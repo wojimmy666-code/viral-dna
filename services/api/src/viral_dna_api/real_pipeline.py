@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
+from .evidence import EvidenceTimelineBuilder
 from .link_ingestion import LinkCollector, LinkIngestionError, LinkIngestionResult
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
@@ -14,6 +15,8 @@ from .models import (
     AnalysisMode,
     AnalysisReport,
     AnalysisStage,
+    EvidenceProviderStatus,
+    EvidenceTimeline,
     MediaEvidence,
     PromptPackage,
     PromptShot,
@@ -112,18 +115,22 @@ class HybridAnalysisPipeline:
                 progress=media_progress,
             )
 
-            await progress(AnalysisStage.VALIDATING, 90, "正在校验媒体证据与分镜时间线")
+            await progress(AnalysisStage.TRANSCRIBING, 84, "正在运行 ASR/OCR 证据 Provider")
+            timeline = await EvidenceTimelineBuilder.from_environment().build(
+                analysis_id=analysis.id,
+                evidence=evidence,
+                include_audio=analysis.include_audio,
+                include_ocr=analysis.include_ocr,
+            )
+            await progress(AnalysisStage.UNDERSTANDING, 89, "正在将语音和画面文字对齐到镜头")
+            await progress(AnalysisStage.VALIDATING, 94, "正在校验媒体证据与统一时间线")
             self._apply_metadata(video, evidence)
-            report = build_media_evidence_report(video, analysis, evidence)
+            report = build_media_evidence_report(video, analysis, evidence, timeline)
             await self.repository.save_report(report)
 
             analysis.stage = AnalysisStage.COMPLETED
             analysis.progress = 100
-            analysis.message = (
-                "链接采集和真实媒体证据提取完成；ASR/OCR/VLM 待下一批接入"
-                if is_link
-                else "真实媒体证据提取完成；ASR/OCR/VLM 待下一批接入"
-            )
+            analysis.message = _completion_message(is_link=is_link, timeline=timeline)
             analysis.updated_at = utc_now()
             analysis.completed_at = utc_now()
             await self.repository.save_analysis(analysis)
@@ -193,7 +200,9 @@ def build_media_evidence_report(
     video: Video,
     analysis: AnalysisJob,
     evidence: MediaEvidence,
+    timeline: EvidenceTimeline,
 ) -> AnalysisReport:
+    timeline_by_shot = {shot.shot_id: shot for shot in timeline.shots}
     shots = [
         Shot(
             id=shot.shot_id,
@@ -208,13 +217,9 @@ def build_media_evidence_report(
             composition="已提取代表关键帧，构图语义待分析",
             lighting="待多模态模型识别",
             color="待多模态模型识别",
-            dialogue=None,
-            ocr_text=None,
-            audio=(
-                "已提取 16 kHz 音频，ASR 待接入"
-                if evidence.audio_url
-                else "原视频无音轨或未提取音频"
-            ),
+            dialogue=timeline_by_shot[shot.shot_id].transcript_text,
+            ocr_text=timeline_by_shot[shot.shot_id].ocr_text,
+            audio=_shot_audio_description(timeline, shot.shot_id, evidence),
             transition=("视频开始" if shot.index == 1 else "FFmpeg scene score 检测到画面切换"),
             narrative_role="待 ASR/OCR/VLM 分析",
             prompt="当前仅完成真实媒体证据提取；接入多模态模型后生成复刻提示词。",
@@ -268,4 +273,37 @@ def build_media_evidence_report(
         viral_findings=[],
         prompt_package=prompt_package,
         media_evidence=evidence,
+        evidence_timeline=timeline,
     )
+
+
+def _provider_run(timeline: EvidenceTimeline, kind: str):
+    return next((run for run in timeline.provider_runs if run.kind == kind), None)
+
+
+def _shot_audio_description(
+    timeline: EvidenceTimeline,
+    shot_id: str,
+    evidence: MediaEvidence,
+) -> str:
+    shot = next(item for item in timeline.shots if item.shot_id == shot_id)
+    if shot.transcript_text:
+        return "ASR 已生成带时间戳的镜头转写"
+    run = _provider_run(timeline, "asr")
+    if run and run.status == EvidenceProviderStatus.COMPLETED:
+        return "ASR 已完成，本镜头没有识别到语音"
+    if run and run.message:
+        return run.message
+    return "已提取 16 kHz 音频" if evidence.audio_url else "原视频无音轨或未提取音频"
+
+
+def _completion_message(*, is_link: bool, timeline: EvidenceTimeline) -> str:
+    prefix = "链接采集、媒体证据和时间线生成完成" if is_link else "媒体证据和时间线生成完成"
+    completed = [
+        run.kind.upper()
+        for run in timeline.provider_runs
+        if run.status == EvidenceProviderStatus.COMPLETED
+    ]
+    if completed:
+        return f"{prefix}；{'/'.join(completed)} 已执行，VLM 待下一批接入"
+    return f"{prefix}；ASR/OCR Provider 待配置，VLM 待下一批接入"

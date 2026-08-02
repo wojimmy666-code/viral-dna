@@ -1377,6 +1377,45 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.provider-status-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.provider-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid #e3e1eb;
+  border-radius: 7px;
+  color: #777481;
+  background: #f8f7fa;
+  font-size: 9px;
+}
+
+.provider-status strong {
+  color: #55515f;
+  font-size: 9px;
+}
+
+.provider-status.completed {
+  border-color: #ccebd8;
+  color: #32774a;
+  background: #f0faf4;
+}
+
+.provider-status.unavailable,
+.provider-status.failed {
+  border-color: #f1d9bf;
+  color: #9a5b19;
+  background: #fff8ef;
+}
+
 .media-evidence-card {
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr);

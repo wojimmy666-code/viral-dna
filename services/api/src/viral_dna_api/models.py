@@ -224,6 +224,90 @@ class MediaEvidence(BaseModel):
     shots: list[ShotEvidence]
 
 
+class EvidenceProviderStatus(StrEnum):
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+    UNAVAILABLE = "unavailable"
+    FAILED = "failed"
+
+
+class EvidenceProviderRun(BaseModel):
+    kind: Literal["asr", "ocr"]
+    provider: str = Field(min_length=1, max_length=80)
+    model: str | None = Field(default=None, max_length=120)
+    status: EvidenceProviderStatus
+    item_count: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    message: str | None = Field(default=None, max_length=500)
+
+
+class TranscriptWord(BaseModel):
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=200)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> TranscriptWord:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("词级转写结束时间必须晚于开始时间")
+        return self
+
+
+class TranscriptSegment(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=4000)
+    language: str | None = Field(default=None, max_length=20)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    words: list[TranscriptWord] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> TranscriptSegment:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("转写片段结束时间必须晚于开始时间")
+        return self
+
+
+class OCRObservation(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    timestamp_seconds: float = Field(ge=0)
+    text: str = Field(min_length=1, max_length=2000)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    bounding_box: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    shot_id: str | None = Field(default=None, max_length=80)
+    frame_url: str | None = None
+
+
+class ShotTimelineEvidence(BaseModel):
+    shot_id: str = Field(min_length=1, max_length=80)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    transcript_segment_ids: list[str] = Field(default_factory=list)
+    transcript_text: str | None = None
+    ocr_observation_ids: list[str] = Field(default_factory=list)
+    ocr_text: str | None = None
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> ShotTimelineEvidence:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("镜头时间线结束时间必须晚于开始时间")
+        return self
+
+
+class EvidenceTimeline(BaseModel):
+    timeline_version: str = "phase1-evidence-timeline-v1"
+    duration_seconds: float = Field(gt=0)
+    language: str | None = Field(default=None, max_length=20)
+    provider_runs: list[EvidenceProviderRun]
+    transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
+    ocr_observations: list[OCRObservation] = Field(default_factory=list)
+    shots: list[ShotTimelineEvidence]
+    warnings: list[str] = Field(default_factory=list)
+    artifact_url: str
+
+
 class AnalysisReport(BaseModel):
     video_id: UUID
     analysis_id: UUID
@@ -234,6 +318,7 @@ class AnalysisReport(BaseModel):
     viral_findings: list[ViralFinding]
     prompt_package: PromptPackage
     media_evidence: MediaEvidence | None = None
+    evidence_timeline: EvidenceTimeline | None = None
     generated_at: datetime = Field(default_factory=utc_now)
 
 

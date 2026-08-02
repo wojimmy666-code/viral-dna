@@ -857,6 +857,7 @@ function VideoPlayer({ src, videoRef, fallbackDuration, downloadUrl }) {
 function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   const overview = report.overview;
   const evidence = report.media_evidence;
+  const timeline = report.evidence_timeline;
   const metadata = evidence?.metadata;
   const isMediaEvidence = report.analysis_mode === "media_evidence";
   const mediaAvailable = isMediaEvidence || Boolean(filePreview);
@@ -974,11 +975,33 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
         </dl>
         <div className="audience-card">
           <span className="eyebrow">{isMediaEvidence ? "语义分析状态" : "受众推断"}</span>
-          <p>
-            {isMediaEvidence
-              ? "ASR、OCR、多模态画面理解、爆点判断和复刻提示词尚未运行。"
-              : overview.audience_inference}
-          </p>
+          {isMediaEvidence ? (
+            <>
+              <p>
+                {timeline
+                  ? `统一证据时间线已生成：${timeline.transcript_segments.length} 条转写、${timeline.ocr_observations.length} 条 OCR；VLM、爆点判断和复刻提示词待下一批接入。`
+                  : "当前是旧版媒体报告，ASR、OCR 和多模态语义分析尚未运行。"}
+              </p>
+              {timeline?.provider_runs?.length > 0 && (
+                <div className="provider-status-list" aria-label="证据 Provider 状态">
+                  {timeline.provider_runs.map((run) => (
+                    <span className={`provider-status ${run.status}`} key={run.kind}>
+                      <strong>{run.kind.toUpperCase()}</strong>
+                      {run.status === "completed"
+                        ? `完成 · ${run.item_count} 条`
+                        : run.status === "skipped"
+                          ? "未配置"
+                          : run.status === "unavailable"
+                            ? "不可用"
+                            : "失败"}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <p>{overview.audience_inference}</p>
+          )}
           {isMediaEvidence && metadata?.sha256 && (
             <code className="media-hash">SHA-256 {metadata.sha256.slice(0, 12)}…</code>
           )}
@@ -1057,7 +1080,7 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
             <>
               <div className="evidence-note">
                 <ShieldCheck size={18} weight="fill" />
-                这里只展示可验证的媒体事实。主体、服装、场景、台词、爆点和提示词将在多模态分析接入后生成。
+                这里只展示可验证的媒体和 Provider 证据。主体、服装、场景、爆点和提示词将在多模态分析接入后生成。
               </div>
               <div className="shot-facts-grid">
                 <Fact label="开始时间" value={`${activeShot.start_seconds.toFixed(3)} 秒`} />
@@ -1067,6 +1090,22 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
                 <Fact label="音频证据" value={activeShot.audio} />
                 <Fact label="证据类型" value="FFmpeg 实测" />
               </div>
+              {(activeShot.dialogue || activeShot.ocr_text) && (
+                <div className="transcript-box">
+                  {activeShot.dialogue && (
+                    <div>
+                      <span>ASR 转写</span>
+                      <p>{activeShot.dialogue}</p>
+                    </div>
+                  )}
+                  {activeShot.ocr_text && (
+                    <div>
+                      <span>OCR 画面文字</span>
+                      <p>{activeShot.ocr_text}</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           ) : (
             <>

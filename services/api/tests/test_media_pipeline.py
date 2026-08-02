@@ -113,6 +113,14 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert report["analysis_mode"] == "media_evidence"
         assert report["viral_findings"] == []
         assert report["entities"] == []
+        assert report["evidence_timeline"]["timeline_version"] == (
+            "phase1-evidence-timeline-v1"
+        )
+        assert len(report["evidence_timeline"]["shots"]) == len(report["shots"])
+        assert {
+            run["kind"]: run["status"]
+            for run in report["evidence_timeline"]["provider_runs"]
+        } == {"asr": "skipped", "ocr": "skipped"}
         assert report["media_evidence"]["metadata"]["duration_seconds"] == pytest.approx(
             2.0, abs=0.1
         )
@@ -121,12 +129,15 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         proxy_response = client.get(report["media_evidence"]["proxy_url"])
         keyframe_response = client.get(report["shots"][0]["keyframe_url"])
         manifest_response = client.get(report["media_evidence"]["manifest_url"])
+        timeline_response = client.get(report["evidence_timeline"]["artifact_url"])
         assert proxy_response.status_code == 200
         assert len(proxy_response.content) > 100
         assert keyframe_response.status_code == 200
         assert keyframe_response.headers["content-type"].startswith("image/jpeg")
         assert manifest_response.status_code == 200
         assert manifest_response.json()["processor_version"] == "ffmpeg-media-v1"
+        assert timeline_response.status_code == 200
+        assert timeline_response.json()["timeline_version"] == "phase1-evidence-timeline-v1"
 
 
 def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,7 +185,7 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         assert analysis_response.status_code == 202
         analysis_payload = analysis_response.json()
         assert analysis_payload["analysis_mode"] == "media_evidence"
-        assert analysis_payload["analysis_version"] == "phase1-link-media-v1"
+        assert analysis_payload["analysis_version"] == "phase1-link-evidence-timeline-v1"
         assert analysis_payload["simulated"] is False
         analysis_id = analysis_payload["id"]
 
@@ -203,3 +214,5 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         report = report_response.json()
         assert report["analysis_mode"] == "media_evidence"
         assert len(report["shots"]) >= 2
+        assert len(report["evidence_timeline"]["shots"]) == len(report["shots"])
+        assert report["evidence_timeline"]["artifact_url"].endswith("/timeline.json")

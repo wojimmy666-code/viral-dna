@@ -9,6 +9,10 @@ set "LOCAL_ENV_FILE=%PROJECT_ROOT%\.env.local"
 if exist "%LOCAL_ENV_FILE%" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%LOCAL_ENV_FILE%") do (
     if /I "%%A"=="VIRAL_DNA_YTDLP_COOKIE_FILE" set "VIRAL_DNA_YTDLP_COOKIE_FILE=%%B"
+    if /I "%%A"=="VIRAL_DNA_ASR_PROVIDER" set "VIRAL_DNA_ASR_PROVIDER=%%B"
+    if /I "%%A"=="VIRAL_DNA_ASR_MODEL" set "VIRAL_DNA_ASR_MODEL=%%B"
+    if /I "%%A"=="VIRAL_DNA_OCR_PROVIDER" set "VIRAL_DNA_OCR_PROVIDER=%%B"
+    if /I "%%A"=="VIRAL_DNA_OCR_MODEL" set "VIRAL_DNA_OCR_MODEL=%%B"
   )
 )
 set "WEB_URL=http://127.0.0.1:4174"
