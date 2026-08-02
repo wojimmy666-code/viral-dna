@@ -14,16 +14,18 @@ docs                     产品、架构、执行计划与 UI 参考
 
 ## 当前状态
 
-当前已完成 Phase 1 Batch 2 的真实媒体证据层：
+当前已完成 Phase 1 Batch 2.5 的真实媒体证据与链接采集层：
 
-- 视频文件流式上传，以及抖音/小红书链接记录。
-- 上传视频的 ffprobe 探测、SHA-256、H.264/AAC 代理和 WAV 音频。
+- 视频文件流式上传，以及抖音/小红书公开视频真实下载。
+- `yt-dlp` 平台解析、白名单校验、下载限制、错误码和可选显式 Cookie 文件。
+- 上传或采集视频的 ffprobe 探测、SHA-256、H.264/AAC 代理和 WAV 音频。
 - FFmpeg scene score 真实分镜、逐镜头关键帧、Contact Sheet 和 manifest。
 - SQLite 持久化、分析状态机和受限的媒体产物 API。
+- 链接任务使用真实 `media_evidence` 报告，不再默认回退模拟数据。
 - 单视频报告工作台，以及真实媒体证据和模拟报告的明确区分。
 - Windows `scripts/start.bat` 一键启动 API 8000 和 Web 4174。
 
-抖音/小红书链接的真实下载解析，以及 ASR、OCR、VLM、爆点 LLM、Seedance Prompt 和真实元素替换仍待后续批次接入。详细边界见 [Batch 2 执行与验收记录](./docs/Phase1_Batch2_真实媒体证据层执行计划.md)。
+ASR、OCR、VLM、爆点 LLM、Seedance Prompt 和真实元素替换仍待后续批次接入。详细结果见 [Batch 2.5 链接采集层执行与验收](./docs/Phase1_Batch2.5_链接采集层执行与验收.md)。
 
 ## 本地开发
 
@@ -61,4 +63,6 @@ Web 开发服务器默认将 `/api` 代理到 `http://127.0.0.1:8000`。
 - [项目定位与长期技术方案](./docs/ViralDNA_项目定位与技术方案.md)
 - [Phase 1 执行计划](./docs/Phase1_执行计划.md)
 - [Phase 1 架构与接口设计](./docs/Phase1_架构与接口设计.md)
+- [Batch 2 真实媒体证据层执行与验收](./docs/Phase1_Batch2_真实媒体证据层执行计划.md)
+- [Batch 2.5 链接采集层执行与验收](./docs/Phase1_Batch2.5_链接采集层执行与验收.md)
 - [UI 风格参考](./docs/UI模板.png)

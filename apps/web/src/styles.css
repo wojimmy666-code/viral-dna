@@ -557,6 +557,21 @@ button:disabled {
   cursor: pointer;
 }
 
+.link-ingestion-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 2px 0;
+  color: #888894;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.link-ingestion-hint svg {
+  flex: 0 0 auto;
+  color: var(--purple);
+}
+
 .upload-dropzone {
   min-height: 118px;
   display: flex;
@@ -721,6 +736,19 @@ button:disabled {
 
 .progress-card {
   padding: 22px;
+}
+
+.progress-card.failed {
+  border-color: #efc5cb;
+}
+
+.progress-card.failed .progress-icon {
+  color: #a23f4b;
+  background: #fff1f3;
+}
+
+.progress-card.failed .progress-header > strong {
+  color: #a23f4b;
 }
 
 .progress-header {

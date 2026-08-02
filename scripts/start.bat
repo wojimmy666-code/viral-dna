@@ -87,7 +87,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%PYTHON_EXE%" -c "import uvicorn, viral_dna_api" >nul 2>&1
+"%PYTHON_EXE%" -c "import uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
 if errorlevel 1 (
   echo [ViralDNA] Installing API dependencies...
   "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev]"

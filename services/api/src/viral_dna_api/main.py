@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import os
 import re
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
@@ -15,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import __version__
+from .link_ingestion import LinkIngestionError, identify_platform
 from .media import get_analysis_artifact_root
 from .models import (
     AnalysisCreate,
@@ -41,11 +40,6 @@ ALLOWED_CONTENT_TYPES = {
     "video/quicktime",
     "video/webm",
     "application/octet-stream",
-}
-ALLOWED_PLATFORM_DOMAINS = {
-    "douyin.com": SourceType.DOUYIN,
-    "xiaohongshu.com": SourceType.XIAOHONGSHU,
-    "xhslink.com": SourceType.XIAOHONGSHU,
 }
 
 
@@ -79,23 +73,10 @@ async def health() -> HealthResponse:
 
 
 def resolve_platform(url: str) -> SourceType:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise HTTPException(status_code=422, detail="只支持有效的 HTTP/HTTPS 视频链接")
-
-    hostname = parsed.hostname.lower().rstrip(".")
     try:
-        ipaddress.ip_address(hostname)
-    except ValueError:
-        pass
-    else:
-        raise HTTPException(status_code=422, detail="不允许使用 IP 地址作为视频来源")
-
-    for domain, platform in ALLOWED_PLATFORM_DOMAINS.items():
-        if hostname == domain or hostname.endswith(f".{domain}"):
-            return platform
-
-    raise HTTPException(status_code=422, detail="一期仅支持抖音和小红书公开链接")
+        return identify_platform(url)
+    except LinkIngestionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def safe_filename(filename: str) -> str:
@@ -195,16 +176,17 @@ async def create_analysis(video_id: UUID, payload: AnalysisCreate) -> AnalysisJo
     if video is None:
         raise HTTPException(status_code=404, detail="视频不存在")
 
-    mode = (
-        AnalysisMode.MEDIA_EVIDENCE
-        if video.source_type == SourceType.UPLOAD and video.stored_path
-        else AnalysisMode.SIMULATED
-    )
+    analyzer_mode = os.getenv("VIRAL_DNA_ANALYZER_MODE", "hybrid").strip().lower()
+    mode = AnalysisMode.SIMULATED if analyzer_mode == "simulated" else AnalysisMode.MEDIA_EVIDENCE
+    if mode == AnalysisMode.SIMULATED:
+        analysis_version = "phase1-simulated-v1"
+    elif video.source_type == SourceType.UPLOAD:
+        analysis_version = "phase1-media-v1"
+    else:
+        analysis_version = "phase1-link-media-v1"
     analysis = AnalysisJob(
         video_id=video.id,
-        analysis_version=(
-            "phase1-media-v1" if mode == AnalysisMode.MEDIA_EVIDENCE else "phase1-simulated-v1"
-        ),
+        analysis_version=analysis_version,
         analysis_mode=mode,
         granularity=payload.granularity,
         include_audio=payload.include_audio,

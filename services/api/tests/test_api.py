@@ -35,7 +35,10 @@ def test_upload_video() -> None:
     stored_path.parent.rmdir()
 
 
-def test_link_analysis_and_replacement_flow() -> None:
+def test_simulated_analysis_and_replacement_flow(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VIRAL_DNA_ANALYZER_MODE", "simulated")
     with TestClient(app) as client:
         video_response = client.post(
             "/api/v1/videos/link",

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
+from .link_ingestion import LinkCollector, LinkIngestionError, LinkIngestionResult
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
     AnalysisError,
@@ -42,7 +43,7 @@ class AnalysisRepository(Protocol):
 
 
 class HybridAnalysisPipeline:
-    """Routes uploads through real FFmpeg evidence and links through the demo analyzer."""
+    """Collects uploads and platform links before building real FFmpeg evidence."""
 
     def __init__(self, repository: AnalysisRepository) -> None:
         self.repository = repository
@@ -62,7 +63,7 @@ class HybridAnalysisPipeline:
         if video is None:
             return
 
-        if video.source_type != SourceType.UPLOAD or not video.stored_path:
+        if analysis.analysis_mode == AnalysisMode.SIMULATED:
             await self.simulated.run(analysis_id)
             return
 
@@ -77,13 +78,38 @@ class HybridAnalysisPipeline:
                 analysis.updated_at = utc_now()
                 await self.repository.save_analysis(analysis)
 
+            is_link = video.source_type in {SourceType.DOUYIN, SourceType.XIAOHONGSHU}
+            if is_link and not video.stored_path:
+                await progress(AnalysisStage.INGESTING, 3, "正在校验平台链接并读取视频信息")
+                collected = await LinkCollector().collect(video)
+                self._apply_ingestion(video, collected)
+                await self.repository.save_video(video)
+                await progress(AnalysisStage.INGESTING, 24, "平台视频下载完成，正在准备媒体分析")
+
+            if not video.stored_path:
+                raise MediaProcessingError(
+                    "media_source_missing",
+                    "视频没有可分析的本地媒体文件",
+                )
+
+            async def media_progress(
+                stage: AnalysisStage,
+                value: int,
+                message: str,
+            ) -> None:
+                if is_link:
+                    scaled_value = min(82, 24 + round(value * 0.72))
+                    await progress(stage, scaled_value, message)
+                else:
+                    await progress(stage, value, message)
+
             processor = MediaProcessor()
             evidence = await processor.process(
                 source_path=Path(video.stored_path),
                 analysis_id=analysis.id,
                 granularity=analysis.granularity,
                 include_audio=analysis.include_audio,
-                progress=progress,
+                progress=media_progress,
             )
 
             await progress(AnalysisStage.VALIDATING, 90, "正在校验媒体证据与分镜时间线")
@@ -93,17 +119,30 @@ class HybridAnalysisPipeline:
 
             analysis.stage = AnalysisStage.COMPLETED
             analysis.progress = 100
-            analysis.message = "真实媒体证据提取完成；ASR/OCR/VLM 待下一批接入"
+            analysis.message = (
+                "链接采集和真实媒体证据提取完成；ASR/OCR/VLM 待下一批接入"
+                if is_link
+                else "真实媒体证据提取完成；ASR/OCR/VLM 待下一批接入"
+            )
             analysis.updated_at = utc_now()
             analysis.completed_at = utc_now()
             await self.repository.save_analysis(analysis)
 
             video.status = VideoStatus.COMPLETED
             await self.repository.save_video(video)
+        except LinkIngestionError as exc:
+            await self._fail(
+                analysis,
+                video,
+                exc.code,
+                str(exc),
+                exc.retryable,
+                context="链接采集",
+            )
         except MediaProcessingError as exc:
             await self._fail(analysis, video, exc.code, str(exc), exc.retryable)
         except Exception as exc:  # pragma: no cover - orchestration safety boundary
-            await self._fail(analysis, video, "analysis_failed", str(exc), True)
+            await self._fail(analysis, video, "analysis_failed", str(exc), True, context="分析")
 
     async def _fail(
         self,
@@ -112,15 +151,30 @@ class HybridAnalysisPipeline:
         code: str,
         message: str,
         retryable: bool,
+        context: str = "媒体处理",
     ) -> None:
         analysis.stage = AnalysisStage.FAILED
         analysis.progress = 100
-        analysis.message = f"媒体处理失败：{message}"
+        analysis.message = f"{context}失败：{message}"
         analysis.error = AnalysisError(code=code, message=message, retryable=retryable)
         analysis.updated_at = utc_now()
+        analysis.completed_at = utc_now()
         await self.repository.save_analysis(analysis)
         video.status = VideoStatus.FAILED
         await self.repository.save_video(video)
+
+    @staticmethod
+    def _apply_ingestion(video: Video, result: LinkIngestionResult) -> None:
+        video.stored_path = str(result.path)
+        video.original_filename = result.path.name
+        video.resolved_source_url = result.resolved_url
+        video.source_video_id = result.source_video_id
+        video.source_author = result.author
+        video.ingested_at = utc_now()
+        if result.duration_seconds is not None:
+            video.duration_seconds = result.duration_seconds
+        if result.title and video.title in {"抖音链接视频", "小红书链接视频"}:
+            video.title = result.title[:120]
 
     @staticmethod
     def _apply_metadata(video: Video, evidence: MediaEvidence) -> None:

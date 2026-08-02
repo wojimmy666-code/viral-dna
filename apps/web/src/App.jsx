@@ -21,7 +21,6 @@ import {
   MagnifyingGlass,
   MagicWand,
   Play,
-  PlayCircle,
   Plus,
   Question,
   ShieldCheck,
@@ -143,7 +142,10 @@ export function App() {
         await loadReport(next.video_id);
         return;
       }
-      if (next.stage === "failed") return;
+      if (next.stage === "failed") {
+        setError(next.error?.message || next.message || "分析失败");
+        return;
+      }
       await new Promise((resolve) => window.setTimeout(resolve, 700));
     }
     setError("分析仍在后台运行，请稍后刷新状态");
@@ -160,7 +162,10 @@ export function App() {
         source.close();
         await loadReport(next.video_id);
       }
-      if (next.stage === "failed") source.close();
+      if (next.stage === "failed") {
+        setError(next.error?.message || next.message || "分析失败");
+        source.close();
+      }
     });
     source.onerror = () => {
       source.close();
@@ -169,8 +174,12 @@ export function App() {
   }
 
   async function loadReport(videoId) {
-    const nextReport = await apiRequest(`/videos/${videoId}/report`);
+    const [nextReport, processedVideo] = await Promise.all([
+      apiRequest(`/videos/${videoId}/report`),
+      apiRequest(`/videos/${videoId}`),
+    ]);
     setReport(nextReport);
+    setVideo(processedVideo);
     setActiveShotId(nextReport.shots[0]?.id || null);
     setActiveReportTab("overview");
     window.setTimeout(() => {
@@ -178,18 +187,18 @@ export function App() {
     }, 120);
   }
 
-  async function startAnalysis({ useExample = false } = {}) {
+  async function startAnalysis() {
     setError("");
     setNotice("");
-    if (!rightsConfirmed && !useExample) {
+    if (!rightsConfirmed) {
       setError("请先确认拥有视频分析和使用权限");
       return;
     }
-    if (sourceMode === "link" && !url.trim() && !useExample) {
+    if (sourceMode === "link" && !url.trim()) {
       setError("请粘贴抖音或小红书公开链接");
       return;
     }
-    if (sourceMode === "file" && !file && !useExample) {
+    if (sourceMode === "file" && !file) {
       setError("请选择一个视频文件");
       return;
     }
@@ -200,13 +209,12 @@ export function App() {
     setAnalysis(null);
     try {
       let createdVideo;
-      if (useExample || sourceMode === "link") {
+      if (sourceMode === "link") {
         createdVideo = await apiRequest("/videos/link", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            url: useExample ? "https://v.douyin.com/example/" : url.trim(),
-            title: useExample ? "三分钟高蛋白早餐" : undefined,
+            url: url.trim(),
             target_model: targetModel,
             rights_confirmed: true,
           }),
@@ -304,16 +312,13 @@ export function App() {
               submitting={submitting}
               error={error}
               onStart={startAnalysis}
-              onExample={() => startAnalysis({ useExample: true })}
             />
 
             {analysis && analysis.stage !== "completed" && (
               <AnalysisProgress analysis={analysis} video={video} />
             )}
 
-            {!analysis && !report && (
-              <EmptyWorkspace onExample={() => startAnalysis({ useExample: true })} />
-            )}
+            {!analysis && !report && <EmptyWorkspace />}
 
             {report && (
               <section className="report-card" ref={reportSectionRef}>
@@ -470,7 +475,6 @@ const ImportPanel = forwardRef(function ImportPanel({
   submitting,
   error,
   onStart,
-  onExample,
 }, ref) {
   return (
     <section className="import-card" id="new-analysis" ref={ref}>
@@ -522,6 +526,10 @@ const ImportPanel = forwardRef(function ImportPanel({
               </button>
             )}
           </div>
+          <p className="link-ingestion-hint">
+            <DownloadSimple size={15} />
+            系统会采集公开源视频并进入真实分镜流程；平台验证、私密或失效链接会明确报错。
+          </p>
         </div>
       ) : (
         <label className={`upload-dropzone ${file ? "has-file" : ""}`}>
@@ -577,10 +585,6 @@ const ImportPanel = forwardRef(function ImportPanel({
       )}
 
       <div className="import-actions">
-        <button className="text-button" type="button" onClick={onExample} disabled={submitting}>
-          <PlayCircle size={18} />
-          运行示例分析
-        </button>
         <button className="primary-button" type="button" onClick={() => onStart()} disabled={submitting}>
           {submitting ? <CircleNotch className="spin" size={18} /> : <Sparkle size={18} weight="fill" />}
           {submitting ? "正在创建任务" : "开始精细拆解"}
@@ -603,10 +607,14 @@ function AnalysisProgress({ analysis, video }) {
   ];
   const activeIndex = stages.indexOf(analysis.stage);
   return (
-    <section className="progress-card" aria-live="polite">
+    <section className={`progress-card ${analysis.stage === "failed" ? "failed" : ""}`} aria-live="polite">
       <div className="progress-header">
         <span className="progress-icon">
-          <CircleNotch className={analysis.stage === "failed" ? "" : "spin"} size={22} />
+          {analysis.stage === "failed" ? (
+            <X size={22} weight="bold" />
+          ) : (
+            <CircleNotch className="spin" size={22} />
+          )}
         </span>
         <div>
           <span className="eyebrow">分析任务</span>
@@ -633,20 +641,22 @@ function AnalysisProgress({ analysis, video }) {
       {analysis.simulated && (
         <div className="simulation-note">
           <ShieldCheck size={16} />
-          链接输入当前使用模拟报告；上传视频已进入真实媒体处理链路。
+          当前服务运行在模拟分析模式，不会下载或处理真实媒体。
         </div>
       )}
-      {!analysis.simulated && (
+      {!analysis.simulated && analysis.stage !== "failed" && (
         <div className="evidence-note compact">
           <ShieldCheck size={16} weight="fill" />
-          正在从真实视频提取编码信息、镜头边界、关键帧和音频证据，不生成虚构语义结果。
+          {video?.source_type === "upload"
+            ? "正在从真实视频提取编码信息、镜头边界、关键帧和音频证据，不生成虚构语义结果。"
+            : "正在解析平台链接并下载源视频；下载完成后会继续提取真实镜头、关键帧和音频证据。"}
         </div>
       )}
     </section>
   );
 }
 
-function EmptyWorkspace({ onExample }) {
+function EmptyWorkspace() {
   return (
     <section className="empty-workspace">
       <span className="empty-icon">
@@ -654,12 +664,8 @@ function EmptyWorkspace({ onExample }) {
       </span>
       <div>
         <h2>分析结果会在这里展开</h2>
-        <p>完成导入后，你可以逐镜头查看主体、动作、镜头语言、爆点证据和可复制提示词。</p>
+        <p>上传视频文件或粘贴公开平台链接后，可以查看真实镜头时间线、关键帧和媒体证据。</p>
       </div>
-      <button className="secondary-button" type="button" onClick={onExample}>
-        查看完整示例
-        <CaretRight size={16} />
-      </button>
     </section>
   );
 }
@@ -791,7 +797,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
               <strong>
                 {metadata?.width} × {metadata?.height} · {metadata?.fps?.toFixed(2)} FPS
               </strong>
-              <p>编码、时长、分镜和关键帧均来自上传文件，不包含模型臆测。</p>
+              <p>编码、时长、分镜和关键帧均来自真实源视频，不包含模型臆测。</p>
             </div>
           </div>
         ) : (
@@ -1276,7 +1282,11 @@ function InsightsPanel({ report, analysis, onOpenTab }) {
 
       {progressMessage ? (
         <div className="assistant-progress">
-          <CircleNotch className="spin" size={24} />
+          {analysis.stage === "failed" ? (
+            <X size={24} weight="bold" />
+          ) : (
+            <CircleNotch className="spin" size={24} />
+          )}
           <strong>{stageLabels[analysis.stage]}</strong>
           <p>{progressMessage}</p>
           <div className="assistant-progress-track">
