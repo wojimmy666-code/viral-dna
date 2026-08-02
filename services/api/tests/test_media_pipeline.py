@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from viral_dna_api.link_ingestion import LinkIngestionResult
 from viral_dna_api.main import app
+from viral_dna_api.media import MediaProcessor
 from viral_dna_api.models import SourceType
 
 FFMPEG = shutil.which("ffmpeg")
@@ -56,6 +57,68 @@ def create_two_scene_video(output_path: Path) -> None:
         check=True,
         timeout=30,
     )
+
+
+def add_mov_text_subtitles(source_path: Path, output_path: Path, subtitle_path: Path) -> None:
+    if FFMPEG is None:
+        pytest.skip("FFmpeg is not available")
+    subtitle_path.write_text(
+        "1\n00:00:00,200 --> 00:00:01,200\n第一句字幕\n\n"
+        "2\n00:00:01,200 --> 00:00:01,900\n第二句字幕\n",
+        "utf-8",
+    )
+    subprocess.run(
+        [
+            FFMPEG,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source_path),
+            "-i",
+            str(subtitle_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-map",
+            "1:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "mov_text",
+            str(output_path),
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_processor_extracts_text_subtitle_stream(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.mp4"
+    subtitled_path = tmp_path / "subtitled.mp4"
+    subtitle_source = tmp_path / "source.srt"
+    extracted_path = tmp_path / "extracted.srt"
+    create_two_scene_video(source_path)
+    add_mov_text_subtitles(source_path, subtitled_path, subtitle_source)
+
+    processor = MediaProcessor()
+    metadata = await processor.probe(subtitled_path)
+
+    assert len(metadata.subtitle_streams) == 1
+    stream = metadata.subtitle_streams[0]
+    assert stream.codec_name == "mov_text"
+    assert stream.extractable is True
+
+    await processor.extract_subtitle(subtitled_path, extracted_path, stream.index)
+    extracted = extracted_path.read_text("utf-8")
+    assert "第一句字幕" in extracted
+    assert "第二句字幕" in extracted
 
 
 def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,13 +177,13 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert report["viral_findings"] == []
         assert report["entities"] == []
         assert report["evidence_timeline"]["timeline_version"] == (
-            "phase1-evidence-timeline-v1"
+            "phase1-evidence-timeline-v2"
         )
         assert len(report["evidence_timeline"]["shots"]) == len(report["shots"])
         assert {
             run["kind"]: run["status"]
             for run in report["evidence_timeline"]["provider_runs"]
-        } == {"asr": "skipped", "ocr": "skipped"}
+        } == {"asr": "skipped", "ocr": "skipped", "subtitle": "skipped"}
         assert report["media_evidence"]["metadata"]["duration_seconds"] == pytest.approx(
             2.0, abs=0.1
         )
@@ -137,7 +200,7 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert manifest_response.status_code == 200
         assert manifest_response.json()["processor_version"] == "ffmpeg-media-v1"
         assert timeline_response.status_code == 200
-        assert timeline_response.json()["timeline_version"] == "phase1-evidence-timeline-v1"
+        assert timeline_response.json()["timeline_version"] == "phase1-evidence-timeline-v2"
 
 
 def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,7 +248,7 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         assert analysis_response.status_code == 202
         analysis_payload = analysis_response.json()
         assert analysis_payload["analysis_mode"] == "media_evidence"
-        assert analysis_payload["analysis_version"] == "phase1-link-evidence-timeline-v1"
+        assert analysis_payload["analysis_version"] == "phase1-link-evidence-timeline-v2"
         assert analysis_payload["simulated"] is False
         analysis_id = analysis_payload["id"]
 

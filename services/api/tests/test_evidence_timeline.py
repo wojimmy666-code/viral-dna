@@ -15,6 +15,7 @@ from viral_dna_api.models import (
     OCRObservation,
     ShotEvidence,
     SourceType,
+    SubtitleStream,
     TranscriptSegment,
     Video,
 )
@@ -162,8 +163,12 @@ async def test_timeline_aligns_fake_asr_and_ocr(
     )
 
     assert timeline.language == "zh"
-    assert [run.status for run in timeline.provider_runs] == ["completed", "completed"]
-    assert [run.item_count for run in timeline.provider_runs] == [2, 2]
+    assert [run.status for run in timeline.provider_runs] == [
+        "completed",
+        "completed",
+        "skipped",
+    ]
+    assert [run.item_count for run in timeline.provider_runs] == [2, 2, 0]
     assert [segment.id for segment in timeline.transcript_segments] == ["asr_001", "asr_002"]
     assert [item.id for item in timeline.ocr_observations] == ["ocr_001", "ocr_002"]
     assert timeline.shots[0].transcript_segment_ids == ["asr_001"]
@@ -188,7 +193,7 @@ async def test_timeline_aligns_fake_asr_and_ocr(
     assert report.evidence_timeline == timeline
 
     payload = json.loads((artifact_root / "timeline.json").read_text("utf-8"))
-    assert payload["timeline_version"] == "phase1-evidence-timeline-v1"
+    assert payload["timeline_version"] == "phase1-evidence-timeline-v2"
     assert len(payload["shots"]) == 2
 
 
@@ -222,3 +227,50 @@ async def test_configured_but_unavailable_provider_degrades_cleanly(
     assert timeline.provider_runs[0].provider == "future-cloud-asr"
     assert "尚未安装" in (timeline.provider_runs[0].message or "")
     assert timeline.provider_runs[1].status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_embedded_subtitles_are_parsed_and_aligned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis_id = uuid4()
+    storage_root = tmp_path / "storage"
+    artifact_root = storage_root / "analyses" / str(analysis_id)
+    artifact_root.mkdir(parents=True)
+    (artifact_root / "subtitles.srt").write_text(
+        "1\n00:00:00,500 --> 00:00:02,500\n<b>跨镜头字幕</b>\n\n"
+        "2\n00:00:03,000 --> 00:00:03,800\n第二句字幕\n",
+        "utf-8",
+    )
+    monkeypatch.setenv("VIRAL_DNA_STORAGE_ROOT", str(storage_root))
+    monkeypatch.setenv("VIRAL_DNA_ASR_PROVIDER", "disabled")
+    monkeypatch.setenv("VIRAL_DNA_OCR_PROVIDER", "disabled")
+    evidence = build_evidence(analysis_id)
+    evidence.metadata.subtitle_streams = [
+        SubtitleStream(
+            index=2,
+            codec_name="mov_text",
+            language="zh",
+            extractable=True,
+        )
+    ]
+    evidence.subtitle_url = (
+        f"/api/v1/analyses/{analysis_id}/artifacts/subtitles.srt"
+    )
+    evidence.subtitle_extraction_message = "已提取 mov_text 内嵌字幕轨"
+
+    timeline = await EvidenceTimelineBuilder.from_environment().build(
+        analysis_id=analysis_id,
+        evidence=evidence,
+        include_audio=False,
+        include_ocr=False,
+    )
+
+    assert timeline.provider_runs[2].kind == "subtitle"
+    assert timeline.provider_runs[2].status == "completed"
+    assert timeline.provider_runs[2].item_count == 2
+    assert timeline.subtitle_cues[0].text == "跨镜头字幕"
+    assert timeline.subtitle_cues[0].language == "zh"
+    assert timeline.shots[0].subtitle_text == "跨镜头字幕"
+    assert timeline.shots[1].subtitle_text == "跨镜头字幕 第二句字幕"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import re
 from dataclasses import dataclass
@@ -18,10 +19,11 @@ from .models import (
     OCRObservation,
     ShotEvidence,
     ShotTimelineEvidence,
+    SubtitleCue,
     TranscriptSegment,
 )
 
-TIMELINE_VERSION = "phase1-evidence-timeline-v1"
+TIMELINE_VERSION = "phase1-evidence-timeline-v2"
 TIMESTAMP_TOLERANCE_SECONDS = 0.25
 OCR_DEDUP_WINDOW_SECONDS = 1.5
 
@@ -104,6 +106,14 @@ class UnavailableOCRProvider:
         raise EvidenceProviderUnavailable(f"尚未安装 OCR Provider 适配器：{self.provider_id}")
 
 
+class EmbeddedSubtitleProvider:
+    provider_id = "ffmpeg-subtitle"
+    enabled = True
+
+    def __init__(self, model_id: str | None = None) -> None:
+        self.model_id = model_id
+
+
 def _configured_provider(kind: str) -> tuple[str, str | None]:
     raw_provider = os.getenv(f"VIRAL_DNA_{kind}_PROVIDER", "disabled")
     provider = re.sub(r"[^a-z0-9_.-]+", "-", raw_provider.strip().lower())[:80]
@@ -115,6 +125,10 @@ def asr_provider_from_environment() -> ASRProvider:
     provider, model = _configured_provider("ASR")
     if provider in {"disabled", "none", "off"}:
         return DisabledASRProvider()
+    if provider in {"faster-whisper", "faster_whisper", "whisper"}:
+        from .local_providers import FasterWhisperASRProvider
+
+        return FasterWhisperASRProvider(model)
     return UnavailableASRProvider(provider, model)
 
 
@@ -122,6 +136,10 @@ def ocr_provider_from_environment() -> OCRProvider:
     provider, model = _configured_provider("OCR")
     if provider in {"disabled", "none", "off"}:
         return DisabledOCRProvider()
+    if provider in {"rapidocr", "rapid-ocr", "rapid_ocr"}:
+        from .local_providers import RapidOCRProvider
+
+        return RapidOCRProvider(model)
     return UnavailableOCRProvider(provider, model)
 
 
@@ -151,10 +169,60 @@ def _join_unique_text(values: list[str]) -> str | None:
     return " ".join(result) or None
 
 
+def _srt_timestamp(value: str) -> float | None:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})", value.strip())
+    if match is None:
+        return None
+    hours, minutes, seconds, milliseconds = (int(part) for part in match.groups())
+    millisecond_scale = 10 ** (3 - len(match.group(4)))
+    return hours * 3600 + minutes * 60 + seconds + milliseconds * millisecond_scale / 1000
+
+
+def _parse_srt(
+    payload: str,
+    *,
+    language: str | None,
+    stream_index: int | None,
+) -> list[SubtitleCue]:
+    normalized = payload.replace("\r\n", "\n").replace("\r", "\n").strip()
+    cues: list[SubtitleCue] = []
+    for block in re.split(r"\n\s*\n", normalized):
+        lines = [line.strip() for line in block.splitlines()]
+        timing_index = next((index for index, line in enumerate(lines) if "-->" in line), None)
+        if timing_index is None:
+            continue
+        timing = re.match(
+            r"(?P<start>\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*"
+            r"(?P<end>\d{1,2}:\d{2}:\d{2}[,.]\d{1,3})",
+            lines[timing_index],
+        )
+        if timing is None:
+            continue
+        start = _srt_timestamp(timing.group("start"))
+        end = _srt_timestamp(timing.group("end"))
+        raw_text = " ".join(lines[timing_index + 1 :])
+        cleaned = re.sub(r"\{\\[^}]+}", "", raw_text)
+        cleaned = html.unescape(re.sub(r"<[^>]+>", "", cleaned))
+        cleaned = _clean_text(cleaned)[:4000]
+        if start is None or end is None or end <= start or not cleaned:
+            continue
+        cues.append(
+            SubtitleCue(
+                id=f"subtitle_{len(cues) + 1:04d}",
+                start_seconds=round(start, 3),
+                end_seconds=round(end, 3),
+                text=cleaned,
+                language=language,
+                stream_index=stream_index,
+            )
+        )
+    return cues
+
+
 def _provider_run(
     *,
     kind: str,
-    provider: ASRProvider | OCRProvider,
+    provider: ASRProvider | OCRProvider | EmbeddedSubtitleProvider,
     status: EvidenceProviderStatus,
     started_at: float,
     item_count: int = 0,
@@ -209,6 +277,10 @@ class EvidenceTimelineBuilder:
             frames=frames,
             include_ocr=include_ocr,
         )
+        subtitle_cues, subtitle_run = await self._run_subtitles(
+            artifact_root=artifact_root,
+            evidence=evidence,
+        )
 
         warnings: list[str] = []
         segments = self._valid_segments(
@@ -221,20 +293,27 @@ class EvidenceTimelineBuilder:
             evidence,
             warnings,
         )
+        cues = self._valid_subtitle_cues(
+            subtitle_cues,
+            evidence.metadata.duration_seconds,
+            warnings,
+        )
         asr_run.item_count = len(segments)
         ocr_run.item_count = len(observations)
-        shot_timeline = self._align_shots(evidence.shots, segments, observations)
+        subtitle_run.item_count = len(cues)
+        shot_timeline = self._align_shots(evidence.shots, segments, cues, observations)
 
         language = asr_result.language or next(
             (segment.language for segment in segments if segment.language),
-            None,
+            next((cue.language for cue in cues if cue.language), None),
         )
         timeline = EvidenceTimeline(
             timeline_version=TIMELINE_VERSION,
             duration_seconds=evidence.metadata.duration_seconds,
             language=language,
-            provider_runs=[asr_run, ocr_run],
+            provider_runs=[asr_run, ocr_run, subtitle_run],
             transcript_segments=segments,
+            subtitle_cues=cues,
             ocr_observations=observations,
             shots=shot_timeline,
             warnings=warnings,
@@ -374,6 +453,61 @@ class EvidenceTimelineBuilder:
             item_count=len(observations),
         )
 
+    async def _run_subtitles(
+        self,
+        *,
+        artifact_root: Path,
+        evidence: MediaEvidence,
+    ) -> tuple[list[SubtitleCue], EvidenceProviderRun]:
+        started_at = perf_counter()
+        first_stream = next(
+            (stream for stream in evidence.metadata.subtitle_streams if stream.extractable),
+            evidence.metadata.subtitle_streams[0]
+            if evidence.metadata.subtitle_streams
+            else None,
+        )
+        provider = EmbeddedSubtitleProvider(first_stream.codec_name if first_stream else None)
+        if first_stream is None:
+            return [], _provider_run(
+                kind="subtitle",
+                provider=provider,
+                status=EvidenceProviderStatus.SKIPPED,
+                started_at=started_at,
+                message="视频没有独立字幕轨；画面烧录字幕由 OCR 识别",
+            )
+        if not evidence.subtitle_url:
+            return [], _provider_run(
+                kind="subtitle",
+                provider=provider,
+                status=EvidenceProviderStatus.UNAVAILABLE,
+                started_at=started_at,
+                message=evidence.subtitle_extraction_message or "独立字幕轨无法转换为文本",
+            )
+
+        subtitle_path = artifact_root / "subtitles.srt"
+        if not await asyncio.to_thread(subtitle_path.is_file):
+            return [], _provider_run(
+                kind="subtitle",
+                provider=provider,
+                status=EvidenceProviderStatus.FAILED,
+                started_at=started_at,
+                message="字幕证据文件不存在",
+            )
+        payload = await asyncio.to_thread(subtitle_path.read_text, "utf-8", "replace")
+        cues = _parse_srt(
+            payload,
+            language=first_stream.language,
+            stream_index=first_stream.index,
+        )
+        return cues, _provider_run(
+            kind="subtitle",
+            provider=provider,
+            status=EvidenceProviderStatus.COMPLETED,
+            started_at=started_at,
+            item_count=len(cues),
+            message=evidence.subtitle_extraction_message,
+        )
+
     @staticmethod
     def _ocr_frames(artifact_root: Path, evidence: MediaEvidence) -> list[OCRFrame]:
         return [
@@ -459,6 +593,39 @@ class EvidenceTimelineBuilder:
         return result
 
     @staticmethod
+    def _valid_subtitle_cues(
+        values: list[SubtitleCue],
+        duration_seconds: float,
+        warnings: list[str],
+    ) -> list[SubtitleCue]:
+        result: list[SubtitleCue] = []
+        seen_ids: set[str] = set()
+        for cue in sorted(values, key=lambda item: (item.start_seconds, item.end_seconds)):
+            if cue.id in seen_ids:
+                warnings.append(f"丢弃重复字幕 ID：{cue.id}")
+                continue
+            if cue.start_seconds >= duration_seconds:
+                warnings.append(f"丢弃越界字幕：{cue.id}")
+                continue
+            cleaned = _clean_text(cue.text)
+            if not cleaned:
+                warnings.append(f"丢弃空字幕：{cue.id}")
+                continue
+            end_seconds = min(cue.end_seconds, duration_seconds)
+            if end_seconds <= cue.start_seconds:
+                continue
+            seen_ids.add(cue.id)
+            result.append(
+                cue.model_copy(
+                    update={
+                        "end_seconds": round(end_seconds, 3),
+                        "text": cleaned,
+                    }
+                )
+            )
+        return result
+
+    @staticmethod
     def _shot_at(shots: list[ShotEvidence], timestamp: float) -> ShotEvidence | None:
         for index, shot in enumerate(shots):
             is_last = index == len(shots) - 1
@@ -472,6 +639,7 @@ class EvidenceTimelineBuilder:
     def _align_shots(
         shots: list[ShotEvidence],
         segments: list[TranscriptSegment],
+        cues: list[SubtitleCue],
         observations: list[OCRObservation],
     ) -> list[ShotTimelineEvidence]:
         timeline: list[ShotTimelineEvidence] = []
@@ -485,6 +653,11 @@ class EvidenceTimelineBuilder:
             matched_ocr = [
                 observation for observation in observations if observation.shot_id == shot.shot_id
             ]
+            matched_cues = [
+                cue
+                for cue in cues
+                if cue.start_seconds < shot.end_seconds and cue.end_seconds > shot.start_seconds
+            ]
             timeline.append(
                 ShotTimelineEvidence(
                     shot_id=shot.shot_id,
@@ -494,6 +667,8 @@ class EvidenceTimelineBuilder:
                     transcript_text=_join_unique_text(
                         [segment.text for segment in matched_segments]
                     ),
+                    subtitle_cue_ids=[cue.id for cue in matched_cues],
+                    subtitle_text=_join_unique_text([cue.text for cue in matched_cues]),
                     ocr_observation_ids=[observation.id for observation in matched_ocr],
                     ocr_text=_join_unique_text([observation.text for observation in matched_ocr]),
                 )

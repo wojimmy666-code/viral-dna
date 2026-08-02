@@ -14,7 +14,7 @@ docs                     产品、架构、执行计划与 UI 参考
 
 ## 当前状态
 
-当前已完成 Phase 1 Batch 2.5 的真实媒体证据与链接采集层：
+当前已完成 Phase 1 Batch 3.2 的真实媒体、链接采集和本地语音/字幕证据层：
 
 - 视频文件流式上传，以及抖音/小红书公开视频真实下载。
 - `yt-dlp` 平台解析、白名单校验、下载限制、错误码和可选显式 Cookie 文件。
@@ -22,10 +22,13 @@ docs                     产品、架构、执行计划与 UI 参考
 - FFmpeg scene score 真实分镜、逐镜头关键帧、Contact Sheet 和 manifest。
 - SQLite 持久化、分析状态机和受限的媒体产物 API。
 - 链接任务使用真实 `media_evidence` 报告，不再默认回退模拟数据。
+- faster-whisper 本地 ASR，输出句级和词级时间戳。
+- RapidOCR 本地画面文字识别，以及 FFmpeg 独立文本字幕轨抽取。
+- ASR、独立字幕、画面 OCR 和镜头边界统一写入 `timeline.json`。
 - 单视频报告工作台，以及真实媒体证据和模拟报告的明确区分。
 - Windows `scripts/start.bat` 一键启动 API 8000 和 Web 4174。
 
-ASR、OCR、VLM、爆点 LLM、Seedance Prompt 和真实元素替换仍待后续批次接入。详细结果见 [Batch 2.5 链接采集层执行与验收](./docs/Phase1_Batch2.5_链接采集层执行与验收.md)。
+逐镜头 VLM、爆点 LLM、Seedance Prompt 和真实元素替换仍待后续批次接入。详细结果见 [Batch 3.2 本地语音与字幕识别执行验收](./docs/Phase1_Batch3.2_本地语音与字幕识别执行验收.md)。
 
 ## 本地开发
 
@@ -52,7 +55,7 @@ npm run dev:web
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -e "services/api[dev]"
+.venv/Scripts/python -m pip install -e "services/api[dev,local-ai]"
 .venv/Scripts/python -m uvicorn viral_dna_api.main:app --app-dir services/api/src --reload --port 8000
 ```
 
@@ -65,4 +68,6 @@ Web 开发服务器默认将 `/api` 代理到 `http://127.0.0.1:8000`。
 - [Phase 1 架构与接口设计](./docs/Phase1_架构与接口设计.md)
 - [Batch 2 真实媒体证据层执行与验收](./docs/Phase1_Batch2_真实媒体证据层执行计划.md)
 - [Batch 2.5 链接采集层执行与验收](./docs/Phase1_Batch2.5_链接采集层执行与验收.md)
+- [Batch 3.1 证据时间线与 Provider 执行计划](./docs/Phase1_Batch3.1_证据时间线与Provider执行计划.md)
+- [Batch 3.2 本地语音与字幕识别执行验收](./docs/Phase1_Batch3.2_本地语音与字幕识别执行验收.md)
 - [UI 风格参考](./docs/UI模板.png)

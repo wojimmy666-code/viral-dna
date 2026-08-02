@@ -959,6 +959,10 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
                 <dt>音轨</dt>
                 <dd>{metadata?.has_audio ? metadata.audio_codec?.toUpperCase() : "无"}</dd>
               </div>
+              <div>
+                <dt>独立字幕轨</dt>
+                <dd>{metadata?.subtitle_streams?.length || 0} 条</dd>
+              </div>
             </>
           ) : (
             <>
@@ -979,18 +983,18 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             <>
               <p>
                 {timeline
-                  ? `统一证据时间线已生成：${timeline.transcript_segments.length} 条转写、${timeline.ocr_observations.length} 条 OCR；VLM、爆点判断和复刻提示词待下一批接入。`
+                  ? `统一证据时间线已生成：${timeline.transcript_segments.length} 条 ASR 转写、${timeline.subtitle_cues?.length || 0} 条独立字幕、${timeline.ocr_observations.length} 条画面 OCR；VLM、爆点判断和复刻提示词待下一批接入。`
                   : "当前是旧版媒体报告，ASR、OCR 和多模态语义分析尚未运行。"}
               </p>
               {timeline?.provider_runs?.length > 0 && (
                 <div className="provider-status-list" aria-label="证据 Provider 状态">
                   {timeline.provider_runs.map((run) => (
                     <span className={`provider-status ${run.status}`} key={run.kind}>
-                      <strong>{run.kind.toUpperCase()}</strong>
+                      <strong>{run.kind === "subtitle" ? "字幕轨" : run.kind.toUpperCase()}</strong>
                       {run.status === "completed"
                         ? `完成 · ${run.item_count} 条`
                         : run.status === "skipped"
-                          ? "未配置"
+                          ? "已跳过"
                           : run.status === "unavailable"
                             ? "不可用"
                             : "失败"}
@@ -1090,12 +1094,18 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
                 <Fact label="音频证据" value={activeShot.audio} />
                 <Fact label="证据类型" value="FFmpeg 实测" />
               </div>
-              {(activeShot.dialogue || activeShot.ocr_text) && (
+              {(activeShot.dialogue || activeShot.subtitle_text || activeShot.ocr_text) && (
                 <div className="transcript-box">
                   {activeShot.dialogue && (
                     <div>
                       <span>ASR 转写</span>
                       <p>{activeShot.dialogue}</p>
+                    </div>
+                  )}
+                  {activeShot.subtitle_text && (
+                    <div>
+                      <span>独立字幕轨</span>
+                      <p>{activeShot.subtitle_text}</p>
                     </div>
                   )}
                   {activeShot.ocr_text && (
@@ -1119,12 +1129,18 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
                 <Fact label="声音" value={activeShot.audio} />
                 <Fact label="转场" value={activeShot.transition} />
               </div>
-              {(activeShot.dialogue || activeShot.ocr_text) && (
+              {(activeShot.dialogue || activeShot.subtitle_text || activeShot.ocr_text) && (
             <div className="transcript-box">
               {activeShot.dialogue && (
                 <div>
                   <span>旁白</span>
                   <p>{activeShot.dialogue}</p>
+                </div>
+              )}
+              {activeShot.subtitle_text && (
+                <div>
+                  <span>字幕</span>
+                  <p>{activeShot.subtitle_text}</p>
                 </div>
               )}
               {activeShot.ocr_text && (

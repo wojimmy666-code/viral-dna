@@ -11,8 +11,13 @@ if exist "%LOCAL_ENV_FILE%" (
     if /I "%%A"=="VIRAL_DNA_YTDLP_COOKIE_FILE" set "VIRAL_DNA_YTDLP_COOKIE_FILE=%%B"
     if /I "%%A"=="VIRAL_DNA_ASR_PROVIDER" set "VIRAL_DNA_ASR_PROVIDER=%%B"
     if /I "%%A"=="VIRAL_DNA_ASR_MODEL" set "VIRAL_DNA_ASR_MODEL=%%B"
+    if /I "%%A"=="VIRAL_DNA_ASR_DEVICE" set "VIRAL_DNA_ASR_DEVICE=%%B"
+    if /I "%%A"=="VIRAL_DNA_ASR_COMPUTE_TYPE" set "VIRAL_DNA_ASR_COMPUTE_TYPE=%%B"
+    if /I "%%A"=="VIRAL_DNA_ASR_LANGUAGE" set "VIRAL_DNA_ASR_LANGUAGE=%%B"
+    if /I "%%A"=="VIRAL_DNA_ASR_MODEL_DIR" set "VIRAL_DNA_ASR_MODEL_DIR=%%B"
     if /I "%%A"=="VIRAL_DNA_OCR_PROVIDER" set "VIRAL_DNA_OCR_PROVIDER=%%B"
     if /I "%%A"=="VIRAL_DNA_OCR_MODEL" set "VIRAL_DNA_OCR_MODEL=%%B"
+    if /I "%%A"=="VIRAL_DNA_OCR_MIN_CONFIDENCE" set "VIRAL_DNA_OCR_MIN_CONFIDENCE=%%B"
   )
 )
 set "WEB_URL=http://127.0.0.1:4174"
@@ -109,6 +114,22 @@ if errorlevel 1 (
   echo [ViralDNA] Installing API dependencies...
   "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev]"
   if errorlevel 1 exit /b 1
+)
+
+set "LOCAL_AI_REQUIRED=0"
+if /I "%VIRAL_DNA_ASR_PROVIDER%"=="faster-whisper" set "LOCAL_AI_REQUIRED=1"
+if /I "%VIRAL_DNA_ASR_PROVIDER%"=="faster_whisper" set "LOCAL_AI_REQUIRED=1"
+if /I "%VIRAL_DNA_ASR_PROVIDER%"=="whisper" set "LOCAL_AI_REQUIRED=1"
+if /I "%VIRAL_DNA_OCR_PROVIDER%"=="rapidocr" set "LOCAL_AI_REQUIRED=1"
+if /I "%VIRAL_DNA_OCR_PROVIDER%"=="rapid-ocr" set "LOCAL_AI_REQUIRED=1"
+if /I "%VIRAL_DNA_OCR_PROVIDER%"=="rapid_ocr" set "LOCAL_AI_REQUIRED=1"
+if "%LOCAL_AI_REQUIRED%"=="1" (
+  "%PYTHON_EXE%" -c "import faster_whisper, onnxruntime, rapidocr" >nul 2>&1
+  if errorlevel 1 (
+    echo [ViralDNA] Installing optional local ASR/OCR dependencies...
+    "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[local-ai]"
+    if errorlevel 1 exit /b 1
+  )
 )
 exit /b 0
 

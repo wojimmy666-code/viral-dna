@@ -14,12 +14,19 @@ from math import gcd
 from pathlib import Path
 from uuid import UUID
 
-from .models import AnalysisStage, MediaEvidence, MediaMetadata, ShotEvidence
+from .models import (
+    AnalysisStage,
+    MediaEvidence,
+    MediaMetadata,
+    ShotEvidence,
+    SubtitleStream,
+)
 
 PROCESSOR_VERSION = "ffmpeg-media-v1"
 MAX_VIDEO_SECONDS = 5 * 60
 MAX_SHOTS = 120
 MIN_SHOT_SECONDS = 0.45
+TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "ssa", "srt", "subrip", "text", "webvtt"}
 
 ProgressCallback = Callable[[AnalysisStage, int, str], Awaitable[None]]
 
@@ -137,6 +144,19 @@ def _rotation(video_stream: dict[str, object]) -> int:
     return 0
 
 
+def _subtitle_stream(stream: dict[str, object]) -> SubtitleStream:
+    tags = stream.get("tags")
+    tag_values = tags if isinstance(tags, dict) else {}
+    codec_name = str(stream.get("codec_name") or "unknown").lower()
+    return SubtitleStream(
+        index=_parse_int(stream.get("index")),
+        codec_name=codec_name,
+        language=str(tag_values.get("language") or "").strip()[:20] or None,
+        title=str(tag_values.get("title") or "").strip()[:200] or None,
+        extractable=codec_name in TEXT_SUBTITLE_CODECS,
+    )
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -191,6 +211,11 @@ class MediaProcessor:
             (stream for stream in streams if stream.get("codec_type") == "audio"),
             None,
         )
+        subtitle_streams = [
+            _subtitle_stream(stream)
+            for stream in streams
+            if isinstance(stream, dict) and stream.get("codec_type") == "subtitle"
+        ]
 
         format_data = payload.get("format") or {}
         duration = _parse_float(format_data.get("duration")) or _parse_float(
@@ -232,6 +257,7 @@ class MediaProcessor:
             bit_rate=_parse_int(format_data.get("bit_rate"), 0) or None,
             sha256=await asyncio.to_thread(_sha256, source_path),
             aspect_ratio=_aspect_ratio(display_width, display_height),
+            subtitle_streams=subtitle_streams,
         )
 
     async def create_proxy(self, source_path: Path, output_path: Path) -> None:
@@ -291,6 +317,31 @@ class MediaProcessor:
                 str(output_path),
             ],
             timeout_seconds=300,
+        )
+
+    async def extract_subtitle(
+        self,
+        source_path: Path,
+        output_path: Path,
+        stream_index: int,
+    ) -> None:
+        await _run_command(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(source_path),
+                "-map",
+                f"0:{stream_index}",
+                "-c:s",
+                "srt",
+                str(output_path),
+            ],
+            timeout_seconds=120,
         )
 
     async def detect_scene_boundaries(
@@ -446,6 +497,24 @@ class MediaProcessor:
             await self.extract_audio(proxy_path, audio_path)
             audio_url = artifact_url(analysis_id, "audio.wav")
 
+        subtitle_url: str | None = None
+        subtitle_message: str | None = None
+        subtitle_stream = next(
+            (stream for stream in metadata.subtitle_streams if stream.extractable),
+            None,
+        )
+        if subtitle_stream is not None:
+            subtitle_path = artifact_root / "subtitles.srt"
+            try:
+                await self.extract_subtitle(source_path, subtitle_path, subtitle_stream.index)
+            except MediaProcessingError:
+                subtitle_message = "检测到文本字幕轨，但 FFmpeg 无法将其转换为 SRT"
+            else:
+                subtitle_url = artifact_url(analysis_id, "subtitles.srt")
+                subtitle_message = f"已提取 {subtitle_stream.codec_name} 内嵌字幕轨"
+        elif metadata.subtitle_streams:
+            subtitle_message = "检测到图像型或暂不支持的字幕轨，首期仅转换文本字幕轨"
+
         await progress(AnalysisStage.SEGMENTING, 48, "正在检测真实镜头边界")
         boundaries = await self.detect_scene_boundaries(
             proxy_path,
@@ -462,6 +531,8 @@ class MediaProcessor:
             metadata=metadata,
             proxy_url=artifact_url(analysis_id, "proxy.mp4"),
             audio_url=audio_url,
+            subtitle_url=subtitle_url,
+            subtitle_extraction_message=subtitle_message,
             contact_sheet_url=artifact_url(analysis_id, "contact-sheet.jpg"),
             manifest_url=artifact_url(analysis_id, "manifest.json"),
             shots=shots,

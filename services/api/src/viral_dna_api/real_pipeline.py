@@ -218,10 +218,11 @@ def build_media_evidence_report(
             lighting="待多模态模型识别",
             color="待多模态模型识别",
             dialogue=timeline_by_shot[shot.shot_id].transcript_text,
+            subtitle_text=timeline_by_shot[shot.shot_id].subtitle_text,
             ocr_text=timeline_by_shot[shot.shot_id].ocr_text,
             audio=_shot_audio_description(timeline, shot.shot_id, evidence),
             transition=("视频开始" if shot.index == 1 else "FFmpeg scene score 检测到画面切换"),
-            narrative_role="待 ASR/OCR/VLM 分析",
+            narrative_role="待 ASR/字幕/OCR/VLM 分析",
             prompt="当前仅完成真实媒体证据提取；接入多模态模型后生成复刻提示词。",
             confidence=0.82,
             keyframe_url=shot.keyframe_url,
@@ -255,10 +256,11 @@ def build_media_evidence_report(
         overview=VideoOverview(
             summary=(
                 f"已完成真实媒体处理：{metadata.duration_seconds:.1f} 秒、"
-                f"{metadata.width}×{metadata.height}、{len(shots)} 个镜头。"
+                f"{metadata.width}×{metadata.height}、{len(shots)} 个镜头；"
+                f"{len(timeline.subtitle_cues)} 条内嵌字幕。"
             ),
             content_type="真实媒体证据 · 语义待分析",
-            narrative_structure="真实分镜时间线已生成；叙事结构待 ASR/OCR/VLM 分析",
+            narrative_structure="真实分镜时间线已生成；叙事结构待 ASR/字幕/OCR/VLM 分析",
             audience_inference="待语义模型分析",
             visual_style=(
                 f"{metadata.video_codec.upper()} · {metadata.fps:.2f} FPS · {metadata.aspect_ratio}"
@@ -306,4 +308,4 @@ def _completion_message(*, is_link: bool, timeline: EvidenceTimeline) -> str:
     ]
     if completed:
         return f"{prefix}；{'/'.join(completed)} 已执行，VLM 待下一批接入"
-    return f"{prefix}；ASR/OCR Provider 待配置，VLM 待下一批接入"
+    return f"{prefix}；ASR/OCR Provider 待配置，内嵌字幕已检查，VLM 待下一批接入"

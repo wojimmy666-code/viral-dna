@@ -120,6 +120,7 @@ class Shot(BaseModel):
     lighting: str
     color: str
     dialogue: str | None = None
+    subtitle_text: str | None = None
     ocr_text: str | None = None
     audio: str
     transition: str
@@ -187,6 +188,14 @@ class VideoOverview(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class SubtitleStream(BaseModel):
+    index: int = Field(ge=0)
+    codec_name: str = Field(min_length=1, max_length=80)
+    language: str | None = Field(default=None, max_length=20)
+    title: str | None = Field(default=None, max_length=200)
+    extractable: bool = False
+
+
 class MediaMetadata(BaseModel):
     duration_seconds: float = Field(gt=0)
     width: int = Field(gt=0)
@@ -201,6 +210,7 @@ class MediaMetadata(BaseModel):
     bit_rate: int | None = Field(default=None, ge=0)
     sha256: str = Field(min_length=64, max_length=64)
     aspect_ratio: str
+    subtitle_streams: list[SubtitleStream] = Field(default_factory=list)
 
 
 class ShotEvidence(BaseModel):
@@ -219,6 +229,8 @@ class MediaEvidence(BaseModel):
     metadata: MediaMetadata
     proxy_url: str
     audio_url: str | None = None
+    subtitle_url: str | None = None
+    subtitle_extraction_message: str | None = Field(default=None, max_length=500)
     contact_sheet_url: str | None = None
     manifest_url: str
     shots: list[ShotEvidence]
@@ -232,7 +244,7 @@ class EvidenceProviderStatus(StrEnum):
 
 
 class EvidenceProviderRun(BaseModel):
-    kind: Literal["asr", "ocr"]
+    kind: Literal["asr", "ocr", "subtitle"]
     provider: str = Field(min_length=1, max_length=80)
     model: str | None = Field(default=None, max_length=120)
     status: EvidenceProviderStatus
@@ -270,6 +282,21 @@ class TranscriptSegment(BaseModel):
         return self
 
 
+class SubtitleCue(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=4000)
+    language: str | None = Field(default=None, max_length=20)
+    stream_index: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def end_after_start(self) -> SubtitleCue:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("字幕结束时间必须晚于开始时间")
+        return self
+
+
 class OCRObservation(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     timestamp_seconds: float = Field(ge=0)
@@ -286,6 +313,8 @@ class ShotTimelineEvidence(BaseModel):
     end_seconds: float = Field(gt=0)
     transcript_segment_ids: list[str] = Field(default_factory=list)
     transcript_text: str | None = None
+    subtitle_cue_ids: list[str] = Field(default_factory=list)
+    subtitle_text: str | None = None
     ocr_observation_ids: list[str] = Field(default_factory=list)
     ocr_text: str | None = None
 
@@ -297,11 +326,12 @@ class ShotTimelineEvidence(BaseModel):
 
 
 class EvidenceTimeline(BaseModel):
-    timeline_version: str = "phase1-evidence-timeline-v1"
+    timeline_version: str = "phase1-evidence-timeline-v2"
     duration_seconds: float = Field(gt=0)
     language: str | None = Field(default=None, max_length=20)
     provider_runs: list[EvidenceProviderRun]
     transcript_segments: list[TranscriptSegment] = Field(default_factory=list)
+    subtitle_cues: list[SubtitleCue] = Field(default_factory=list)
     ocr_observations: list[OCRObservation] = Field(default_factory=list)
     shots: list[ShotTimelineEvidence]
     warnings: list[str] = Field(default_factory=list)

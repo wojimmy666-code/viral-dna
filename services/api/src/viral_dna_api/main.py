@@ -220,9 +220,9 @@ async def create_analysis(video_id: UUID, payload: AnalysisCreate) -> AnalysisJo
     if mode == AnalysisMode.SIMULATED:
         analysis_version = "phase1-simulated-v1"
     elif video.source_type == SourceType.UPLOAD:
-        analysis_version = "phase1-evidence-timeline-v1"
+        analysis_version = "phase1-evidence-timeline-v2"
     else:
-        analysis_version = "phase1-link-evidence-timeline-v1"
+            analysis_version = "phase1-link-evidence-timeline-v2"
     analysis = AnalysisJob(
         video_id=video.id,
         analysis_version=analysis_version,

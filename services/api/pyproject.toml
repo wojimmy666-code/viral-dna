@@ -16,6 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local-ai = [
+  "faster-whisper>=1.2,<2",
+  "onnxruntime>=1.20,<2",
+  "rapidocr>=3.8,<4"
+]
 dev = [
   "httpx>=0.28,<1",
   "pytest>=8.3,<9",

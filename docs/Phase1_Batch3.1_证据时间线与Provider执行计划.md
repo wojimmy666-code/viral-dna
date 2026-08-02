@@ -1,7 +1,7 @@
 # ViralDNA Phase 1 Batch 3.1：证据时间线与 Provider 执行计划
 
 > 开始日期：2026-08-02
-> 状态：证据时间线与 Provider 骨架完成；真实 ASR/OCR Provider 待接入
+> 状态：证据时间线与 Provider 骨架完成；真实 Provider 已在 Batch 3.2 接入
 > 目标：在真实媒体分镜和后续 VLM/爆点推理之间建立可验证、可替换 Provider 的 ASR/OCR 证据时间线
 
 ## 1. 为什么先做证据时间线
@@ -112,4 +112,4 @@ API Key 只能放入被 Git 忽略的 `.env.local` 或进程环境，不能写�
 
 ## 7. 下一批
 
-Batch 3.2 将基于本时间线接入逐镜头 VLM，提取人物、服装、动作、场景、产品、道具、镜头语言、灯光、色彩和转场，并保留关键帧与时间戳证据。
+Batch 3.2 已接入 faster-whisper、RapidOCR 和 FFmpeg 文本字幕轨。逐镜头 VLM 顺延到 Batch 3.3，提取人物、服装、动作、场景、产品、道具、镜头语言、灯光、色彩和转场，并保留关键帧与时间戳证据。
