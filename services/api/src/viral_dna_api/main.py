@@ -12,12 +12,14 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from . import __version__
+from .media import get_analysis_artifact_root
 from .models import (
     AnalysisCreate,
     AnalysisJob,
+    AnalysisMode,
     AnalysisReport,
     AnalysisStage,
     HealthResponse,
@@ -27,7 +29,8 @@ from .models import (
     SourceType,
     Video,
 )
-from .pipeline import SimulatedAnalysisPipeline, create_replacement_version
+from .pipeline import create_replacement_version
+from .real_pipeline import HybridAnalysisPipeline
 from .store import store
 
 API_PREFIX = "/api/v1"
@@ -49,7 +52,7 @@ ALLOWED_PLATFORM_DOMAINS = {
 def parse_cors_origins() -> list[str]:
     value = os.getenv(
         "VIRAL_DNA_CORS_ORIGINS",
-        "http://localhost:4173,http://localhost:5173",
+        "http://127.0.0.1:4174,http://localhost:4174,http://localhost:5173",
     )
     return [origin.strip() for origin in value.split(",") if origin.strip()]
 
@@ -67,12 +70,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-pipeline = SimulatedAnalysisPipeline(store)
+pipeline = HybridAnalysisPipeline(store)
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    return HealthResponse(analyzer_mode=os.getenv("VIRAL_DNA_ANALYZER_MODE", "simulated"))
+    return HealthResponse(analyzer_mode=os.getenv("VIRAL_DNA_ANALYZER_MODE", "hybrid"))
 
 
 def resolve_platform(url: str) -> SourceType:
@@ -187,12 +190,27 @@ async def get_video(video_id: UUID) -> Video:
     response_model=AnalysisJob,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def create_analysis(video_id: UUID, _: AnalysisCreate) -> AnalysisJob:
+async def create_analysis(video_id: UUID, payload: AnalysisCreate) -> AnalysisJob:
     video = await store.get_video(video_id)
     if video is None:
         raise HTTPException(status_code=404, detail="视频不存在")
 
-    analysis = AnalysisJob(video_id=video.id)
+    mode = (
+        AnalysisMode.MEDIA_EVIDENCE
+        if video.source_type == SourceType.UPLOAD and video.stored_path
+        else AnalysisMode.SIMULATED
+    )
+    analysis = AnalysisJob(
+        video_id=video.id,
+        analysis_version=(
+            "phase1-media-v1" if mode == AnalysisMode.MEDIA_EVIDENCE else "phase1-simulated-v1"
+        ),
+        analysis_mode=mode,
+        granularity=payload.granularity,
+        include_audio=payload.include_audio,
+        include_ocr=payload.include_ocr,
+        simulated=mode == AnalysisMode.SIMULATED,
+    )
     await store.add_analysis(analysis)
     pipeline.start(analysis.id)
     return analysis
@@ -204,6 +222,22 @@ async def get_analysis(analysis_id: UUID) -> AnalysisJob:
     if analysis is None:
         raise HTTPException(status_code=404, detail="分析任务不存在")
     return analysis
+
+
+@app.get(f"{API_PREFIX}/analyses/{{analysis_id}}/artifacts/{{artifact_path:path}}")
+async def get_analysis_artifact(analysis_id: UUID, artifact_path: str) -> FileResponse:
+    if await store.get_analysis(analysis_id) is None:
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+
+    artifact_root = get_analysis_artifact_root(analysis_id).resolve()
+    candidate = (artifact_root / artifact_path).resolve()
+    try:
+        candidate.relative_to(artifact_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="分析产物不存在") from exc
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="分析产物不存在")
+    return FileResponse(candidate)
 
 
 @app.get(f"{API_PREFIX}/analyses/{{analysis_id}}/events")

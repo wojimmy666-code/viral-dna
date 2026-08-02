@@ -17,6 +17,7 @@ def test_health() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
+
 def test_upload_video() -> None:
     payload = b"phase-one-video-fixture"
     with TestClient(app) as client:

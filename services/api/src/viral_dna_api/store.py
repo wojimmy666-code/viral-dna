@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from uuid import UUID
 
 from .models import AnalysisJob, AnalysisReport, ReplacementVersion, Video
@@ -60,4 +62,14 @@ class InMemoryStore:
         return version
 
 
-store = InMemoryStore()
+def create_store():
+    if os.getenv("VIRAL_DNA_STORE", "sqlite").lower() == "memory":
+        return InMemoryStore()
+
+    from .sqlite_store import SQLiteStore
+
+    database_path = Path(os.getenv("VIRAL_DNA_DATABASE_PATH", "storage/viral_dna.db"))
+    return SQLiteStore(database_path)
+
+
+store = create_store()

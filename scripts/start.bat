@@ -1,0 +1,142 @@
+@echo off
+setlocal EnableExtensions
+chcp 65001 >nul
+title ViralDNA Launcher
+
+set "PROJECT_ROOT=%~dp0.."
+for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
+set "WEB_URL=http://127.0.0.1:4174"
+set "API_URL=http://127.0.0.1:8000/health"
+set "PYTHON_EXE=%PROJECT_ROOT%\.venv\Scripts\python.exe"
+set "WEB_RUNNING=0"
+set "API_RUNNING=0"
+
+echo.
+echo [ViralDNA] Project root: %PROJECT_ROOT%
+echo [ViralDNA] Checking services...
+
+call :is_web_ready
+if not errorlevel 1 set "WEB_RUNNING=1"
+
+call :is_api_ready
+if not errorlevel 1 set "API_RUNNING=1"
+
+if "%API_RUNNING%"=="1" (
+  echo [ViralDNA] API is already running on port 8000.
+) else (
+  call :prepare_api
+  if errorlevel 1 goto :failed
+)
+
+if "%WEB_RUNNING%"=="1" (
+  echo [ViralDNA] Web is already running on port 4174.
+) else (
+  call :prepare_web
+  if errorlevel 1 goto :failed
+)
+
+if "%API_RUNNING%"=="1" if "%WEB_RUNNING%"=="1" goto :ready
+
+if "%API_RUNNING%"=="0" (
+  echo [ViralDNA] Starting API...
+  start "ViralDNA API" /D "%PROJECT_ROOT%" "%ComSpec%" /k ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
+)
+
+if "%WEB_RUNNING%"=="0" (
+  echo [ViralDNA] Starting Web...
+  start "ViralDNA Web" /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /k "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
+)
+
+echo [ViralDNA] Waiting for both services...
+set /a WAIT_COUNT=0
+
+:wait_for_services
+call :is_api_ready
+if errorlevel 1 goto :not_ready
+call :is_web_ready
+if errorlevel 1 goto :not_ready
+goto :ready
+
+:not_ready
+set /a WAIT_COUNT+=1
+if %WAIT_COUNT% GEQ 30 goto :startup_timeout
+timeout /t 1 /nobreak >nul
+goto :wait_for_services
+
+:ready
+echo [ViralDNA] Ready: %WEB_URL%
+if /I not "%~1"=="--no-browser" start "" "%WEB_URL%"
+exit /b 0
+
+:prepare_api
+if not exist "%PYTHON_EXE%" (
+  where python >nul 2>&1
+  if errorlevel 1 (
+    echo [ViralDNA] ERROR: Python 3.11 or newer was not found.
+    exit /b 1
+  )
+  echo [ViralDNA] Creating Python virtual environment...
+  python -m venv "%PROJECT_ROOT%\.venv"
+  if errorlevel 1 exit /b 1
+)
+
+"%PYTHON_EXE%" --version >nul 2>&1
+if errorlevel 1 (
+  echo [ViralDNA] ERROR: The Python virtual environment is not usable.
+  echo [ViralDNA] Remove .venv, install Python 3.11+, and run this file again.
+  exit /b 1
+)
+
+"%PYTHON_EXE%" -c "import uvicorn, viral_dna_api" >nul 2>&1
+if errorlevel 1 (
+  echo [ViralDNA] Installing API dependencies...
+  "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev]"
+  if errorlevel 1 exit /b 1
+)
+exit /b 0
+
+:prepare_web
+where node >nul 2>&1
+if errorlevel 1 (
+  echo [ViralDNA] ERROR: Node.js 20.19 or newer was not found.
+  exit /b 1
+)
+
+where npm >nul 2>&1
+if errorlevel 1 (
+  echo [ViralDNA] ERROR: npm was not found.
+  exit /b 1
+)
+
+if not exist "%PROJECT_ROOT%\node_modules\.bin\vite.cmd" (
+  echo [ViralDNA] Installing Web dependencies...
+  pushd "%PROJECT_ROOT%"
+  call npm install
+  if errorlevel 1 (
+    popd
+    exit /b 1
+  )
+  popd
+)
+exit /b 0
+
+:is_api_ready
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $result = Invoke-RestMethod -Uri '%API_URL%' -TimeoutSec 2; if ($result.service -eq 'viral-dna-api' -and $result.status -eq 'ok') { exit 0 } } catch {}; exit 1" >nul 2>&1
+exit /b %errorlevel%
+
+:is_web_ready
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $result = Invoke-WebRequest -UseBasicParsing -Uri '%WEB_URL%' -TimeoutSec 2; if ($result.StatusCode -eq 200 -and $result.Content -match 'ViralDNA') { exit 0 } } catch {}; exit 1" >nul 2>&1
+exit /b %errorlevel%
+
+:startup_timeout
+echo.
+echo [ViralDNA] ERROR: Services did not become ready within 30 seconds.
+echo [ViralDNA] Check the API and Web windows for details.
+pause
+exit /b 1
+
+:failed
+echo.
+echo [ViralDNA] ERROR: Startup preparation failed.
+pause
+exit /b 1

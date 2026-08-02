@@ -81,6 +81,11 @@ function formatTime(seconds = 0) {
   return `${String(minutes).padStart(2, "0")}:${rest.toFixed(1).padStart(4, "0")}`;
 }
 
+function resolveArtifactUrl(path) {
+  if (!path || /^https?:\/\//i.test(path) || !API_BASE.startsWith("http")) return path || "";
+  return new URL(path, API_BASE).toString();
+}
+
 function useFilePreview(file) {
   const previewUrl = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
   useEffect(() => {
@@ -167,6 +172,7 @@ export function App() {
     const nextReport = await apiRequest(`/videos/${videoId}/report`);
     setReport(nextReport);
     setActiveShotId(nextReport.shots[0]?.id || null);
+    setActiveReportTab("overview");
     window.setTimeout(() => {
       reportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 120);
@@ -318,7 +324,7 @@ export function App() {
                   onDownload={downloadPromptPackage}
                   onRestart={() => selectNav("new-analysis")}
                 />
-                <ReportTabs active={activeReportTab} onChange={setActiveReportTab} />
+                <ReportTabs active={activeReportTab} onChange={setActiveReportTab} mode={report.analysis_mode} />
                 <div className="report-content">
                   {activeReportTab === "overview" && (
                     <OverviewTab
@@ -333,6 +339,7 @@ export function App() {
                       shots={report.shots}
                       activeShotId={activeShotId}
                       onSelect={seekToShot}
+                      analysisMode={report.analysis_mode}
                       onCopy={copyText}
                     />
                   )}
@@ -417,7 +424,7 @@ function Sidebar({ activeNav, onSelect }) {
         </span>
         <span>
           <strong>内测环境</strong>
-          <small>模拟分析器已启用</small>
+          <small>混合分析引擎已启用</small>
         </span>
       </div>
     </aside>
@@ -626,7 +633,13 @@ function AnalysisProgress({ analysis, video }) {
       {analysis.simulated && (
         <div className="simulation-note">
           <ShieldCheck size={16} />
-          当前使用模拟分析器验证完整流程，真实 FFmpeg 与多模态 Provider 将在下一批接入。
+          链接输入当前使用模拟报告；上传视频已进入真实媒体处理链路。
+        </div>
+      )}
+      {!analysis.simulated && (
+        <div className="evidence-note compact">
+          <ShieldCheck size={16} weight="fill" />
+          正在从真实视频提取编码信息、镜头边界、关键帧和音频证据，不生成虚构语义结果。
         </div>
       )}
     </section>
@@ -662,11 +675,17 @@ function ReportHeader({ video, report, promptPackage, onDownload, onRestart }) {
           <div className="report-title-line">
             <h2>{video?.title || "视频拆解报告"}</h2>
             {report.analysis_mode === "simulated" && <span className="simulation-badge">模拟分析</span>}
+            {report.analysis_mode === "media_evidence" && (
+              <span className="evidence-badge">真实媒体证据</span>
+            )}
           </div>
-          <p>
-            {report.shots.length} 个镜头 · {report.entities.length} 个可替换元素 · Prompt v
-            {promptPackage.version}
-          </p>
+          {report.analysis_mode === "media_evidence" ? (
+            <p>{report.shots.length} 个真实镜头 · FFmpeg 证据层 · 语义分析待接入</p>
+          ) : (
+            <p>
+              {report.shots.length} 个镜头 · {report.entities.length} 个可替换元素 · Prompt v{promptPackage.version}
+            </p>
+          )}
         </div>
       </div>
       <div className="report-actions">
@@ -674,19 +693,28 @@ function ReportHeader({ video, report, promptPackage, onDownload, onRestart }) {
           <ArrowClockwise size={16} />
           新任务
         </button>
-        <button className="primary-button compact" type="button" onClick={onDownload}>
+        <button
+          className="primary-button compact"
+          type="button"
+          onClick={
+            report.analysis_mode === "media_evidence"
+              ? () => window.open(resolveArtifactUrl(report.media_evidence?.manifest_url), "_blank")
+              : onDownload
+          }
+        >
           <DownloadSimple size={16} />
-          导出
+          {report.analysis_mode === "media_evidence" ? "证据清单" : "导出"}
         </button>
       </div>
     </div>
   );
 }
 
-function ReportTabs({ active, onChange }) {
+function ReportTabs({ active, onChange, mode }) {
+  const visibleTabs = mode === "media_evidence" ? reportTabs.slice(0, 2) : reportTabs;
   return (
     <div className="report-tabs" role="tablist" aria-label="分析报告">
-      {reportTabs.map((tab) => {
+      {visibleTabs.map((tab) => {
         const Icon = tab.icon;
         return (
           <button
@@ -708,12 +736,16 @@ function ReportTabs({ active, onChange }) {
 
 function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   const overview = report.overview;
+  const evidence = report.media_evidence;
+  const metadata = evidence?.metadata;
+  const isMediaEvidence = report.analysis_mode === "media_evidence";
+  const playbackUrl = filePreview || resolveArtifactUrl(evidence?.proxy_url);
   return (
     <div className="overview-grid">
       <div className="overview-primary">
         <div className="video-stage">
-          {filePreview ? (
-            <video ref={videoRef} src={filePreview} controls playsInline />
+          {playbackUrl ? (
+            <video ref={videoRef} src={playbackUrl} controls playsInline />
           ) : (
             <div className="video-empty-state">
               <span>
@@ -727,7 +759,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
         </div>
 
         <div className="section-block">
-          <span className="eyebrow">视频概览</span>
+          <span className="eyebrow">{isMediaEvidence ? "媒体证据概览" : "视频概览"}</span>
           <h3>{overview.summary}</h3>
           <p>{overview.narrative_structure}</p>
           <div className="tag-row">
@@ -749,17 +781,32 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
       </div>
 
       <aside className="overview-sidebar">
-        <div className="score-card">
-          <span className="eyebrow">内容爆点潜力</span>
-          <div className="score-value">
-            <strong>{overview.viral_potential_score}</strong>
-            <span>/100</span>
+        {isMediaEvidence ? (
+          <div className="media-evidence-card">
+            <span className="media-evidence-icon">
+              <ShieldCheck size={20} weight="fill" />
+            </span>
+            <div>
+              <span className="eyebrow">真实媒体已验证</span>
+              <strong>
+                {metadata?.width} × {metadata?.height} · {metadata?.fps?.toFixed(2)} FPS
+              </strong>
+              <p>编码、时长、分镜和关键帧均来自上传文件，不包含模型臆测。</p>
+            </div>
           </div>
-          <div className="score-track">
-            <span style={{ width: `${overview.viral_potential_score}%` }} />
+        ) : (
+          <div className="score-card">
+            <span className="eyebrow">内容爆点潜力</span>
+            <div className="score-value">
+              <strong>{overview.viral_potential_score}</strong>
+              <span>/100</span>
+            </div>
+            <div className="score-track">
+              <span style={{ width: `${overview.viral_potential_score}%` }} />
+            </div>
+            <p>基于视频内容结构的启发式评分，不代表真实平台播放表现。</p>
           </div>
-          <p>基于视频内容结构的启发式评分，不代表真实平台播放表现。</p>
-        </div>
+        )}
         <dl className="overview-facts">
           <div>
             <dt>时长</dt>
@@ -769,21 +816,43 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             <dt>镜头</dt>
             <dd>{report.shots.length} 个</dd>
           </div>
-          <div>
-            <dt>主体元素</dt>
-            <dd>{report.entities.length} 个</dd>
-          </div>
-          <div>
-            <dt>分析置信度</dt>
-            <dd>{Math.round(overview.confidence * 100)}%</dd>
-          </div>
+          {isMediaEvidence ? (
+            <>
+              <div>
+                <dt>视频编码</dt>
+                <dd>{metadata?.video_codec?.toUpperCase() || "—"}</dd>
+              </div>
+              <div>
+                <dt>音轨</dt>
+                <dd>{metadata?.has_audio ? metadata.audio_codec?.toUpperCase() : "无"}</dd>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <dt>主体元素</dt>
+                <dd>{report.entities.length} 个</dd>
+              </div>
+              <div>
+                <dt>分析置信度</dt>
+                <dd>{Math.round(overview.confidence * 100)}%</dd>
+              </div>
+            </>
+          )}
         </dl>
         <div className="audience-card">
-          <span className="eyebrow">受众推断</span>
-          <p>{overview.audience_inference}</p>
+          <span className="eyebrow">{isMediaEvidence ? "语义分析状态" : "受众推断"}</span>
+          <p>
+            {isMediaEvidence
+              ? "ASR、OCR、多模态画面理解、爆点判断和复刻提示词尚未运行。"
+              : overview.audience_inference}
+          </p>
+          {isMediaEvidence && metadata?.sha256 && (
+            <code className="media-hash">SHA-256 {metadata.sha256.slice(0, 12)}…</code>
+          )}
         </div>
         <button className="secondary-button full" type="button" onClick={onOpenShots}>
-          查看逐镜头拆解
+          {isMediaEvidence ? "查看真实分镜证据" : "查看逐镜头拆解"}
           <CaretRight size={16} />
         </button>
       </aside>
@@ -791,8 +860,9 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   );
 }
 
-function ShotsTab({ shots, activeShotId, onSelect, onCopy }) {
+function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
   const activeShot = shots.find((shot) => shot.id === activeShotId) || shots[0];
+  const isMediaEvidence = analysisMode === "media_evidence";
   return (
     <div className="shots-layout">
       <div className="shot-list">
@@ -807,7 +877,15 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy }) {
             key={shot.id}
             onClick={() => onSelect(shot)}
           >
-            <span className="shot-index">{String(shot.index).padStart(2, "0")}</span>
+            {shot.keyframe_url ? (
+              <img
+                className="shot-row-thumb"
+                src={resolveArtifactUrl(shot.keyframe_url)}
+                alt={`${shot.title} 关键帧`}
+              />
+            ) : (
+              <span className="shot-index">{String(shot.index).padStart(2, "0")}</span>
+            )}
             <span className="shot-row-copy">
               <strong>{shot.title}</strong>
               <small>
@@ -826,26 +904,51 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy }) {
               <span className="eyebrow">镜头 {String(activeShot.index).padStart(2, "0")}</span>
               <h3>{activeShot.title}</h3>
               <p>
-                {formatTime(activeShot.start_seconds)} — {formatTime(activeShot.end_seconds)} · 置信度 {Math.round(activeShot.confidence * 100)}%
+                {formatTime(activeShot.start_seconds)} — {formatTime(activeShot.end_seconds)} · {isMediaEvidence ? "真实时间边界" : `置信度 ${Math.round(activeShot.confidence * 100)}%`}
               </p>
             </div>
-            <button className="icon-button bordered" type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")} aria-label="复制镜头提示词">
-              <Copy size={17} />
-            </button>
+            {!isMediaEvidence && (
+              <button className="icon-button bordered" type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")} aria-label="复制镜头提示词">
+                <Copy size={17} />
+              </button>
+            )}
           </div>
 
-          <div className="shot-facts-grid">
-            <Fact label="主体动作" value={activeShot.action} />
-            <Fact label="场景" value={activeShot.scene} />
-            <Fact label="机位与运镜" value={activeShot.camera} />
-            <Fact label="构图" value={activeShot.composition} />
-            <Fact label="灯光" value={activeShot.lighting} />
-            <Fact label="色彩" value={activeShot.color} />
-            <Fact label="声音" value={activeShot.audio} />
-            <Fact label="转场" value={activeShot.transition} />
-          </div>
+          {activeShot.keyframe_url && (
+            <figure className="shot-keyframe">
+              <img src={resolveArtifactUrl(activeShot.keyframe_url)} alt={`${activeShot.title} 代表关键帧`} />
+              <figcaption>代表关键帧 · 截取自该镜头时间区间中点</figcaption>
+            </figure>
+          )}
 
-          {(activeShot.dialogue || activeShot.ocr_text) && (
+          {isMediaEvidence ? (
+            <>
+              <div className="evidence-note">
+                <ShieldCheck size={18} weight="fill" />
+                这里只展示可验证的媒体事实。主体、服装、场景、台词、爆点和提示词将在多模态分析接入后生成。
+              </div>
+              <div className="shot-facts-grid">
+                <Fact label="开始时间" value={`${activeShot.start_seconds.toFixed(3)} 秒`} />
+                <Fact label="结束时间" value={`${activeShot.end_seconds.toFixed(3)} 秒`} />
+                <Fact label="镜头时长" value={`${(activeShot.end_seconds - activeShot.start_seconds).toFixed(3)} 秒`} />
+                <Fact label="边界依据" value={activeShot.transition} />
+                <Fact label="音频证据" value={activeShot.audio} />
+                <Fact label="证据类型" value="FFmpeg 实测" />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="shot-facts-grid">
+                <Fact label="主体动作" value={activeShot.action} />
+                <Fact label="场景" value={activeShot.scene} />
+                <Fact label="机位与运镜" value={activeShot.camera} />
+                <Fact label="构图" value={activeShot.composition} />
+                <Fact label="灯光" value={activeShot.lighting} />
+                <Fact label="色彩" value={activeShot.color} />
+                <Fact label="声音" value={activeShot.audio} />
+                <Fact label="转场" value={activeShot.transition} />
+              </div>
+              {(activeShot.dialogue || activeShot.ocr_text) && (
             <div className="transcript-box">
               {activeShot.dialogue && (
                 <div>
@@ -860,15 +963,17 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy }) {
                 </div>
               )}
             </div>
-          )}
+              )}
 
-          <div className="prompt-box">
-            <div>
-              <MagicWand size={17} weight="fill" />
-              <strong>逐镜头复刻提示词</strong>
-            </div>
-            <p>{activeShot.prompt}</p>
-          </div>
+              <div className="prompt-box">
+                <div>
+                  <MagicWand size={17} weight="fill" />
+                  <strong>逐镜头复刻提示词</strong>
+                </div>
+                <p>{activeShot.prompt}</p>
+              </div>
+            </>
+          )}
         </article>
       )}
     </div>
@@ -1151,12 +1256,18 @@ function PromptsTab({ promptPackage, onCopy, onDownload }) {
 
 function InsightsPanel({ report, analysis, onOpenTab }) {
   const progressMessage = analysis && analysis.stage !== "completed" ? analysis.message : null;
+  const isMediaEvidence = report?.analysis_mode === "media_evidence";
+  const metadata = report?.media_evidence?.metadata;
   return (
     <aside className="insights-panel">
       <div className="insights-heading">
         <div>
-          <Sparkle size={18} weight="fill" />
-          <strong>AI 助手建议</strong>
+          {isMediaEvidence ? (
+            <ShieldCheck size={18} weight="fill" />
+          ) : (
+            <Sparkle size={18} weight="fill" />
+          )}
+          <strong>{isMediaEvidence ? "真实分析状态" : "AI 助手建议"}</strong>
         </div>
         <button className="icon-button" type="button" aria-label="刷新建议">
           <ArrowClockwise size={17} />
@@ -1172,6 +1283,36 @@ function InsightsPanel({ report, analysis, onOpenTab }) {
             <span style={{ width: `${analysis.progress}%` }} />
           </div>
         </div>
+      ) : isMediaEvidence ? (
+        <>
+          <div className="insight-card purple">
+            <span className="insight-icon"><ShieldCheck size={20} weight="fill" /></span>
+            <div>
+              <strong>媒体探测与代理文件已完成</strong>
+              <p>
+                {metadata?.width} × {metadata?.height} · {report.overview.duration_seconds.toFixed(1)} 秒 · {metadata?.video_codec?.toUpperCase()}
+              </p>
+            </div>
+          </div>
+          <div className="insight-card orange">
+            <span className="insight-icon"><FilmStrip size={20} weight="fill" /></span>
+            <div>
+              <strong>检测到 {report.shots.length} 个真实镜头</strong>
+              <p>每个时间区间都已生成代表关键帧，可回到原视频对应时间点核验。</p>
+            </div>
+          </div>
+          <div className="insight-card green">
+            <span className="insight-icon"><MagicWand size={20} weight="fill" /></span>
+            <div>
+              <strong>语义层将在下一批接入</strong>
+              <p>接入 ASR、OCR 与多模态模型后，再生成主体、场景、爆点和 Seedance 提示词。</p>
+            </div>
+          </div>
+          <button className="assistant-action" type="button" onClick={() => onOpenTab("shots")}>
+            查看真实分镜证据
+            <CaretRight size={16} />
+          </button>
+        </>
       ) : report ? (
         <>
           <div className="insight-card purple">

@@ -25,6 +25,12 @@ class VideoStatus(StrEnum):
     FAILED = "failed"
 
 
+class AnalysisMode(StrEnum):
+    SIMULATED = "simulated"
+    MEDIA_EVIDENCE = "media_evidence"
+    MODEL = "model"
+
+
 class AnalysisStage(StrEnum):
     QUEUED = "queued"
     INGESTING = "ingesting"
@@ -59,6 +65,10 @@ class Video(BaseModel):
     width: int | None = None
     height: int | None = None
     fps: float | None = None
+    sha256: str | None = None
+    has_audio: bool | None = None
+    video_codec: str | None = None
+    audio_codec: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -78,6 +88,10 @@ class AnalysisJob(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     video_id: UUID
     analysis_version: str = "phase1-simulated-v1"
+    analysis_mode: AnalysisMode = AnalysisMode.SIMULATED
+    granularity: Literal["standard", "fine"] = "fine"
+    include_audio: bool = True
+    include_ocr: bool = True
     stage: AnalysisStage = AnalysisStage.QUEUED
     progress: int = Field(default=0, ge=0, le=100)
     message: str = "等待分析"
@@ -108,6 +122,9 @@ class Shot(BaseModel):
     narrative_role: str
     prompt: str
     confidence: float = Field(ge=0, le=1)
+    keyframe_url: str | None = None
+    evidence_frame_urls: list[str] = Field(default_factory=list)
+    evidence_kind: Literal["simulated", "measured", "model"] = "simulated"
 
 
 class Entity(BaseModel):
@@ -166,15 +183,53 @@ class VideoOverview(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class MediaMetadata(BaseModel):
+    duration_seconds: float = Field(gt=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    rotation: int = 0
+    fps: float = Field(ge=0)
+    format_name: str
+    video_codec: str
+    audio_codec: str | None = None
+    has_audio: bool
+    size_bytes: int = Field(gt=0)
+    bit_rate: int | None = Field(default=None, ge=0)
+    sha256: str = Field(min_length=64, max_length=64)
+    aspect_ratio: str
+
+
+class ShotEvidence(BaseModel):
+    shot_id: str
+    index: int = Field(gt=0)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    duration_seconds: float = Field(gt=0)
+    representative_timestamp: float = Field(ge=0)
+    keyframe_url: str
+    detection_method: str
+
+
+class MediaEvidence(BaseModel):
+    processor_version: str
+    metadata: MediaMetadata
+    proxy_url: str
+    audio_url: str | None = None
+    contact_sheet_url: str | None = None
+    manifest_url: str
+    shots: list[ShotEvidence]
+
+
 class AnalysisReport(BaseModel):
     video_id: UUID
     analysis_id: UUID
-    analysis_mode: Literal["simulated", "model"] = "simulated"
+    analysis_mode: AnalysisMode = AnalysisMode.SIMULATED
     overview: VideoOverview
     shots: list[Shot]
     entities: list[Entity]
     viral_findings: list[ViralFinding]
     prompt_package: PromptPackage
+    media_evidence: MediaEvidence | None = None
     generated_at: datetime = Field(default_factory=utc_now)
 
 

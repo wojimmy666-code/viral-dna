@@ -828,6 +828,30 @@ button:disabled {
   background: #faf9ff;
   font-size: 11px;
 }
+.evidence-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 12px 13px;
+  border: 1px solid #cfe7d8;
+  border-radius: 9px;
+  color: #4f7560;
+  background: #f6fbf8;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.evidence-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--green);
+}
+
+.evidence-note.compact {
+  margin-top: 17px;
+}
+
 
 .empty-workspace {
   min-height: 210px;
@@ -924,6 +948,17 @@ button:disabled {
   font-weight: 650;
   white-space: nowrap;
 }
+
+.evidence-badge {
+  padding: 4px 7px;
+  border-radius: 6px;
+  color: #3c7553;
+  background: #eaf7ef;
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
 
 .report-tabs {
   display: flex;
@@ -1198,6 +1233,55 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.media-evidence-card {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 13px;
+  border: 1px solid #cfe7d8;
+  border-radius: 11px;
+  background: #f6fbf8;
+}
+
+.media-evidence-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--green);
+  background: #e3f3e9;
+}
+
+.media-evidence-card strong {
+  display: block;
+  margin-top: 5px;
+  color: #3f5f4b;
+  font-size: 11px;
+}
+
+.media-evidence-card p {
+  margin: 6px 0 0;
+  color: #708177;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.media-hash {
+  display: inline-block;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-radius: 5px;
+  color: #747481;
+  background: #f2f2f5;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .shots-layout {
   display: grid;
   grid-template-columns: 250px minmax(0, 1fr);
@@ -1293,6 +1377,16 @@ button:disabled {
   font-size: 9px;
 }
 
+.shot-row-thumb {
+  width: 42px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid #ddddE6;
+  border-radius: 7px;
+  object-fit: cover;
+  background: #ececf1;
+}
+
 .shot-detail {
   min-width: 0;
   padding: 20px;
@@ -1320,6 +1414,29 @@ button:disabled {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
   margin-top: 18px;
+}
+
+.shot-keyframe {
+  margin: 17px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #f5f5f7;
+}
+
+.shot-keyframe img {
+  width: 100%;
+  max-height: 360px;
+  display: block;
+  object-fit: contain;
+  background: #18181c;
+}
+
+.shot-keyframe figcaption {
+  padding: 8px 11px;
+  color: #8b8b97;
+  background: #fff;
+  font-size: 9px;
 }
 
 .fact-card {

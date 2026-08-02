@@ -14,19 +14,30 @@ docs                     产品、架构、执行计划与 UI 参考
 
 ## 当前状态
 
-当前正在执行 Phase 1 的第一个纵向切片：
+当前已完成 Phase 1 Batch 2 的真实媒体证据层：
 
-- 视频文件/链接导入
-- 分析任务状态机
-- 模拟分析流水线
-- 单视频报告工作台
-- 元素替换和 Prompt Pack 导出
+- 视频文件流式上传，以及抖音/小红书链接记录。
+- 上传视频的 ffprobe 探测、SHA-256、H.264/AAC 代理和 WAV 音频。
+- FFmpeg scene score 真实分镜、逐镜头关键帧、Contact Sheet 和 manifest。
+- SQLite 持久化、分析状态机和受限的媒体产物 API。
+- 单视频报告工作台，以及真实媒体证据和模拟报告的明确区分。
+- Windows `scripts/start.bat` 一键启动 API 8000 和 Web 4174。
 
-真实 FFmpeg、ASR、OCR、VLM 和 LLM Provider 将按 [Phase 1 执行计划](./docs/Phase1_执行计划.md) 分批接入。
+抖音/小红书链接的真实下载解析，以及 ASR、OCR、VLM、爆点 LLM、Seedance Prompt 和真实元素替换仍待后续批次接入。详细边界见 [Batch 2 执行与验收记录](./docs/Phase1_Batch2_真实媒体证据层执行计划.md)。
 
 ## 本地开发
 
 环境要求：Node.js 20.19+、Python 3.11+。
+
+### Windows 一键启动
+
+双击 `scripts/start.bat` 即可启动 API（8000）和 Web（4174），服务就绪后会自动打开浏览器。首次运行缺少依赖时，脚本会自动安装。
+
+命令行验收时可禁止自动打开浏览器：
+
+```bat
+scripts\start.bat --no-browser
+```
 
 ### Web
 
