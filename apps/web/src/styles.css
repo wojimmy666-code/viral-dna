@@ -1068,6 +1068,122 @@ button:disabled {
   height: 100%;
   object-fit: contain;
   background: #17171c;
+  cursor: pointer;
+}
+
+.video-player {
+  display: grid;
+  gap: 10px;
+}
+
+.video-center-play {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  padding-left: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(24, 24, 31, 0.76);
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.video-center-play:hover {
+  background: rgba(91, 73, 238, 0.9);
+  transform: translate(-50%, -50%) scale(1.04);
+}
+
+.video-load-error {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  color: #fff;
+  background: rgba(36, 35, 44, 0.9);
+  font-size: 11px;
+  transform: translateX(-50%);
+}
+
+.video-controls {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px 4px 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #faf9fc;
+}
+
+.video-control-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  background: var(--purple);
+  cursor: pointer;
+}
+
+.video-control-button:hover:not(:disabled) {
+  background: #4b3bdb;
+}
+
+.video-control-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.video-time {
+  min-width: 45px;
+  color: #656273;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.video-progress {
+  min-width: 80px;
+  flex: 1;
+  accent-color: var(--purple);
+  cursor: pointer;
+}
+
+.video-progress:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.video-download-button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid #d9d5f5;
+  border-radius: 8px;
+  color: var(--purple);
+  background: #f2f0ff;
+  font-size: 11px;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.video-download-button:hover {
+  border-color: #bdb5f1;
+  background: #e9e5ff;
 }
 
 .video-empty-state {
@@ -2363,6 +2479,15 @@ button:disabled {
 }
 
 @media (max-width: 580px) {
+  .video-controls {
+    flex-wrap: wrap;
+  }
+
+  .video-progress {
+    order: 5;
+    flex-basis: 100%;
+  }
+
   .page-intro h1 {
     font-size: 24px;
   }

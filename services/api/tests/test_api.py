@@ -35,6 +35,59 @@ def test_upload_video() -> None:
     stored_path.parent.rmdir()
 
 
+def test_uploaded_video_can_be_played_and_downloaded() -> None:
+    payload = b"phase-one-download-fixture"
+    with TestClient(app) as client:
+        upload_response = client.post(
+            "/api/v1/videos/upload",
+            files={"file": ("download-check.mp4", payload, "video/mp4")},
+            data={
+                "title": "下载测试",
+                "target_model": "seedance",
+                "rights_confirmed": "true",
+            },
+        )
+        assert upload_response.status_code == 201
+        video_id = upload_response.json()["id"]
+
+        media_response = client.get(
+            f"/api/v1/videos/{video_id}/media",
+            headers={"Range": "bytes=0-4"},
+        )
+        download_response = client.get(f"/api/v1/videos/{video_id}/download")
+
+    assert media_response.status_code == 206
+    assert media_response.content == payload[:5]
+    assert media_response.headers["content-type"].startswith("video/mp4")
+    assert media_response.headers["content-disposition"].startswith("inline;")
+    assert download_response.status_code == 200
+    assert download_response.content == payload
+    assert download_response.headers["content-disposition"].startswith("attachment;")
+    assert "download-check.mp4" in download_response.headers["content-disposition"]
+
+    stored_path = Path("storage") / "uploads" / video_id / "download-check.mp4"
+    stored_path.unlink(missing_ok=True)
+    stored_path.parent.rmdir()
+
+
+def test_link_video_media_waits_for_ingestion() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/videos/link",
+            json={
+                "url": "https://www.douyin.com/video/123456789",
+                "rights_confirmed": True,
+            },
+        )
+        assert response.status_code == 201
+        link_video_id = response.json()["id"]
+
+        media_response = client.get(f"/api/v1/videos/{link_video_id}/media")
+
+    assert media_response.status_code == 409
+    assert media_response.json()["detail"] == "视频源文件尚未准备完成"
+
+
 def test_simulated_analysis_and_replacement_flow(
     monkeypatch,
 ) -> None:

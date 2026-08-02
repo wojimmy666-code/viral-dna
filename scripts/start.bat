@@ -5,6 +5,12 @@ title ViralDNA Launcher
 
 set "PROJECT_ROOT=%~dp0.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
+set "LOCAL_ENV_FILE=%PROJECT_ROOT%\.env.local"
+if exist "%LOCAL_ENV_FILE%" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%LOCAL_ENV_FILE%") do (
+    if /I "%%A"=="VIRAL_DNA_YTDLP_COOKIE_FILE" set "VIRAL_DNA_YTDLP_COOKIE_FILE=%%B"
+  )
+)
 set "WEB_URL=http://127.0.0.1:4174"
 set "API_URL=http://127.0.0.1:8000/health"
 set "PYTHON_EXE=%PROJECT_ROOT%\.venv\Scripts\python.exe"
@@ -13,6 +19,13 @@ set "API_RUNNING=0"
 
 echo.
 echo [ViralDNA] Project root: %PROJECT_ROOT%
+if defined VIRAL_DNA_YTDLP_COOKIE_FILE (
+  if exist "%VIRAL_DNA_YTDLP_COOKIE_FILE%" (
+    echo [ViralDNA] Link collector Cookie file is configured.
+  ) else (
+    echo [ViralDNA] WARNING: Configured Cookie file does not exist.
+  )
+)
 echo [ViralDNA] Checking services...
 
 call :is_web_ready

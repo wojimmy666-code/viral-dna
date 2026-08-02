@@ -20,6 +20,7 @@ import {
   LockSimple,
   MagnifyingGlass,
   MagicWand,
+  Pause,
   Play,
   Plus,
   Question,
@@ -83,6 +84,10 @@ function formatTime(seconds = 0) {
 function resolveArtifactUrl(path) {
   if (!path || /^https?:\/\//i.test(path) || !API_BASE.startsWith("http")) return path || "";
   return new URL(path, API_BASE).toString();
+}
+
+function resolveApiUrl(path) {
+  return `${API_BASE.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
 }
 
 function useFilePreview(file) {
@@ -740,29 +745,150 @@ function ReportTabs({ active, onChange, mode }) {
   );
 }
 
+function VideoPlayer({ src, videoRef, fallbackDuration, downloadUrl }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(fallbackDuration || 0);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    const player = videoRef.current;
+    if (player) {
+      player.pause();
+      player.currentTime = 0;
+    }
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(fallbackDuration || 0);
+    setLoadError(false);
+  }, [fallbackDuration, src, videoRef]);
+
+  function syncDuration(player) {
+    if (Number.isFinite(player.duration) && player.duration > 0) {
+      setDuration(player.duration);
+    }
+  }
+
+  function togglePlayback() {
+    const player = videoRef.current;
+    if (!player) return;
+    if (player.paused || player.ended) {
+      player.play().catch(() => setLoadError(true));
+    } else {
+      player.pause();
+    }
+  }
+
+  function seekVideo(event) {
+    const player = videoRef.current;
+    const nextTime = Number(event.target.value);
+    setCurrentTime(nextTime);
+    if (player && Number.isFinite(nextTime)) {
+      player.currentTime = nextTime;
+    }
+  }
+
+  const resolvedDuration = duration > 0 ? duration : fallbackDuration || 0;
+  const progressValue = Math.min(currentTime, resolvedDuration || 0);
+
+  return (
+    <div className="video-player">
+      <div className="video-stage">
+        <video
+          ref={videoRef}
+          src={src}
+          playsInline
+          preload="metadata"
+          onClick={togglePlayback}
+          onLoadedMetadata={(event) => syncDuration(event.currentTarget)}
+          onDurationChange={(event) => syncDuration(event.currentTarget)}
+          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+          onEnded={() => setIsPlaying(false)}
+          onError={() => setLoadError(true)}
+        />
+        {!isPlaying && !loadError && (
+          <button
+            className="video-center-play"
+            type="button"
+            aria-label="播放视频"
+            onClick={togglePlayback}
+          >
+            <Play size={28} weight="fill" />
+          </button>
+        )}
+        {loadError && <span className="video-load-error">视频加载失败，可尝试下载后播放</span>}
+      </div>
+      <div className="video-controls">
+        <button
+          className="video-control-button"
+          type="button"
+          aria-label={isPlaying ? "暂停视频" : "播放视频"}
+          title={isPlaying ? "暂停" : "播放"}
+          onClick={togglePlayback}
+          disabled={loadError}
+        >
+          {isPlaying ? <Pause size={17} weight="fill" /> : <Play size={17} weight="fill" />}
+        </button>
+        <span className="video-time">{formatTime(currentTime)}</span>
+        <input
+          className="video-progress"
+          type="range"
+          min="0"
+          max={Math.max(resolvedDuration, 0.1)}
+          step="0.1"
+          value={progressValue}
+          aria-label="视频进度"
+          aria-valuetext={`${formatTime(currentTime)} / ${formatTime(resolvedDuration)}`}
+          onChange={seekVideo}
+          disabled={loadError || resolvedDuration <= 0}
+        />
+        <span className="video-time">{formatTime(resolvedDuration)}</span>
+        <a className="video-download-button" href={downloadUrl} download>
+          <DownloadSimple size={16} />
+          下载视频
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   const overview = report.overview;
   const evidence = report.media_evidence;
   const metadata = evidence?.metadata;
   const isMediaEvidence = report.analysis_mode === "media_evidence";
-  const playbackUrl = filePreview || resolveArtifactUrl(evidence?.proxy_url);
+  const mediaAvailable = isMediaEvidence || Boolean(filePreview);
+  const playbackUrl =
+    filePreview ||
+    (isMediaEvidence
+      ? resolveApiUrl(`/videos/${report.video_id}/media`)
+      : resolveArtifactUrl(evidence?.proxy_url));
+  const downloadUrl = mediaAvailable
+    ? resolveApiUrl(`/videos/${report.video_id}/download`)
+    : "";
   return (
     <div className="overview-grid">
       <div className="overview-primary">
-        <div className="video-stage">
-          {playbackUrl ? (
-            <video ref={videoRef} src={playbackUrl} controls playsInline />
-          ) : (
+        {playbackUrl ? (
+          <VideoPlayer
+            src={playbackUrl}
+            videoRef={videoRef}
+            fallbackDuration={overview.duration_seconds}
+            downloadUrl={downloadUrl}
+          />
+        ) : (
+          <div className="video-stage">
             <div className="video-empty-state">
               <span>
                 <Play size={25} weight="fill" />
               </span>
-              <strong>链接视频分析预览</strong>
-              <small>正式链接解析器接入后在此显示原视频</small>
+              <strong>暂无可播放视频</strong>
+              <small>当前报告没有关联的源视频文件</small>
             </div>
-          )}
-          <span className="video-duration">{formatTime(overview.duration_seconds)}</span>
-        </div>
+          </div>
+        )}
 
         <div className="section-block">
           <span className="eyebrow">{isMediaEvidence ? "媒体证据概览" : "视频概览"}</span>

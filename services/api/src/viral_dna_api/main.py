@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import os
 import re
 from pathlib import Path
@@ -13,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import __version__
-from .link_ingestion import LinkIngestionError, identify_platform
+from .link_ingestion import LinkIngestionError, get_storage_root, identify_platform
 from .media import get_analysis_artifact_root
 from .models import (
     AnalysisCreate,
@@ -91,6 +92,44 @@ def prepare_upload_target(video_id: UUID, filename: str) -> tuple[Path, Path]:
     target_dir = storage_root / "uploads" / str(video_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir, target_dir / safe_filename(filename)
+
+
+def resolve_video_media_path(video: Video) -> Path:
+    if not video.stored_path:
+        raise HTTPException(status_code=409, detail="视频源文件尚未准备完成")
+
+    storage_root = get_storage_root().resolve()
+    candidate = Path(video.stored_path).resolve()
+    try:
+        candidate.relative_to(storage_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="视频文件不存在") from exc
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="视频文件不存在")
+    return candidate
+
+
+def video_download_filename(video: Video, media_path: Path) -> str:
+    if video.source_type == SourceType.UPLOAD and video.original_filename:
+        stem = Path(video.original_filename).stem
+    else:
+        stem = video.title or "video"
+    normalized = re.sub(r"[<>\x22:/\\|?*\x00-\x1f]+", "-", stem).strip(" .-")[:120] or "video"
+    return f"{normalized}{media_path.suffix.lower()}"
+
+
+def video_file_response(video: Video, *, disposition: str) -> FileResponse:
+    media_path = resolve_video_media_path(video)
+    return FileResponse(
+        media_path,
+        media_type=mimetypes.guess_type(media_path.name)[0] or "application/octet-stream",
+        filename=video_download_filename(video, media_path),
+        content_disposition_type=disposition,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post(f"{API_PREFIX}/videos/link", response_model=Video, status_code=status.HTTP_201_CREATED)
@@ -273,3 +312,19 @@ async def create_replacement(video_id: UUID, payload: ReplacementCreate) -> Repl
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return await store.save_replacement(version)
+
+
+@app.get(f"{API_PREFIX}/videos/{{video_id}}/media")
+async def play_video(video_id: UUID) -> FileResponse:
+    video = await store.get_video(video_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    return video_file_response(video, disposition="inline")
+
+
+@app.get(f"{API_PREFIX}/videos/{{video_id}}/download")
+async def download_video(video_id: UUID) -> FileResponse:
+    video = await store.get_video(video_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    return video_file_response(video, disposition="attachment")
