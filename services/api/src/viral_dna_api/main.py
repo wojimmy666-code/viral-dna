@@ -1,0 +1,259 @@
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+import json
+import os
+import re
+from pathlib import Path
+from typing import Annotated
+from urllib.parse import urlparse
+from uuid import UUID, uuid4
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+from . import __version__
+from .models import (
+    AnalysisCreate,
+    AnalysisJob,
+    AnalysisReport,
+    AnalysisStage,
+    HealthResponse,
+    LinkVideoCreate,
+    ReplacementCreate,
+    ReplacementVersion,
+    SourceType,
+    Video,
+)
+from .pipeline import SimulatedAnalysisPipeline, create_replacement_version
+from .store import store
+
+API_PREFIX = "/api/v1"
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+ALLOWED_EXTENSIONS = {".mp4", ".mov", ".webm"}
+ALLOWED_CONTENT_TYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
+    "application/octet-stream",
+}
+ALLOWED_PLATFORM_DOMAINS = {
+    "douyin.com": SourceType.DOUYIN,
+    "xiaohongshu.com": SourceType.XIAOHONGSHU,
+    "xhslink.com": SourceType.XIAOHONGSHU,
+}
+
+
+def parse_cors_origins() -> list[str]:
+    value = os.getenv(
+        "VIRAL_DNA_CORS_ORIGINS",
+        "http://localhost:4173,http://localhost:5173",
+    )
+    return [origin.strip() for origin in value.split(",") if origin.strip()]
+
+
+app = FastAPI(
+    title="ViralDNA API",
+    version=__version__,
+    description="Phase 1 single-video analysis orchestration API",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=parse_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+pipeline = SimulatedAnalysisPipeline(store)
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse(analyzer_mode=os.getenv("VIRAL_DNA_ANALYZER_MODE", "simulated"))
+
+
+def resolve_platform(url: str) -> SourceType:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="只支持有效的 HTTP/HTTPS 视频链接")
+
+    hostname = parsed.hostname.lower().rstrip(".")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        raise HTTPException(status_code=422, detail="不允许使用 IP 地址作为视频来源")
+
+    for domain, platform in ALLOWED_PLATFORM_DOMAINS.items():
+        if hostname == domain or hostname.endswith(f".{domain}"):
+            return platform
+
+    raise HTTPException(status_code=422, detail="一期仅支持抖音和小红书公开链接")
+
+
+def safe_filename(filename: str) -> str:
+    stem = Path(filename).stem[:80]
+    suffix = Path(filename).suffix.lower()
+    normalized = re.sub(r"[^0-9A-Za-z._-]+", "-", stem).strip("-.") or "video"
+    return f"{normalized}{suffix}"
+
+
+def prepare_upload_target(video_id: UUID, filename: str) -> tuple[Path, Path]:
+    storage_root = Path(os.getenv("VIRAL_DNA_STORAGE_ROOT", "storage")).resolve()
+    target_dir = storage_root / "uploads" / str(video_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir, target_dir / safe_filename(filename)
+
+
+@app.post(f"{API_PREFIX}/videos/link", response_model=Video, status_code=status.HTTP_201_CREATED)
+async def create_link_video(payload: LinkVideoCreate) -> Video:
+    if not payload.rights_confirmed:
+        raise HTTPException(status_code=422, detail="请先确认拥有分析和使用该视频的权利")
+
+    source_type = resolve_platform(str(payload.url))
+    platform_name = "抖音" if source_type == SourceType.DOUYIN else "小红书"
+    video = Video(
+        source_type=source_type,
+        source_url=str(payload.url),
+        title=payload.title or f"{platform_name}链接视频",
+        target_model=payload.target_model,
+    )
+    return await store.add_video(video)
+
+
+@app.post(f"{API_PREFIX}/videos/upload", response_model=Video, status_code=status.HTTP_201_CREATED)
+async def upload_video(
+    file: Annotated[UploadFile, File()],
+    title: Annotated[str | None, Form()] = None,
+    target_model: Annotated[str, Form()] = "seedance",
+    rights_confirmed: Annotated[bool, Form()] = False,
+) -> Video:
+    if not rights_confirmed:
+        raise HTTPException(status_code=422, detail="请先确认拥有分析和使用该视频的权利")
+    if not file.filename:
+        raise HTTPException(status_code=422, detail="缺少文件名")
+
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="仅支持 MP4、MOV 和 WebM")
+    if file.content_type and file.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail="文件媒体类型不受支持")
+
+    video_id = uuid4()
+    target_dir, target_path = prepare_upload_target(video_id, file.filename)
+    written = 0
+    try:
+        with target_path.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="视频文件不能超过 500 MB")
+                output.write(chunk)
+    except Exception:
+        target_path.unlink(missing_ok=True)
+        try:
+            target_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    finally:
+        await file.close()
+
+    video = Video(
+        id=video_id,
+        source_type=SourceType.UPLOAD,
+        original_filename=file.filename,
+        stored_path=str(target_path),
+        title=title or Path(file.filename).stem,
+        target_model=target_model,
+    )
+    return await store.add_video(video)
+
+
+@app.get(f"{API_PREFIX}/videos/{{video_id}}", response_model=Video)
+async def get_video(video_id: UUID) -> Video:
+    video = await store.get_video(video_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    return video
+
+
+@app.post(
+    f"{API_PREFIX}/videos/{{video_id}}/analyses",
+    response_model=AnalysisJob,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_analysis(video_id: UUID, _: AnalysisCreate) -> AnalysisJob:
+    video = await store.get_video(video_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+
+    analysis = AnalysisJob(video_id=video.id)
+    await store.add_analysis(analysis)
+    pipeline.start(analysis.id)
+    return analysis
+
+
+@app.get(f"{API_PREFIX}/analyses/{{analysis_id}}", response_model=AnalysisJob)
+async def get_analysis(analysis_id: UUID) -> AnalysisJob:
+    analysis = await store.get_analysis(analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+    return analysis
+
+
+@app.get(f"{API_PREFIX}/analyses/{{analysis_id}}/events")
+async def analysis_events(analysis_id: UUID) -> StreamingResponse:
+    if await store.get_analysis(analysis_id) is None:
+        raise HTTPException(status_code=404, detail="分析任务不存在")
+
+    async def event_stream():
+        last_payload = ""
+        while True:
+            analysis = await store.get_analysis(analysis_id)
+            if analysis is None:
+                break
+            payload = json.dumps(analysis.model_dump(mode="json"), ensure_ascii=False)
+            if payload != last_payload:
+                yield f"event: progress\ndata: {payload}\n\n"
+                last_payload = payload
+            if analysis.stage in {AnalysisStage.COMPLETED, AnalysisStage.FAILED}:
+                break
+            await asyncio.sleep(0.35)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get(f"{API_PREFIX}/videos/{{video_id}}/report", response_model=AnalysisReport)
+async def get_report(video_id: UUID) -> AnalysisReport:
+    video = await store.get_video(video_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    report = await store.get_report(video_id)
+    if report is None:
+        raise HTTPException(status_code=409, detail="报告尚未生成")
+    return report
+
+
+@app.post(
+    f"{API_PREFIX}/videos/{{video_id}}/replacement-versions",
+    response_model=ReplacementVersion,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_replacement(video_id: UUID, payload: ReplacementCreate) -> ReplacementVersion:
+    report = await store.get_report(video_id)
+    if report is None:
+        raise HTTPException(status_code=409, detail="请先完成视频分析")
+    try:
+        version = create_replacement_version(video_id, report, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await store.save_replacement(version)
