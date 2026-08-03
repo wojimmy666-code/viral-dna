@@ -263,8 +263,9 @@ class EvidenceTimelineBuilder:
         evidence: MediaEvidence,
         include_audio: bool,
         include_ocr: bool,
+        record_id: UUID | None = None,
     ) -> EvidenceTimeline:
-        artifact_root = get_analysis_artifact_root(analysis_id)
+        artifact_root = get_analysis_artifact_root(analysis_id, record_id)
         await asyncio.to_thread(artifact_root.mkdir, parents=True, exist_ok=True)
 
         asr_result, asr_run = await self._run_asr(

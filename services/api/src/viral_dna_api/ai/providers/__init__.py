@@ -1,0 +1,1 @@
+"""Concrete cloud model adapters."""

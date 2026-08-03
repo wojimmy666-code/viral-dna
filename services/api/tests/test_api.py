@@ -28,11 +28,14 @@ def test_upload_video() -> None:
         )
     assert response.status_code == 201
     video = response.json()
-    stored_path = Path("storage") / "uploads" / video["id"] / "breakfast.mp4"
+    source_dir = Path("storage") / "records" / video["record_id"] / "source"
+    stored_path = source_dir / "original.mp4"
     assert video["source_type"] == "upload"
     assert stored_path.read_bytes() == payload
     stored_path.unlink(missing_ok=True)
-    stored_path.parent.rmdir()
+    (source_dir / "metadata.json").unlink(missing_ok=True)
+    source_dir.rmdir()
+    source_dir.parent.rmdir()
 
 
 def test_uploaded_video_can_be_played_and_downloaded() -> None:
@@ -65,9 +68,13 @@ def test_uploaded_video_can_be_played_and_downloaded() -> None:
     assert download_response.headers["content-disposition"].startswith("attachment;")
     assert "download-check.mp4" in download_response.headers["content-disposition"]
 
-    stored_path = Path("storage") / "uploads" / video_id / "download-check.mp4"
+    record_id = upload_response.json()["record_id"]
+    source_dir = Path("storage") / "records" / record_id / "source"
+    stored_path = source_dir / "original.mp4"
     stored_path.unlink(missing_ok=True)
-    stored_path.parent.rmdir()
+    (source_dir / "metadata.json").unlink(missing_ok=True)
+    source_dir.rmdir()
+    source_dir.parent.rmdir()
 
 
 def test_link_video_media_waits_for_ingestion() -> None:

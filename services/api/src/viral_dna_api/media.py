@@ -21,6 +21,7 @@ from .models import (
     ShotEvidence,
     SubtitleStream,
 )
+from .workspace import workspace_manager
 
 PROCESSOR_VERSION = "ffmpeg-media-v1"
 MAX_VIDEO_SECONDS = 5 * 60
@@ -39,10 +40,15 @@ class MediaProcessingError(RuntimeError):
 
 
 def get_storage_root() -> Path:
-    return Path(os.getenv("VIRAL_DNA_STORAGE_ROOT", "storage")).resolve()
+    return workspace_manager.root
 
 
-def get_analysis_artifact_root(analysis_id: UUID) -> Path:
+def get_analysis_artifact_root(
+    analysis_id: UUID,
+    record_id: UUID | None = None,
+) -> Path:
+    if record_id is not None:
+        return workspace_manager.analysis_root(record_id, analysis_id)
     return get_storage_root() / "analyses" / str(analysis_id)
 
 
@@ -400,30 +406,46 @@ class MediaProcessor:
         shots: list[ShotEvidence] = []
         for index, (start, end) in enumerate(pairwise(boundaries), 1):
             representative = round(start + (end - start) / 2, 3)
-            filename = f"shot_{index:03d}.jpg"
-            output_path = shots_dir / filename
-            await _run_command(
-                [
-                    self.ffmpeg,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-y",
-                    "-ss",
-                    f"{representative:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-frames:v",
-                    "1",
-                    "-vf",
-                    "scale=w='min(640,iw)':h=-2",
-                    "-q:v",
-                    "2",
-                    str(output_path),
-                ],
-                timeout_seconds=60,
+            duration = end - start
+            offset = min(0.18, max(0.001, duration * 0.2), duration / 3)
+            samples = (
+                ("start", round(start + offset, 3)),
+                ("middle", representative),
+                ("end", round(end - offset, 3)),
             )
+            frame_urls: list[str] = []
+            for label, timestamp in samples:
+                filename = (
+                    f"shot_{index:03d}.jpg"
+                    if label == "middle"
+                    else f"shot_{index:03d}_{label}.jpg"
+                )
+                output_path = shots_dir / filename
+                await _run_command(
+                    [
+                        self.ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostdin",
+                        "-y",
+                        "-ss",
+                        f"{timestamp:.3f}",
+                        "-i",
+                        str(proxy_path),
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        "scale=w='min(640,iw)':h=-2",
+                        "-q:v",
+                        "2",
+                        str(output_path),
+                    ],
+                    timeout_seconds=60,
+                )
+                frame_urls.append(artifact_url(analysis_id, f"shots/{filename}"))
+
+            keyframe_url = artifact_url(analysis_id, f"shots/shot_{index:03d}.jpg")
             shots.append(
                 ShotEvidence(
                     shot_id=f"shot_{index:03d}",
@@ -432,7 +454,8 @@ class MediaProcessor:
                     end_seconds=round(end, 3),
                     duration_seconds=round(end - start, 3),
                     representative_timestamp=representative,
-                    keyframe_url=artifact_url(analysis_id, f"shots/{filename}"),
+                    keyframe_url=keyframe_url,
+                    evidence_frame_urls=frame_urls,
                     detection_method="ffmpeg_scene_score",
                 )
             )
@@ -478,8 +501,9 @@ class MediaProcessor:
         granularity: str,
         include_audio: bool,
         progress: ProgressCallback,
+        record_id: UUID | None = None,
     ) -> MediaEvidence:
-        artifact_root = get_analysis_artifact_root(analysis_id)
+        artifact_root = get_analysis_artifact_root(analysis_id, record_id)
         shots_dir = artifact_root / "shots"
         await asyncio.to_thread(shots_dir.mkdir, parents=True, exist_ok=True)
 

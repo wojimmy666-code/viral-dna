@@ -120,7 +120,9 @@ def normalize_platform_url(url: str) -> str:
     return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", parsed.query, ""))
 
 
-def get_link_storage_root(video_id: UUID) -> Path:
+def get_link_storage_root(video_id: UUID, record_id: UUID | None = None) -> Path:
+    if record_id is not None:
+        return get_storage_root() / "records" / str(record_id) / "source"
     return get_storage_root() / "links" / str(video_id)
 
 
@@ -148,7 +150,7 @@ class LinkCollector:
                 "链接平台与视频记录不一致",
             )
 
-        target_dir = get_link_storage_root(video.id)
+        target_dir = get_link_storage_root(video.id, video.record_id)
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(self._remove_partial_files, target_dir)
 
@@ -237,7 +239,7 @@ class LinkCollector:
             return None
 
         options: dict[str, Any] = {
-            "outtmpl": str(target_dir / "source.%(ext)s"),
+            "outtmpl": str(target_dir / "original.%(ext)s"),
             "format": "bv*+ba/b",
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -253,7 +255,7 @@ class LinkCollector:
             "no_warnings": True,
             "logger": logger,
             "match_filter": duration_filter,
-            "cachedir": str(get_storage_root() / "yt-dlp-cache"),
+            "cachedir": str(get_storage_root() / "temp" / "yt-dlp-cache"),
         }
         cookie_file = os.getenv("VIRAL_DNA_YTDLP_COOKIE_FILE", "").strip()
         if cookie_file:
@@ -290,7 +292,7 @@ class LinkCollector:
             for item in requested_downloads:
                 if isinstance(item, dict) and isinstance(item.get("filepath"), str):
                     candidates.append(Path(item["filepath"]))
-        candidates.extend(target_dir.glob("source.*"))
+        candidates.extend([*target_dir.glob("original.*"), *target_dir.glob("source.*")])
 
         target_root = target_dir.resolve()
         valid: list[Path] = []
@@ -312,7 +314,7 @@ class LinkCollector:
         return max(
             unique,
             key=lambda path: (
-                path.stem == "source",
+                path.stem in {"original", "source"},
                 path.stat().st_size,
                 path.stat().st_mtime_ns,
             ),
@@ -393,10 +395,13 @@ class LinkCollector:
             "file_size_bytes": result.file_size_bytes,
             "collected_at": datetime.now(UTC).isoformat(),
         }
-        manifest_path = target_dir / "ingestion.json"
-        temp_path = target_dir / "ingestion.json.tmp"
+        manifest_path = target_dir / "metadata.json"
+        temp_path = target_dir / "metadata.json.tmp"
         temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temp_path.replace(manifest_path)
+        legacy_manifest = target_dir / "ingestion.json"
+        if legacy_manifest != manifest_path:
+            legacy_manifest.write_text(manifest_path.read_text("utf-8"), encoding="utf-8")
 
 
 def _positive_int(name: str, default: int) -> int:

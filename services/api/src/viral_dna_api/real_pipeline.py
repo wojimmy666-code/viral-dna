@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
+from .ai.shot_facts import ShotFactsOutcome, ShotFactsService
 from .evidence import EvidenceTimelineBuilder
 from .link_ingestion import LinkCollector, LinkIngestionError, LinkIngestionResult
 from .media import MediaProcessingError, MediaProcessor
@@ -18,15 +18,20 @@ from .models import (
     EvidenceProviderStatus,
     EvidenceTimeline,
     MediaEvidence,
+    ModelRun,
+    PriceSnapshot,
     PromptPackage,
     PromptShot,
     Shot,
+    ShotVisualFacts,
     SourceType,
     Video,
     VideoOverview,
     VideoStatus,
 )
 from .pipeline import SimulatedAnalysisPipeline
+from .records import resolve_video_path, write_source_metadata
+from .workspace import workspace_manager
 
 
 def utc_now() -> datetime:
@@ -43,6 +48,14 @@ class AnalysisRepository(Protocol):
     async def save_video(self, video: Video) -> Video: ...
 
     async def save_report(self, report: AnalysisReport) -> AnalysisReport: ...
+
+    async def save_model_run(self, run: ModelRun) -> ModelRun: ...
+
+    async def list_model_runs(self, analysis_id: UUID) -> list[ModelRun]: ...
+
+    async def find_completed_model_run(self, request_fingerprint: str) -> ModelRun | None: ...
+
+    async def save_price_snapshot(self, snapshot: PriceSnapshot) -> PriceSnapshot: ...
 
 
 class HybridAnalysisPipeline:
@@ -82,14 +95,15 @@ class HybridAnalysisPipeline:
                 await self.repository.save_analysis(analysis)
 
             is_link = video.source_type in {SourceType.DOUYIN, SourceType.XIAOHONGSHU}
-            if is_link and not video.stored_path:
+            if is_link and not (video.stored_path or video.stored_relative_path):
                 await progress(AnalysisStage.INGESTING, 3, "正在校验平台链接并读取视频信息")
                 collected = await LinkCollector().collect(video)
                 self._apply_ingestion(video, collected)
                 await self.repository.save_video(video)
+                await write_source_metadata(video)
                 await progress(AnalysisStage.INGESTING, 24, "平台视频下载完成，正在准备媒体分析")
 
-            if not video.stored_path:
+            if not (video.stored_path or video.stored_relative_path):
                 raise MediaProcessingError(
                     "media_source_missing",
                     "视频没有可分析的本地媒体文件",
@@ -108,11 +122,12 @@ class HybridAnalysisPipeline:
 
             processor = MediaProcessor()
             evidence = await processor.process(
-                source_path=Path(video.stored_path),
+                source_path=resolve_video_path(video),
                 analysis_id=analysis.id,
                 granularity=analysis.granularity,
                 include_audio=analysis.include_audio,
                 progress=media_progress,
+                record_id=analysis.record_id,
             )
 
             await progress(AnalysisStage.TRANSCRIBING, 84, "正在运行 ASR/OCR 证据 Provider")
@@ -121,16 +136,48 @@ class HybridAnalysisPipeline:
                 evidence=evidence,
                 include_audio=analysis.include_audio,
                 include_ocr=analysis.include_ocr,
+                record_id=analysis.record_id,
             )
-            await progress(AnalysisStage.UNDERSTANDING, 89, "正在将语音和画面文字对齐到镜头")
-            await progress(AnalysisStage.VALIDATING, 94, "正在校验媒体证据与统一时间线")
+            model_outcome: ShotFactsOutcome | None = None
+            if analysis.model_plan is not None:
+                await progress(AnalysisStage.UNDERSTANDING, 87, "正在启动逐镜头视觉理解")
+
+                async def model_progress(current: int, total: int, message: str) -> None:
+                    value = min(95, 87 + round(current / max(total, 1) * 8))
+                    await progress(AnalysisStage.UNDERSTANDING, value, message)
+
+                model_outcome = await ShotFactsService(self.repository).analyze(
+                    analysis=analysis,
+                    video=video,
+                    evidence=evidence,
+                    timeline=timeline,
+                    progress=model_progress,
+                )
+            else:
+                await progress(
+                    AnalysisStage.UNDERSTANDING,
+                    91,
+                    "正在将语音和画面文字对齐到镜头；VLM 未启用",
+                )
+            await progress(AnalysisStage.VALIDATING, 96, "正在校验证据、模型结果与成本账本")
             self._apply_metadata(video, evidence)
-            report = build_media_evidence_report(video, analysis, evidence, timeline)
+            report = build_media_evidence_report(
+                video,
+                analysis,
+                evidence,
+                timeline,
+                model_outcome=model_outcome,
+            )
             await self.repository.save_report(report)
 
             analysis.stage = AnalysisStage.COMPLETED
             analysis.progress = 100
-            analysis.message = _completion_message(is_link=is_link, timeline=timeline)
+            analysis.message = _completion_message(
+                is_link=is_link,
+                timeline=timeline,
+                model_outcome=model_outcome,
+                vlm_configured=analysis.model_plan is not None,
+            )
             analysis.updated_at = utc_now()
             analysis.completed_at = utc_now()
             await self.repository.save_analysis(analysis)
@@ -173,6 +220,8 @@ class HybridAnalysisPipeline:
     @staticmethod
     def _apply_ingestion(video: Video, result: LinkIngestionResult) -> None:
         video.stored_path = str(result.path)
+        if video.record_id is not None:
+            video.stored_relative_path = workspace_manager.relative(result.path)
         video.original_filename = result.path.name
         video.resolved_source_url = result.resolved_url
         video.source_video_id = result.source_video_id
@@ -201,40 +250,67 @@ def build_media_evidence_report(
     analysis: AnalysisJob,
     evidence: MediaEvidence,
     timeline: EvidenceTimeline,
+    *,
+    model_outcome: ShotFactsOutcome | None = None,
 ) -> AnalysisReport:
     timeline_by_shot = {shot.shot_id: shot for shot in timeline.shots}
-    shots = [
-        Shot(
-            id=shot.shot_id,
-            index=shot.index,
-            start_seconds=shot.start_seconds,
-            end_seconds=shot.end_seconds,
-            title=f"镜头 {shot.index:02d}",
-            subjects=[],
-            action="待多模态模型识别",
-            scene="待多模态模型识别",
-            camera=f"真实镜头边界，持续 {shot.duration_seconds:.1f} 秒",
-            composition="已提取代表关键帧，构图语义待分析",
-            lighting="待多模态模型识别",
-            color="待多模态模型识别",
-            dialogue=timeline_by_shot[shot.shot_id].transcript_text,
-            subtitle_text=timeline_by_shot[shot.shot_id].subtitle_text,
-            ocr_text=timeline_by_shot[shot.shot_id].ocr_text,
-            audio=_shot_audio_description(timeline, shot.shot_id, evidence),
-            transition=("视频开始" if shot.index == 1 else "FFmpeg scene score 检测到画面切换"),
-            narrative_role="待 ASR/字幕/OCR/VLM 分析",
-            prompt="当前仅完成真实媒体证据提取；接入多模态模型后生成复刻提示词。",
-            confidence=0.82,
-            keyframe_url=shot.keyframe_url,
-            evidence_frame_urls=[shot.keyframe_url],
-            evidence_kind="measured",
+    visual_facts = model_outcome.facts if model_outcome else {}
+    shots: list[Shot] = []
+    for shot in evidence.shots:
+        facts: ShotVisualFacts | None = visual_facts.get(shot.shot_id)
+        shots.append(
+            Shot(
+                id=shot.shot_id,
+                index=shot.index,
+                start_seconds=shot.start_seconds,
+                end_seconds=shot.end_seconds,
+                title=facts.title if facts else f"镜头 {shot.index:02d}",
+                subjects=facts.subjects if facts else [],
+                action=facts.action if facts else "待多模态模型识别",
+                scene=facts.scene if facts else "待多模态模型识别",
+                camera=(
+                    facts.camera
+                    if facts
+                    else f"真实镜头边界，持续 {shot.duration_seconds:.1f} 秒"
+                ),
+                composition=(
+                    facts.composition if facts else "已提取多时点关键帧，构图语义待分析"
+                ),
+                lighting=facts.lighting if facts else "待多模态模型识别",
+                color=facts.color if facts else "待多模态模型识别",
+                dialogue=timeline_by_shot[shot.shot_id].transcript_text,
+                subtitle_text=timeline_by_shot[shot.shot_id].subtitle_text,
+                ocr_text=timeline_by_shot[shot.shot_id].ocr_text,
+                audio=_shot_audio_description(timeline, shot.shot_id, evidence),
+                transition=(
+                    facts.transition
+                    if facts
+                    else "视频开始"
+                    if shot.index == 1
+                    else "FFmpeg scene score 检测到画面切换"
+                ),
+                narrative_role=facts.narrative_role if facts else "待 VLM 分析",
+                prompt=(
+                    facts.replication_prompt
+                    if facts
+                    else "当前仅完成真实媒体证据提取；启用 VLM 后生成复刻提示词。"
+                ),
+                confidence=facts.confidence if facts else 0.82,
+                keyframe_url=shot.keyframe_url,
+                evidence_frame_urls=shot.evidence_frame_urls or [shot.keyframe_url],
+                evidence_kind="model" if facts else "measured",
+            )
         )
-        for shot in evidence.shots
-    ]
+
+    model_count = len(visual_facts)
     prompt_package = PromptPackage(
         target_model=video.target_model,
         aspect_ratio=evidence.metadata.aspect_ratio,
-        global_prompt="尚未生成：真实关键帧已就绪，等待 ASR/OCR/VLM 语义分析。",
+        global_prompt=(
+            "逐镜头视觉事实和复刻提示词已生成；全局实体连续性将在下一阶段归并。"
+            if model_count
+            else "尚未生成：真实关键帧已就绪，等待 VLM 语义分析。"
+        ),
         continuity_locks=[],
         entities={},
         shots=[
@@ -252,16 +328,21 @@ def build_media_evidence_report(
     return AnalysisReport(
         video_id=video.id,
         analysis_id=analysis.id,
-        analysis_mode=AnalysisMode.MEDIA_EVIDENCE,
+        analysis_mode=analysis.analysis_mode,
         overview=VideoOverview(
             summary=(
                 f"已完成真实媒体处理：{metadata.duration_seconds:.1f} 秒、"
                 f"{metadata.width}×{metadata.height}、{len(shots)} 个镜头；"
-                f"{len(timeline.subtitle_cues)} 条内嵌字幕。"
+                f"{len(timeline.subtitle_cues)} 条内嵌字幕；"
+                f"VLM 已完成 {model_count}/{len(shots)} 个镜头。"
             ),
-            content_type="真实媒体证据 · 语义待分析",
-            narrative_structure="真实分镜时间线已生成；叙事结构待 ASR/字幕/OCR/VLM 分析",
-            audience_inference="待语义模型分析",
+            content_type="真实多模态镜头分析" if model_count else "真实媒体证据 · 语义待分析",
+            narrative_structure=(
+                "逐镜头视觉事实已生成；全局叙事与爆点待下一阶段推理"
+                if model_count
+                else "真实分镜时间线已生成；叙事结构待 VLM 分析"
+            ),
+            audience_inference="待爆点推理阶段分析",
             visual_style=(
                 f"{metadata.video_codec.upper()} · {metadata.fps:.2f} FPS · {metadata.aspect_ratio}"
             ),
@@ -276,6 +357,8 @@ def build_media_evidence_report(
         prompt_package=prompt_package,
         media_evidence=evidence,
         evidence_timeline=timeline,
+        model_warnings=model_outcome.warnings if model_outcome else [],
+        model_cost_summary=model_outcome.cost_summary if model_outcome else None,
     )
 
 
@@ -299,13 +382,30 @@ def _shot_audio_description(
     return "已提取 16 kHz 音频" if evidence.audio_url else "原视频无音轨或未提取音频"
 
 
-def _completion_message(*, is_link: bool, timeline: EvidenceTimeline) -> str:
+def _completion_message(
+    *,
+    is_link: bool,
+    timeline: EvidenceTimeline,
+    model_outcome: ShotFactsOutcome | None,
+    vlm_configured: bool,
+) -> str:
     prefix = "链接采集、媒体证据和时间线生成完成" if is_link else "媒体证据和时间线生成完成"
     completed = [
         run.kind.upper()
         for run in timeline.provider_runs
         if run.status == EvidenceProviderStatus.COMPLETED
     ]
+    evidence_message = f"{'/'.join(completed)} 已执行" if completed else "ASR/OCR 未执行"
+    if model_outcome and model_outcome.facts:
+        cost = model_outcome.cost_summary.measured_cost_micros / 1_000_000
+        return (
+            f"{prefix}；{evidence_message}；VLM 已完成 "
+            f"{len(model_outcome.facts)} 个镜头，模型成本约 ¥{cost:.4f}"
+        )
+    if model_outcome and model_outcome.warnings:
+        return f"{prefix}；{evidence_message}；VLM 已降级：{model_outcome.warnings[0]}"
+    if vlm_configured:
+        return f"{prefix}；{evidence_message}；VLM 未返回有效镜头事实"
     if completed:
-        return f"{prefix}；{'/'.join(completed)} 已执行，VLM 待下一批接入"
-    return f"{prefix}；ASR/OCR Provider 待配置，内嵌字幕已检查，VLM 待下一批接入"
+        return f"{prefix}；{evidence_message}；VLM 未启用"
+    return f"{prefix}；ASR/OCR Provider 待配置，内嵌字幕已检查，VLM 未启用"

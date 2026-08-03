@@ -18,6 +18,16 @@ if exist "%LOCAL_ENV_FILE%" (
     if /I "%%A"=="VIRAL_DNA_OCR_PROVIDER" set "VIRAL_DNA_OCR_PROVIDER=%%B"
     if /I "%%A"=="VIRAL_DNA_OCR_MODEL" set "VIRAL_DNA_OCR_MODEL=%%B"
     if /I "%%A"=="VIRAL_DNA_OCR_MIN_CONFIDENCE" set "VIRAL_DNA_OCR_MIN_CONFIDENCE=%%B"
+    if /I "%%A"=="VIRAL_DNA_VLM_PROVIDER" set "VIRAL_DNA_VLM_PROVIDER=%%B"
+    if /I "%%A"=="VIRAL_DNA_VLM_MODEL_ALIAS" set "VIRAL_DNA_VLM_MODEL_ALIAS=%%B"
+    if /I "%%A"=="VIRAL_DNA_MODEL_LAST_VALIDATED_AT" set "VIRAL_DNA_MODEL_LAST_VALIDATED_AT=%%B"
+    if /I "%%A"=="VIRAL_DNA_MODEL_PROFILE" set "VIRAL_DNA_MODEL_PROFILE=%%B"
+    if /I "%%A"=="VIRAL_DNA_MODEL_CATALOG" set "VIRAL_DNA_MODEL_CATALOG=%%B"
+    if /I "%%A"=="VIRAL_DNA_MODEL_PRICING" set "VIRAL_DNA_MODEL_PRICING=%%B"
+    if /I "%%A"=="VIRAL_DNA_MODEL_MAX_ATTEMPTS" set "VIRAL_DNA_MODEL_MAX_ATTEMPTS=%%B"
+    if /I "%%A"=="VIRAL_DNA_MODEL_TIMEOUT_SECONDS" set "VIRAL_DNA_MODEL_TIMEOUT_SECONDS=%%B"
+    if /I "%%A"=="DASHSCOPE_API_KEY" set "DASHSCOPE_API_KEY=%%B"
+    if /I "%%A"=="DASHSCOPE_BASE_URL" set "DASHSCOPE_BASE_URL=%%B"
   )
 )
 set "WEB_URL=http://127.0.0.1:4174"
@@ -109,7 +119,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%PYTHON_EXE%" -c "import uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
+"%PYTHON_EXE%" -c "import httpx, opencc, uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
 if errorlevel 1 (
   echo [ViralDNA] Installing API dependencies...
   "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev]"

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, SecretStr, model_validator
 
 
 def utc_now() -> datetime:
@@ -23,6 +24,14 @@ class VideoStatus(StrEnum):
     ANALYZING = "analyzing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class ExportKind(StrEnum):
+    REPORT_JSON = "report_json"
+    REPORT_MARKDOWN = "report_markdown"
+    PROMPT_PACKAGE = "prompt_package"
+    TRANSCRIPT = "transcript"
+    SUBTITLES = "subtitles"
 
 
 class AnalysisMode(StrEnum):
@@ -45,6 +54,69 @@ class AnalysisStage(StrEnum):
     FAILED = "failed"
 
 
+class AnalysisProfile(StrEnum):
+    QUALITY = "quality"
+    BALANCED = "balanced"
+    ECONOMY = "economy"
+
+
+class ModelTask(StrEnum):
+    SHOT_FACTS = "shot_facts"
+    ENTITY_RESOLUTION = "entity_resolution"
+    VIRAL_REASONING = "viral_reasoning"
+    PROMPT_GENERATION = "prompt_generation"
+
+
+class ModelRunStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CACHED = "cached"
+    BLOCKED = "blocked"
+
+
+class CostStatus(StrEnum):
+    ESTIMATED = "estimated"
+    MEASURED = "measured"
+    RECONCILED = "reconciled"
+
+
+class ModelProviderOption(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=1, max_length=500)
+
+
+class ModelOption(BaseModel):
+    alias: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+
+
+class ModelSettingsUpdate(BaseModel):
+    provider: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_-]+$")
+    model_alias: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_.-]+$")
+    api_key: SecretStr | None = Field(default=None, max_length=512)
+    base_url: HttpUrl | None = None
+
+
+class ModelSettingsResponse(BaseModel):
+    provider: str
+    model_alias: str
+    model: str | None = None
+    base_url: str
+    api_key_configured: bool = False
+    api_key_hint: str | None = None
+    last_validated_at: datetime | None = None
+    validation_latency_ms: int | None = Field(default=None, ge=0)
+    catalog_version: str
+    pricing_version: str
+    providers: list[ModelProviderOption]
+    models: list[ModelOption]
+
+
 class LinkVideoCreate(BaseModel):
     url: HttpUrl
     title: str | None = Field(default=None, max_length=120)
@@ -54,6 +126,7 @@ class LinkVideoCreate(BaseModel):
 
 class Video(BaseModel):
     id: UUID = Field(default_factory=uuid4)
+    record_id: UUID | None = None
     source_type: SourceType
     source_url: str | None = None
     resolved_source_url: str | None = None
@@ -62,6 +135,7 @@ class Video(BaseModel):
     ingested_at: datetime | None = None
     original_filename: str | None = None
     stored_path: str | None = Field(default=None, exclude=True)
+    stored_relative_path: str | None = Field(default=None, exclude=True)
     title: str
     target_model: str = "seedance"
     status: VideoStatus = VideoStatus.READY
@@ -80,6 +154,37 @@ class AnalysisCreate(BaseModel):
     granularity: Literal["standard", "fine"] = "fine"
     include_audio: bool = True
     include_ocr: bool = True
+    analysis_profile: AnalysisProfile = AnalysisProfile.BALANCED
+    max_cost_cny: Decimal | None = Field(default=None, gt=0, le=1000, decimal_places=6)
+
+
+class ModelTargetSnapshot(BaseModel):
+    alias: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=160)
+    region: str = Field(default="cn-beijing", min_length=1, max_length=80)
+    endpoint: str = Field(default="default", min_length=1, max_length=80)
+    thinking: bool = False
+    prompt_version: str = Field(min_length=1, max_length=80)
+    schema_version: str = Field(min_length=1, max_length=80)
+
+
+class ModelRouteSnapshot(BaseModel):
+    task: ModelTask
+    targets: list[ModelTargetSnapshot] = Field(min_length=1)
+
+
+class ModelPlanSnapshot(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    profile: AnalysisProfile
+    catalog_version: str = Field(min_length=1, max_length=80)
+    pricing_version: str = Field(min_length=1, max_length=80)
+    routes: list[ModelRouteSnapshot]
+    created_at: datetime = Field(default_factory=utc_now)
+
+    def targets_for(self, task: ModelTask) -> list[ModelTargetSnapshot]:
+        route = next((item for item in self.routes if item.task == task), None)
+        return list(route.targets) if route else []
 
 
 class AnalysisError(BaseModel):
@@ -90,12 +195,18 @@ class AnalysisError(BaseModel):
 
 class AnalysisJob(BaseModel):
     id: UUID = Field(default_factory=uuid4)
+    record_id: UUID | None = None
     video_id: UUID
     analysis_version: str = "phase1-simulated-v1"
     analysis_mode: AnalysisMode = AnalysisMode.SIMULATED
     granularity: Literal["standard", "fine"] = "fine"
     include_audio: bool = True
     include_ocr: bool = True
+    analysis_profile: AnalysisProfile = AnalysisProfile.BALANCED
+    max_cost_micros: int | None = Field(default=None, gt=0)
+    model_plan: ModelPlanSnapshot | None = None
+    estimated_cost_micros: int = Field(default=0, ge=0)
+    measured_cost_micros: int = Field(default=0, ge=0)
     stage: AnalysisStage = AnalysisStage.QUEUED
     progress: int = Field(default=0, ge=0, le=100)
     message: str = "等待分析"
@@ -130,6 +241,21 @@ class Shot(BaseModel):
     keyframe_url: str | None = None
     evidence_frame_urls: list[str] = Field(default_factory=list)
     evidence_kind: Literal["simulated", "measured", "model"] = "simulated"
+
+
+class ShotVisualFacts(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    subjects: list[str] = Field(default_factory=list, max_length=20)
+    action: str = Field(min_length=1, max_length=1200)
+    scene: str = Field(min_length=1, max_length=1200)
+    camera: str = Field(min_length=1, max_length=1200)
+    composition: str = Field(min_length=1, max_length=1200)
+    lighting: str = Field(min_length=1, max_length=1200)
+    color: str = Field(min_length=1, max_length=1200)
+    transition: str = Field(min_length=1, max_length=800)
+    narrative_role: str = Field(min_length=1, max_length=800)
+    replication_prompt: str = Field(min_length=1, max_length=4000)
+    confidence: float = Field(ge=0, le=1)
 
 
 class Entity(BaseModel):
@@ -221,6 +347,7 @@ class ShotEvidence(BaseModel):
     duration_seconds: float = Field(gt=0)
     representative_timestamp: float = Field(ge=0)
     keyframe_url: str
+    evidence_frame_urls: list[str] = Field(default_factory=list)
     detection_method: str
 
 
@@ -338,6 +465,82 @@ class EvidenceTimeline(BaseModel):
     artifact_url: str
 
 
+class ModelUsage(BaseModel):
+    input_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    image_count: int = Field(default=0, ge=0)
+    video_seconds: float = Field(default=0, ge=0)
+
+
+class PriceSnapshot(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    catalog_version: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=160)
+    region: str = Field(min_length=1, max_length=80)
+    input_tokens_above: int = Field(default=0, ge=0)
+    input_tokens_at_most: int = Field(gt=0)
+    input_cny_per_million: Decimal = Field(ge=0)
+    cached_input_cny_per_million: Decimal | None = Field(default=None, ge=0)
+    output_cny_per_million: Decimal = Field(ge=0)
+    currency: Literal["CNY"] = "CNY"
+    effective_from: datetime
+    source_url: str
+
+
+class ModelRun(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    analysis_id: UUID
+    video_id: UUID
+    task: ModelTask
+    shot_id: str | None = Field(default=None, max_length=80)
+    attempt: int = Field(default=1, ge=1)
+    retry_of_run_id: UUID | None = None
+    cache_source_run_id: UUID | None = None
+    provider: str = Field(min_length=1, max_length=80)
+    requested_model: str = Field(min_length=1, max_length=160)
+    resolved_model: str | None = Field(default=None, max_length=160)
+    prompt_version: str = Field(min_length=1, max_length=80)
+    schema_version: str = Field(min_length=1, max_length=80)
+    request_fingerprint: str = Field(min_length=64, max_length=64)
+    provider_request_id: str | None = Field(default=None, max_length=200)
+    status: ModelRunStatus = ModelRunStatus.RUNNING
+    usage: ModelUsage = Field(default_factory=ModelUsage)
+    price_snapshot_id: str | None = Field(default=None, max_length=160)
+    estimated_cost_micros: int = Field(default=0, ge=0)
+    measured_cost_micros: int = Field(default=0, ge=0)
+    latency_ms: int = Field(default=0, ge=0)
+    raw_response_ref: str | None = Field(default=None, max_length=500)
+    result_payload: dict[str, Any] | None = None
+    error_code: str | None = Field(default=None, max_length=100)
+    error_message: str | None = Field(default=None, max_length=500)
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+
+
+class ModelCostBreakdown(BaseModel):
+    provider: str
+    model: str
+    run_count: int = Field(default=0, ge=0)
+    measured_cost_micros: int = Field(default=0, ge=0)
+
+
+class AnalysisCostSummary(BaseModel):
+    analysis_id: UUID
+    currency: Literal["CNY"] = "CNY"
+    status: CostStatus = CostStatus.ESTIMATED
+    estimated_cost_micros: int = Field(default=0, ge=0)
+    measured_cost_micros: int = Field(default=0, ge=0)
+    run_count: int = Field(default=0, ge=0)
+    completed_run_count: int = Field(default=0, ge=0)
+    failed_run_count: int = Field(default=0, ge=0)
+    cached_run_count: int = Field(default=0, ge=0)
+    breakdown: list[ModelCostBreakdown] = Field(default_factory=list)
+
+
 class AnalysisReport(BaseModel):
     video_id: UUID
     analysis_id: UUID
@@ -349,6 +552,8 @@ class AnalysisReport(BaseModel):
     prompt_package: PromptPackage
     media_evidence: MediaEvidence | None = None
     evidence_timeline: EvidenceTimeline | None = None
+    model_warnings: list[str] = Field(default_factory=list)
+    model_cost_summary: AnalysisCostSummary | None = None
     generated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -385,6 +590,109 @@ class ReplacementVersion(BaseModel):
     prompt_package: PromptPackage
     diffs: list[ReplacementDiff]
     locks: list[str]
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class WorkspacePathRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2048)
+
+
+class WorkspaceValidationResponse(BaseModel):
+    valid: bool
+    normalized_path: str
+    exists: bool
+    writable: bool
+    error: str | None = None
+
+
+class WorkspaceInfo(BaseModel):
+    root_path: str
+    database_path: str
+    initialized: bool = True
+    writable: bool = True
+    schema_version: int = 1
+    record_count: int = Field(default=0, ge=0)
+    folder_count: int = Field(default=0, ge=0)
+
+
+class RecordFolder(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(min_length=1, max_length=80)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class FolderCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class FolderUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class AnalysisRecord(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    name: str = Field(min_length=1, max_length=120)
+    folder_id: UUID | None = None
+    video_id: UUID
+    source_type: SourceType
+    source_url: str | None = None
+    latest_analysis_id: UUID | None = None
+    status: VideoStatus = VideoStatus.READY
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    last_opened_at: datetime | None = None
+
+
+class AnalysisRecordUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    folder_id: UUID | None = None
+
+
+class AnalysisRecordList(BaseModel):
+    items: list[AnalysisRecord]
+    total: int = Field(ge=0)
+
+
+class AnalysisRecordDetail(BaseModel):
+    record: AnalysisRecord
+    video: Video
+    analyses: list[AnalysisJob]
+    latest_report: AnalysisReport | None = None
+
+
+class ExportCreate(BaseModel):
+    kinds: list[ExportKind] = Field(
+        default_factory=lambda: [
+            ExportKind.REPORT_JSON,
+            ExportKind.REPORT_MARKDOWN,
+            ExportKind.PROMPT_PACKAGE,
+            ExportKind.TRANSCRIPT,
+            ExportKind.SUBTITLES,
+        ],
+        min_length=1,
+        max_length=5,
+    )
+    analysis_id: UUID | None = None
+    replacement_version_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def unique_kinds(self) -> ExportCreate:
+        if len(self.kinds) != len(set(self.kinds)):
+            raise ValueError("导出类型不能重复")
+        return self
+
+
+class ExportArtifact(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    record_id: UUID
+    analysis_id: UUID
+    kind: ExportKind
+    filename: str = Field(min_length=1, max_length=240)
+    relative_path: str = Field(exclude=True)
+    media_type: str = Field(min_length=1, max_length=120)
+    size_bytes: int = Field(ge=0)
+    sha256: str = Field(min_length=64, max_length=64)
     created_at: datetime = Field(default_factory=utc_now)
 
 

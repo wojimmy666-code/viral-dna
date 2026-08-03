@@ -1,0 +1,53 @@
+catalog_version = "cn-list-price-2026-08-02"
+
+[[prices]]
+id = "dashscope:qwen3.7-plus-2026-05-26:cn-beijing:0-256k:2026-08-02"
+catalog_version = "cn-list-price-2026-08-02"
+provider = "dashscope"
+model = "qwen3.7-plus-2026-05-26"
+region = "cn-beijing"
+input_tokens_above = 0
+input_tokens_at_most = 256000
+input_cny_per_million = 2
+output_cny_per_million = 8
+effective_from = 2026-05-26T00:00:00Z
+source_url = "https://help.aliyun.com/zh/model-studio/model-pricing"
+
+[[prices]]
+id = "dashscope:qwen3.7-plus-2026-05-26:cn-beijing:256k-1m:2026-08-02"
+catalog_version = "cn-list-price-2026-08-02"
+provider = "dashscope"
+model = "qwen3.7-plus-2026-05-26"
+region = "cn-beijing"
+input_tokens_above = 256000
+input_tokens_at_most = 1000000
+input_cny_per_million = 6
+output_cny_per_million = 24
+effective_from = 2026-05-26T00:00:00Z
+source_url = "https://help.aliyun.com/zh/model-studio/model-pricing"
+
+[[prices]]
+id = "dashscope:qwen3.6-flash-2026-04-16:cn-beijing:0-256k:2026-08-02"
+catalog_version = "cn-list-price-2026-08-02"
+provider = "dashscope"
+model = "qwen3.6-flash-2026-04-16"
+region = "cn-beijing"
+input_tokens_above = 0
+input_tokens_at_most = 256000
+input_cny_per_million = 1.2
+output_cny_per_million = 7.2
+effective_from = 2026-04-16T00:00:00Z
+source_url = "https://help.aliyun.com/zh/model-studio/model-pricing"
+
+[[prices]]
+id = "dashscope:qwen3.6-flash-2026-04-16:cn-beijing:256k-1m:2026-08-02"
+catalog_version = "cn-list-price-2026-08-02"
+provider = "dashscope"
+model = "qwen3.6-flash-2026-04-16"
+region = "cn-beijing"
+input_tokens_above = 256000
+input_tokens_at_most = 1000000
+input_cny_per_million = 4.8
+output_cny_per_million = 28.8
+effective_from = 2026-04-16T00:00:00Z
+source_url = "https://help.aliyun.com/zh/model-studio/model-pricing"
