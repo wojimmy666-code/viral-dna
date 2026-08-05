@@ -102,9 +102,7 @@ def _frame_paths(
 ) -> tuple[Path, ...]:
     urls = shot.evidence_frame_urls or [shot.keyframe_url]
     paths = [
-        path
-        for url in urls
-        if (path := _artifact_path(analysis_id, url, record_id)) is not None
+        path for url in urls if (path := _artifact_path(analysis_id, url, record_id)) is not None
     ]
     if not paths:
         keyframe = _artifact_path(analysis_id, shot.keyframe_url, record_id)
@@ -213,9 +211,7 @@ class ShotFactsService:
             return await self._outcome(
                 analysis,
                 {},
-                [
-                    "模型计划冻结的价格版本与当前价格目录不一致，已在调用前停止"
-                ],
+                ["模型计划冻结的价格版本与当前价格目录不一致，已在调用前停止"],
             )
 
         timeline_by_shot = {shot.shot_id: shot for shot in timeline.shots}
@@ -472,9 +468,7 @@ class ShotFactsService:
                             budget_exhausted = True
                             break
                         if not exc.retryable:
-                            warnings.append(
-                                f"{shot.shot_id} 的模型调用不可重试：{exc}"
-                            )
+                            warnings.append(f"{shot.shot_id} 的模型调用不可重试：{exc}")
                             budget_exhausted = True
                             break
                     except Exception as exc:  # pragma: no cover - provider safety boundary
@@ -493,6 +487,9 @@ class ShotFactsService:
                     warnings.append(f"{shot.shot_id} 的 VLM 分析失败，已保留媒体证据结果")
                 continue
             facts[shot.shot_id] = shot_result
+            if shot_result.contains_multiple_scenes:
+                reason = shot_result.multiple_scenes_reason or "关键帧存在跨场景迹象"
+                warnings.append(f"{shot.shot_id} 仍可能包含多个语义场景：{reason}")
             previous = shot_result
 
         return await self._outcome(analysis, facts, list(dict.fromkeys(warnings)))

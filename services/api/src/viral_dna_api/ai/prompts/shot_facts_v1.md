@@ -7,4 +7,5 @@
 3. ASR、字幕和 OCR 只作为时间线证据，不得把对白中的说法当作画面事实。
 4. replication_prompt 必须能够给视频生成模型使用，包含主体、动作、环境、摄影、光线、色彩和时序，但不要写模型名，不要声称复刻真人身份。
 5. 所有字段使用简体中文，confidence 使用 0 到 1。
-6. 严格输出一个 JSON 对象，不要输出 Markdown、解释或额外字段。
+6. 如果开始帧、中间帧和结束帧明显属于两个及以上不同主体、场景或叙事任务，将 contains_multiple_scenes 设为 true，并在 multiple_scenes_reason 中说明证据；否则设为 false。
+7. 严格输出一个 JSON 对象，不要输出 Markdown、解释或额外字段。

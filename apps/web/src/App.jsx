@@ -4,6 +4,7 @@ import {
   Bell,
   BracketsCurly,
   CaretDown,
+  CaretLeft,
   CaretRight,
   ChartBar,
   Check,
@@ -38,6 +39,8 @@ import {
   VideoCamera,
   X,
 } from "@phosphor-icons/react";
+import { ProductionHub } from "./ProductionWorkflow.jsx";
+import { inferVideoOrientation } from "./video-layout.js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 const MODEL_SETTINGS_STORAGE_KEY = "viral-dna:model-settings:v1";
@@ -58,6 +61,37 @@ const DEFAULT_SERVER_MODEL_SETTINGS = Object.freeze({
   providers: [{ id: "dashscope", label: "阿里云百炼（DashScope）" }],
   models: [],
 });
+const DEFAULT_IMAGE_GENERATION_SETTINGS = Object.freeze({
+  enabled: false,
+  execution_mode: "remote_api",
+  default_candidate_count: 1,
+  remote_provider: "dashscope",
+  remote_model_alias: "qwen_image_2_pro",
+  remote_model: "qwen-image-2.0-pro",
+  remote_base_url: "https://dashscope.aliyuncs.com/api/v1",
+  api_key_configured: false,
+  api_key_hint: null,
+  local_adapter_id: "viral_dna_json_v1",
+  local_executable_path: "",
+  local_fixed_args: [],
+  local_timeout_seconds: 300,
+  local_concurrency: 1,
+  local_protocol_version: "viral-dna-image-tool/v1",
+  local_tool_id: null,
+  local_tool_version: null,
+  local_cost_source: "unknown",
+  local_unit_cost_micros: null,
+  local_model_policy: "latest_flagship",
+  local_model: null,
+  local_reasoning_effort: "xhigh",
+  local_proxy_mode: "system",
+  local_proxy_url: null,
+  local_proxy_detected_url: null,
+  local_proxy_effective_url: null,
+  local_proxy_source: "none",
+  selected_capabilities: null,
+  models: [],
+});
 const DEFAULT_WORKSPACE_INFO = Object.freeze({
   root_path: "",
   database_path: "",
@@ -73,6 +107,18 @@ const PROFILE_OPTIONS = [
 ];
 const VALID_ANALYSIS_PROFILES = new Set(PROFILE_OPTIONS.map((item) => item.id));
 const VALID_TARGET_MODELS = new Set(["seedance", "generic"]);
+const HISTORY_STATE_STORAGE_KEY = "viral-dna:history-state:v1";
+const HISTORY_PAGE_SIZES = [20, 50, 100];
+const VALID_HISTORY_STATUSES = new Set(["", "ready", "analyzing", "completed", "failed"]);
+const VALID_HISTORY_SORTS = new Set(["updated_desc", "created_desc", "name_asc"]);
+const DEFAULT_HISTORY_STATE = Object.freeze({
+  query: "",
+  folder: "",
+  status: "",
+  sort: "updated_desc",
+  page: 1,
+  pageSize: 20,
+});
 
 function loadModelSettings() {
   if (typeof window === "undefined") return { ...DEFAULT_MODEL_SETTINGS };
@@ -96,6 +142,52 @@ function loadModelSettings() {
   } catch {
     return { ...DEFAULT_MODEL_SETTINGS };
   }
+}
+
+function loadHistoryState() {
+  if (typeof window === "undefined") return { ...DEFAULT_HISTORY_STATE };
+  try {
+    const saved = JSON.parse(window.sessionStorage.getItem(HISTORY_STATE_STORAGE_KEY) || "null");
+    if (!saved || typeof saved !== "object") return { ...DEFAULT_HISTORY_STATE };
+    const page = Number(saved.page);
+    const pageSize = Number(saved.pageSize);
+    return {
+      query: typeof saved.query === "string" ? saved.query.slice(0, 120) : "",
+      folder: typeof saved.folder === "string" ? saved.folder : "",
+      status: VALID_HISTORY_STATUSES.has(saved.status) ? saved.status : "",
+      sort: VALID_HISTORY_SORTS.has(saved.sort) ? saved.sort : DEFAULT_HISTORY_STATE.sort,
+      page: Number.isInteger(page) && page > 0 ? page : 1,
+      pageSize: HISTORY_PAGE_SIZES.includes(pageSize) ? pageSize : DEFAULT_HISTORY_STATE.pageSize,
+    };
+  } catch {
+    return { ...DEFAULT_HISTORY_STATE };
+  }
+}
+
+function saveHistoryState(state) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(HISTORY_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Browsing remains functional when session storage is unavailable.
+  }
+}
+
+function buildPaginationItems(currentPage, totalPages) {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+  const visiblePages = [...new Set([1, currentPage - 1, currentPage, currentPage + 1, totalPages])]
+    .filter((page) => page >= 1 && page <= totalPages)
+    .sort((left, right) => left - right);
+  const items = [];
+  visiblePages.forEach((page, index) => {
+    const previous = visiblePages[index - 1];
+    if (index > 0 && page - previous === 2) items.push(previous + 1);
+    if (index > 0 && page - previous > 2) items.push(`ellipsis-${previous}-${page}`);
+    items.push(page);
+  });
+  return items;
 }
 
 const stageLabels = {
@@ -137,7 +229,16 @@ async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(payload?.detail || "请求失败，请稍后重试");
+    const detail = payload?.detail;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : typeof detail?.message === "string"
+          ? detail.message
+          : typeof payload?.message === "string"
+            ? payload.message
+            : "请求失败，请稍后重试";
+    throw new Error(message);
   }
   return payload;
 }
@@ -146,6 +247,24 @@ function formatTime(seconds = 0) {
   const minutes = Math.floor(seconds / 60);
   const rest = Math.max(0, seconds - minutes * 60);
   return `${String(minutes).padStart(2, "0")}:${rest.toFixed(1).padStart(4, "0")}`;
+}
+
+function formatBoundaryMethod(method) {
+  if (method === "video_start") return "视频起点";
+  if (method === "hybrid_vlm_verified") return "VLM 确认边界";
+  if (method === "hard_scene_score") return "程序硬切边界";
+  return "程序检测边界";
+}
+
+function formatDurationBadge(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  const rounded = Math.round(seconds);
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const remaining = rounded % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
 }
 
 function formatCost(micros = 0) {
@@ -164,6 +283,52 @@ function formatValidationTime(value) {
     minute: "2-digit",
   }).format(date);
 }
+
+function imageSettingsDraft(server = DEFAULT_IMAGE_GENERATION_SETTINGS) {
+  return {
+    imageExecutionMode: server.execution_mode || "remote_api",
+    imageDefaultCandidateCount: Number(server.default_candidate_count || 1),
+    imageRemoteProvider: server.remote_provider || "dashscope",
+    imageRemoteModelAlias: server.remote_model_alias || "qwen_image_2_pro",
+    imageRemoteBaseUrl:
+      server.remote_base_url || DEFAULT_IMAGE_GENERATION_SETTINGS.remote_base_url,
+    imageLocalAdapterId: server.local_adapter_id || "viral_dna_json_v1",
+    imageLocalExecutablePath: server.local_executable_path || "",
+    imageLocalFixedArgs: (server.local_fixed_args || []).join("\n"),
+    imageLocalTimeoutSeconds: Number(server.local_timeout_seconds || 300),
+    imageLocalConcurrency: Number(server.local_concurrency || 1),
+    imageLocalProtocolVersion:
+      server.local_protocol_version || "viral-dna-image-tool/v1",
+    imageLocalCostSource: server.local_cost_source || "unknown",
+    imageLocalModelPolicy: server.local_model_policy || "latest_flagship",
+    imageLocalModel: server.local_model || "",
+    imageLocalReasoningEffort: server.local_reasoning_effort || "xhigh",
+    imageLocalProxyMode: server.local_proxy_mode || "system",
+    imageLocalProxyUrl: server.local_proxy_url || "",
+    imageLocalUnitCostYuan:
+      server.local_unit_cost_micros == null
+        ? ""
+        : (Number(server.local_unit_cost_micros) / 1_000_000).toFixed(4),
+  };
+}
+
+function imageFixedArgs(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function localProxySourceLabel(value) {
+  return {
+    windows_user_proxy: "Windows 系统代理",
+    environment: "进程环境变量",
+    manual: "手动代理",
+    disabled: "未使用代理",
+    none: "未检测到代理",
+  }[value] || "未检测到代理";
+}
+
 function formatRecordDate(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -198,6 +363,7 @@ function useFilePreview(file) {
 
 export function App() {
   const initialModelSettings = useMemo(loadModelSettings, []);
+  const initialHistoryState = useMemo(loadHistoryState, []);
   const [activeNav, setActiveNav] = useState("workspace");
   const [sourceMode, setSourceMode] = useState("link");
   const [url, setUrl] = useState("");
@@ -207,8 +373,12 @@ export function App() {
   const [maxCostCny, setMaxCostCny] = useState(initialModelSettings.maxCostCny);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [serverModelSettings, setServerModelSettings] = useState(DEFAULT_SERVER_MODEL_SETTINGS);
+  const [serverImageSettings, setServerImageSettings] = useState(
+    DEFAULT_IMAGE_GENERATION_SETTINGS,
+  );
   const [settingsDraft, setSettingsDraft] = useState({
     ...initialModelSettings,
+    ...imageSettingsDraft(),
     provider: DEFAULT_SERVER_MODEL_SETTINGS.provider,
     modelAlias: DEFAULT_SERVER_MODEL_SETTINGS.model_alias,
     baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
@@ -217,6 +387,13 @@ export function App() {
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
+  const [imageToolDetecting, setImageToolDetecting] = useState(false);
+  const [imageToolDetection, setImageToolDetection] = useState(null);
+  const [codexDiscovering, setCodexDiscovering] = useState(false);
+  const [codexDiscovery, setCodexDiscovery] = useState(null);
+  const [codexApplying, setCodexApplying] = useState(false);
+  const [codexNetworkTesting, setCodexNetworkTesting] = useState(false);
+  const [codexNetworkTest, setCodexNetworkTest] = useState(null);
   const [workspaceInfo, setWorkspaceInfo] = useState(DEFAULT_WORKSPACE_INFO);
   const [workspaceDraft, setWorkspaceDraft] = useState("");
   const [workspaceValidation, setWorkspaceValidation] = useState(null);
@@ -225,12 +402,15 @@ export function App() {
   const [folders, setFolders] = useState([]);
   const [records, setRecords] = useState([]);
   const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyTotalPages, setHistoryTotalPages] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
-  const [historyQuery, setHistoryQuery] = useState("");
-  const [historyFolder, setHistoryFolder] = useState("");
-  const [historyStatus, setHistoryStatus] = useState("");
-  const [historySort, setHistorySort] = useState("updated_desc");
+  const [historyQuery, setHistoryQuery] = useState(initialHistoryState.query);
+  const [historyFolder, setHistoryFolder] = useState(initialHistoryState.folder);
+  const [historyStatus, setHistoryStatus] = useState(initialHistoryState.status);
+  const [historySort, setHistorySort] = useState(initialHistoryState.sort);
+  const [historyPage, setHistoryPage] = useState(initialHistoryState.page);
+  const [historyPageSize, setHistoryPageSize] = useState(initialHistoryState.pageSize);
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -241,8 +421,15 @@ export function App() {
   const [activeReportTab, setActiveReportTab] = useState("overview");
   const [activeShotId, setActiveShotId] = useState(null);
   const [replacementVersion, setReplacementVersion] = useState(null);
+  const [recordWorkspaceMode, setRecordWorkspaceMode] = useState("analysis");
+  const [productionProjects, setProductionProjects] = useState([]);
+  const [productionsLoading, setProductionsLoading] = useState(false);
+  const [productionsError, setProductionsError] = useState("");
+  const [productionCreateSignal, setProductionCreateSignal] = useState(0);
   const [notice, setNotice] = useState("");
   const eventSourceRef = useRef(null);
+  const historyRequestIdRef = useRef(0);
+  const productionRequestIdRef = useRef(0);
   const importSectionRef = useRef(null);
   const reportSectionRef = useRef(null);
   const videoRef = useRef(null);
@@ -263,7 +450,33 @@ export function App() {
       refreshHistory().catch(() => undefined);
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [activeNav, historyQuery, historyFolder, historyStatus, historySort]);
+  }, [
+    activeNav,
+    historyQuery,
+    historyFolder,
+    historyStatus,
+    historySort,
+    historyPage,
+    historyPageSize,
+  ]);
+
+  useEffect(() => {
+    saveHistoryState({
+      query: historyQuery,
+      folder: historyFolder,
+      status: historyStatus,
+      sort: historySort,
+      page: historyPage,
+      pageSize: historyPageSize,
+    });
+  }, [
+    historyQuery,
+    historyFolder,
+    historyStatus,
+    historySort,
+    historyPage,
+    historyPageSize,
+  ]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -292,31 +505,85 @@ export function App() {
     return next;
   }
 
-  async function refreshHistory({ quiet = false } = {}) {
+  function resetProductionWorkspace() {
+    productionRequestIdRef.current += 1;
+    setRecordWorkspaceMode("analysis");
+    setProductionProjects([]);
+    setProductionsLoading(false);
+    setProductionsError("");
+    setProductionCreateSignal(0);
+  }
+
+  async function loadProductions(recordId, { quiet = false } = {}) {
+    if (!recordId) {
+      resetProductionWorkspace();
+      return [];
+    }
+    const requestId = ++productionRequestIdRef.current;
+    if (!quiet) setProductionsLoading(true);
+    setProductionsError("");
+    try {
+      const next = await apiRequest(`/records/${recordId}/productions`);
+      if (requestId !== productionRequestIdRef.current) return next || [];
+      setProductionProjects(next || []);
+      return next || [];
+    } catch (requestError) {
+      if (requestId === productionRequestIdRef.current) {
+        setProductionsError(requestError.message);
+      }
+      throw requestError;
+    } finally {
+      if (requestId === productionRequestIdRef.current) {
+        setProductionsLoading(false);
+      }
+    }
+  }
+
+  async function refreshHistory({
+    quiet = false,
+    page = historyPage,
+    pageSize = historyPageSize,
+    query = historyQuery,
+    folder = historyFolder,
+    status = historyStatus,
+    sort = historySort,
+  } = {}) {
+    const requestId = ++historyRequestIdRef.current;
     if (!quiet) setHistoryLoading(true);
     setHistoryError("");
     const params = new URLSearchParams();
-    if (historyQuery.trim()) params.set("q", historyQuery.trim());
-    if (historyFolder) params.set("folder_id", historyFolder);
-    if (historyStatus) params.set("status", historyStatus);
-    params.set("sort", historySort);
+    if (query.trim()) params.set("q", query.trim());
+    if (folder) params.set("folder_id", folder);
+    if (status) params.set("status", status);
+    params.set("sort", sort);
+    params.set("page", String(page));
+    params.set("page_size", String(pageSize));
     try {
       const [recordPayload, folderPayload] = await Promise.all([
         apiRequest(`/records?${params.toString()}`),
         apiRequest("/folders"),
       ]);
+      if (requestId !== historyRequestIdRef.current) return;
       setRecords(recordPayload.items || []);
       setHistoryTotal(recordPayload.total || 0);
+      setHistoryTotalPages(recordPayload.total_pages || 0);
+      if (recordPayload.page && recordPayload.page !== page) {
+        setHistoryPage(recordPayload.page);
+      }
       setFolders(folderPayload || []);
       setWorkspaceInfo((current) => ({
         ...current,
         folder_count: folderPayload.length || 0,
       }));
     } catch (requestError) {
-      setHistoryError(requestError.message);
+      if (requestId === historyRequestIdRef.current) {
+        setHistoryError(requestError.message);
+      }
       throw requestError;
     } finally {
-      if (!quiet) setHistoryLoading(false);
+      if (requestId === historyRequestIdRef.current) {
+        setHistoryLoading(false);
+      }
     }
   }
 
@@ -326,9 +593,31 @@ export function App() {
     if (id === "new-analysis") {
       importSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
-    if (id === "history") {
-      refreshHistory().catch(() => undefined);
-    }
+  }
+
+  function changeHistoryQuery(value) {
+    setHistoryPage(1);
+    setHistoryQuery(value);
+  }
+
+  function changeHistoryFolder(value) {
+    setHistoryPage(1);
+    setHistoryFolder(value);
+  }
+
+  function changeHistoryStatus(value) {
+    setHistoryPage(1);
+    setHistoryStatus(value);
+  }
+
+  function changeHistorySort(value) {
+    setHistoryPage(1);
+    setHistorySort(value);
+  }
+
+  function changeHistoryPageSize(value) {
+    setHistoryPage(1);
+    setHistoryPageSize(Number(value));
   }
 
   async function openModelSettings() {
@@ -336,17 +625,23 @@ export function App() {
       targetModel,
       analysisProfile,
       maxCostCny,
+      ...imageSettingsDraft(serverImageSettings),
       provider: serverModelSettings.provider,
       modelAlias: serverModelSettings.model_alias,
       baseUrl: serverModelSettings.base_url,
       apiKey: "",
     });
     setSettingsError("");
+    setImageToolDetection(null);
+    setCodexDiscovery(null);
+    setCodexNetworkTest(null);
     setSettingsOpen(true);
     setSettingsLoading(true);
+    void discoverLocalCodex({ quiet: true });
     try {
-      const [remote, nextWorkspace] = await Promise.all([
+      const [remote, imageRemote, nextWorkspace] = await Promise.all([
         apiRequest("/settings/model"),
+        apiRequest("/settings/image-generation"),
         apiRequest("/workspace"),
       ]);
       setWorkspaceInfo(nextWorkspace);
@@ -354,10 +649,12 @@ export function App() {
       setWorkspaceValidation(null);
       setWorkspaceError("");
       setServerModelSettings(remote);
+      setServerImageSettings(imageRemote);
       setSettingsDraft({
         targetModel,
         analysisProfile,
         maxCostCny,
+        ...imageSettingsDraft(imageRemote),
         provider: remote.provider,
         modelAlias: remote.model_alias,
         baseUrl: remote.base_url,
@@ -372,6 +669,12 @@ export function App() {
 
   function updateSettingsDraft(update) {
     setSettingsError("");
+    if (
+      Object.hasOwn(update, "imageLocalProxyMode")
+      || Object.hasOwn(update, "imageLocalProxyUrl")
+    ) {
+      setCodexNetworkTest(null);
+    }
     setSettingsDraft((current) => ({ ...current, ...update }));
   }
 
@@ -424,7 +727,21 @@ export function App() {
       setAnalysis(null);
       setReport(null);
       setReplacementVersion(null);
-      await refreshHistory({ quiet: true });
+      resetProductionWorkspace();
+      setHistoryQuery("");
+      setHistoryFolder("");
+      setHistoryStatus("");
+      setHistorySort(DEFAULT_HISTORY_STATE.sort);
+      setHistoryPage(1);
+      await refreshHistory({
+        quiet: true,
+        page: 1,
+        pageSize: historyPageSize,
+        query: "",
+        folder: "",
+        status: "",
+        sort: DEFAULT_HISTORY_STATE.sort,
+      });
       setNotice("工作区已切换，历史记录已重新加载");
     } catch (requestError) {
       setWorkspaceError(requestError.message);
@@ -487,6 +804,7 @@ export function App() {
 
   async function openHistoryRecord(recordId) {
     setHistoryError("");
+    resetProductionWorkspace();
     try {
       const detail = await apiRequest(`/records/${recordId}`);
       setVideo(detail.video);
@@ -497,6 +815,7 @@ export function App() {
       setActiveShotId(detail.latest_report?.shots?.[0]?.id || null);
       setActiveReportTab("overview");
       setActiveNav("workspace");
+      loadProductions(detail.record.id).catch(() => undefined);
       window.setTimeout(() => {
         reportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 120);
@@ -512,25 +831,83 @@ export function App() {
       setSettingsError("成本上限必须大于 0 且不超过 ¥1000，留空表示不限制。");
       return;
     }
-    if (!String(settingsDraft.apiKey || "").trim() && !serverModelSettings.api_key_configured) {
+    const hasConfiguredKey =
+      serverModelSettings.api_key_configured || serverImageSettings.api_key_configured;
+    const needsRemoteKey = settingsDraft.imageExecutionMode === "remote_api";
+    if (
+      !String(settingsDraft.apiKey || "").trim()
+      && !hasConfiguredKey
+      && needsRemoteKey
+    ) {
       setSettingsError("首次配置请填写阿里云百炼 API Key。");
+      return;
+    }
+    if (
+      settingsDraft.imageExecutionMode === "local_tool"
+      && !String(settingsDraft.imageLocalExecutablePath || "").trim()
+    ) {
+      setSettingsError("本机工具模式必须填写可执行文件路径。");
+      return;
+    }
+    const localCostText = String(settingsDraft.imageLocalUnitCostYuan || "").trim();
+    const localCostNumber = localCostText ? Number(localCostText) : null;
+    if (
+      settingsDraft.imageLocalCostSource === "configured_rate"
+      && (
+        localCostNumber === null
+        || !Number.isFinite(localCostNumber)
+        || localCostNumber < 0
+      )
+    ) {
+      setSettingsError("按配置费率计费时，请填写有效的单张成本。");
       return;
     }
 
     setSettingsSaving(true);
     setSettingsError("");
     try {
-      const remote = await apiRequest("/settings/model", {
+      const sharedApiKey = String(settingsDraft.apiKey || "").trim() || null;
+      if (sharedApiKey || serverModelSettings.api_key_configured) {
+        const remote = await apiRequest("/settings/model", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: settingsDraft.provider,
+            model_alias: settingsDraft.modelAlias,
+            api_key: sharedApiKey,
+            base_url: settingsDraft.baseUrl,
+          }),
+        });
+        setServerModelSettings(remote);
+      }
+      const imageRemote = await apiRequest("/settings/image-generation", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider: settingsDraft.provider,
-          model_alias: settingsDraft.modelAlias,
-          api_key: String(settingsDraft.apiKey || "").trim() || null,
-          base_url: settingsDraft.baseUrl,
+          execution_mode: settingsDraft.imageExecutionMode,
+          default_candidate_count: Number(settingsDraft.imageDefaultCandidateCount || 1),
+          remote_provider: settingsDraft.imageRemoteProvider,
+          remote_model_alias: settingsDraft.imageRemoteModelAlias,
+          remote_api_key: sharedApiKey,
+          remote_base_url: settingsDraft.imageRemoteBaseUrl,
+          local_adapter_id: settingsDraft.imageLocalAdapterId,
+          local_executable_path: settingsDraft.imageLocalExecutablePath.trim() || null,
+          local_fixed_args: imageFixedArgs(settingsDraft.imageLocalFixedArgs),
+          local_timeout_seconds: Number(settingsDraft.imageLocalTimeoutSeconds || 300),
+          local_concurrency: Number(settingsDraft.imageLocalConcurrency || 1),
+          local_protocol_version: settingsDraft.imageLocalProtocolVersion,
+          local_cost_source: settingsDraft.imageLocalCostSource,
+          local_unit_cost_micros:
+            localCostNumber === null ? null : Math.round(localCostNumber * 1_000_000),
+          local_model_policy: settingsDraft.imageLocalModelPolicy,
+          local_model: String(settingsDraft.imageLocalModel || "").trim() || null,
+          local_reasoning_effort: settingsDraft.imageLocalReasoningEffort,
+          local_proxy_mode: settingsDraft.imageLocalProxyMode,
+          local_proxy_url:
+            String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
         }),
       });
-      setServerModelSettings(remote);
+      setServerImageSettings(imageRemote);
 
       const nextSettings = {
         targetModel: settingsDraft.targetModel,
@@ -550,8 +927,8 @@ export function App() {
       setSettingsOpen(false);
       setNotice(
         persisted
-          ? "API Key 验证通过，模型设置已保存"
-          : "API Key 验证通过；设置已应用，但浏览器未保存默认值",
+          ? "模型与图片生成配置已验证并保存"
+          : "配置已应用，但浏览器未保存分析默认值",
       );
     } catch (requestError) {
       setSettingsError(requestError.message);
@@ -616,6 +993,8 @@ export function App() {
     setVideo(processedVideo);
     setActiveShotId(nextReport.shots[0]?.id || null);
     setActiveReportTab("overview");
+    resetProductionWorkspace();
+    loadProductions(processedVideo.record_id).catch(() => undefined);
     loadWorkspace().catch(() => undefined);
     refreshHistory({ quiet: true }).catch(() => undefined);
     window.setTimeout(() => {
@@ -644,6 +1023,7 @@ export function App() {
     setReplacementVersion(null);
     setAnalysis(null);
     setAnalysisVersions([]);
+    resetProductionWorkspace();
     try {
       let createdVideo;
       if (sourceMode === "link") {
@@ -763,6 +1143,7 @@ export function App() {
       setReplacementVersion(null);
       setActiveShotId(nextReport.shots?.[0]?.id || null);
       setActiveReportTab("overview");
+      setRecordWorkspaceMode("analysis");
       setNotice("已切换分析版本");
     } catch (requestError) {
       setError(requestError.message);
@@ -791,12 +1172,150 @@ export function App() {
       rememberAnalysis(next);
       setReport(null);
       setReplacementVersion(null);
+      resetProductionWorkspace();
       connectToProgress(next.id);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function detectLocalImageTool() {
+    if (!String(settingsDraft.imageLocalExecutablePath || "").trim()) {
+      setSettingsError("请先填写本机工具可执行文件路径。");
+      return;
+    }
+    setImageToolDetecting(true);
+    setImageToolDetection(null);
+    setSettingsError("");
+    try {
+      const result = await apiRequest("/settings/image-generation/detect-local", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          executable_path: settingsDraft.imageLocalExecutablePath.trim(),
+          fixed_args: imageFixedArgs(settingsDraft.imageLocalFixedArgs),
+          protocol_version: settingsDraft.imageLocalProtocolVersion,
+          timeout_seconds: Math.min(
+            120,
+            Number(settingsDraft.imageLocalTimeoutSeconds || 20),
+          ),
+          proxy_mode: settingsDraft.imageLocalProxyMode,
+          proxy_url: String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
+        }),
+      });
+      setImageToolDetection(result);
+    } catch (requestError) {
+      setSettingsError(requestError.message);
+    } finally {
+      setImageToolDetecting(false);
+    }
+  }
+
+  async function discoverLocalCodex({ quiet = false } = {}) {
+    setCodexDiscovering(true);
+    if (!quiet) setSettingsError("");
+    try {
+      const result = await apiRequest(
+        "/settings/image-generation/discover-local-codex",
+        { method: "POST" },
+      );
+      setCodexDiscovery(result);
+      return result;
+    } catch (requestError) {
+      setCodexDiscovery(null);
+      if (!quiet) setSettingsError(`无法检测本机 Codex：${requestError.message}`);
+      return null;
+    } finally {
+      setCodexDiscovering(false);
+    }
+  }
+
+  async function testLocalCodexNetwork() {
+    setCodexNetworkTesting(true);
+    setCodexNetworkTest(null);
+    setSettingsError("");
+    try {
+      const result = await apiRequest(
+        "/settings/image-generation/test-local-network",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            proxy_mode: settingsDraft.imageLocalProxyMode,
+            proxy_url:
+              String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
+            timeout_seconds: 15,
+          }),
+        },
+      );
+      setCodexNetworkTest(result);
+    } catch (requestError) {
+      setSettingsError(`Codex 网络检测失败：${requestError.message}`);
+    } finally {
+      setCodexNetworkTesting(false);
+    }
+  }
+
+  async function applyLocalCodexConfiguration() {
+    setCodexApplying(true);
+    setSettingsError("");
+    try {
+      const result = await apiRequest(
+        "/settings/image-generation/auto-configure-codex",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model_policy: settingsDraft.imageLocalModelPolicy,
+            model: String(settingsDraft.imageLocalModel || "").trim() || null,
+            reasoning_effort: settingsDraft.imageLocalReasoningEffort,
+            default_candidate_count: Number(
+              settingsDraft.imageDefaultCandidateCount || 1,
+            ),
+            proxy_mode: settingsDraft.imageLocalProxyMode,
+            proxy_url:
+              String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
+          }),
+        },
+      );
+      setServerImageSettings(result);
+      setSettingsDraft((current) => ({
+        ...current,
+        ...imageSettingsDraft(result),
+        imageExecutionMode: "local_tool",
+      }));
+      setImageToolDetection({
+        tool_id: result.local_tool_id,
+        tool_version: result.local_tool_version,
+        protocol_version: result.local_protocol_version,
+        capabilities: result.selected_capabilities,
+      });
+      setNotice(
+        "Codex + ImageGen 已自动配置；本次只做环境检测，首次出图仍需人工触发",
+      );
+    } catch (requestError) {
+      setSettingsError(requestError.message);
+    } finally {
+      setCodexApplying(false);
+    }
+  }
+
+  function changeRecordWorkspace(mode) {
+    setRecordWorkspaceMode(mode);
+    if (mode === "production" && video?.record_id) {
+      loadProductions(video.record_id, { quiet: productionProjects.length > 0 }).catch(() => undefined);
+    }
+  }
+
+  function createProductionFromReport() {
+    if (!video?.record_id || !report?.analysis_id) {
+      setError("当前分析记录尚未准备好创建创作方案");
+      return;
+    }
+    setRecordWorkspaceMode("production");
+    setProductionCreateSignal((current) => current + 1);
   }
 
   return (
@@ -813,7 +1332,7 @@ export function App() {
         <Topbar
           onCreate={() => selectNav("new-analysis")}
           onSearch={(value) => {
-            setHistoryQuery(value);
+            changeHistoryQuery(value);
             if (value) setActiveNav("history");
           }}
           searchValue={historyQuery}
@@ -825,6 +1344,9 @@ export function App() {
               records={records}
               folders={folders}
               total={historyTotal}
+              totalPages={historyTotalPages}
+              page={historyPage}
+              pageSize={historyPageSize}
               loading={historyLoading}
               error={historyError}
               query={historyQuery}
@@ -832,10 +1354,12 @@ export function App() {
               statusFilter={historyStatus}
               sort={historySort}
               workspace={workspaceInfo}
-              onQueryChange={setHistoryQuery}
-              onFolderChange={setHistoryFolder}
-              onStatusChange={setHistoryStatus}
-              onSortChange={setHistorySort}
+              onQueryChange={changeHistoryQuery}
+              onFolderChange={changeHistoryFolder}
+              onStatusChange={changeHistoryStatus}
+              onSortChange={changeHistorySort}
+              onPageChange={setHistoryPage}
+              onPageSizeChange={changeHistoryPageSize}
               onCreateFolder={createHistoryFolder}
               onRenameFolder={renameHistoryFolder}
               onRenameRecord={renameHistoryRecord}
@@ -898,10 +1422,18 @@ export function App() {
                   onRestart={reanalyzeCurrent}
                   analysisVersions={analysisVersions}
                   activeAnalysisId={report.analysis_id}
+                  onCreateProduction={createProductionFromReport}
                   onVersionChange={openAnalysisVersion}
                 />
-                <ReportTabs active={activeReportTab} onChange={setActiveReportTab} mode={report.analysis_mode} />
-                <div className="report-content">
+                <RecordWorkspaceTabs
+                  active={recordWorkspaceMode}
+                  count={productionProjects.length}
+                  onChange={changeRecordWorkspace}
+                />
+                {recordWorkspaceMode === "analysis" ? (
+                  <>
+                    <ReportTabs active={activeReportTab} onChange={setActiveReportTab} mode={report.analysis_mode} />
+                    <div className="report-content">
                   {activeReportTab === "overview" && (
                     <OverviewTab
                       report={report}
@@ -913,6 +1445,7 @@ export function App() {
                   {activeReportTab === "shots" && (
                     <ShotsTab
                       shots={report.shots}
+                      segmentation={report.media_evidence?.segmentation}
                       activeShotId={activeShotId}
                       onSelect={seekToShot}
                       analysisMode={report.analysis_mode}
@@ -936,7 +1469,24 @@ export function App() {
                       onDownload={downloadPromptPackage}
                     />
                   )}
-                </div>
+                    </div>
+                  </>
+                ) : (
+                  <ProductionHub
+                    analysisId={report.analysis_id}
+                    createSignal={productionCreateSignal}
+                    error={productionsError}
+                    imageGenerationSettings={serverImageSettings}
+                    loading={productionsLoading}
+                    onNotice={setNotice}
+                    onProjectsChanged={() => loadProductions(video.record_id, { quiet: true })}
+                    projects={productionProjects}
+                    recordId={video.record_id}
+                    request={apiRequest}
+                    resolveUrl={resolveArtifactUrl}
+                    sourceTitle={video.title}
+                  />
+                )}
               </section>
             )}
           </main>
@@ -953,6 +1503,14 @@ export function App() {
           loading={settingsLoading}
           saving={settingsSaving}
           serverSettings={serverModelSettings}
+          imageServerSettings={serverImageSettings}
+          imageToolDetecting={imageToolDetecting}
+          imageToolDetection={imageToolDetection}
+          codexApplying={codexApplying}
+          codexDiscovering={codexDiscovering}
+          codexDiscovery={codexDiscovery}
+          codexNetworkTesting={codexNetworkTesting}
+          codexNetworkTest={codexNetworkTest}
           workspace={workspaceInfo}
           workspaceDraft={workspaceDraft}
           workspaceValidation={workspaceValidation}
@@ -962,10 +1520,15 @@ export function App() {
           onValidateWorkspace={validateWorkspace}
           onSwitchWorkspace={switchWorkspace}
           onChange={updateSettingsDraft}
+          onApplyLocalCodex={applyLocalCodexConfiguration}
+          onDetectLocalImageTool={detectLocalImageTool}
+          onDiscoverLocalCodex={discoverLocalCodex}
+          onTestLocalCodexNetwork={testLocalCodexNetwork}
           onClose={() => setSettingsOpen(false)}
           onReset={() =>
             updateSettingsDraft({
               ...DEFAULT_MODEL_SETTINGS,
+              ...imageSettingsDraft(),
               provider: DEFAULT_SERVER_MODEL_SETTINGS.provider,
               modelAlias: DEFAULT_SERVER_MODEL_SETTINGS.model_alias,
               baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
@@ -986,10 +1549,68 @@ export function App() {
   );
 }
 
+function RecordThumbnail({ record }) {
+  const imageUrl = record.thumbnail_url ? resolveArtifactUrl(record.thumbnail_url) : "";
+  const imageRef = useRef(null);
+  const [imageState, setImageState] = useState(imageUrl ? "loading" : "missing");
+
+  useEffect(() => {
+    if (!imageUrl) {
+      setImageState("missing");
+      return;
+    }
+
+    const image = imageRef.current;
+    if (!image?.complete) {
+      setImageState("loading");
+      return;
+    }
+
+    setImageState(image.naturalWidth > 0 ? "loaded" : "failed");
+  }, [imageUrl]);
+
+  const loaded = imageState === "loaded";
+  const showImage = Boolean(imageUrl) && imageState !== "failed";
+  const duration = formatDurationBadge(record.duration_seconds);
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`record-thumbnail ${record.source_type} ${showImage ? "has-image" : "fallback"} ${loaded ? "loaded" : "loading"}`}
+    >
+      {showImage ? (
+        <>
+          <span className="record-thumbnail-skeleton" />
+          <img
+            alt=""
+            className="record-thumbnail-image"
+            decoding="async"
+            draggable="false"
+            key={imageUrl}
+            loading="lazy"
+            onError={() => setImageState("failed")}
+            onLoad={(event) => setImageState(event.currentTarget.naturalWidth > 0 ? "loaded" : "failed")}
+            ref={imageRef}
+            src={imageUrl}
+          />
+          {loaded && duration && <span className="record-thumbnail-duration">{duration}</span>}
+        </>
+      ) : (
+        <span className="record-thumbnail-fallback">
+          {record.source_type === "upload" ? <FileVideo size={24} /> : <LinkSimple size={24} />}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function HistoryPage({
   records,
   folders,
   total,
+  totalPages,
+  page,
+  pageSize,
   loading,
   error,
   query,
@@ -1001,6 +1622,8 @@ function HistoryPage({
   onFolderChange,
   onStatusChange,
   onSortChange,
+  onPageChange,
+  onPageSizeChange,
   onCreateFolder,
   onRenameFolder,
   onRenameRecord,
@@ -1010,6 +1633,26 @@ function HistoryPage({
 }) {
   const sourceLabels = { upload: "本地文件", douyin: "抖音", xiaohongshu: "小红书" };
   const folderNames = new Map(folders.map((folder) => [folder.id, folder.name]));
+  const paginationItems = buildPaginationItems(page, totalPages);
+  const firstResult = total > 0 ? (page - 1) * pageSize + 1 : 0;
+  const lastResult = Math.min(page * pageSize, total);
+  const resultHeadingRef = useRef(null);
+
+  function scrollToHistoryResults() {
+    window.requestAnimationFrame(() => {
+      resultHeadingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  function selectHistoryPage(nextPage) {
+    onPageChange(nextPage);
+    scrollToHistoryResults();
+  }
+
+  function selectHistoryPageSize(nextPageSize) {
+    onPageSizeChange(nextPageSize);
+    scrollToHistoryResults();
+  }
 
   return (
     <>
@@ -1065,7 +1708,7 @@ function HistoryPage({
           </label>
         </section>
 
-        <div className="history-result-heading">
+        <div className="history-result-heading" ref={resultHeadingRef}>
           <div>
             <strong>{folderFilter ? folderFilter === "unfiled" ? "未分类" : folderNames.get(folderFilter) : "全部记录"}</strong>
             <span>{total} 条结果</span>
@@ -1096,7 +1739,8 @@ function HistoryPage({
             )}
           </section>
         ) : (
-          <div className="record-grid">
+          <>
+            <div className="record-grid">
             {records.map((record) => (
               <article className="record-card" key={record.id}>
                 <button
@@ -1104,9 +1748,7 @@ function HistoryPage({
                   onClick={() => onOpenRecord(record.id)}
                   type="button"
                 >
-                  <span className={`record-source-icon ${record.source_type}`}>
-                    {record.source_type === "upload" ? <FileVideo size={23} /> : <LinkSimple size={23} />}
-                  </span>
+                  <RecordThumbnail record={record} />
                   <span className="record-card-copy">
                     <span className="record-title-row">
                       <strong>{record.name}</strong>
@@ -1143,7 +1785,62 @@ function HistoryPage({
                 </div>
               </article>
             ))}
-          </div>
+            </div>
+
+            <nav className="history-pagination" aria-label="分析记录分页">
+              <div className="history-page-summary">
+                <span>显示 {firstResult}–{lastResult} 条，共 {total} 条</span>
+                <label>
+                  每页
+                  <select
+                    aria-label="每页记录数"
+                    disabled={loading}
+                    onChange={(event) => selectHistoryPageSize(event.target.value)}
+                    value={pageSize}
+                  >
+                    {HISTORY_PAGE_SIZES.map((size) => (
+                      <option key={size} value={size}>{size} 条</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="history-page-controls">
+                <button
+                  aria-label="上一页"
+                  disabled={loading || page <= 1}
+                  onClick={() => selectHistoryPage(page - 1)}
+                  type="button"
+                >
+                  <CaretLeft size={15} />
+                </button>
+                {paginationItems.map((item) => (
+                  typeof item === "number" ? (
+                    <button
+                      aria-current={item === page ? "page" : undefined}
+                      className={item === page ? "active" : ""}
+                      disabled={loading}
+                      key={item}
+                      onClick={() => selectHistoryPage(item)}
+                      type="button"
+                    >
+                      {item}
+                    </button>
+                  ) : (
+                    <span aria-hidden="true" className="history-page-ellipsis" key={item}>…</span>
+                  )
+                ))}
+                <button
+                  aria-label="下一页"
+                  disabled={loading || page >= totalPages}
+                  onClick={() => selectHistoryPage(page + 1)}
+                  type="button"
+                >
+                  <CaretRight size={15} />
+                </button>
+              </div>
+            </nav>
+          </>
         )}
       </main>
 
@@ -1248,6 +1945,14 @@ function ModelSettingsDialog({
   loading,
   saving,
   serverSettings,
+  imageServerSettings,
+  imageToolDetecting,
+  imageToolDetection,
+  codexApplying,
+  codexDiscovering,
+  codexDiscovery,
+  codexNetworkTesting,
+  codexNetworkTest,
   workspace,
   workspaceDraft,
   workspaceValidation,
@@ -1257,6 +1962,10 @@ function ModelSettingsDialog({
   onValidateWorkspace,
   onSwitchWorkspace,
   onChange,
+  onApplyLocalCodex,
+  onDetectLocalImageTool,
+  onDiscoverLocalCodex,
+  onTestLocalCodexNetwork,
   onClose,
   onReset,
   onSave,
@@ -1268,10 +1977,22 @@ function ModelSettingsDialog({
     (model) => model.provider === draft.provider,
   );
   const selectedModel = modelOptions.find((model) => model.alias === draft.modelAlias);
+  const imageModelOptions = imageServerSettings.models || [];
+  const selectedImageModel = imageModelOptions.find(
+    (model) => model.alias === draft.imageRemoteModelAlias,
+  );
+  const selectedImageCapabilities =
+    imageToolDetection?.capabilities
+    || imageServerSettings.selected_capabilities
+    || selectedImageModel?.capabilities;
+  const imageCandidateCount = Number(draft.imageDefaultCandidateCount || 2);
+  const estimatedImageCost = selectedImageModel
+    ? (Number(selectedImageModel.unit_cost_micros || 0) * imageCandidateCount) / 1_000_000
+    : null;
   const hasNewKey = Boolean(String(draft.apiKey || "").trim());
   const credentialState = hasNewKey
     ? "pending"
-    : serverSettings.api_key_configured
+    : serverSettings.api_key_configured || imageServerSettings.api_key_configured
       ? "connected"
       : "missing";
   const credentialTitle = {
@@ -1281,7 +2002,13 @@ function ModelSettingsDialog({
   }[credentialState];
 
   function closeIfIdle() {
-    if (!saving && !workspaceSaving) onClose();
+    if (
+      !saving
+      && !workspaceSaving
+      && !codexApplying
+      && !codexDiscovering
+      && !codexNetworkTesting
+    ) onClose();
   }
 
   function changeProvider(providerId) {
@@ -1444,8 +2171,12 @@ function ModelSettingsDialog({
                       disabled={saving}
                       onChange={(event) => onChange({ apiKey: event.target.value })}
                       placeholder={
-                        serverSettings.api_key_configured
-                          ? `已配置 ${serverSettings.api_key_hint || ""}；留空沿用`
+                        serverSettings.api_key_configured || imageServerSettings.api_key_configured
+                          ? `已配置 ${
+                              serverSettings.api_key_hint
+                              || imageServerSettings.api_key_hint
+                              || ""
+                            }；留空沿用`
                           : "请输入阿里云百炼 API Key"
                       }
                       spellCheck="false"
@@ -1478,13 +2209,535 @@ function ModelSettingsDialog({
                     <p>
                       {hasNewKey
                         ? "点击“验证并保存”后才会替换本机已有密钥。"
-                        : serverSettings.api_key_configured
+                        : serverSettings.api_key_configured || imageServerSettings.api_key_configured
                           ? `最近验证：${formatValidationTime(serverSettings.last_validated_at)}`
                           : "填写密钥后才能启用真实 VLM 视频分析。"}
                     </p>
                   </div>
                 </div>
               </>
+            )}
+          </section>
+
+          <section className="settings-section image-generation-settings" aria-labelledby="image-generation-title">
+            <div className="settings-section-heading">
+              <div>
+                <h3 id="image-generation-title">分镜图片生成</h3>
+                <p>真实候选可以通过国内大模型 API，或符合协议的本机工具生成。</p>
+              </div>
+              <span className={"image-settings-state " + (imageServerSettings.enabled ? "enabled" : "")}>
+                {imageServerSettings.enabled ? "已启用" : "尚未启用"}
+              </span>
+            </div>
+
+            <div className="image-mode-grid">
+              <label className={draft.imageExecutionMode === "remote_api" ? "selected" : ""}>
+                <input
+                  checked={draft.imageExecutionMode === "remote_api"}
+                  disabled={saving}
+                  name="image-execution-mode"
+                  onChange={() => onChange({ imageExecutionMode: "remote_api" })}
+                  type="radio"
+                />
+                <span><Sparkle size={18} weight="fill" /></span>
+                <div>
+                  <strong>国内大模型 API</strong>
+                  <small>百炼 Qwen Image，按成功生成图片计费</small>
+                </div>
+              </label>
+              <label className={draft.imageExecutionMode === "local_tool" ? "selected" : ""}>
+                <input
+                  checked={draft.imageExecutionMode === "local_tool"}
+                  disabled={saving}
+                  name="image-execution-mode"
+                  onChange={() => onChange({ imageExecutionMode: "local_tool" })}
+                  type="radio"
+                />
+                <span><Gear size={18} weight="fill" /></span>
+                <div>
+                  <strong>本机工具 / CLI</strong>
+                  <small>通过版本化 JSON 协议调用 imagegen 类工具</small>
+                </div>
+              </label>
+            </div>
+
+            {draft.imageExecutionMode === "remote_api" ? (
+              <div className="image-mode-panel">
+                <div className="settings-field-grid">
+                  <label className="settings-field">
+                    <span>图片模型</span>
+                    <select
+                      disabled={saving}
+                      onChange={(event) => onChange({
+                        imageRemoteModelAlias: event.target.value,
+                      })}
+                      value={draft.imageRemoteModelAlias}
+                    >
+                      {imageModelOptions.map((model) => (
+                        <option key={model.alias} value={model.alias}>
+                          {model.label}{model.recommended ? "（推荐）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <small>{selectedImageModel?.description || "正在读取图片模型目录…"}</small>
+                  </label>
+                  <label className="settings-field">
+                    <span>默认候选数量</span>
+                    <select
+                      disabled={saving}
+                      onChange={(event) => onChange({
+                        imageDefaultCandidateCount: Number(event.target.value),
+                      })}
+                      value={draft.imageDefaultCandidateCount}
+                    >
+                      {[1, 2, 3, 4].map((count) => (
+                        <option key={count} value={count}>{count} 张</option>
+                      ))}
+                    </select>
+                    <small>
+                      本次预计目录价：
+                      {estimatedImageCost == null
+                        ? "—"
+                        : "¥" + estimatedImageCost.toFixed(2)}
+                    </small>
+                  </label>
+                  <label className="settings-field settings-field-wide">
+                    <span>图片服务地址</span>
+                    <input
+                      disabled={saving}
+                      onChange={(event) => onChange({
+                        imageRemoteBaseUrl: event.target.value,
+                      })}
+                      spellCheck="false"
+                      type="url"
+                      value={draft.imageRemoteBaseUrl}
+                    />
+                    <small>
+                      仅接受百炼官方 HTTPS /api/v1 地址；工作空间 Endpoint 需包含正确区域。
+                    </small>
+                  </label>
+                </div>
+                <div className="image-mode-note">
+                  <ShieldCheck size={18} weight="fill" />
+                  <div>
+                    <strong>复用上方百炼 API Key</strong>
+                    <p>
+                      保存时执行低成本认证校验，不会调用付费图片生成；模型权限在首次出图时确认。
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="image-mode-panel">
+                <div
+                  className={`codex-auto-card ${
+                    codexDiscovery?.can_auto_configure ? "ready" : ""
+                  }`}
+                >
+                  <div className="codex-auto-heading">
+                    <span><Sparkle size={19} weight="fill" /></span>
+                    <div>
+                      <strong>自动发现 Codex + ImageGen</strong>
+                      <p>只检测本机安装、登录状态和版本，不会提交提示词或消耗图片额度。</p>
+                    </div>
+                    <button
+                      className="secondary-button compact"
+                      disabled={saving || codexApplying || codexDiscovering}
+                      onClick={() => onDiscoverLocalCodex()}
+                      type="button"
+                    >
+                      {codexDiscovering
+                        ? <CircleNotch className="spin" size={15} />
+                        : <ArrowClockwise size={15} />}
+                      {codexDiscovering ? "检测中" : "重新检测"}
+                    </button>
+                  </div>
+
+                  {codexDiscovering && !codexDiscovery ? (
+                    <div className="codex-auto-loading">
+                      <CircleNotch className="spin" size={16} />
+                      正在读取 Codex CLI、ChatGPT 桌面端和 imagegen 技能…
+                    </div>
+                  ) : codexDiscovery ? (
+                    <>
+                      <div className="codex-status-grid">
+                        <span className={codexDiscovery.codex_found ? "positive" : "warning"}>
+                          <strong>Codex CLI</strong>
+                          {codexDiscovery.codex_version || "未找到"}
+                        </span>
+                        <span className={codexDiscovery.auth_status === "authenticated" ? "positive" : "warning"}>
+                          <strong>登录状态</strong>
+                          {{
+                            authenticated: "已登录",
+                            not_authenticated: "未登录",
+                            unknown: "无法确认",
+                          }[codexDiscovery.auth_status] || "无法确认"}
+                        </span>
+                        <span className={codexDiscovery.imagegen_status === "installed_unverified" ? "positive" : "warning"}>
+                          <strong>ImageGen</strong>
+                          {codexDiscovery.imagegen_status === "installed_unverified"
+                            ? "已安装，待首次出图验证"
+                            : "未找到"}
+                        </span>
+                        <span className={codexDiscovery.desktop_app_found ? "positive" : "neutral"}>
+                          <strong>ChatGPT / Codex</strong>
+                          {codexDiscovery.desktop_app_found ? "桌面端已安装" : "未检测到桌面端"}
+                        </span>
+                      </div>
+
+                      <div className="settings-field-grid codex-policy-grid">
+                        <label className="settings-field">
+                          <span>模型策略</span>
+                          <select
+                            disabled={saving || codexApplying}
+                            onChange={(event) => {
+                              const policy = event.target.value;
+                              onChange({
+                                imageLocalModelPolicy: policy,
+                                ...(policy === "latest_flagship"
+                                  ? { imageLocalModel: codexDiscovery.recommended_model }
+                                  : policy === "balanced"
+                                    ? { imageLocalModel: "gpt-5.6-terra" }
+                                    : {}),
+                              });
+                            }}
+                            value={draft.imageLocalModelPolicy}
+                          >
+                            <option value="latest_flagship">始终使用最新旗舰</option>
+                            <option value="balanced">均衡模型</option>
+                            <option value="pinned">固定指定模型</option>
+                          </select>
+                          <small>最新旗舰由版本化目录解析，当前为 {codexDiscovery.recommended_model}。</small>
+                        </label>
+                        <label className="settings-field">
+                          <span>推理强度</span>
+                          <select
+                            disabled={saving || codexApplying}
+                            onChange={(event) => onChange({
+                              imageLocalReasoningEffort: event.target.value,
+                            })}
+                            value={draft.imageLocalReasoningEffort}
+                          >
+                            <option value="xhigh">最高（xhigh）</option>
+                            <option value="high">高（high）</option>
+                            <option value="medium">中（medium）</option>
+                            <option value="low">低（low）</option>
+                          </select>
+                          <small>最高质量更慢，也可能消耗更多订阅配额。</small>
+                        </label>
+                        <label className="settings-field settings-field-wide">
+                          <span>实际模型</span>
+                          <input
+                            disabled={
+                              saving
+                              || codexApplying
+                              || draft.imageLocalModelPolicy !== "pinned"
+                            }
+                            onChange={(event) => onChange({
+                              imageLocalModel: event.target.value,
+                            })}
+                            spellCheck="false"
+                            type="text"
+                            value={
+                              draft.imageLocalModel
+                              || (draft.imageLocalModelPolicy === "balanced"
+                                ? "gpt-5.6-terra"
+                                : codexDiscovery.recommended_model)
+                            }
+                          />
+                          <small>只有“固定指定模型”允许手动编辑；其他策略在保存时自动解析。</small>
+                        </label>
+                      </div>
+
+                      <div className="codex-proxy-card">
+                        <div className="codex-proxy-heading">
+                          <div>
+                            <strong>命令行网络代理</strong>
+                            <p>Codex CLI 不一定继承浏览器代理，生成前会显式注入这里选定的代理。</p>
+                          </div>
+                          <span>
+                            {localProxySourceLabel(
+                              codexNetworkTest?.proxy_source
+                              || imageServerSettings.local_proxy_source,
+                            )}
+                          </span>
+                        </div>
+                        <div className="settings-field-grid">
+                          <label className="settings-field">
+                            <span>代理模式</span>
+                            <select
+                              disabled={saving || codexApplying || codexNetworkTesting}
+                              onChange={(event) => onChange({
+                                imageLocalProxyMode: event.target.value,
+                              })}
+                              value={draft.imageLocalProxyMode}
+                            >
+                              <option value="system">自动读取 Windows 系统代理（推荐）</option>
+                              <option value="manual">手动指定 HTTP 代理</option>
+                              <option value="disabled">不使用代理</option>
+                            </select>
+                            <small>
+                              {draft.imageLocalProxyMode === "system"
+                                ? imageServerSettings.local_proxy_detected_url
+                                  ? `已检测：${imageServerSettings.local_proxy_detected_url}`
+                                  : "当前未检测到 Windows 或环境变量代理。"
+                                : draft.imageLocalProxyMode === "disabled"
+                                  ? "Codex 将直接连接 ChatGPT。"
+                                  : "仅支持不含账号密码的 HTTP/HTTPS 代理。"}
+                            </small>
+                          </label>
+                          {draft.imageLocalProxyMode === "manual" && (
+                            <label className="settings-field">
+                              <span>代理地址</span>
+                              <input
+                                disabled={saving || codexApplying || codexNetworkTesting}
+                                onChange={(event) => onChange({
+                                  imageLocalProxyUrl: event.target.value,
+                                })}
+                                placeholder="http://127.0.0.1:10808"
+                                spellCheck="false"
+                                type="url"
+                                value={draft.imageLocalProxyUrl}
+                              />
+                              <small>示例：http://127.0.0.1:10808</small>
+                            </label>
+                          )}
+                        </div>
+                        <div className="codex-proxy-actions">
+                          <button
+                            className="secondary-button compact"
+                            disabled={
+                              saving
+                              || codexApplying
+                              || codexNetworkTesting
+                              || (
+                                draft.imageLocalProxyMode === "manual"
+                                && !String(draft.imageLocalProxyUrl || "").trim()
+                              )
+                            }
+                            onClick={onTestLocalCodexNetwork}
+                            type="button"
+                          >
+                            {codexNetworkTesting
+                              ? <CircleNotch className="spin" size={15} />
+                              : <ShieldCheck size={15} />}
+                            {codexNetworkTesting ? "正在测试" : "测试网络与登录"}
+                          </button>
+                          <small>只建立 HTTPS 连接并检查本机登录状态，不生成图片。</small>
+                        </div>
+                        {codexNetworkTest && (
+                          <div
+                            className={`codex-network-result ${
+                              codexNetworkTest.reachable
+                              && codexNetworkTest.auth_status === "authenticated"
+                                ? "positive"
+                                : "warning"
+                            }`}
+                            role="status"
+                          >
+                            {codexNetworkTest.reachable
+                              && codexNetworkTest.auth_status === "authenticated"
+                              ? <CheckCircle size={17} weight="fill" />
+                              : <Question size={17} weight="fill" />}
+                            <div>
+                              <strong>{codexNetworkTest.message}</strong>
+                              <small>
+                                {codexNetworkTest.effective_proxy_url || "直连"}
+                                {` · ${codexNetworkTest.latency_ms} ms`}
+                              </small>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {codexDiscovery.warnings?.length > 0 && (
+                        <ul className="codex-warning-list">
+                          {codexDiscovery.warnings.map((warning) => (
+                            <li key={warning}>{warning}</li>
+                          ))}
+                        </ul>
+                      )}
+
+                      <div className="codex-auto-footer">
+                        <small>
+                          自动配置会立即保存本机包装器与订阅配额口径；首次生成仍由你手动触发。
+                        </small>
+                        <button
+                          className="primary-button compact"
+                          disabled={
+                            saving
+                            || codexApplying
+                            || !codexDiscovery.can_auto_configure
+                            || (
+                              draft.imageLocalModelPolicy === "pinned"
+                              && !String(draft.imageLocalModel || "").trim()
+                            )
+                          }
+                          onClick={onApplyLocalCodex}
+                          type="button"
+                        >
+                          {codexApplying
+                            ? <CircleNotch className="spin" size={15} />
+                            : <MagicWand size={15} weight="fill" />}
+                          {codexApplying ? "正在配置" : "应用推荐配置"}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="codex-auto-empty">
+                      尚未读取本机环境。点击“重新检测”后可获得自动配置建议。
+                    </div>
+                  )}
+                </div>
+
+                <div className="local-tool-manual-label">
+                  <strong>高级手动配置</strong>
+                  <small>仅在接入其他 CLI 或自定义包装器时修改以下字段。</small>
+                </div>
+                <div className="settings-field-grid">
+                  <label className="settings-field settings-field-wide">
+                    <span>可执行文件绝对路径</span>
+                    <input
+                      disabled={saving || imageToolDetecting}
+                      onChange={(event) => {
+                        onChange({ imageLocalExecutablePath: event.target.value });
+                      }}
+                      placeholder="例如 C:\Tools\viral-imagegen.exe"
+                      spellCheck="false"
+                      type="text"
+                      value={draft.imageLocalExecutablePath}
+                    />
+                    <small>直接启动可执行文件，不经过 shell；路径和工具版本会在本机检测。</small>
+                  </label>
+                  <label className="settings-field settings-field-wide">
+                    <span>固定参数（每行一项）</span>
+                    <textarea
+                      disabled={saving || imageToolDetecting}
+                      onChange={(event) => onChange({
+                        imageLocalFixedArgs: event.target.value,
+                      })}
+                      placeholder={"例如包装脚本路径\n--profile\nproduction"}
+                      rows={3}
+                      spellCheck="false"
+                      value={draft.imageLocalFixedArgs}
+                    />
+                    <small>参数按数组传递，不支持命令拼接；不要在参数里填写密钥。</small>
+                  </label>
+                  <label className="settings-field">
+                    <span>超时</span>
+                    <select
+                      disabled={saving || imageToolDetecting}
+                      onChange={(event) => onChange({
+                        imageLocalTimeoutSeconds: Number(event.target.value),
+                      })}
+                      value={draft.imageLocalTimeoutSeconds}
+                    >
+                      <option value={120}>2 分钟</option>
+                      <option value={300}>5 分钟</option>
+                      <option value={600}>10 分钟</option>
+                      <option value={1200}>20 分钟</option>
+                    </select>
+                  </label>
+                  <label className="settings-field">
+                    <span>并发上限</span>
+                    <select
+                      disabled={saving || imageToolDetecting}
+                      onChange={(event) => onChange({
+                        imageLocalConcurrency: Number(event.target.value),
+                      })}
+                      value={draft.imageLocalConcurrency}
+                    >
+                      {[1, 2, 3, 4].map((count) => (
+                        <option key={count} value={count}>{count}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="settings-field">
+                    <span>成本口径</span>
+                    <select
+                      disabled={saving || imageToolDetecting}
+                      onChange={(event) => onChange({
+                        imageLocalCostSource: event.target.value,
+                      })}
+                      value={draft.imageLocalCostSource}
+                    >
+                      <option value="unknown">未知成本</option>
+                      <option value="subscription_quota">ChatGPT / Codex 订阅配额</option>
+                      <option value="configured_rate">按配置费率</option>
+                      <option value="unmetered">确认不计费</option>
+                    </select>
+                    <small>调用云服务但不返回用量的 CLI 应选择未知成本。</small>
+                  </label>
+                  {draft.imageLocalCostSource === "configured_rate" && (
+                    <label className="settings-field">
+                      <span>单张成本（元）</span>
+                      <input
+                        disabled={saving || imageToolDetecting}
+                        min="0"
+                        onChange={(event) => onChange({
+                          imageLocalUnitCostYuan: event.target.value,
+                        })}
+                        step="0.0001"
+                        type="number"
+                        value={draft.imageLocalUnitCostYuan}
+                      />
+                    </label>
+                  )}
+                </div>
+                <div className="local-tool-actions">
+                  <button
+                    className="secondary-button compact"
+                    disabled={
+                      saving
+                      || imageToolDetecting
+                      || !String(draft.imageLocalExecutablePath || "").trim()
+                    }
+                    onClick={onDetectLocalImageTool}
+                    type="button"
+                  >
+                    {imageToolDetecting
+                      ? <CircleNotch className="spin" size={15} />
+                      : <ShieldCheck size={15} />}
+                    {imageToolDetecting ? "正在检测" : "检测工具"}
+                  </button>
+                  {(imageToolDetection || imageServerSettings.local_tool_id) && (
+                    <div className="local-tool-result">
+                      <CheckCircle size={17} weight="fill" />
+                      <span>
+                        <strong>
+                          {imageToolDetection?.tool_id || imageServerSettings.local_tool_id}
+                        </strong>
+                        {" · "}
+                        {imageToolDetection?.tool_version || imageServerSettings.local_tool_version}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                {draft.imageLocalCostSource === "unknown" && (
+                  <div className="image-cost-warning">
+                    <Question size={17} weight="fill" />
+                    每次生成前必须人工确认接受未知成本，不会把未知成本记为 ¥0。
+                  </div>
+                )}
+                {draft.imageLocalCostSource === "subscription_quota" && (
+                  <div className="image-subscription-note">
+                    <Sparkle size={17} weight="fill" />
+                    使用 ChatGPT / Codex 订阅配额；金额不可核算，因此不显示为 ¥0，也无需每次确认未知成本。
+                  </div>
+                )}
+              </div>
+            )}
+
+            {selectedImageCapabilities && (
+              <div className="image-capability-row">
+                <span>图生图</span>
+                <span>最多 {selectedImageCapabilities.max_reference_images} 张参考图</span>
+                <span>最多 {selectedImageCapabilities.max_candidates} 个候选</span>
+                <span>
+                  上限 {selectedImageCapabilities.maximum_width} ×
+                  {selectedImageCapabilities.maximum_height}
+                </span>
+              </div>
             )}
           </section>
 
@@ -1557,7 +2810,7 @@ function ModelSettingsDialog({
             <span><ShieldCheck size={19} weight="fill" /></span>
             <div>
               <strong>验证后才保存</strong>
-              <p>保存时会由本地 API 发起一次 max_tokens=1 的最小模型请求，可能产生极小费用；验证失败不会修改现有配置。</p>
+              <p>保存时只发起最小文本认证请求，不执行付费图片生成；任一校验失败都不会覆盖图片生成配置。</p>
             </div>
           </section>
 
@@ -1565,16 +2818,16 @@ function ModelSettingsDialog({
         </div>
 
         <footer className="settings-footer">
-          <button className="text-button" disabled={saving || workspaceSaving} onClick={onReset} type="button">
+          <button className="text-button" disabled={saving || workspaceSaving || codexApplying || codexDiscovering} onClick={onReset} type="button">
             恢复推荐值
           </button>
           <span />
-          <button className="secondary-button compact" disabled={saving || workspaceSaving} onClick={closeIfIdle} type="button">
+          <button className="secondary-button compact" disabled={saving || workspaceSaving || codexApplying || codexDiscovering} onClick={closeIfIdle} type="button">
             取消
           </button>
           <button
             className="primary-button compact"
-            disabled={loading || saving || workspaceSaving}
+            disabled={loading || saving || workspaceSaving || codexApplying || codexDiscovering}
             onClick={onSave}
             type="button"
           >
@@ -1864,6 +3117,34 @@ function EmptyWorkspace() {
   );
 }
 
+function RecordWorkspaceTabs({ active, count, onChange }) {
+  return (
+    <div className="record-workspace-tabs" role="tablist" aria-label="记录工作区">
+      <button
+        aria-selected={active === "analysis"}
+        className={active === "analysis" ? "active" : ""}
+        onClick={() => onChange("analysis")}
+        role="tab"
+        type="button"
+      >
+        <ChartBar size={17} weight={active === "analysis" ? "fill" : "regular"} />
+        分析报告
+      </button>
+      <button
+        aria-selected={active === "production"}
+        className={active === "production" ? "active" : ""}
+        onClick={() => onChange("production")}
+        role="tab"
+        type="button"
+      >
+        <MagicWand size={17} weight={active === "production" ? "fill" : "regular"} />
+        创作方案
+        <small>{count}</small>
+      </button>
+    </div>
+  );
+}
+
 function ReportHeader({
   video,
   report,
@@ -1872,11 +3153,13 @@ function ReportHeader({
   onRestart,
   analysisVersions,
   activeAnalysisId,
+  onCreateProduction,
   onVersionChange,
 }) {
   const isMediaEvidence = report.analysis_mode === "media_evidence";
   const isModel = report.analysis_mode === "model";
   const primaryModel = report.model_cost_summary?.breakdown?.[0]?.model;
+  const segmentation = report.media_evidence?.segmentation;
   const completedVersions = analysisVersions.filter((item) => item.stage === "completed");
   return (
     <div className="report-header">
@@ -1891,13 +3174,18 @@ function ReportHeader({
             {report.analysis_mode === "media_evidence" && (
               <span className="evidence-badge">真实媒体证据</span>
             )}
-            {isModel && <span className="model-badge">VLM 逐镜头分析</span>}
+            {isModel && (
+              <span className="model-badge">
+                {segmentation?.verified_by_model ? "混合分镜 + VLM 分析" : "VLM 逐镜头分析"}
+              </span>
+            )}
           </div>
           {isMediaEvidence ? (
             <p>{report.shots.length} 个真实镜头 · FFmpeg 证据层 · 语义分析待接入</p>
           ) : isModel ? (
             <p>
               {report.shots.filter((shot) => shot.evidence_kind === "model").length} / {report.shots.length} 个镜头已理解
+              {segmentation?.verified_by_model ? ` · ${segmentation.candidate_count} 个候选已审核` : ""}
               {primaryModel ? ` · ${primaryModel}` : ""}
               {report.model_cost_summary
                 ? ` · ${formatCost(report.model_cost_summary.measured_cost_micros)}`
@@ -1911,6 +3199,10 @@ function ReportHeader({
         </div>
       </div>
       <div className="report-actions">
+        <button className="secondary-button compact" type="button" onClick={onCreateProduction}>
+          <MagicWand size={16} />
+          创建方案
+        </button>
         {completedVersions.length > 1 && (
           <label className="analysis-version-picker">
             <ClockCounterClockwise size={16} />
@@ -1978,11 +3270,26 @@ function ReportTabs({ active, onChange, mode }) {
   );
 }
 
-function VideoPlayer({ src, videoRef, fallbackDuration, downloadUrl }) {
+function VideoPlayer({
+  src,
+  videoRef,
+  fallbackDuration,
+  downloadUrl,
+  mediaWidth,
+  mediaHeight,
+  aspectRatio,
+  posterUrl,
+}) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(fallbackDuration || 0);
   const [loadError, setLoadError] = useState(false);
+  const sourceOrientation = useMemo(
+    () => inferVideoOrientation({ width: mediaWidth, height: mediaHeight, aspectRatio }),
+    [aspectRatio, mediaHeight, mediaWidth],
+  );
+  const [orientation, setOrientation] = useState(sourceOrientation);
+  const [posterFailed, setPosterFailed] = useState(false);
 
   useEffect(() => {
     const player = videoRef.current;
@@ -1994,12 +3301,25 @@ function VideoPlayer({ src, videoRef, fallbackDuration, downloadUrl }) {
     setCurrentTime(0);
     setDuration(fallbackDuration || 0);
     setLoadError(false);
-  }, [fallbackDuration, src, videoRef]);
+    setOrientation(sourceOrientation);
+    setPosterFailed(false);
+  }, [fallbackDuration, sourceOrientation, src, videoRef]);
 
   function syncDuration(player) {
     if (Number.isFinite(player.duration) && player.duration > 0) {
       setDuration(player.duration);
     }
+  }
+
+  function handleLoadedMetadata(player) {
+    syncDuration(player);
+    setOrientation(
+      inferVideoOrientation({
+        width: player.videoWidth,
+        height: player.videoHeight,
+        aspectRatio,
+      }),
+    );
   }
 
   function togglePlayback() {
@@ -2023,17 +3343,38 @@ function VideoPlayer({ src, videoRef, fallbackDuration, downloadUrl }) {
 
   const resolvedDuration = duration > 0 ? duration : fallbackDuration || 0;
   const progressValue = Math.min(currentTime, resolvedDuration || 0);
+  const hasPoster = Boolean(posterUrl) && !posterFailed;
+  const stageClassName = [
+    "video-stage",
+    "video-stage-" + orientation,
+    hasPoster ? "has-poster" : "no-poster",
+  ].join(" ");
 
   return (
     <div className="video-player">
-      <div className="video-stage">
+      <div className={stageClassName} data-video-orientation={orientation}>
+        {hasPoster && (
+          <>
+            <img
+              alt=""
+              aria-hidden="true"
+              className="video-stage-ambient"
+              decoding="async"
+              draggable="false"
+              onError={() => setPosterFailed(true)}
+              src={posterUrl}
+            />
+            <span aria-hidden="true" className="video-stage-tint" />
+          </>
+        )}
         <video
           ref={videoRef}
           src={src}
+          poster={hasPoster ? posterUrl : undefined}
           playsInline
           preload="metadata"
           onClick={togglePlayback}
-          onLoadedMetadata={(event) => syncDuration(event.currentTarget)}
+          onLoadedMetadata={(event) => handleLoadedMetadata(event.currentTarget)}
           onDurationChange={(event) => syncDuration(event.currentTarget)}
           onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
           onPlay={() => setIsPlaying(true)}
@@ -2105,6 +3446,10 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   const downloadUrl = mediaAvailable
     ? resolveApiUrl(`/videos/${report.video_id}/download`)
     : "";
+  const posterPath =
+    report.shots?.find((shot) => shot.keyframe_url)?.keyframe_url ||
+    evidence?.shots?.find((shot) => shot.keyframe_url)?.keyframe_url;
+  const posterUrl = posterPath ? resolveArtifactUrl(posterPath) : "";
   return (
     <div className="overview-grid">
       <div className="overview-primary">
@@ -2114,6 +3459,10 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             videoRef={videoRef}
             fallbackDuration={overview.duration_seconds}
             downloadUrl={downloadUrl}
+            mediaWidth={metadata?.width}
+            mediaHeight={metadata?.height}
+            aspectRatio={metadata?.aspect_ratio || overview.aspect_ratio}
+            posterUrl={posterUrl}
           />
         ) : (
           <div className="video-stage">
@@ -2306,15 +3655,28 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   );
 }
 
-function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
+function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysisMode }) {
   const activeShot = shots.find((shot) => shot.id === activeShotId) || shots[0];
   const isMediaEvidence = analysisMode === "media_evidence";
+  const hasHybridSegmentation = Boolean(segmentation);
+  const segmentationVerified = Boolean(segmentation?.verified_by_model);
+  const hasFourFrameEvidence = segmentation?.detector_version?.endsWith("-v3");
   return (
     <div className="shots-layout">
       <div className="shot-list">
         <div className="shot-list-header">
           <span>分镜时间线</span>
-          <small>{shots.length} 个镜头</small>
+          <div className="shot-list-meta">
+            <small>{shots.length} 个镜头</small>
+            {hasHybridSegmentation && (
+              <span
+                className={`segmentation-status ${segmentationVerified ? "verified" : "fallback"}`}
+                title={segmentation?.fallback_reason || segmentation?.model_summary || ""}
+              >
+                {segmentationVerified ? "程序候选 + VLM 确认" : "程序边界 · VLM 已降级"}
+              </span>
+            )}
+          </div>
         </div>
         {shots.map((shot) => (
           <button
@@ -2350,7 +3712,9 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
               <span className="eyebrow">镜头 {String(activeShot.index).padStart(2, "0")}</span>
               <h3>{activeShot.title}</h3>
               <p>
-                {formatTime(activeShot.start_seconds)} — {formatTime(activeShot.end_seconds)} · {isMediaEvidence ? "真实时间边界" : `置信度 ${Math.round(activeShot.confidence * 100)}%`}
+                {formatTime(activeShot.start_seconds)} — {formatTime(activeShot.end_seconds)} · {isMediaEvidence ? "真实时间边界" : `内容置信度 ${Math.round(activeShot.confidence * 100)}%`}
+                {hasHybridSegmentation && ` · ${formatBoundaryMethod(activeShot.boundary_method)}`}
+                {activeShot.boundary_confidence != null && ` ${Math.round(activeShot.boundary_confidence * 100)}%`}
               </p>
             </div>
             {!isMediaEvidence && (
@@ -2359,6 +3723,55 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
               </button>
             )}
           </div>
+
+          {hasHybridSegmentation && (
+            <details className="segmentation-evidence">
+              <summary>
+                查看边界候选证据
+                <span>{segmentation.candidate_count} 个候选 · 最终 {segmentation.final_shot_count} 个镜头</span>
+              </summary>
+              {hasFourFrameEvidence && (
+                <p className="segmentation-evidence-guide">
+                  每张候选图从左到右：远前、近前｜近后、远后；中间白线为候选时刻。
+                </p>
+              )}
+              <div className="segmentation-candidate-grid">
+                {segmentation.candidates.map((candidate) => (
+                  <article
+                    className={`segmentation-candidate ${segmentation.selected_candidate_ids?.includes(candidate.id) ? "selected" : ""}`}
+                    key={candidate.id}
+                  >
+                    {candidate.comparison_image_url && (
+                      <img
+                        className={hasFourFrameEvidence ? "micro-timeline" : ""}
+                        src={resolveArtifactUrl(candidate.comparison_image_url)}
+                        alt={
+                          hasFourFrameEvidence
+                            ? `${candidate.id} 边界四帧微时间线`
+                            : `${candidate.id} 边界前后对比`
+                        }
+                      />
+                    )}
+                    <div>
+                      <strong>{formatTime(candidate.timestamp_seconds)}</strong>
+                      <span>
+                        {candidate.hard_boundary
+                          ? "硬切锁定"
+                          : candidate.selected_by_model
+                            ? "VLM 已确认"
+                            : candidate.model_consistency_adjusted
+                              ? "一致性校验已合并"
+                              : candidate.model_reason
+                                ? "VLM 已拒绝"
+                                : "候选已合并"}
+                      </span>
+                      <small>{candidate.model_reason || candidate.methods.join(" / ")}</small>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </details>
+          )}
 
           {activeShot.keyframe_url && (
             <figure className="shot-keyframe">
@@ -2378,6 +3791,12 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
                 <Fact label="结束时间" value={`${activeShot.end_seconds.toFixed(3)} 秒`} />
                 <Fact label="镜头时长" value={`${(activeShot.end_seconds - activeShot.start_seconds).toFixed(3)} 秒`} />
                 <Fact label="边界依据" value={activeShot.transition} />
+                {hasHybridSegmentation && (
+                  <Fact
+                    label="边界来源"
+                    value={`${formatBoundaryMethod(activeShot.boundary_method)}${activeShot.source_candidate_ids?.length ? ` · ${activeShot.source_candidate_ids.join(", ")}` : ""}`}
+                  />
+                )}
                 <Fact label="音频证据" value={activeShot.audio} />
                 <Fact label="证据类型" value="FFmpeg 实测" />
               </div>
@@ -2415,6 +3834,12 @@ function ShotsTab({ shots, activeShotId, onSelect, onCopy, analysisMode }) {
                 <Fact label="色彩" value={activeShot.color} />
                 <Fact label="声音" value={activeShot.audio} />
                 <Fact label="转场" value={activeShot.transition} />
+                {hasHybridSegmentation && (
+                  <Fact
+                    label="分镜边界"
+                    value={`${formatBoundaryMethod(activeShot.boundary_method)}${activeShot.semantic_group ? ` · ${activeShot.semantic_group}` : ""}`}
+                  />
+                )}
               </div>
               {(activeShot.dialogue || activeShot.subtitle_text || activeShot.ocr_text) && (
             <div className="transcript-box">

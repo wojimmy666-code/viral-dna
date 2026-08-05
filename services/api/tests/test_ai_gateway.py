@@ -159,7 +159,7 @@ def test_catalog_freezes_profile_routes(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("VIRAL_DNA_VLM_PROVIDER", "dashscope")
     plan = load_model_plan(AnalysisProfile.ECONOMY)
     assert plan is not None
-    assert plan.catalog_version == "phase1-model-catalog-2026-08-02"
+    assert plan.catalog_version == "phase1-model-catalog-2026-08-04-r5"
     assert PriceCatalog().catalog_version == plan.pricing_version
     targets = plan.targets_for(ModelTask.SHOT_FACTS)
     assert [target.model for target in targets] == [
@@ -348,7 +348,7 @@ async def test_failed_response_with_usage_is_charged_to_ledger(
                 ),
                 resolved_model=request.target.model,
                 latency_ms=42,
-                raw_content='{\"title\":\"incomplete\"}',
+                raw_content='{"title":"incomplete"}',
             )
 
     service = ShotFactsService(

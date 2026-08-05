@@ -6,6 +6,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from .ai.shot_facts import ShotFactsOutcome, ShotFactsService
+from .ai.shot_segmentation import SegmentationOutcome, ShotSegmentationService
 from .evidence import EvidenceTimelineBuilder
 from .link_ingestion import LinkCollector, LinkIngestionError, LinkIngestionResult
 from .media import MediaProcessingError, MediaProcessor
@@ -31,6 +32,7 @@ from .models import (
 )
 from .pipeline import SimulatedAnalysisPipeline
 from .records import resolve_video_path, write_source_metadata
+from .thumbnails import thumbnail_service
 from .workspace import workspace_manager
 
 
@@ -101,6 +103,7 @@ class HybridAnalysisPipeline:
                 self._apply_ingestion(video, collected)
                 await self.repository.save_video(video)
                 await write_source_metadata(video)
+                await thumbnail_service.ensure(video)
                 await progress(AnalysisStage.INGESTING, 24, "平台视频下载完成，正在准备媒体分析")
 
             if not (video.stored_path or video.stored_relative_path):
@@ -129,6 +132,27 @@ class HybridAnalysisPipeline:
                 progress=media_progress,
                 record_id=analysis.record_id,
             )
+            self._apply_metadata(video, evidence)
+            await self.repository.save_video(video)
+
+            segmentation_outcome: SegmentationOutcome | None = None
+            if analysis.model_plan is not None:
+                await progress(
+                    AnalysisStage.SEGMENTING,
+                    76,
+                    "正在使用 VLM 确认候选分镜边界",
+                )
+                segmentation_outcome = await ShotSegmentationService(self.repository).analyze(
+                    analysis=analysis,
+                    video=video,
+                    evidence=evidence,
+                )
+                evidence = await processor.apply_segmentation(
+                    evidence,
+                    analysis.id,
+                    segmentation_outcome.segmentation,
+                    record_id=analysis.record_id,
+                )
 
             await progress(AnalysisStage.TRANSCRIBING, 84, "正在运行 ASR/OCR 证据 Provider")
             timeline = await EvidenceTimelineBuilder.from_environment().build(
@@ -167,7 +191,10 @@ class HybridAnalysisPipeline:
                 evidence,
                 timeline,
                 model_outcome=model_outcome,
+                segmentation_outcome=segmentation_outcome,
             )
+            if analysis.record_id is not None:
+                await thumbnail_service.promote_from_report(analysis.record_id, report)
             await self.repository.save_report(report)
 
             analysis.stage = AnalysisStage.COMPLETED
@@ -176,6 +203,7 @@ class HybridAnalysisPipeline:
                 is_link=is_link,
                 timeline=timeline,
                 model_outcome=model_outcome,
+                segmentation_outcome=segmentation_outcome,
                 vlm_configured=analysis.model_plan is not None,
             )
             analysis.updated_at = utc_now()
@@ -252,6 +280,7 @@ def build_media_evidence_report(
     timeline: EvidenceTimeline,
     *,
     model_outcome: ShotFactsOutcome | None = None,
+    segmentation_outcome: SegmentationOutcome | None = None,
 ) -> AnalysisReport:
     timeline_by_shot = {shot.shot_id: shot for shot in timeline.shots}
     visual_facts = model_outcome.facts if model_outcome else {}
@@ -269,13 +298,9 @@ def build_media_evidence_report(
                 action=facts.action if facts else "待多模态模型识别",
                 scene=facts.scene if facts else "待多模态模型识别",
                 camera=(
-                    facts.camera
-                    if facts
-                    else f"真实镜头边界，持续 {shot.duration_seconds:.1f} 秒"
+                    facts.camera if facts else f"真实镜头边界，持续 {shot.duration_seconds:.1f} 秒"
                 ),
-                composition=(
-                    facts.composition if facts else "已提取多时点关键帧，构图语义待分析"
-                ),
+                composition=(facts.composition if facts else "已提取多时点关键帧，构图语义待分析"),
                 lighting=facts.lighting if facts else "待多模态模型识别",
                 color=facts.color if facts else "待多模态模型识别",
                 dialogue=timeline_by_shot[shot.shot_id].transcript_text,
@@ -287,7 +312,11 @@ def build_media_evidence_report(
                     if facts
                     else "视频开始"
                     if shot.index == 1
-                    else "FFmpeg scene score 检测到画面切换"
+                    else "VLM 已确认候选边界代表新的语义镜头"
+                    if shot.boundary_method == "hybrid_vlm_verified"
+                    else "FFmpeg 硬切分数达到锁定阈值"
+                    if shot.boundary_method == "hard_scene_score"
+                    else "程序检测到画面切换"
                 ),
                 narrative_role=facts.narrative_role if facts else "待 VLM 分析",
                 prompt=(
@@ -299,6 +328,10 @@ def build_media_evidence_report(
                 keyframe_url=shot.keyframe_url,
                 evidence_frame_urls=shot.evidence_frame_urls or [shot.keyframe_url],
                 evidence_kind="model" if facts else "measured",
+                boundary_method=shot.boundary_method or shot.detection_method,
+                boundary_confidence=shot.boundary_confidence,
+                source_candidate_ids=shot.source_candidate_ids,
+                semantic_group=shot.semantic_group,
             )
         )
 
@@ -357,8 +390,21 @@ def build_media_evidence_report(
         prompt_package=prompt_package,
         media_evidence=evidence,
         evidence_timeline=timeline,
-        model_warnings=model_outcome.warnings if model_outcome else [],
-        model_cost_summary=model_outcome.cost_summary if model_outcome else None,
+        model_warnings=list(
+            dict.fromkeys(
+                [
+                    *(segmentation_outcome.warnings if segmentation_outcome else []),
+                    *(model_outcome.warnings if model_outcome else []),
+                ]
+            )
+        ),
+        model_cost_summary=(
+            model_outcome.cost_summary
+            if model_outcome
+            else segmentation_outcome.cost_summary
+            if segmentation_outcome
+            else None
+        ),
     )
 
 
@@ -387,6 +433,7 @@ def _completion_message(
     is_link: bool,
     timeline: EvidenceTimeline,
     model_outcome: ShotFactsOutcome | None,
+    segmentation_outcome: SegmentationOutcome | None,
     vlm_configured: bool,
 ) -> str:
     prefix = "链接采集、媒体证据和时间线生成完成" if is_link else "媒体证据和时间线生成完成"
@@ -396,10 +443,18 @@ def _completion_message(
         if run.status == EvidenceProviderStatus.COMPLETED
     ]
     evidence_message = f"{'/'.join(completed)} 已执行" if completed else "ASR/OCR 未执行"
+    segmentation_message = ""
+    if segmentation_outcome:
+        segmentation = segmentation_outcome.segmentation
+        segmentation_message = (
+            f"；混合分镜确认完成，共 {segmentation.final_shot_count} 个镜头"
+            if segmentation.verified_by_model
+            else "；分镜语义确认已降级为程序硬切边界"
+        )
     if model_outcome and model_outcome.facts:
         cost = model_outcome.cost_summary.measured_cost_micros / 1_000_000
         return (
-            f"{prefix}；{evidence_message}；VLM 已完成 "
+            f"{prefix}；{evidence_message}{segmentation_message}；VLM 已完成 "
             f"{len(model_outcome.facts)} 个镜头，模型成本约 ¥{cost:.4f}"
         )
     if model_outcome and model_outcome.warnings:

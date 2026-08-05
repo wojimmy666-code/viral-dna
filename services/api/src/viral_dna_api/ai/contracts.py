@@ -48,6 +48,7 @@ class ModelRequest:
     system_prompt: str
     user_prompt: str
     image_paths: tuple[Path, ...] = ()
+    image_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

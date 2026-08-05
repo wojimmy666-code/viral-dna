@@ -13,12 +13,20 @@ from .models import (
     AnalysisRecord,
     AnalysisReport,
     AnalysisStage,
+    ApprovalEvent,
     ExportArtifact,
+    GenerationCandidate,
+    GenerationRun,
     ModelRun,
     ModelRunStatus,
     PriceSnapshot,
+    ProductionProject,
+    ProductionRevision,
     RecordFolder,
+    ReferenceAsset,
+    ReferenceBinding,
     ReplacementVersion,
+    ShotPlan,
     Video,
     VideoStatus,
 )
@@ -44,6 +52,14 @@ class InMemoryStore:
         self.folders: dict[UUID, RecordFolder] = {}
         self.records: dict[UUID, AnalysisRecord] = {}
         self.exports: dict[UUID, ExportArtifact] = {}
+        self.production_projects: dict[UUID, ProductionProject] = {}
+        self.production_revisions: dict[UUID, ProductionRevision] = {}
+        self.reference_assets: dict[UUID, ReferenceAsset] = {}
+        self.shot_plans: dict[UUID, ShotPlan] = {}
+        self.reference_bindings: dict[UUID, ReferenceBinding] = {}
+        self.generation_runs: dict[UUID, GenerationRun] = {}
+        self.generation_candidates: dict[UUID, GenerationCandidate] = {}
+        self.approval_events: dict[UUID, ApprovalEvent] = {}
 
     async def add_video(self, video: Video) -> Video:
         async with self._lock:
@@ -164,6 +180,212 @@ class InMemoryStore:
 
     async def get_price_snapshot(self, snapshot_id: str) -> PriceSnapshot | None:
         return self.price_snapshots.get(snapshot_id)
+
+    async def save_production_project(
+        self,
+        project: ProductionProject,
+    ) -> ProductionProject:
+        async with self._lock:
+            self.production_projects[project.id] = project
+        return project
+
+    async def get_production_project(
+        self,
+        project_id: UUID,
+    ) -> ProductionProject | None:
+        return self.production_projects.get(project_id)
+
+    async def list_production_projects(
+        self,
+        record_id: UUID | None = None,
+    ) -> list[ProductionProject]:
+        projects = list(self.production_projects.values())
+        if record_id is not None:
+            projects = [project for project in projects if project.record_id == record_id]
+        return sorted(projects, key=lambda project: project.created_at)
+
+    async def save_production_revision(
+        self,
+        revision: ProductionRevision,
+    ) -> ProductionRevision:
+        async with self._lock:
+            self.production_revisions[revision.id] = revision
+        return revision
+
+    async def get_production_revision(
+        self,
+        revision_id: UUID,
+    ) -> ProductionRevision | None:
+        return self.production_revisions.get(revision_id)
+
+    async def list_production_revisions(
+        self,
+        project_id: UUID,
+    ) -> list[ProductionRevision]:
+        return sorted(
+            (
+                revision
+                for revision in self.production_revisions.values()
+                if revision.project_id == project_id
+            ),
+            key=lambda revision: revision.revision_number,
+        )
+
+    async def save_reference_asset(self, asset: ReferenceAsset) -> ReferenceAsset:
+        async with self._lock:
+            self.reference_assets[asset.id] = asset
+        return asset
+
+    async def get_reference_asset(self, asset_id: UUID) -> ReferenceAsset | None:
+        return self.reference_assets.get(asset_id)
+
+    async def list_reference_assets(self, project_id: UUID) -> list[ReferenceAsset]:
+        return sorted(
+            (asset for asset in self.reference_assets.values() if asset.project_id == project_id),
+            key=lambda asset: asset.created_at,
+        )
+
+    async def save_production_bundle(
+        self,
+        project: ProductionProject,
+        revision: ProductionRevision,
+        *,
+        reference_assets: list[ReferenceAsset] | None = None,
+        shot_plans: list[ShotPlan] | None = None,
+        reference_bindings: list[ReferenceBinding] | None = None,
+        remove_reference_binding_ids: list[UUID] | None = None,
+        generation_runs: list[GenerationRun] | None = None,
+        generation_candidates: list[GenerationCandidate] | None = None,
+        approval_events: list[ApprovalEvent] | None = None,
+    ) -> tuple[ProductionProject, ProductionRevision]:
+        async with self._lock:
+            self.production_projects[project.id] = project
+            self.production_revisions[revision.id] = revision
+            for asset in reference_assets or []:
+                self.reference_assets[asset.id] = asset
+            for shot_plan in shot_plans or []:
+                self.shot_plans[shot_plan.id] = shot_plan
+            for binding in reference_bindings or []:
+                self.reference_bindings[binding.id] = binding
+            for binding_id in remove_reference_binding_ids or []:
+                self.reference_bindings.pop(binding_id, None)
+            for run in generation_runs or []:
+                self.generation_runs[run.id] = run
+            for candidate in generation_candidates or []:
+                self.generation_candidates[candidate.id] = candidate
+            for event in approval_events or []:
+                self.approval_events[event.id] = event
+        return project, revision
+
+    async def save_shot_plan(self, shot_plan: ShotPlan) -> ShotPlan:
+        async with self._lock:
+            self.shot_plans[shot_plan.id] = shot_plan
+        return shot_plan
+
+    async def get_shot_plan(self, shot_plan_id: UUID) -> ShotPlan | None:
+        return self.shot_plans.get(shot_plan_id)
+
+    async def list_shot_plans(self, project_id: UUID) -> list[ShotPlan]:
+        return sorted(
+            (
+                shot_plan
+                for shot_plan in self.shot_plans.values()
+                if shot_plan.project_id == project_id
+            ),
+            key=lambda shot_plan: shot_plan.index,
+        )
+
+    async def save_reference_binding(
+        self,
+        binding: ReferenceBinding,
+    ) -> ReferenceBinding:
+        async with self._lock:
+            self.reference_bindings[binding.id] = binding
+        return binding
+
+    async def get_reference_binding(
+        self,
+        binding_id: UUID,
+    ) -> ReferenceBinding | None:
+        return self.reference_bindings.get(binding_id)
+
+    async def list_reference_bindings(
+        self,
+        shot_plan_id: UUID,
+    ) -> list[ReferenceBinding]:
+        return sorted(
+            (
+                binding
+                for binding in self.reference_bindings.values()
+                if binding.shot_plan_id == shot_plan_id
+            ),
+            key=lambda binding: binding.created_at,
+        )
+
+    async def save_generation_run(self, run: GenerationRun) -> GenerationRun:
+        async with self._lock:
+            self.generation_runs[run.id] = run
+        return run
+
+    async def get_generation_run(self, run_id: UUID) -> GenerationRun | None:
+        return self.generation_runs.get(run_id)
+
+    async def list_generation_runs(
+        self,
+        project_id: UUID,
+        shot_plan_id: UUID | None = None,
+    ) -> list[GenerationRun]:
+        runs = [run for run in self.generation_runs.values() if run.project_id == project_id]
+        if shot_plan_id is not None:
+            runs = [run for run in runs if run.shot_plan_id == shot_plan_id]
+        return sorted(runs, key=lambda run: run.created_at)
+
+    async def save_generation_candidate(
+        self,
+        candidate: GenerationCandidate,
+    ) -> GenerationCandidate:
+        async with self._lock:
+            self.generation_candidates[candidate.id] = candidate
+        return candidate
+
+    async def get_generation_candidate(
+        self,
+        candidate_id: UUID,
+    ) -> GenerationCandidate | None:
+        return self.generation_candidates.get(candidate_id)
+
+    async def list_generation_candidates(
+        self,
+        generation_run_id: UUID,
+    ) -> list[GenerationCandidate]:
+        return sorted(
+            (
+                candidate
+                for candidate in self.generation_candidates.values()
+                if candidate.generation_run_id == generation_run_id
+            ),
+            key=lambda candidate: candidate.ordinal,
+        )
+
+    async def save_approval_event(self, event: ApprovalEvent) -> ApprovalEvent:
+        async with self._lock:
+            self.approval_events[event.id] = event
+        return event
+
+    async def get_approval_event(self, event_id: UUID) -> ApprovalEvent | None:
+        return self.approval_events.get(event_id)
+
+    async def list_approval_events(
+        self,
+        project_id: UUID,
+        shot_plan_id: UUID | None = None,
+    ) -> list[ApprovalEvent]:
+        events = [
+            event for event in self.approval_events.values() if event.project_id == project_id
+        ]
+        if shot_plan_id is not None:
+            events = [event for event in events if event.shot_plan_id == shot_plan_id]
+        return sorted(events, key=lambda event: event.created_at)
 
 
 class WorkspaceStore:

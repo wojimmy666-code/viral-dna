@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from fractions import Fraction
 from itertools import pairwise
 from math import gcd
@@ -18,15 +19,28 @@ from .models import (
     AnalysisStage,
     MediaEvidence,
     MediaMetadata,
+    SceneBoundaryCandidate,
+    SegmentationMetadata,
     ShotEvidence,
     SubtitleStream,
 )
 from .workspace import workspace_manager
 
-PROCESSOR_VERSION = "ffmpeg-media-v1"
+PROCESSOR_VERSION = "ffmpeg-hybrid-candidates-v3"
 MAX_VIDEO_SECONDS = 5 * 60
 MAX_SHOTS = 120
 MIN_SHOT_SECONDS = 0.45
+SEGMENTATION_DETECTOR_VERSION = "ffmpeg-hybrid-candidates-v3"
+MAX_BOUNDARY_CANDIDATES = 18
+LOW_SCENE_THRESHOLD_FINE = 0.015
+LOW_SCENE_THRESHOLD_STANDARD = 0.035
+TEMPORAL_SCENE_THRESHOLD_FINE = 0.18
+TEMPORAL_SCENE_THRESHOLD_STANDARD = 0.24
+TEMPORAL_SAMPLE_FPS = 2
+BOUNDARY_NMS_SECONDS = 0.65
+BOUNDARY_EVIDENCE_NEAR_OFFSET_SECONDS = 0.12
+BOUNDARY_EVIDENCE_FAR_OFFSET_SECONDS = 0.75
+MAX_CONTEXT_FRAMES = 12
 TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "ssa", "srt", "subrip", "text", "webvtt"}
 
 ProgressCallback = Callable[[AnalysisStage, int, str], Awaitable[None]]
@@ -37,6 +51,147 @@ class MediaProcessingError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+@dataclass(frozen=True, slots=True)
+class RawSceneScore:
+    timestamp_seconds: float
+    score: float
+    method: str
+    hard_boundary: bool = False
+
+
+_SCENE_METADATA_PATTERN = re.compile(
+    r"pts_time:(?P<timestamp>[0-9]+(?:\.[0-9]+)?)[^\r\n]*[\r\n]+"
+    r"[^\r\n]*lavfi\.scene_score=(?P<score>[0-9]+(?:\.[0-9]+)?)"
+)
+
+
+def parse_scene_score_metadata(
+    output: str,
+    *,
+    method: str,
+    hard_threshold: float,
+) -> list[RawSceneScore]:
+    results: list[RawSceneScore] = []
+    for match in _SCENE_METADATA_PATTERN.finditer(output):
+        timestamp = round(float(match.group("timestamp")), 3)
+        score = min(1.0, max(0.0, float(match.group("score"))))
+        results.append(
+            RawSceneScore(
+                timestamp_seconds=timestamp,
+                score=score,
+                method=method,
+                hard_boundary=(method == "adjacent_scene_score" and score >= hard_threshold),
+            )
+        )
+    return results
+
+
+def merge_scene_candidates(
+    raw_candidates: list[RawSceneScore],
+    *,
+    duration_seconds: float,
+    nms_seconds: float = BOUNDARY_NMS_SECONDS,
+    max_candidates: int = MAX_BOUNDARY_CANDIDATES,
+) -> list[SceneBoundaryCandidate]:
+    eligible = sorted(
+        (
+            item
+            for item in raw_candidates
+            if item.timestamp_seconds >= MIN_SHOT_SECONDS
+            and duration_seconds - item.timestamp_seconds >= MIN_SHOT_SECONDS
+        ),
+        key=lambda item: item.timestamp_seconds,
+    )
+    clusters: list[list[RawSceneScore]] = []
+    for item in eligible:
+        if not clusters or item.timestamp_seconds - clusters[-1][0].timestamp_seconds > nms_seconds:
+            clusters.append([item])
+        else:
+            clusters[-1].append(item)
+
+    merged: list[tuple[RawSceneScore, list[str], bool]] = []
+    for cluster in clusters:
+        hard_items = [item for item in cluster if item.hard_boundary]
+        adjacent_items = [item for item in cluster if item.method == "adjacent_scene_score"]
+        if hard_items:
+            selected = max(hard_items, key=lambda item: item.score)
+        elif adjacent_items:
+            selected = min(adjacent_items, key=lambda item: item.timestamp_seconds)
+        else:
+            selected = max(cluster, key=lambda item: item.score)
+        merged.append(
+            (
+                selected,
+                sorted({item.method for item in cluster}),
+                any(item.hard_boundary for item in cluster),
+            )
+        )
+
+    if len(merged) > max_candidates:
+        locked = [item for item in merged if item[2]]
+        soft = [item for item in merged if not item[2]]
+        available = max(0, max_candidates - len(locked))
+        soft = sorted(soft, key=lambda item: item[0].score, reverse=True)[:available]
+        merged = sorted([*locked, *soft], key=lambda item: item[0].timestamp_seconds)
+
+    return [
+        SceneBoundaryCandidate(
+            id=f"candidate_{index:03d}",
+            timestamp_seconds=item.timestamp_seconds,
+            score=round(item.score, 6),
+            methods=methods,
+            hard_boundary=hard,
+        )
+        for index, (item, methods, hard) in enumerate(merged, 1)
+    ]
+
+
+def boundaries_from_candidates(
+    candidates: list[SceneBoundaryCandidate],
+    duration_seconds: float,
+    *,
+    selected_candidate_ids: set[str] | None = None,
+    include_hard: bool = True,
+) -> list[float]:
+    selected = selected_candidate_ids or set()
+    boundaries = [0.0]
+    for candidate in sorted(candidates, key=lambda item: item.timestamp_seconds):
+        if not ((include_hard and candidate.hard_boundary) or candidate.id in selected):
+            continue
+        timestamp = candidate.timestamp_seconds
+        if timestamp - boundaries[-1] < MIN_SHOT_SECONDS:
+            continue
+        if duration_seconds - timestamp < MIN_SHOT_SECONDS:
+            continue
+        boundaries.append(round(timestamp, 3))
+        if len(boundaries) >= MAX_SHOTS:
+            break
+    boundaries.append(round(duration_seconds, 3))
+    return boundaries
+
+
+def boundary_evidence_timestamps(
+    timestamp_seconds: float,
+    duration_seconds: float,
+    *,
+    near_offset_seconds: float = BOUNDARY_EVIDENCE_NEAR_OFFSET_SECONDS,
+    far_offset_seconds: float = BOUNDARY_EVIDENCE_FAR_OFFSET_SECONDS,
+) -> tuple[float, float, float, float]:
+    """Return a four-frame micro timeline around one candidate boundary."""
+
+    maximum = max(0.001, duration_seconds - 0.001)
+
+    def clamp(value: float) -> float:
+        return round(min(maximum, max(0.001, value)), 3)
+
+    return (
+        clamp(timestamp_seconds - far_offset_seconds),
+        clamp(timestamp_seconds - near_offset_seconds),
+        clamp(timestamp_seconds + near_offset_seconds),
+        clamp(timestamp_seconds + far_offset_seconds),
+    )
 
 
 def get_storage_root() -> Path:
@@ -350,6 +505,47 @@ class MediaProcessor:
             timeout_seconds=120,
         )
 
+    async def extract_frame(
+        self,
+        source_path: Path,
+        timestamp_seconds: float,
+        output_path: Path,
+    ) -> None:
+        if timestamp_seconds < 0:
+            raise MediaProcessingError(
+                "frame_timestamp_invalid",
+                "关键帧时间不能小于 0",
+            )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        await _run_command(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(source_path),
+                "-ss",
+                f"{timestamp_seconds:.3f}",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(output_path),
+            ],
+            timeout_seconds=120,
+        )
+        valid_output = await asyncio.to_thread(
+            lambda: output_path.is_file() and output_path.stat().st_size > 0
+        )
+        if not valid_output:
+            raise MediaProcessingError(
+                "frame_extract_failed",
+                "没有从源视频提取到关键帧",
+            )
+
     async def detect_scene_boundaries(
         self,
         proxy_path: Path,
@@ -396,14 +592,94 @@ class MediaProcessor:
         boundaries.append(round(duration_seconds, 3))
         return boundaries
 
+    async def _detect_scene_scores(
+        self,
+        proxy_path: Path,
+        *,
+        threshold: float,
+        method: str,
+        hard_threshold: float,
+        filter_prefix: str = "",
+    ) -> list[RawSceneScore]:
+        _, stderr = await _run_command(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-nostdin",
+                "-i",
+                str(proxy_path),
+                "-vf",
+                f"{filter_prefix}select=gt(scene\\,{threshold}),metadata=print",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ],
+            timeout_seconds=600,
+        )
+        return parse_scene_score_metadata(
+            stderr,
+            method=method,
+            hard_threshold=hard_threshold,
+        )
+
+    async def detect_scene_candidates(
+        self,
+        proxy_path: Path,
+        duration_seconds: float,
+        *,
+        granularity: str,
+    ) -> list[SceneBoundaryCandidate]:
+        hard_threshold = (
+            min(self.scene_threshold, 0.24) if granularity == "fine" else self.scene_threshold
+        )
+        low_threshold = (
+            LOW_SCENE_THRESHOLD_FINE if granularity == "fine" else LOW_SCENE_THRESHOLD_STANDARD
+        )
+        temporal_threshold = (
+            TEMPORAL_SCENE_THRESHOLD_FINE
+            if granularity == "fine"
+            else TEMPORAL_SCENE_THRESHOLD_STANDARD
+        )
+        adjacent, temporal = await asyncio.gather(
+            self._detect_scene_scores(
+                proxy_path,
+                threshold=low_threshold,
+                method="adjacent_scene_score",
+                hard_threshold=hard_threshold,
+            ),
+            self._detect_scene_scores(
+                proxy_path,
+                threshold=temporal_threshold,
+                method="temporal_window_scene_score",
+                hard_threshold=hard_threshold,
+                filter_prefix=f"fps={TEMPORAL_SAMPLE_FPS},",
+            ),
+        )
+        temporal = [
+            item for item in temporal if item.timestamp_seconds > (1 / TEMPORAL_SAMPLE_FPS) + 0.01
+        ]
+        return merge_scene_candidates(
+            [*adjacent, *temporal],
+            duration_seconds=duration_seconds,
+        )
+
     async def extract_keyframes(
         self,
         proxy_path: Path,
         boundaries: list[float],
         shots_dir: Path,
         analysis_id: UUID,
+        *,
+        boundary_candidates: list[SceneBoundaryCandidate] | None = None,
     ) -> list[ShotEvidence]:
         shots: list[ShotEvidence] = []
+        candidates_by_timestamp = {
+            round(candidate.timestamp_seconds, 3): candidate
+            for candidate in boundary_candidates or []
+        }
         for index, (start, end) in enumerate(pairwise(boundaries), 1):
             representative = round(start + (end - start) / 2, 3)
             duration = end - start
@@ -446,6 +722,30 @@ class MediaProcessor:
                 frame_urls.append(artifact_url(analysis_id, f"shots/{filename}"))
 
             keyframe_url = artifact_url(analysis_id, f"shots/shot_{index:03d}.jpg")
+            boundary_candidate = candidates_by_timestamp.get(round(start, 3))
+            if index == 1:
+                boundary_method = "video_start"
+                boundary_confidence = 1.0
+                source_candidate_ids: list[str] = []
+                semantic_group = None
+            elif boundary_candidate is not None:
+                boundary_method = (
+                    "hybrid_vlm_verified"
+                    if boundary_candidate.selected_by_model
+                    else "hard_scene_score"
+                )
+                boundary_confidence = (
+                    boundary_candidate.model_confidence
+                    if boundary_candidate.selected_by_model
+                    else boundary_candidate.score
+                )
+                source_candidate_ids = [boundary_candidate.id]
+                semantic_group = boundary_candidate.semantic_group_after
+            else:
+                boundary_method = "ffmpeg_scene_score"
+                boundary_confidence = None
+                source_candidate_ids = []
+                semantic_group = None
             shots.append(
                 ShotEvidence(
                     shot_id=f"shot_{index:03d}",
@@ -456,10 +756,164 @@ class MediaProcessor:
                     representative_timestamp=representative,
                     keyframe_url=keyframe_url,
                     evidence_frame_urls=frame_urls,
-                    detection_method="ffmpeg_scene_score",
+                    detection_method=(
+                        "hybrid_candidate_vlm"
+                        if boundary_candidates is not None
+                        else "ffmpeg_scene_score"
+                    ),
+                    boundary_method=boundary_method,
+                    boundary_confidence=boundary_confidence,
+                    source_candidate_ids=source_candidate_ids,
+                    semantic_group=semantic_group,
                 )
             )
         return shots
+
+    async def extract_boundary_evidence(
+        self,
+        proxy_path: Path,
+        candidates: list[SceneBoundaryCandidate],
+        segmentation_dir: Path,
+        analysis_id: UUID,
+        duration_seconds: float,
+    ) -> list[SceneBoundaryCandidate]:
+        enriched: list[SceneBoundaryCandidate] = []
+        for candidate in candidates:
+            far_before, near_before, near_after, far_after = boundary_evidence_timestamps(
+                candidate.timestamp_seconds,
+                duration_seconds,
+            )
+            filename = f"{candidate.id}.jpg"
+            output_path = segmentation_dir / filename
+            await _run_command(
+                [
+                    self.ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-ss",
+                    f"{far_before:.3f}",
+                    "-i",
+                    str(proxy_path),
+                    "-ss",
+                    f"{near_before:.3f}",
+                    "-i",
+                    str(proxy_path),
+                    "-ss",
+                    f"{near_after:.3f}",
+                    "-i",
+                    str(proxy_path),
+                    "-ss",
+                    f"{far_after:.3f}",
+                    "-i",
+                    str(proxy_path),
+                    "-filter_complex",
+                    (
+                        "[0:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[far_before];"
+                        "[1:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[near_before];"
+                        "[2:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[near_after];"
+                        "[3:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[far_after];"
+                        "[far_before][near_before][near_after][far_after]"
+                        "hstack=inputs=4,"
+                        "drawbox=x=479:y=0:w=2:h=ih:color=white:t=fill[comparison]"
+                    ),
+                    "-map",
+                    "[comparison]",
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    str(output_path),
+                ],
+                timeout_seconds=60,
+            )
+            url = artifact_url(analysis_id, f"segmentation/{filename}")
+            enriched.append(
+                candidate.model_copy(
+                    update={
+                        "comparison_image_url": url,
+                        "evidence_frame_urls": [url],
+                        "evidence_timestamps": [
+                            far_before,
+                            near_before,
+                            near_after,
+                            far_after,
+                        ],
+                    }
+                )
+            )
+        return enriched
+
+    async def create_segmentation_context(
+        self,
+        proxy_path: Path,
+        segmentation_dir: Path,
+        analysis_id: UUID,
+        duration_seconds: float,
+    ) -> tuple[str, list[float]]:
+        count = min(MAX_CONTEXT_FRAMES, max(2, math.ceil(duration_seconds / 1.5)))
+        timestamps = [round(duration_seconds * (index + 0.5) / count, 3) for index in range(count)]
+        for index, timestamp in enumerate(timestamps, 1):
+            output_path = segmentation_dir / f"context_{index:03d}.jpg"
+            await _run_command(
+                [
+                    self.ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-ss",
+                    f"{timestamp:.3f}",
+                    "-i",
+                    str(proxy_path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=w='min(480,iw)':h=-2",
+                    "-q:v",
+                    "3",
+                    str(output_path),
+                ],
+                timeout_seconds=60,
+            )
+
+        columns = min(4, count)
+        rows = max(1, math.ceil(count / columns))
+        context_path = segmentation_dir / "context-sheet.jpg"
+        await _run_command(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-framerate",
+                "1",
+                "-start_number",
+                "1",
+                "-i",
+                str(segmentation_dir / "context_%03d.jpg"),
+                "-vf",
+                (
+                    "scale=240:240:force_original_aspect_ratio=decrease,"
+                    "pad=240:240:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"tile={columns}x{rows}:nb_frames={count}:padding=8:margin=8:color=white"
+                ),
+                "-frames:v",
+                "1",
+                str(context_path),
+            ],
+            timeout_seconds=120,
+        )
+        return artifact_url(analysis_id, "segmentation/context-sheet.jpg"), timestamps
 
     async def create_contact_sheet(self, shots_dir: Path, output_path: Path, count: int) -> None:
         tile_count = min(count, 20)
@@ -492,6 +946,41 @@ class MediaProcessor:
             ],
             timeout_seconds=120,
         )
+
+    async def apply_segmentation(
+        self,
+        evidence: MediaEvidence,
+        analysis_id: UUID,
+        segmentation: SegmentationMetadata,
+        *,
+        record_id: UUID | None = None,
+    ) -> MediaEvidence:
+        artifact_root = get_analysis_artifact_root(analysis_id, record_id)
+        proxy_path = artifact_root / "proxy.mp4"
+        shots_dir = artifact_root / "shots"
+        await asyncio.to_thread(shots_dir.mkdir, parents=True, exist_ok=True)
+        shots = await self.extract_keyframes(
+            proxy_path,
+            segmentation.final_boundaries,
+            shots_dir,
+            analysis_id,
+            boundary_candidates=segmentation.candidates,
+        )
+        contact_sheet_path = artifact_root / "contact-sheet.jpg"
+        await self.create_contact_sheet(shots_dir, contact_sheet_path, len(shots))
+        updated = evidence.model_copy(
+            update={
+                "shots": shots,
+                "segmentation": segmentation,
+            }
+        )
+        manifest_path = artifact_root / "manifest.json"
+        await asyncio.to_thread(
+            manifest_path.write_text,
+            updated.model_dump_json(indent=2),
+            "utf-8",
+        )
+        return updated
 
     async def process(
         self,
@@ -539,14 +1028,50 @@ class MediaProcessor:
         elif metadata.subtitle_streams:
             subtitle_message = "检测到图像型或暂不支持的字幕轨，首期仅转换文本字幕轨"
 
-        await progress(AnalysisStage.SEGMENTING, 48, "正在检测真实镜头边界")
-        boundaries = await self.detect_scene_boundaries(
+        await progress(AnalysisStage.SEGMENTING, 48, "正在生成多层镜头边界候选")
+        candidates = await self.detect_scene_candidates(
             proxy_path,
             metadata.duration_seconds,
             granularity=granularity,
         )
+        segmentation_dir = artifact_root / "segmentation"
+        await asyncio.to_thread(segmentation_dir.mkdir, parents=True, exist_ok=True)
+        candidates = await self.extract_boundary_evidence(
+            proxy_path,
+            candidates,
+            segmentation_dir,
+            analysis_id,
+            metadata.duration_seconds,
+        )
+        context_sheet_url, context_timestamps = await self.create_segmentation_context(
+            proxy_path,
+            segmentation_dir,
+            analysis_id,
+            metadata.duration_seconds,
+        )
+        boundaries = boundaries_from_candidates(candidates, metadata.duration_seconds)
+        segmentation = SegmentationMetadata(
+            detector_version=SEGMENTATION_DETECTOR_VERSION,
+            candidate_count=len(candidates),
+            candidates=candidates,
+            context_sheet_url=context_sheet_url,
+            context_timestamps=context_timestamps,
+            program_boundaries=boundaries,
+            selected_candidate_ids=[
+                candidate.id for candidate in candidates if candidate.hard_boundary
+            ],
+            final_boundaries=boundaries,
+            final_shot_count=max(0, len(boundaries) - 1),
+            fallback_reason="等待 VLM 语义确认，当前采用硬切边界",
+        )
         await progress(AnalysisStage.SEGMENTING, 66, "正在提取逐镜头代表关键帧")
-        shots = await self.extract_keyframes(proxy_path, boundaries, shots_dir, analysis_id)
+        shots = await self.extract_keyframes(
+            proxy_path,
+            boundaries,
+            shots_dir,
+            analysis_id,
+            boundary_candidates=candidates,
+        )
 
         contact_sheet_path = artifact_root / "contact-sheet.jpg"
         await self.create_contact_sheet(shots_dir, contact_sheet_path, len(shots))
@@ -560,6 +1085,7 @@ class MediaProcessor:
             contact_sheet_url=artifact_url(analysis_id, "contact-sheet.jpg"),
             manifest_url=artifact_url(analysis_id, "manifest.json"),
             shots=shots,
+            segmentation=segmentation,
         )
         manifest_path = artifact_root / "manifest.json"
         await asyncio.to_thread(

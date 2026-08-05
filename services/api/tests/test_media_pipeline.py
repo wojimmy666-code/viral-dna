@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import time
@@ -170,37 +171,66 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert processed_video["has_audio"] is True
         assert len(processed_video["sha256"]) == 64
 
+        records_response = client.get("/api/v1/records")
+        assert records_response.status_code == 200
+        record_id = upload_response.json()["record_id"]
+        record_summary = next(
+            item for item in records_response.json()["items"] if item["id"] == record_id
+        )
+        assert record_summary["duration_seconds"] == pytest.approx(2.0, abs=0.1)
+        assert record_summary["thumbnail_url"].startswith(
+            f"/api/v1/records/{record_id}/thumbnail?v="
+        )
+        thumbnail_response = client.get(record_summary["thumbnail_url"])
+        assert thumbnail_response.status_code == 200
+        assert thumbnail_response.headers["content-type"].startswith("image/jpeg")
+        assert thumbnail_response.headers["etag"]
+        assert thumbnail_response.content.startswith(b"\xff\xd8")
+
         report_response = client.get(f"/api/v1/videos/{video_id}/report")
         assert report_response.status_code == 200
         report = report_response.json()
         assert report["analysis_mode"] == "media_evidence"
         assert report["viral_findings"] == []
         assert report["entities"] == []
-        assert report["evidence_timeline"]["timeline_version"] == (
-            "phase1-evidence-timeline-v2"
-        )
+        assert report["evidence_timeline"]["timeline_version"] == ("phase1-evidence-timeline-v2")
         assert len(report["evidence_timeline"]["shots"]) == len(report["shots"])
         assert {
-            run["kind"]: run["status"]
-            for run in report["evidence_timeline"]["provider_runs"]
+            run["kind"]: run["status"] for run in report["evidence_timeline"]["provider_runs"]
         } == {"asr": "skipped", "ocr": "skipped", "subtitle": "skipped"}
         assert report["media_evidence"]["metadata"]["duration_seconds"] == pytest.approx(
             2.0, abs=0.1
         )
         assert len(report["shots"]) >= 2
+        segmentation = report["media_evidence"]["segmentation"]
+        assert segmentation["detector_version"] == "ffmpeg-hybrid-candidates-v3"
+        assert segmentation["candidate_count"] >= 1
+        assert segmentation["verified_by_model"] is False
+        assert segmentation["final_shot_count"] == len(report["shots"])
+        assert len(segmentation["candidates"][0]["evidence_timestamps"]) == 4
+        assert report["shots"][0]["boundary_method"] == "video_start"
 
         proxy_response = client.get(report["media_evidence"]["proxy_url"])
         keyframe_response = client.get(report["shots"][0]["keyframe_url"])
         manifest_response = client.get(report["media_evidence"]["manifest_url"])
         timeline_response = client.get(report["evidence_timeline"]["artifact_url"])
+        context_response = client.get(segmentation["context_sheet_url"])
+        comparison_response = client.get(segmentation["candidates"][0]["comparison_image_url"])
         assert proxy_response.status_code == 200
         assert len(proxy_response.content) > 100
         assert keyframe_response.status_code == 200
         assert keyframe_response.headers["content-type"].startswith("image/jpeg")
         assert manifest_response.status_code == 200
-        assert manifest_response.json()["processor_version"] == "ffmpeg-media-v1"
+        assert manifest_response.json()["processor_version"] == "ffmpeg-hybrid-candidates-v3"
+        assert context_response.status_code == 200
+        assert comparison_response.status_code == 200
         assert timeline_response.status_code == 200
         assert timeline_response.json()["timeline_version"] == "phase1-evidence-timeline-v2"
+        thumbnail_metadata = json.loads(
+            (storage_root / "records" / record_id / "source" / "thumbnail.json").read_text("utf-8")
+        )
+        assert thumbnail_metadata["source_kind"] == "analysis_keyframe"
+        assert thumbnail_metadata["analysis_id"] == analysis_id
 
 
 def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

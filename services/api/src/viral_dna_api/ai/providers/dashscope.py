@@ -225,9 +225,14 @@ class DashScopeProvider:
     ) -> ProviderResult[ResultT]:
         image_urls = await asyncio.gather(*(_data_url(path) for path in request.image_paths))
         user_content: list[dict[str, Any]] = [{"type": "text", "text": request.user_prompt}]
-        user_content.extend(
-            {"type": "image_url", "image_url": {"url": image_url}} for image_url in image_urls
-        )
+        if request.image_labels and len(request.image_labels) == len(image_urls):
+            for label, image_url in zip(request.image_labels, image_urls, strict=True):
+                user_content.append({"type": "text", "text": label})
+                user_content.append({"type": "image_url", "image_url": {"url": image_url}})
+        else:
+            user_content.extend(
+                {"type": "image_url", "image_url": {"url": image_url}} for image_url in image_urls
+            )
         payload = {
             "model": request.target.model,
             "messages": [

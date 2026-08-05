@@ -1,13 +1,15 @@
-catalog_version = "phase1-model-catalog-2026-08-02"
+catalog_version = "phase1-model-catalog-2026-08-04-r5"
 pricing_version = "cn-list-price-2026-08-02"
 
 [prompts]
+shot_segmentation = "shot-segmentation-v5"
 shot_facts = "shot-facts-v1"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-reasoning-v1"
 prompt_generation = "seedance-prompt-v1"
 
 [schemas]
+shot_segmentation = "shot-segmentation-selection-v4"
 shot_facts = "shot-visual-facts-v1"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-findings-v1"
@@ -32,18 +34,21 @@ endpoint = "dashscope-cn-beijing"
 thinking = false
 
 [routes.quality]
+shot_segmentation = ["qwen37"]
 shot_facts = ["qwen37"]
 entity_resolution = ["qwen37"]
 viral_reasoning = ["qwen37"]
 prompt_generation = ["qwen37"]
 
 [routes.balanced]
+shot_segmentation = ["qwen37"]
 shot_facts = ["qwen37"]
 entity_resolution = ["qwen37"]
 viral_reasoning = ["qwen37"]
 prompt_generation = ["qwen36flash", "qwen37"]
 
 [routes.economy]
+shot_segmentation = ["qwen36flash", "qwen37"]
 shot_facts = ["qwen36flash", "qwen37"]
 entity_resolution = ["qwen36flash", "qwen37"]
 viral_reasoning = ["qwen36flash", "qwen37"]

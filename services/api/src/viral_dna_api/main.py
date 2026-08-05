@@ -14,12 +14,18 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 
 from . import __version__
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
 from .chinese import to_simplified
 from .exports import ExportService
+from .image_generation import (
+    ImageGenerationGateway,
+    ImageGenerationSettingsService,
+    ImageGenerationSettingsServiceError,
+)
 from .link_ingestion import LinkIngestionError, identify_platform
 from .media import get_analysis_artifact_root
 from .model_settings import ModelSettingsService, ModelSettingsServiceError
@@ -31,22 +37,60 @@ from .models import (
     AnalysisRecord,
     AnalysisRecordDetail,
     AnalysisRecordList,
+    AnalysisRecordSummary,
     AnalysisRecordUpdate,
     AnalysisReport,
     AnalysisStage,
+    CandidateActionResponse,
+    CandidateApprovalRequest,
+    CandidateSelectRequest,
+    ChangeImpactRequest,
+    ChangeImpactResponse,
     ExportArtifact,
     ExportCreate,
     ExportKind,
     FolderCreate,
     FolderUpdate,
+    GenerationRunResponse,
     HealthResponse,
+    ImageGenerationCreate,
+    ImageGenerationSettingsResponse,
+    ImageGenerationSettingsUpdate,
     LinkVideoCreate,
+    LocalCodexAutoConfigureRequest,
+    LocalCodexDiscoveryResponse,
+    LocalCodexNetworkTestRequest,
+    LocalCodexNetworkTestResponse,
+    LocalImageToolDetectRequest,
+    LocalImageToolDetectResponse,
     ModelRun,
     ModelSettingsResponse,
     ModelSettingsUpdate,
+    ProductionAdvanceRequest,
+    ProductionBranchCreate,
+    ProductionGateStatus,
+    ProductionProject,
+    ProductionProjectCreate,
+    ProductionProjectDetail,
+    ProductionProjectUpdate,
+    ProductionRevisionDetail,
+    ProductionRevisionResponse,
     RecordFolder,
+    ReferenceAssetCreate,
+    ReferenceAssetResponse,
+    ReferenceAssetType,
+    ReferenceAssetUpdate,
     ReplacementCreate,
     ReplacementVersion,
+    ShotKeyframeSelectRequest,
+    ShotLifecycleUpdate,
+    ShotPlanBulkUpdate,
+    ShotPlanCreate,
+    ShotPlanDetailResponse,
+    ShotPlanReorder,
+    ShotPlanResponse,
+    ShotPlanUpdate,
+    ShotSourceFrameApprovalRequest,
     SourceType,
     Video,
     VideoStatus,
@@ -55,10 +99,26 @@ from .models import (
     WorkspaceValidationResponse,
 )
 from .pipeline import create_replacement_version
+from .production import (
+    MAX_REFERENCE_IMAGE_BYTES,
+    ProductionService,
+    ProductionServiceError,
+)
 from .real_pipeline import HybridAnalysisPipeline
 from .records import RecordService, resolve_video_path, write_source_metadata
 from .store import store
+from .thumbnails import thumbnail_etag, thumbnail_service
 from .workspace import WORKSPACE_SCHEMA_VERSION, WorkspaceError, workspace_manager
+from .workspace_catalog import (
+    Account,
+    AccountCatalogError,
+    AccountContextResponse,
+    ActiveWorkspaceRequest,
+    StorageLocation,
+    WorkspaceListItem,
+    WorkspaceLocalRegisterRequest,
+    create_account_context_service,
+)
 
 API_PREFIX = "/api/v1"
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
@@ -85,6 +145,7 @@ def parse_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    await account_context_service.ensure_current()
     await record_service.bootstrap(recover_interrupted=True)
     yield
 
@@ -105,8 +166,17 @@ app.add_middleware(
 
 pipeline = HybridAnalysisPipeline(store)
 model_settings_service = ModelSettingsService()
+image_generation_settings_service = ImageGenerationSettingsService()
 record_service = RecordService(store)
 export_service = ExportService(store)
+image_generation_gateway = ImageGenerationGateway(
+    workspace_manager,
+    image_generation_settings_service,
+    repository=store,
+)
+production_service = ProductionService(store, workspace_manager, image_generation_gateway)
+
+account_context_service = create_account_context_service(workspace_manager)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -127,6 +197,156 @@ async def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsRe
     try:
         return await model_settings_service.update(payload)
     except ModelSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/settings/image-generation",
+    response_model=ImageGenerationSettingsResponse,
+)
+async def get_image_generation_settings() -> ImageGenerationSettingsResponse:
+    try:
+        return image_generation_settings_service.get()
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/settings/image-generation",
+    response_model=ImageGenerationSettingsResponse,
+)
+async def update_image_generation_settings(
+    payload: ImageGenerationSettingsUpdate,
+) -> ImageGenerationSettingsResponse:
+    try:
+        return await image_generation_settings_service.update(payload)
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/image-generation/detect-local",
+    response_model=LocalImageToolDetectResponse,
+)
+async def detect_local_image_tool(
+    payload: LocalImageToolDetectRequest,
+) -> LocalImageToolDetectResponse:
+    try:
+        return await image_generation_settings_service.detect_local(payload)
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/image-generation/discover-local-codex",
+    response_model=LocalCodexDiscoveryResponse,
+)
+async def discover_local_codex() -> LocalCodexDiscoveryResponse:
+    try:
+        return await image_generation_settings_service.discover_codex()
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/image-generation/test-local-network",
+    response_model=LocalCodexNetworkTestResponse,
+)
+async def test_local_codex_network(
+    payload: LocalCodexNetworkTestRequest,
+) -> LocalCodexNetworkTestResponse:
+    try:
+        return await image_generation_settings_service.test_codex_network(payload)
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/image-generation/auto-configure-codex",
+    response_model=ImageGenerationSettingsResponse,
+)
+async def auto_configure_local_codex(
+    payload: LocalCodexAutoConfigureRequest,
+) -> ImageGenerationSettingsResponse:
+    try:
+        return await image_generation_settings_service.auto_configure_codex(payload)
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/context", response_model=AccountContextResponse)
+async def get_account_context() -> AccountContextResponse:
+    try:
+        return await account_context_service.ensure_current()
+    except AccountCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/accounts/current", response_model=Account)
+async def get_current_account() -> Account:
+    try:
+        return await account_context_service.current_account()
+    except AccountCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/workspaces", response_model=list[WorkspaceListItem])
+async def list_registered_workspaces() -> list[WorkspaceListItem]:
+    try:
+        return await account_context_service.list_workspaces()
+    except AccountCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/workspaces/validate-local",
+    response_model=WorkspaceValidationResponse,
+)
+async def validate_local_workspace(
+    payload: WorkspacePathRequest,
+) -> WorkspaceValidationResponse:
+    return workspace_manager.validate(payload.path)
+
+
+@app.post(
+    f"{API_PREFIX}/workspaces/register-local",
+    response_model=WorkspaceListItem,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register_local_workspace(
+    payload: WorkspaceLocalRegisterRequest,
+) -> WorkspaceListItem:
+    try:
+        return await account_context_service.register_local(payload.path, name=payload.name)
+    except AccountCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/context/active-workspace",
+    response_model=AccountContextResponse,
+)
+async def activate_registered_workspace(
+    payload: ActiveWorkspaceRequest,
+) -> AccountContextResponse:
+    try:
+        context = await account_context_service.activate_workspace(payload.workspace_id, store)
+        await record_service.bootstrap(recover_interrupted=True)
+        return context
+    except AccountCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/workspaces/{{workspace_id}}/storage-locations",
+    response_model=list[StorageLocation],
+)
+async def list_workspace_storage_locations(
+    workspace_id: UUID,
+) -> list[StorageLocation]:
+    try:
+        return await account_context_service.list_storage_locations(workspace_id)
+    except AccountCatalogError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
@@ -158,11 +378,10 @@ async def update_workspace(payload: WorkspacePathRequest) -> WorkspaceInfo:
     if not validation.valid:
         raise HTTPException(status_code=422, detail=validation.error or "工作区不可用")
     try:
-        await store.switch_workspace(validation.normalized_path)
+        await account_context_service.activate_local_path(validation.normalized_path, store)
         await record_service.bootstrap(recover_interrupted=True)
-    except WorkspaceError as exc:
-        status_code = 409 if "正在运行" in str(exc) else 422
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except AccountCatalogError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return await workspace_info()
 
 
@@ -175,11 +394,555 @@ def normalize_name(value: str, *, fallback: str | None = None) -> str:
     return cleaned
 
 
+def parse_reference_tags(value: str | None) -> list[str]:
+    if not value or not value.strip():
+        return []
+    text = value.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail="参考资产标签 JSON 格式无效") from exc
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise HTTPException(status_code=422, detail="参考资产标签必须是字符串数组")
+        return parsed
+    return [item.strip() for item in re.split(r"[,，\n]", text) if item.strip()]
+
+
+@app.post(
+    f"{API_PREFIX}/records/{{record_id}}/productions",
+    response_model=ProductionProjectDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_production(
+    record_id: UUID,
+    payload: ProductionProjectCreate,
+) -> ProductionProjectDetail:
+    try:
+        return await production_service.create_project(record_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/records/{{record_id}}/productions",
+    response_model=list[ProductionProject],
+)
+async def list_productions(record_id: UUID) -> list[ProductionProject]:
+    try:
+        return await production_service.list_projects(record_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}",
+    response_model=ProductionProjectDetail,
+)
+async def get_production(project_id: UUID) -> ProductionProjectDetail:
+    try:
+        return await production_service.get_project(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.patch(
+    f"{API_PREFIX}/productions/{{project_id}}",
+    response_model=ProductionProjectDetail,
+)
+async def update_production(
+    project_id: UUID,
+    payload: ProductionProjectUpdate,
+) -> ProductionProjectDetail:
+    try:
+        return await production_service.update_project(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/branches",
+    response_model=ProductionProjectDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_production_branch(
+    project_id: UUID,
+    payload: ProductionBranchCreate,
+) -> ProductionProjectDetail:
+    try:
+        return await production_service.create_branch(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/revisions",
+    response_model=list[ProductionRevisionResponse],
+)
+async def list_production_revisions(
+    project_id: UUID,
+) -> list[ProductionRevisionResponse]:
+    try:
+        return await production_service.list_revisions(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/revisions/{{revision_id}}",
+    response_model=ProductionRevisionDetail,
+)
+async def get_production_revision(
+    project_id: UUID,
+    revision_id: UUID,
+) -> ProductionRevisionDetail:
+    try:
+        return await production_service.get_revision(project_id, revision_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/references",
+    response_model=ReferenceAssetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_production_reference(
+    project_id: UUID,
+    file: Annotated[UploadFile, File()],
+    expected_revision_id: Annotated[UUID, Form()],
+    asset_type: Annotated[ReferenceAssetType, Form(alias="type")],
+    name: Annotated[str | None, Form()] = None,
+    description: Annotated[str, Form()] = "",
+    tags: Annotated[str | None, Form()] = None,
+    rights_confirmed: Annotated[bool, Form()] = False,
+    rights_note: Annotated[str | None, Form()] = None,
+) -> ReferenceAssetResponse:
+    filename = file.filename or ""
+    fallback_name = Path(filename).stem.strip() or "参考图片"
+    content = bytearray()
+    try:
+        while chunk := await file.read(1024 * 1024):
+            content.extend(chunk)
+            if len(content) > MAX_REFERENCE_IMAGE_BYTES:
+                raise HTTPException(status_code=413, detail="参考图片不能超过 15 MB")
+    finally:
+        await file.close()
+    try:
+        payload = ReferenceAssetCreate(
+            expected_revision_id=expected_revision_id,
+            type=asset_type,
+            name=name or fallback_name,
+            description=description,
+            tags=parse_reference_tags(tags),
+            rights_confirmed=rights_confirmed,
+            rights_note=rights_note,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail="参考资产信息无效") from exc
+    try:
+        return await production_service.create_reference(
+            project_id,
+            payload,
+            bytes(content),
+            file.content_type,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/references",
+    response_model=list[ReferenceAssetResponse],
+)
+async def list_production_references(
+    project_id: UUID,
+    include_archived: Annotated[bool, Query()] = False,
+) -> list[ReferenceAssetResponse]:
+    try:
+        return await production_service.list_references(
+            project_id,
+            include_archived=include_archived,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.patch(
+    f"{API_PREFIX}/references/{{asset_id}}",
+    response_model=ReferenceAssetResponse,
+)
+async def update_production_reference(
+    asset_id: UUID,
+    payload: ReferenceAssetUpdate,
+) -> ReferenceAssetResponse:
+    try:
+        return await production_service.update_reference(asset_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.delete(
+    f"{API_PREFIX}/references/{{asset_id}}",
+    response_model=ReferenceAssetResponse,
+)
+async def archive_production_reference(
+    asset_id: UUID,
+    expected_revision_id: Annotated[UUID, Query()],
+    confirm_stale: Annotated[bool, Query()] = False,
+) -> ReferenceAssetResponse:
+    try:
+        return await production_service.archive_reference(
+            asset_id,
+            expected_revision_id,
+            confirm_stale=confirm_stale,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/references/{{asset_id}}/content")
+async def get_production_reference_content(asset_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_reference_content(asset_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get(f"{API_PREFIX}/references/{{asset_id}}/thumbnail")
+async def get_production_reference_thumbnail(asset_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_reference_content(
+            asset_id,
+            thumbnail=True,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/shots",
+    response_model=list[ShotPlanResponse],
+)
+async def list_production_shots(project_id: UUID) -> list[ShotPlanResponse]:
+    try:
+        return await production_service.list_shots(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/shots",
+    response_model=ShotPlanDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_production_shot(
+    project_id: UUID,
+    payload: ShotPlanCreate,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.create_shot(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/productions/{{project_id}}/shots/order",
+    response_model=list[ShotPlanResponse],
+)
+async def reorder_production_shots(
+    project_id: UUID,
+    payload: ShotPlanReorder,
+) -> list[ShotPlanResponse]:
+    try:
+        return await production_service.reorder_shots(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/source-video")
+async def get_production_source_video(project_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_source_video(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}",
+    response_model=ShotPlanDetailResponse,
+)
+async def get_production_shot(shot_plan_id: UUID) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.get_shot(shot_plan_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.patch(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}",
+    response_model=ShotPlanDetailResponse,
+)
+async def update_production_shot(
+    shot_plan_id: UUID,
+    payload: ShotPlanUpdate,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.update_shot(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/discard",
+    response_model=list[ShotPlanResponse],
+)
+async def discard_production_shot(
+    shot_plan_id: UUID,
+    payload: ShotLifecycleUpdate,
+) -> list[ShotPlanResponse]:
+    try:
+        return await production_service.discard_shot(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/restore",
+    response_model=list[ShotPlanResponse],
+)
+async def restore_production_shot(
+    shot_plan_id: UUID,
+    payload: ShotLifecycleUpdate,
+) -> list[ShotPlanResponse]:
+    try:
+        return await production_service.restore_shot(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/production-shots/{{shot_plan_id}}/source-keyframe")
+async def get_production_source_keyframe(shot_plan_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_source_keyframe_content(
+            shot_plan_id
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/source-keyframe",
+    response_model=ShotPlanDetailResponse,
+)
+async def select_production_source_keyframe(
+    shot_plan_id: UUID,
+    payload: ShotKeyframeSelectRequest,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.select_source_keyframe(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/source-keyframe/approval",
+    response_model=CandidateActionResponse,
+)
+async def approve_production_source_keyframe(
+    shot_plan_id: UUID,
+    payload: ShotSourceFrameApprovalRequest,
+) -> CandidateActionResponse:
+    try:
+        return await production_service.approve_source_keyframe(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/bulk-update",
+    response_model=list[ShotPlanResponse],
+)
+async def bulk_update_production_shots(
+    project_id: Annotated[UUID, Query()],
+    payload: ShotPlanBulkUpdate,
+) -> list[ShotPlanResponse]:
+    try:
+        return await production_service.bulk_update_shots(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/change-impact",
+    response_model=ChangeImpactResponse,
+)
+async def get_production_change_impact(
+    project_id: UUID,
+    payload: ChangeImpactRequest,
+) -> ChangeImpactResponse:
+    try:
+        return await production_service.change_impact(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/image-runs",
+    response_model=GenerationRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_production_image_run(
+    shot_plan_id: UUID,
+    payload: ImageGenerationCreate,
+) -> GenerationRunResponse:
+    try:
+        return await production_service.create_image_run(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/generation-runs/{{run_id}}",
+    response_model=GenerationRunResponse,
+)
+async def get_production_generation_run(run_id: UUID) -> GenerationRunResponse:
+    try:
+        return await production_service.get_generation_run(run_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/generation-candidates/{{candidate_id}}/select",
+    response_model=CandidateActionResponse,
+)
+async def select_production_candidate(
+    candidate_id: UUID,
+    payload: CandidateSelectRequest,
+) -> CandidateActionResponse:
+    try:
+        return await production_service.select_candidate(candidate_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/generation-candidates/{{candidate_id}}/approvals",
+    response_model=CandidateActionResponse,
+)
+async def approve_production_candidate(
+    candidate_id: UUID,
+    payload: CandidateApprovalRequest,
+) -> CandidateActionResponse:
+    try:
+        return await production_service.approve_candidate(candidate_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/generation-candidates/{{candidate_id}}/content")
+async def get_production_candidate_content(candidate_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_candidate_content(candidate_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get(f"{API_PREFIX}/generation-candidates/{{candidate_id}}/thumbnail")
+async def get_production_candidate_thumbnail(candidate_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_candidate_content(
+            candidate_id,
+            thumbnail=True,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/gate-status",
+    response_model=ProductionGateStatus,
+)
+async def get_production_gate_status(project_id: UUID) -> ProductionGateStatus:
+    try:
+        return await production_service.gate_status(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/advance",
+    response_model=ProductionProjectDetail,
+)
+async def advance_production(
+    project_id: UUID,
+    payload: ProductionAdvanceRequest,
+) -> ProductionProjectDetail:
+    try:
+        return await production_service.advance(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 async def ensure_unique_folder_name(name: str, *, exclude_id: UUID | None = None) -> None:
     folders = await store.list_folders()
     if any(
-        folder.id != exclude_id and folder.name.casefold() == name.casefold()
-        for folder in folders
+        folder.id != exclude_id and folder.name.casefold() == name.casefold() for folder in folders
     ):
         raise HTTPException(status_code=409, detail="已存在同名目录")
 
@@ -390,9 +1153,9 @@ async def create_analysis(video_id: UUID, payload: AnalysisCreate) -> AnalysisJo
         analysis_version = "phase1-simulated-v1"
     elif mode == AnalysisMode.MODEL:
         analysis_version = (
-            "phase1-link-vlm-shot-facts-v1"
+            "phase1-link-hybrid-segmentation-v5"
             if video.source_type != SourceType.UPLOAD
-            else "phase1-vlm-shot-facts-v1"
+            else "phase1-hybrid-segmentation-v5"
         )
     elif video.source_type == SourceType.UPLOAD:
         analysis_version = "phase1-evidence-timeline-v2"
@@ -427,6 +1190,8 @@ async def list_records(
         Literal["updated_desc", "created_desc", "name_asc"],
         Query(),
     ] = "updated_desc",
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> AnalysisRecordList:
     records = await store.list_records()
     videos = {video.id: video for video in await store.list_videos()}
@@ -466,7 +1231,59 @@ async def list_records(
         records.sort(key=lambda item: item.name.casefold())
     else:
         records.sort(key=lambda item: item.updated_at, reverse=True)
-    return AnalysisRecordList(items=records, total=len(records))
+
+    total = len(records)
+    total_pages = (total + page_size - 1) // page_size
+    effective_page = min(page, total_pages or 1)
+    page_start = (effective_page - 1) * page_size
+    records = records[page_start : page_start + page_size]
+
+    summaries = []
+    for record in records:
+        video = videos.get(record.video_id)
+        cache_version = round(record.updated_at.timestamp())
+        summaries.append(
+            AnalysisRecordSummary.model_validate(
+                {
+                    **record.model_dump(mode="python"),
+                    "thumbnail_url": (
+                        f"{API_PREFIX}/records/{record.id}/thumbnail?v={cache_version}"
+                    ),
+                    "duration_seconds": video.duration_seconds if video else None,
+                }
+            )
+        )
+    return AnalysisRecordList(
+        items=summaries,
+        total=total,
+        page=effective_page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
+
+
+@app.get(f"{API_PREFIX}/records/{{record_id}}/thumbnail")
+async def get_record_thumbnail(record_id: UUID) -> FileResponse:
+    record = await store.get_record(record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="分析记录不存在")
+    video = await store.get_video(record.video_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    thumbnail = await thumbnail_service.ensure(video)
+    if thumbnail is None:
+        raise HTTPException(status_code=404, detail="缩略图尚不可用")
+    return FileResponse(
+        thumbnail,
+        media_type="image/jpeg",
+        filename=f"{record.id}.jpg",
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "ETag": thumbnail_etag(thumbnail),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get(f"{API_PREFIX}/records/{{record_id}}", response_model=AnalysisRecordDetail)
@@ -556,9 +1373,7 @@ async def create_exports(record_id: UUID, payload: ExportCreate) -> list[ExportA
         replacement = await store.get_replacement(payload.replacement_version_id)
         if replacement is None or replacement.video_id != record.video_id:
             raise HTTPException(status_code=404, detail="替换版本不存在")
-        report = report.model_copy(
-            update={"prompt_package": replacement.prompt_package}
-        )
+        report = report.model_copy(update={"prompt_package": replacement.prompt_package})
         filename_suffix = f"-replacement-{str(replacement.id)[:8]}"
     return await export_service.create(
         record,

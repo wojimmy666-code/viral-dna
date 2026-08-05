@@ -13,22 +13,30 @@ from .models import (
     AnalysisJob,
     AnalysisRecord,
     AnalysisReport,
+    ApprovalEvent,
     ExportArtifact,
+    GenerationCandidate,
+    GenerationRun,
     ModelRun,
     ModelRunStatus,
     PriceSnapshot,
+    ProductionProject,
+    ProductionRevision,
     RecordFolder,
+    ReferenceAsset,
+    ReferenceBinding,
     ReplacementVersion,
+    ShotPlan,
     Video,
 )
+from .schema import WORKSPACE_SCHEMA_VERSION
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
+DATABASE_SCHEMA_VERSION = WORKSPACE_SCHEMA_VERSION
 
-class SQLiteStore:
-    """Durable single-node repository using versioned Pydantic JSON records."""
-
-    _allowed_tables = {
+_LEGACY_TABLES = frozenset(
+    {
         "videos",
         "analyses",
         "reports",
@@ -40,6 +48,47 @@ class SQLiteStore:
         "records",
         "exports",
     }
+)
+
+_PRODUCTION_TABLES = frozenset(
+    {
+        "production_projects",
+        "production_revisions",
+        "reference_assets",
+        "shot_plans",
+        "reference_bindings",
+        "generation_runs",
+        "generation_candidates",
+        "approval_events",
+    }
+)
+
+_PRODUCTION_INDEXES = (
+    ("idx_production_projects_record_id", "production_projects", "record_id"),
+    ("idx_production_revisions_project_id", "production_revisions", "project_id"),
+    ("idx_reference_assets_project_id", "reference_assets", "project_id"),
+    ("idx_shot_plans_project_id", "shot_plans", "project_id"),
+    ("idx_reference_bindings_shot_plan_id", "reference_bindings", "shot_plan_id"),
+    ("idx_generation_runs_project_id", "generation_runs", "project_id"),
+    ("idx_generation_runs_shot_plan_id", "generation_runs", "shot_plan_id"),
+    (
+        "idx_generation_candidates_generation_run_id",
+        "generation_candidates",
+        "generation_run_id",
+    ),
+    ("idx_approval_events_project_id", "approval_events", "project_id"),
+    ("idx_approval_events_shot_plan_id", "approval_events", "shot_plan_id"),
+)
+
+
+class SQLiteSchemaError(RuntimeError):
+    """Raised when the durable database schema cannot be migrated safely."""
+
+
+class SQLiteStore:
+    """Durable single-node repository using versioned Pydantic JSON records."""
+
+    _allowed_tables = _LEGACY_TABLES | _PRODUCTION_TABLES
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path.resolve()
@@ -55,22 +104,66 @@ class SQLiteStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations ("
-                "version INTEGER PRIMARY KEY, "
-                "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
-                ")"
-            )
-            for table in sorted(self._allowed_tables):
+            connection.execute("BEGIN IMMEDIATE")
+            try:
                 connection.execute(
-                    f"CREATE TABLE IF NOT EXISTS {table} ("  # noqa: S608 - internal allowlist
-                    "record_key TEXT PRIMARY KEY, "
-                    "payload TEXT NOT NULL, "
-                    "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                    "CREATE TABLE IF NOT EXISTS schema_migrations ("
+                    "version INTEGER PRIMARY KEY, "
+                    "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
                     ")"
                 )
+                applied_versions = {
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    ).fetchall()
+                }
+                future_versions = {
+                    version for version in applied_versions if version > DATABASE_SCHEMA_VERSION
+                }
+                if future_versions:
+                    newest = max(future_versions)
+                    raise SQLiteSchemaError(
+                        f"数据库版本 {newest} 高于当前支持版本 {DATABASE_SCHEMA_VERSION}"
+                    )
+
+                self._create_json_tables(connection, _LEGACY_TABLES)
+                if 1 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (1)")
+
+                self._create_json_tables(connection, _PRODUCTION_TABLES)
+                self._create_production_indexes(connection)
+                if 2 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (2)")
+
+                if 3 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (3)")
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+
+    @staticmethod
+    def _create_json_tables(
+        connection: sqlite3.Connection,
+        tables: frozenset[str],
+    ) -> None:
+        for table in sorted(tables):
             connection.execute(
-                "INSERT OR IGNORE INTO schema_migrations (version) VALUES (1)"
+                f"CREATE TABLE IF NOT EXISTS {table} ("  # noqa: S608 - internal allowlist
+                "record_key TEXT PRIMARY KEY, "
+                "payload TEXT NOT NULL, "
+                "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+
+    @staticmethod
+    def _create_production_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _PRODUCTION_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608 - internal allowlist
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
             )
 
     @classmethod
@@ -89,6 +182,36 @@ class SQLiteStore:
                 "payload = excluded.payload, updated_at = CURRENT_TIMESTAMP",
                 (key, payload),
             )
+
+    def _upsert_many(
+        self,
+        entries: list[tuple[str, str, str]],
+        deletions: list[tuple[str, str]] | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for table, key, payload in entries:
+                    safe_table = self._table(table)
+                    connection.execute(
+                        f"INSERT INTO {safe_table} "  # noqa: S608 - internal allowlist
+                        "(record_key, payload, updated_at) "
+                        "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                        "ON CONFLICT(record_key) DO UPDATE SET "
+                        "payload = excluded.payload, updated_at = CURRENT_TIMESTAMP",
+                        (key, payload),
+                    )
+                for table, key in deletions or []:
+                    safe_table = self._table(table)
+                    connection.execute(
+                        f"DELETE FROM {safe_table} WHERE record_key = ?",  # noqa: S608
+                        (key,),
+                    )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
 
     def _read(self, table: str, key: str) -> str | None:
         safe_table = self._table(table)
@@ -246,3 +369,222 @@ class SQLiteStore:
 
     async def get_price_snapshot(self, snapshot_id: str) -> PriceSnapshot | None:
         return await self._get("price_snapshots", snapshot_id, PriceSnapshot)
+
+    async def save_production_project(
+        self,
+        project: ProductionProject,
+    ) -> ProductionProject:
+        return await self._save("production_projects", project.id, project)
+
+    async def get_production_project(
+        self,
+        project_id: UUID,
+    ) -> ProductionProject | None:
+        return await self._get("production_projects", project_id, ProductionProject)
+
+    async def list_production_projects(
+        self,
+        record_id: UUID | None = None,
+    ) -> list[ProductionProject]:
+        payloads = await asyncio.to_thread(self._read_all, "production_projects")
+        projects = [ProductionProject.model_validate_json(payload) for payload in payloads]
+        if record_id is not None:
+            projects = [project for project in projects if project.record_id == record_id]
+        return sorted(projects, key=lambda project: project.created_at)
+
+    async def save_production_revision(
+        self,
+        revision: ProductionRevision,
+    ) -> ProductionRevision:
+        return await self._save("production_revisions", revision.id, revision)
+
+    async def get_production_revision(
+        self,
+        revision_id: UUID,
+    ) -> ProductionRevision | None:
+        return await self._get("production_revisions", revision_id, ProductionRevision)
+
+    async def list_production_revisions(
+        self,
+        project_id: UUID,
+    ) -> list[ProductionRevision]:
+        payloads = await asyncio.to_thread(self._read_all, "production_revisions")
+        revisions = [ProductionRevision.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (revision for revision in revisions if revision.project_id == project_id),
+            key=lambda revision: revision.revision_number,
+        )
+
+    async def save_reference_asset(self, asset: ReferenceAsset) -> ReferenceAsset:
+        return await self._save("reference_assets", asset.id, asset)
+
+    async def get_reference_asset(self, asset_id: UUID) -> ReferenceAsset | None:
+        return await self._get("reference_assets", asset_id, ReferenceAsset)
+
+    async def list_reference_assets(self, project_id: UUID) -> list[ReferenceAsset]:
+        payloads = await asyncio.to_thread(self._read_all, "reference_assets")
+        assets = [ReferenceAsset.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (asset for asset in assets if asset.project_id == project_id),
+            key=lambda asset: asset.created_at,
+        )
+
+    async def save_production_bundle(
+        self,
+        project: ProductionProject,
+        revision: ProductionRevision,
+        *,
+        reference_assets: list[ReferenceAsset] | None = None,
+        shot_plans: list[ShotPlan] | None = None,
+        reference_bindings: list[ReferenceBinding] | None = None,
+        remove_reference_binding_ids: list[UUID] | None = None,
+        generation_runs: list[GenerationRun] | None = None,
+        generation_candidates: list[GenerationCandidate] | None = None,
+        approval_events: list[ApprovalEvent] | None = None,
+    ) -> tuple[ProductionProject, ProductionRevision]:
+        entries = [
+            (
+                "production_projects",
+                str(project.id),
+                self._serialize(project),
+            ),
+            (
+                "production_revisions",
+                str(revision.id),
+                self._serialize(revision),
+            ),
+        ]
+        entries.extend(
+            ("reference_assets", str(asset.id), self._serialize(asset))
+            for asset in reference_assets or []
+        )
+        entries.extend(
+            ("shot_plans", str(shot_plan.id), self._serialize(shot_plan))
+            for shot_plan in shot_plans or []
+        )
+        entries.extend(
+            ("reference_bindings", str(binding.id), self._serialize(binding))
+            for binding in reference_bindings or []
+        )
+        entries.extend(
+            ("generation_runs", str(run.id), self._serialize(run)) for run in generation_runs or []
+        )
+        entries.extend(
+            ("generation_candidates", str(candidate.id), self._serialize(candidate))
+            for candidate in generation_candidates or []
+        )
+        entries.extend(
+            ("approval_events", str(event.id), self._serialize(event))
+            for event in approval_events or []
+        )
+        deletions = [
+            ("reference_bindings", str(binding_id))
+            for binding_id in remove_reference_binding_ids or []
+        ]
+        async with self._lock:
+            await asyncio.to_thread(self._upsert_many, entries, deletions)
+        return project, revision
+
+    async def save_shot_plan(self, shot_plan: ShotPlan) -> ShotPlan:
+        return await self._save("shot_plans", shot_plan.id, shot_plan)
+
+    async def get_shot_plan(self, shot_plan_id: UUID) -> ShotPlan | None:
+        return await self._get("shot_plans", shot_plan_id, ShotPlan)
+
+    async def list_shot_plans(self, project_id: UUID) -> list[ShotPlan]:
+        payloads = await asyncio.to_thread(self._read_all, "shot_plans")
+        shot_plans = [ShotPlan.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (shot_plan for shot_plan in shot_plans if shot_plan.project_id == project_id),
+            key=lambda shot_plan: shot_plan.index,
+        )
+
+    async def save_reference_binding(
+        self,
+        binding: ReferenceBinding,
+    ) -> ReferenceBinding:
+        return await self._save("reference_bindings", binding.id, binding)
+
+    async def get_reference_binding(
+        self,
+        binding_id: UUID,
+    ) -> ReferenceBinding | None:
+        return await self._get("reference_bindings", binding_id, ReferenceBinding)
+
+    async def list_reference_bindings(
+        self,
+        shot_plan_id: UUID,
+    ) -> list[ReferenceBinding]:
+        payloads = await asyncio.to_thread(self._read_all, "reference_bindings")
+        bindings = [ReferenceBinding.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (binding for binding in bindings if binding.shot_plan_id == shot_plan_id),
+            key=lambda binding: binding.created_at,
+        )
+
+    async def save_generation_run(self, run: GenerationRun) -> GenerationRun:
+        return await self._save("generation_runs", run.id, run)
+
+    async def get_generation_run(self, run_id: UUID) -> GenerationRun | None:
+        return await self._get("generation_runs", run_id, GenerationRun)
+
+    async def list_generation_runs(
+        self,
+        project_id: UUID,
+        shot_plan_id: UUID | None = None,
+    ) -> list[GenerationRun]:
+        payloads = await asyncio.to_thread(self._read_all, "generation_runs")
+        runs = [GenerationRun.model_validate_json(payload) for payload in payloads]
+        filtered = [run for run in runs if run.project_id == project_id]
+        if shot_plan_id is not None:
+            filtered = [run for run in filtered if run.shot_plan_id == shot_plan_id]
+        return sorted(filtered, key=lambda run: run.created_at)
+
+    async def save_generation_candidate(
+        self,
+        candidate: GenerationCandidate,
+    ) -> GenerationCandidate:
+        return await self._save("generation_candidates", candidate.id, candidate)
+
+    async def get_generation_candidate(
+        self,
+        candidate_id: UUID,
+    ) -> GenerationCandidate | None:
+        return await self._get(
+            "generation_candidates",
+            candidate_id,
+            GenerationCandidate,
+        )
+
+    async def list_generation_candidates(
+        self,
+        generation_run_id: UUID,
+    ) -> list[GenerationCandidate]:
+        payloads = await asyncio.to_thread(self._read_all, "generation_candidates")
+        candidates = [GenerationCandidate.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.generation_run_id == generation_run_id
+            ),
+            key=lambda candidate: candidate.ordinal,
+        )
+
+    async def save_approval_event(self, event: ApprovalEvent) -> ApprovalEvent:
+        return await self._save("approval_events", event.id, event)
+
+    async def get_approval_event(self, event_id: UUID) -> ApprovalEvent | None:
+        return await self._get("approval_events", event_id, ApprovalEvent)
+
+    async def list_approval_events(
+        self,
+        project_id: UUID,
+        shot_plan_id: UUID | None = None,
+    ) -> list[ApprovalEvent]:
+        payloads = await asyncio.to_thread(self._read_all, "approval_events")
+        events = [ApprovalEvent.model_validate_json(payload) for payload in payloads]
+        filtered = [event for event in events if event.project_id == project_id]
+        if shot_plan_id is not None:
+            filtered = [event for event in filtered if event.shot_plan_id == shot_plan_id]
+        return sorted(filtered, key=lambda event: event.created_at)

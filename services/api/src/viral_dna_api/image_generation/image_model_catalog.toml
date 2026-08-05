@@ -1,0 +1,50 @@
+catalog_version = "image-generation-catalog-2026-08-04-r1"
+pricing_version = "aliyun-cn-beijing-list-2026-08-04"
+
+[[models]]
+alias = "qwen_image_2_pro"
+provider = "dashscope"
+model = "qwen-image-2.0-pro"
+label = "Qwen Image 2.0 Pro"
+description = "质量优先，适合人物、产品、场景替换和复杂文字；国内目录价 ¥0.50/张。"
+unit_cost_micros = 500000
+pricing_version = "aliyun-cn-beijing-list-2026-08-04"
+recommended = true
+
+[models.capabilities]
+text_to_image = true
+image_to_image = true
+multi_reference = true
+max_reference_images = 2
+max_input_images = 3
+max_candidates = 6
+maximum_width = 2048
+maximum_height = 2048
+maximum_pixels = 4194304
+supported_formats = ["jpeg", "png", "webp"]
+supports_negative_prompt = true
+supports_seed = true
+
+[[models]]
+alias = "qwen_image_2"
+provider = "dashscope"
+model = "qwen-image-2.0"
+label = "Qwen Image 2.0"
+description = "速度与成本优先，能力契约相同；国内目录价 ¥0.20/张。"
+unit_cost_micros = 200000
+pricing_version = "aliyun-cn-beijing-list-2026-08-04"
+recommended = false
+
+[models.capabilities]
+text_to_image = true
+image_to_image = true
+multi_reference = true
+max_reference_images = 2
+max_input_images = 3
+max_candidates = 6
+maximum_width = 2048
+maximum_height = 2048
+maximum_pixels = 4194304
+supported_formats = ["jpeg", "png", "webp"]
+supports_negative_prompt = true
+supports_seed = true

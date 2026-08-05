@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from viral_dna_api.ai.catalog import load_model_plan
+from viral_dna_api.ai.contracts import ModelRequest, ProviderResult
+from viral_dna_api.ai.router import ModelRouter
+from viral_dna_api.ai.shot_segmentation import (
+    ShotSegmentationService,
+    apply_model_selection,
+)
+from viral_dna_api.media import (
+    RawSceneScore,
+    boundaries_from_candidates,
+    boundary_evidence_timestamps,
+    merge_scene_candidates,
+    parse_scene_score_metadata,
+)
+from viral_dna_api.models import (
+    AnalysisJob,
+    AnalysisMode,
+    AnalysisProfile,
+    MediaEvidence,
+    MediaMetadata,
+    ModelRunStatus,
+    ModelTask,
+    ModelUsage,
+    SceneBoundaryCandidate,
+    SegmentationMetadata,
+    ShotBoundaryDecision,
+    ShotSegmentationSelection,
+    SourceType,
+    Video,
+)
+from viral_dna_api.store import InMemoryStore
+
+
+class FakeSegmentationProvider:
+    provider_id = "dashscope"
+
+    def __init__(self, *, invalid_candidate: bool = False) -> None:
+        self.calls = 0
+        self.invalid_candidate = invalid_candidate
+
+    async def generate(self, request: ModelRequest, response_schema) -> ProviderResult:
+        self.calls += 1
+        assert request.task == ModelTask.SHOT_SEGMENTATION
+        assert len(request.image_paths) == 5
+        assert len(request.image_labels) == 5
+        assert "远前、近前、近后、远后" in request.image_labels[1]
+        candidate_ids = (
+            ["candidate_999"]
+            if self.invalid_candidate
+            else ["candidate_001", "candidate_002", "candidate_003"]
+        )
+        selection = response_schema(
+            candidate_reviews=[
+                ShotBoundaryDecision(
+                    candidate_id=candidate_id,
+                    before_description="候选前为原叙事画面",
+                    after_description="候选后为新的主体或场景",
+                    decision="keep",
+                    confidence=0.93,
+                    reason=(
+                        "主体或稳定构图发生明确变化"
+                        if candidate_id != "candidate_002"
+                        else "同一运镜中的短暂过渡，不形成新镜头"
+                    ),
+                    semantic_group_before=(
+                        "情境/钩子"
+                        if candidate_id in {"candidate_001", "candidate_999"}
+                        else "产品/主体演示"
+                    ),
+                    semantic_group_after=(
+                        "产品/主体演示" if candidate_id != "candidate_003" else "结果/生活方式"
+                    ),
+                    progressive_motion=candidate_id == "candidate_002",
+                )
+                for candidate_id in candidate_ids
+            ],
+            summary="行走、产品展示、湖边使用和结尾卡构成四个语义段落",
+            confidence=0.92,
+        )
+        usage = ModelUsage(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            image_count=len(request.image_paths),
+        )
+        return ProviderResult(
+            data=selection,
+            usage=usage,
+            requested_model=request.target.model,
+            resolved_model=request.target.model,
+            provider_request_id="segmentation-request-1",
+            latency_ms=70,
+            raw_content=selection.model_dump_json(),
+        )
+
+
+def _build_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    max_cost_micros: int | None = None,
+) -> tuple[Video, AnalysisJob, MediaEvidence]:
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("VIRAL_DNA_STORAGE_ROOT", str(storage_root))
+    monkeypatch.setenv("VIRAL_DNA_VLM_PROVIDER", "dashscope")
+    monkeypatch.setenv("VIRAL_DNA_VLM_MODEL_ALIAS", "qwen37")
+    plan = load_model_plan(AnalysisProfile.BALANCED)
+    assert plan is not None
+
+    video = Video(
+        source_type=SourceType.UPLOAD,
+        title="混合分镜测试",
+        sha256="a" * 64,
+    )
+    analysis = AnalysisJob(
+        video_id=video.id,
+        analysis_mode=AnalysisMode.MODEL,
+        simulated=False,
+        model_plan=plan,
+        max_cost_micros=max_cost_micros,
+    )
+    artifact_root = storage_root / "analyses" / str(analysis.id)
+    segmentation_dir = artifact_root / "segmentation"
+    segmentation_dir.mkdir(parents=True)
+    context_url = f"/api/v1/analyses/{analysis.id}/artifacts/segmentation/context-sheet.jpg"
+    (segmentation_dir / "context-sheet.jpg").write_bytes(b"context-jpeg")
+
+    candidates = []
+    candidate_specs = [
+        (3.6, 0.042, False),
+        (6.267, 0.49, False),
+        (8.783, 0.233, False),
+        (15.35, 0.803, True),
+    ]
+    for index, (timestamp, score, hard) in enumerate(candidate_specs, 1):
+        candidate_id = f"candidate_{index:03d}"
+        filename = f"{candidate_id}.jpg"
+        (segmentation_dir / filename).write_bytes(f"jpeg-{candidate_id}".encode())
+        url = f"/api/v1/analyses/{analysis.id}/artifacts/segmentation/{filename}"
+        candidates.append(
+            SceneBoundaryCandidate(
+                id=candidate_id,
+                timestamp_seconds=timestamp,
+                score=score,
+                methods=["adjacent_scene_score"],
+                hard_boundary=hard,
+                evidence_frame_urls=[url],
+                comparison_image_url=url,
+            )
+        )
+
+    evidence = MediaEvidence(
+        processor_version="test-hybrid-v2",
+        metadata=MediaMetadata(
+            duration_seconds=18.342,
+            width=720,
+            height=1280,
+            fps=55.043,
+            format_name="mp4",
+            video_codec="h264",
+            has_audio=True,
+            size_bytes=100,
+            sha256="a" * 64,
+            aspect_ratio="9:16",
+        ),
+        proxy_url=f"/api/v1/analyses/{analysis.id}/artifacts/proxy.mp4",
+        manifest_url=f"/api/v1/analyses/{analysis.id}/artifacts/manifest.json",
+        shots=[],
+        segmentation=SegmentationMetadata(
+            detector_version="test-detector-v2",
+            candidate_count=len(candidates),
+            candidates=candidates,
+            context_sheet_url=context_url,
+            context_timestamps=[1.0, 4.0, 7.0, 10.0, 13.0, 16.0],
+            program_boundaries=[0.0, 15.35, 18.342],
+            selected_candidate_ids=["candidate_004"],
+            final_boundaries=[0.0, 15.35, 18.342],
+            final_shot_count=2,
+        ),
+    )
+    return video, analysis, evidence
+
+
+def test_scene_metadata_is_parsed_and_candidates_are_nms_merged() -> None:
+    output = (
+        "[metadata] frame:0 pts_time:3.500\n"
+        "[metadata] lavfi.scene_score=0.030347\n"
+        "[metadata] frame:1 pts_time:3.600\n"
+        "[metadata] lavfi.scene_score=0.042295\n"
+        "[metadata] frame:2 pts_time:15.350\n"
+        "[metadata] lavfi.scene_score=0.803484\n"
+    )
+    adjacent = parse_scene_score_metadata(
+        output,
+        method="adjacent_scene_score",
+        hard_threshold=0.24,
+    )
+    temporal = [
+        RawSceneScore(4.0, 0.21, "temporal_window_scene_score"),
+        RawSceneScore(9.0, 0.23, "temporal_window_scene_score"),
+    ]
+    candidates = merge_scene_candidates(
+        [*adjacent, *temporal],
+        duration_seconds=18.342,
+    )
+
+    assert [item.timestamp_seconds for item in candidates] == [3.5, 9.0, 15.35]
+    assert candidates[0].methods == [
+        "adjacent_scene_score",
+        "temporal_window_scene_score",
+    ]
+    assert candidates[-1].hard_boundary is True
+    assert boundaries_from_candidates(candidates, 18.342) == [0.0, 15.35, 18.342]
+
+
+def test_boundary_evidence_uses_near_and_far_frames_with_safe_clamping() -> None:
+    assert boundary_evidence_timestamps(6.267, 18.342) == (
+        5.517,
+        6.147,
+        6.387,
+        7.017,
+    )
+    assert boundary_evidence_timestamps(0.45, 1.0) == (
+        0.001,
+        0.33,
+        0.57,
+        0.999,
+    )
+
+
+@pytest.mark.asyncio
+async def test_segmentation_selection_is_metered_cached_and_keeps_hard_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video, analysis, evidence = _build_inputs(tmp_path, monkeypatch)
+    repository = InMemoryStore()
+    await repository.add_video(video)
+    await repository.add_analysis(analysis)
+    provider = FakeSegmentationProvider()
+    service = ShotSegmentationService(
+        repository,
+        router=ModelRouter({"dashscope": provider}),
+    )
+
+    first = await service.analyze(analysis=analysis, video=video, evidence=evidence)
+
+    assert first.segmentation.verified_by_model is True
+    assert first.segmentation.selected_candidate_ids == [
+        "candidate_001",
+        "candidate_003",
+        "candidate_004",
+    ]
+    assert first.segmentation.final_boundaries == [
+        0.0,
+        3.6,
+        8.783,
+        15.35,
+        18.342,
+    ]
+    assert first.segmentation.final_shot_count == 4
+    rejected = first.segmentation.candidates[1]
+    assert rejected.selected_by_model is False
+    assert rejected.model_confidence == pytest.approx(0.93)
+    assert rejected.model_decision == "keep"
+    assert rejected.model_consistency_adjusted is True
+    assert "一致性校验" in (rejected.model_reason or "")
+    assert "candidate_002" in (first.segmentation.model_summary or "")
+    assert provider.calls == 1
+    assert first.cost_summary.measured_cost_micros == 6000
+
+    second = await service.analyze(analysis=analysis, video=video, evidence=evidence)
+
+    assert second.segmentation.final_shot_count == 4
+    assert provider.calls == 1
+    runs = await repository.list_model_runs(analysis.id)
+    assert [run.status for run in runs] == [
+        ModelRunStatus.COMPLETED,
+        ModelRunStatus.CACHED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_candidate_from_model_is_rejected_with_program_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video, analysis, evidence = _build_inputs(tmp_path, monkeypatch)
+    repository = InMemoryStore()
+    await repository.add_video(video)
+    await repository.add_analysis(analysis)
+    provider = FakeSegmentationProvider(invalid_candidate=True)
+    service = ShotSegmentationService(
+        repository,
+        router=ModelRouter({"dashscope": provider}),
+    )
+
+    outcome = await service.analyze(analysis=analysis, video=video, evidence=evidence)
+
+    assert outcome.segmentation.verified_by_model is False
+    assert outcome.segmentation.final_boundaries == [0.0, 15.35, 18.342]
+    assert "不存在的候选边界" in outcome.warnings[0]
+    runs = await repository.list_model_runs(analysis.id)
+    assert runs[0].status == ModelRunStatus.FAILED
+    assert runs[0].measured_cost_micros == 6000
+
+
+@pytest.mark.asyncio
+async def test_segmentation_budget_blocks_provider_before_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video, analysis, evidence = _build_inputs(
+        tmp_path,
+        monkeypatch,
+        max_cost_micros=1,
+    )
+    repository = InMemoryStore()
+    await repository.add_video(video)
+    await repository.add_analysis(analysis)
+    provider = FakeSegmentationProvider()
+    service = ShotSegmentationService(
+        repository,
+        router=ModelRouter({"dashscope": provider}),
+    )
+
+    outcome = await service.analyze(analysis=analysis, video=video, evidence=evidence)
+
+    assert outcome.segmentation.verified_by_model is False
+    assert provider.calls == 0
+    runs = await repository.list_model_runs(analysis.id)
+    assert runs[0].status == ModelRunStatus.BLOCKED
+    assert "成本上限" in outcome.warnings[0]
+
+
+def test_segmentation_requires_a_review_for_every_soft_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, evidence = _build_inputs(tmp_path, monkeypatch)
+    assert evidence.segmentation is not None
+    incomplete = ShotSegmentationSelection(
+        candidate_reviews=[
+            ShotBoundaryDecision(
+                candidate_id="candidate_001",
+                before_description="人物中景",
+                after_description="稳定产品特写",
+                decision="keep",
+                confidence=0.9,
+                reason="主体与稳定构图持续改变",
+                semantic_group_before="情境/钩子",
+                semantic_group_after="产品/主体演示",
+                progressive_motion=False,
+            )
+        ],
+        summary="仅返回了部分候选",
+        confidence=0.5,
+    )
+
+    with pytest.raises(ValueError, match="缺少候选边界审核结果"):
+        apply_model_selection(
+            evidence.segmentation,
+            incomplete,
+            evidence.metadata.duration_seconds,
+        )

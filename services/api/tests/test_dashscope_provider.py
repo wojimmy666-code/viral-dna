@@ -22,6 +22,8 @@ async def test_dashscope_adapter_normalizes_json_and_usage(
     target = plan.targets_for(ModelTask.SHOT_FACTS)[0]
     image_path = tmp_path / "frame.jpg"
     image_path.write_bytes(b"fake-jpeg")
+    second_image_path = tmp_path / "frame-2.jpg"
+    second_image_path.write_bytes(b"fake-jpeg-2")
     captured: dict = {}
 
     facts = ShotVisualFacts(
@@ -86,7 +88,8 @@ async def test_dashscope_adapter_normalizes_json_and_usage(
             target=target,
             system_prompt="请输出 JSON",
             user_prompt="分析这张图片并输出 JSON",
-            image_paths=(image_path,),
+            image_paths=(image_path, second_image_path),
+            image_labels=("候选 candidate_001", "候选 candidate_002"),
         ),
         ShotVisualFacts,
     )
@@ -99,9 +102,18 @@ async def test_dashscope_adapter_normalizes_json_and_usage(
     assert captured["url"] == "https://example.test/v1/chat/completions"
     assert captured["payload"]["enable_thinking"] is False
     assert captured["payload"]["response_format"] == {"type": "json_object"}
-    assert captured["payload"]["messages"][1]["content"][1]["image_url"]["url"].startswith(
-        "data:image/jpeg;base64,"
-    )
+    user_content = captured["payload"]["messages"][1]["content"]
+    assert [item["type"] for item in user_content] == [
+        "text",
+        "text",
+        "image_url",
+        "text",
+        "image_url",
+    ]
+    assert user_content[1]["text"] == "候选 candidate_001"
+    assert user_content[2]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert user_content[3]["text"] == "候选 candidate_002"
+    assert result.usage.image_count == 2
 
 
 @pytest.mark.asyncio
@@ -145,9 +157,7 @@ async def test_dashscope_schema_failure_preserves_billable_usage(
         async def post(self, *args, **kwargs):
             return FakeResponse()
 
-    monkeypatch.setattr(
-        "viral_dna_api.ai.providers.dashscope.httpx.AsyncClient", FakeClient
-    )
+    monkeypatch.setattr("viral_dna_api.ai.providers.dashscope.httpx.AsyncClient", FakeClient)
     provider = DashScopeProvider(api_key="test-key")
     request = ModelRequest(ModelTask.SHOT_FACTS, target, "system", "user", (image_path,))
     with pytest.raises(ModelProviderError) as raised:

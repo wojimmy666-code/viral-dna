@@ -1,0 +1,1170 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from io import BytesIO
+from pathlib import Path
+from uuid import UUID, uuid4
+
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from viral_dna_api import main
+from viral_dna_api.generation import generate_simulated_images
+from viral_dna_api.models import (
+    AnalysisJob,
+    AnalysisRecord,
+    AnalysisStage,
+    ApprovalDecision,
+    CandidateApprovalRequest,
+    CandidateSelectRequest,
+    GenerationCandidateStatus,
+    ImageExecutionMode,
+    ImageGenerationCreate,
+    ProductionChangeKind,
+    ProductionProjectCreate,
+    ReferenceAssetCreate,
+    ReferenceAssetType,
+    SourceType,
+    Video,
+    VideoStatus,
+    WorkflowItemStatus,
+)
+from viral_dna_api.pipeline import build_simulated_report
+from viral_dna_api.production import (
+    ProductionService,
+    ProductionServiceError,
+    inspect_reference_image,
+)
+from viral_dna_api.sqlite_store import SQLiteStore
+from viral_dna_api.store import InMemoryStore
+from viral_dna_api.workspace import WorkspaceManager
+
+
+@pytest.fixture(autouse=True)
+def isolate_production_image_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIRAL_DNA_ENV_FILE", str(tmp_path / ".env.local"))
+    monkeypatch.delenv("VIRAL_DNA_IMAGE_GENERATION_ENABLED", raising=False)
+
+
+def image_bytes(
+    image_format: str = "PNG",
+    *,
+    size: tuple[int, int] = (640, 960),
+) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", size, (94, 78, 219)).save(output, format=image_format)
+    return output.getvalue()
+
+
+def write_fake_frame(
+    source_path: Path,
+    timestamp_seconds: float,
+    output_path: Path,
+) -> None:
+    assert source_path.is_file()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    color = (min(255, round(timestamp_seconds * 20) + 40), 92, 180)
+    Image.new("RGB", (720, 1280), color).save(output_path, "JPEG")
+
+
+class FakeFrameProcessor:
+    async def extract_frame(
+        self,
+        source_path: Path,
+        timestamp_seconds: float,
+        output_path: Path,
+    ) -> None:
+        await asyncio.to_thread(
+            write_fake_frame,
+            source_path,
+            timestamp_seconds,
+            output_path,
+        )
+
+
+class FakeRealImageGateway:
+    def __init__(self, workspace: WorkspaceManager) -> None:
+        self.workspace = workspace
+
+    async def generate(
+        self,
+        project,
+        plan,
+        revision_id,
+        bindings,
+        assets,
+        *,
+        candidate_count,
+        source_path,
+        input_mode,
+        execution_mode,
+        allow_unknown_cost,
+    ):
+        del execution_mode, allow_unknown_cost
+        run, candidates = await asyncio.to_thread(
+            generate_simulated_images,
+            self.workspace,
+            project,
+            plan,
+            revision_id,
+            bindings,
+            assets,
+            candidate_count=candidate_count,
+            source_path=source_path,
+            input_mode=input_mode,
+        )
+        return run.model_copy(
+            update={
+                "provider": "test_image_provider",
+                "model": "test-image-model",
+                "model_snapshot": "test-image-model-v1",
+                "execution_mode": ImageExecutionMode.REMOTE_API,
+                "adapter_id": "test-image-adapter",
+                "adapter_version": "test-v1",
+            }
+        ), candidates
+
+
+async def seed_completed_analysis(repository):
+    record_id = uuid4()
+    video = Video(
+        id=uuid4(),
+        record_id=record_id,
+        source_type=SourceType.UPLOAD,
+        original_filename="source.mp4",
+        title="参考视频",
+        status=VideoStatus.COMPLETED,
+    )
+    analysis = AnalysisJob(
+        id=uuid4(),
+        record_id=record_id,
+        video_id=video.id,
+        stage=AnalysisStage.COMPLETED,
+        progress=100,
+        message="分析完成",
+        simulated=True,
+    )
+    record = AnalysisRecord(
+        id=record_id,
+        name="参考视频",
+        video_id=video.id,
+        source_type=video.source_type,
+        latest_analysis_id=analysis.id,
+        status=VideoStatus.COMPLETED,
+    )
+    report = build_simulated_report(video, analysis)
+    await repository.add_video(video)
+    await repository.add_analysis(analysis)
+    await repository.save_record(record)
+    await repository.save_report(report)
+    return record, video, analysis, report
+
+
+def isolated_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repository=None,
+) -> tuple[ProductionService, object]:
+    root = tmp_path / "workspace"
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+    monkeypatch.setenv("VIRAL_DNA_ENV_FILE", str(tmp_path / ".env.local"))
+    monkeypatch.delenv("VIRAL_DNA_IMAGE_GENERATION_ENABLED", raising=False)
+    workspace = WorkspaceManager()
+    repository = repository or InMemoryStore()
+    return ProductionService(
+        repository,
+        workspace,
+        image_gateway=FakeRealImageGateway(workspace),
+    ), repository
+
+
+def test_reference_image_validation_uses_file_content_and_generates_thumbnail() -> None:
+    original = image_bytes("PNG", size=(800, 1200))
+
+    info = inspect_reference_image(original, "image/png")
+
+    assert info.mime_type == "image/png"
+    assert info.extension == ".png"
+    assert (info.width, info.height) == (800, 1200)
+    assert len(info.sha256) == 64
+    with Image.open(BytesIO(info.thumbnail)) as thumbnail:
+        assert thumbnail.format == "WEBP"
+        assert max(thumbnail.size) == 480
+
+    with pytest.raises(ProductionServiceError) as mismatch:
+        inspect_reference_image(original, "image/jpeg")
+    assert mismatch.value.status_code == 415
+    assert mismatch.value.code == "reference_image_mime_mismatch"
+
+    with pytest.raises(ProductionServiceError) as invalid:
+        inspect_reference_image(b"not-an-image", "image/png")
+    assert invalid.value.status_code == 415
+    assert invalid.value.code == "invalid_reference_image"
+
+
+def test_production_service_rejects_incomplete_or_foreign_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        analysis.stage = AnalysisStage.UNDERSTANDING
+        await repository.save_analysis(analysis)
+
+        with pytest.raises(ProductionServiceError) as incomplete:
+            await service.create_project(
+                record.id,
+                ProductionProjectCreate(base_analysis_id=analysis.id),
+            )
+        assert incomplete.value.status_code == 409
+        assert incomplete.value.code == "analysis_incomplete"
+
+        analysis.stage = AnalysisStage.COMPLETED
+        analysis.record_id = uuid4()
+        await repository.save_analysis(analysis)
+        with pytest.raises(ProductionServiceError) as foreign:
+            await service.create_project(
+                record.id,
+                ProductionProjectCreate(base_analysis_id=analysis.id),
+            )
+        assert foreign.value.status_code == 404
+        assert foreign.value.code == "analysis_not_found"
+
+    asyncio.run(scenario())
+
+
+def test_production_http_api_revision_reference_and_branch_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = isolated_service(tmp_path, monkeypatch)
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+    original = image_bytes("PNG")
+
+    with TestClient(main.app) as client:
+        create_response = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={
+                "base_analysis_id": str(analysis.id),
+                "name": "人物復刻方案",
+            },
+        )
+        assert create_response.status_code == 201, create_response.text
+        created = create_response.json()
+        project_id = created["project"]["id"]
+        revision_1 = created["project"]["current_revision_id"]
+        assert created["project"]["name"] == "人物复刻方案"
+        assert created["project"]["output_width"] == 1080
+        assert created["project"]["output_height"] == 1920
+
+        revision_response = client.get(f"/api/v1/productions/{project_id}/revisions/{revision_1}")
+        assert revision_response.status_code == 200
+        snapshot = revision_response.json()["snapshot"]
+        assert snapshot["schema_version"] == "production-revision-v1"
+        assert snapshot["source_analysis"]["analysis_id"] == str(analysis.id)
+        assert len(snapshot["source_analysis"]["shots"]) == 5
+        assert "snapshot_relative_path" not in revision_response.json()
+
+        conflict = client.patch(
+            f"/api/v1/productions/{project_id}",
+            json={
+                "expected_revision_id": str(uuid4()),
+                "name": "冲突修改",
+            },
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == "创作方案已更新，请刷新后重试"
+
+        update_response = client.patch(
+            f"/api/v1/productions/{project_id}",
+            json={
+                "expected_revision_id": revision_1,
+                "name": "產品替換版",
+            },
+        )
+        assert update_response.status_code == 200, update_response.text
+        updated = update_response.json()
+        revision_2 = updated["project"]["current_revision_id"]
+        assert updated["project"]["name"] == "产品替换版"
+        assert revision_2 != revision_1
+
+        upload_response = client.post(
+            f"/api/v1/productions/{project_id}/references",
+            files={"file": ("person.png", original, "image/png")},
+            data={
+                "expected_revision_id": revision_2,
+                "type": "person",
+                "name": "人物參考",
+                "description": "正面與全身",
+                "tags": '["正面", "全身"]',
+                "rights_confirmed": "true",
+                "rights_note": "已取得授權",
+            },
+        )
+        assert upload_response.status_code == 201, upload_response.text
+        asset = upload_response.json()
+        asset_id = asset["id"]
+        revision_3 = asset["current_revision_id"]
+        assert asset["name"] == "人物参考"
+        assert asset["description"] == "正面与全身"
+        assert asset["rights_note"] == "已取得授权"
+        assert "relative_path" not in asset
+        assert revision_3 != revision_2
+
+        content_response = client.get(asset["content_url"])
+        thumbnail_response = client.get(asset["thumbnail_url"])
+        assert content_response.status_code == 200
+        assert content_response.content == original
+        assert content_response.headers["content-type"].startswith("image/png")
+        assert thumbnail_response.status_code == 200
+        assert thumbnail_response.headers["content-type"].startswith("image/webp")
+        with Image.open(BytesIO(thumbnail_response.content)) as thumbnail:
+            assert max(thumbnail.size) == 480
+
+        edit_response = client.patch(
+            f"/api/v1/references/{asset_id}",
+            json={
+                "expected_revision_id": revision_3,
+                "name": "主角參考圖",
+                "tags": ["正面", "棚拍"],
+            },
+        )
+        assert edit_response.status_code == 200, edit_response.text
+        edited = edit_response.json()
+        revision_4 = edited["current_revision_id"]
+        assert edited["name"] == "主角参考图"
+        assert edited["tags"] == ["正面", "棚拍"]
+
+        branch_response = client.post(
+            f"/api/v1/productions/{project_id}/branches",
+            json={
+                "name": "歷史版本分支",
+                "source_revision_id": revision_3,
+            },
+        )
+        assert branch_response.status_code == 201, branch_response.text
+        branch = branch_response.json()
+        branch_id = branch["project"]["id"]
+        assert branch["project"]["name"] == "历史版本分支"
+        assert branch["project"]["source_project_id"] == project_id
+        assert branch["project"]["source_revision_id"] == revision_3
+        assert branch["reference_count"] == 1
+        branch_assets = client.get(f"/api/v1/productions/{branch_id}/references").json()
+        assert len(branch_assets) == 1
+        assert branch_assets[0]["id"] != asset_id
+        branch_content = client.get(branch_assets[0]["content_url"])
+        assert branch_content.content == original
+
+        archive_response = client.delete(
+            f"/api/v1/references/{asset_id}",
+            params={"expected_revision_id": revision_4},
+        )
+        assert archive_response.status_code == 200, archive_response.text
+        archived = archive_response.json()
+        assert archived["archived_at"] is not None
+        assert client.get(f"/api/v1/productions/{project_id}/references").json() == []
+        archived_list = client.get(
+            f"/api/v1/productions/{project_id}/references",
+            params={"include_archived": "true"},
+        ).json()
+        assert len(archived_list) == 1
+        assert client.get(archived["content_url"]).content == original
+
+        revisions = client.get(f"/api/v1/productions/{project_id}/revisions").json()
+        assert [item["revision_number"] for item in revisions] == [5, 4, 3, 2, 1]
+        assert all("snapshot_relative_path" not in item for item in revisions)
+
+    project_root = tmp_path / "workspace" / "records" / str(record.id) / "productions" / project_id
+    assert (project_root / "project.json").is_file()
+    assert len(list((project_root / "revisions").glob("*.json"))) == 5
+    assert (project_root / "references" / asset_id / "asset.json").is_file()
+
+
+def test_production_service_survives_sqlite_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        root = tmp_path / "durable-workspace"
+        monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+        workspace = WorkspaceManager()
+        first_store = SQLiteStore(workspace.database_path)
+        record, _, analysis, _ = await seed_completed_analysis(first_store)
+        first_service = ProductionService(
+            first_store,
+            workspace,
+            image_gateway=FakeRealImageGateway(workspace),
+        )
+        detail = await first_service.create_project(
+            record.id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis.id,
+                name="可恢复方案",
+            ),
+        )
+        revision_id = detail.project.current_revision_id
+        assert revision_id is not None
+        asset = await first_service.create_reference(
+            detail.project.id,
+            ReferenceAssetCreate(
+                expected_revision_id=revision_id,
+                type=ReferenceAssetType.PRODUCT,
+                name="产品参考",
+                rights_confirmed=True,
+            ),
+            image_bytes("JPEG"),
+            "image/jpeg",
+        )
+        first_shot = (await first_service.list_shots(detail.project.id))[0]
+        run = await first_service.create_image_run(
+            first_shot.plan.id,
+            ImageGenerationCreate(
+                expected_revision_id=asset.current_revision_id,
+            ),
+        )
+        after_run = await first_service.get_project(detail.project.id)
+        selected = await first_service.select_candidate(
+            run.candidates[0].id,
+            CandidateSelectRequest(
+                expected_revision_id=after_run.project.current_revision_id,
+            ),
+        )
+        approved = await first_service.approve_candidate(
+            run.candidates[0].id,
+            CandidateApprovalRequest(
+                expected_revision_id=selected.shot.current_revision_id,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        )
+
+        restarted_store = SQLiteStore(workspace.database_path)
+        restarted = ProductionService(restarted_store, workspace)
+        restored = await restarted.get_project(detail.project.id)
+        restored_assets = await restarted.list_references(detail.project.id)
+        revisions = await restarted.list_revisions(detail.project.id)
+        content, media_type = await restarted.resolve_reference_content(UUID(asset.id.hex))
+        restored_shot = await restarted.get_shot(first_shot.plan.id)
+
+        assert restored.project.name == "可恢复方案"
+        assert restored.revision_count == 5
+        assert restored.reference_count == 1
+        assert len(restored_assets) == 1
+        assert len(revisions) == 5
+        assert content.is_file()
+        assert media_type == "image/jpeg"
+        assert restored_shot.plan.image_status == "approved"
+        assert restored_shot.plan.approved_image_candidate_id == approved.candidate.id
+        assert len(restored_shot.generation_runs) == 1
+        assert len(restored_shot.approval_events) == 1
+
+    asyncio.run(scenario())
+
+
+def test_legacy_simulated_candidates_are_archived_and_never_pass_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis.id,
+                name="历史模拟候选修复",
+            ),
+        )
+        plan = (await service.list_shots(detail.project.id))[0].plan
+        legacy_revision_id = uuid4()
+        run, candidates = await asyncio.to_thread(
+            generate_simulated_images,
+            service.workspace,
+            detail.project,
+            plan,
+            legacy_revision_id,
+            [],
+            [],
+            candidate_count=2,
+            source_path=None,
+        )
+        selected_candidate = candidates[0].model_copy(
+            update={"status": GenerationCandidateStatus.SELECTED}
+        )
+        updated_plan = plan.model_copy(
+            update={
+                "revision_id": legacy_revision_id,
+                "image_status": WorkflowItemStatus.APPROVED,
+                "approved_image_candidate_id": selected_candidate.id,
+            }
+        )
+        plans = await repository.list_shot_plans(detail.project.id)
+        next_plans = [
+            updated_plan if item.id == updated_plan.id else item
+            for item in plans
+        ]
+        legacy_project, legacy_revision = await service._prepare_revision(
+            detail.project,
+            ProductionChangeKind.IMAGE_APPROVED,
+            "旧版模拟候选被错误确认",
+            revision_id=legacy_revision_id,
+            shot_plans=next_plans,
+        )
+        await repository.save_production_bundle(
+            legacy_project,
+            legacy_revision,
+            shot_plans=[updated_plan],
+            generation_runs=[run],
+            generation_candidates=[selected_candidate, candidates[1]],
+        )
+
+        with pytest.raises(ProductionServiceError) as select_error:
+            await service.select_candidate(
+                selected_candidate.id,
+                CandidateSelectRequest(
+                    expected_revision_id=legacy_project.current_revision_id,
+                ),
+            )
+        assert select_error.value.code == "simulated_candidate_forbidden"
+
+        with pytest.raises(ProductionServiceError) as approval_error:
+            await service.approve_candidate(
+                selected_candidate.id,
+                CandidateApprovalRequest(
+                    expected_revision_id=legacy_project.current_revision_id,
+                    decision=ApprovalDecision.APPROVED,
+                ),
+            )
+        assert approval_error.value.code == "simulated_candidate_forbidden"
+
+        repaired = await service.get_project(detail.project.id)
+        repaired_shot = await service.get_shot(plan.id)
+        gate = await service.gate_status(detail.project.id)
+
+        assert repaired.revision_count == 3
+        assert repaired.approved_image_count == 0
+        assert repaired_shot.plan.image_status == WorkflowItemStatus.READY
+        assert repaired_shot.plan.approved_image_candidate_id is None
+        assert {
+            candidate.status
+            for candidate in repaired_shot.generation_runs[0].candidates
+        } == {GenerationCandidateStatus.ARCHIVED}
+        assert gate.allowed is False
+        assert gate.approved_shot_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+    workspace = WorkspaceManager()
+    repository = InMemoryStore()
+    record, video, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    source_video = workspace.source_root(record.id) / "source.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"fake-video-for-range-and-picker")
+    video.stored_relative_path = workspace.relative(source_video)
+    asyncio.run(repository.add_video(video))
+    service = ProductionService(
+        repository,
+        workspace,
+        media_processor=FakeFrameProcessor(),
+    )
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "关键帧工作流"},
+        ).json()
+        project_id = created["project"]["id"]
+        revision_id = created["project"]["current_revision_id"]
+        shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
+        plan = shots[0]["plan"]
+        timestamp = round(
+            (plan["start_seconds"] + plan["end_seconds"]) / 2,
+            2,
+        )
+
+        video_response = client.get(
+            f"/api/v1/productions/{project_id}/source-video"
+        )
+        assert video_response.status_code == 200
+        assert video_response.content == b"fake-video-for-range-and-picker"
+        assert video_response.headers["content-type"].startswith("video/mp4")
+
+        selected_response = client.post(
+            f"/api/v1/production-shots/{plan['id']}/source-keyframe",
+            json={
+                "expected_revision_id": revision_id,
+                "timestamp_seconds": timestamp,
+            },
+        )
+        assert selected_response.status_code == 200, selected_response.text
+        selected = selected_response.json()
+        selected_plan = selected["plan"]
+        assert selected_plan["source_keyframe_origin"] == "video_selection"
+        assert selected_plan["source_keyframe_timestamp_seconds"] == timestamp
+        assert selected_plan["image_status"] == "ready"
+        assert selected_plan["source_keyframe_url"].startswith(
+            f"/api/v1/production-shots/{plan['id']}/source-keyframe"
+        )
+        keyframe_response = client.get(selected_plan["source_keyframe_url"])
+        assert keyframe_response.status_code == 200
+        with Image.open(BytesIO(keyframe_response.content)) as keyframe:
+            assert keyframe.size == (720, 1280)
+
+        approval_response = client.post(
+            f"/api/v1/production-shots/{plan['id']}/source-keyframe/approval",
+            json={"expected_revision_id": selected["current_revision_id"]},
+        )
+        assert approval_response.status_code == 200, approval_response.text
+        approval = approval_response.json()
+        assert approval["shot"]["plan"]["image_status"] == "approved"
+        assert approval["candidate"]["status"] == "selected"
+        approved_candidate_id = approval["candidate"]["id"]
+        shot_detail = client.get(
+            f"/api/v1/production-shots/{plan['id']}"
+        ).json()
+        source_run = shot_detail["generation_runs"][0]
+        assert source_run["execution_mode"] == "source_frame"
+        assert source_run["input_mode"] == "keyframe_edit"
+        assert source_run["actual_cost_micros"] == 0
+
+        conflict = client.post(
+            f"/api/v1/production-shots/{plan['id']}/source-keyframe",
+            json={
+                "expected_revision_id": approval["shot"]["current_revision_id"],
+                "timestamp_seconds": min(timestamp + 0.1, plan["end_seconds"]),
+            },
+        )
+        assert conflict.status_code == 409
+
+        replaced = client.post(
+            f"/api/v1/production-shots/{plan['id']}/source-keyframe",
+            json={
+                "expected_revision_id": approval["shot"]["current_revision_id"],
+                "timestamp_seconds": min(timestamp + 0.1, plan["end_seconds"]),
+                "confirm_stale": True,
+            },
+        )
+        assert replaced.status_code == 200, replaced.text
+        replaced_detail = replaced.json()
+        assert replaced_detail["plan"]["image_status"] == "ready"
+        assert replaced_detail["plan"]["approved_image_candidate_id"] is None
+        archived = next(
+            candidate
+            for run in replaced_detail["generation_runs"]
+            for candidate in run["candidates"]
+            if candidate["id"] == approved_candidate_id
+        )
+        assert archived["status"] == "archived"
+
+        branch_response = client.post(
+            f"/api/v1/productions/{project_id}/branches",
+            json={
+                "name": "保留关键帧的分支",
+                "source_revision_id": replaced_detail["current_revision_id"],
+            },
+        )
+        assert branch_response.status_code == 201, branch_response.text
+        branch_id = branch_response.json()["project"]["id"]
+        branch_plan = client.get(
+            f"/api/v1/productions/{branch_id}/shots"
+        ).json()[0]["plan"]
+        assert branch_plan["source_keyframe_origin"] == "video_selection"
+        assert branch_plan["source_keyframe_url"].startswith(
+            f"/api/v1/production-shots/{branch_plan['id']}/source-keyframe"
+        )
+        assert client.get(branch_plan["source_keyframe_url"]).status_code == 200
+
+
+def test_batch41_shot_generation_approval_stale_and_gate_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = isolated_service(tmp_path, monkeypatch)
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={
+                "base_analysis_id": str(analysis.id),
+                "name": "Batch 4.1 验收方案",
+            },
+        ).json()
+        project_id = created["project"]["id"]
+        current_revision_id = created["project"]["current_revision_id"]
+
+        shots_response = client.get(f"/api/v1/productions/{project_id}/shots")
+        assert shots_response.status_code == 200, shots_response.text
+        shots = shots_response.json()
+        assert len(shots) == 5
+        assert [item["plan"]["index"] for item in shots] == [1, 2, 3, 4, 5]
+        assert all(item["plan"]["image_status"] == "ready" for item in shots)
+        assert all(item["plan"]["source_keyframe_url"] for item in shots)
+
+        asset_response = client.post(
+            f"/api/v1/productions/{project_id}/references",
+            files={"file": ("person.png", image_bytes("PNG"), "image/png")},
+            data={
+                "expected_revision_id": current_revision_id,
+                "type": "person",
+                "name": "主角参考图",
+                "rights_confirmed": "true",
+            },
+        )
+        assert asset_response.status_code == 201, asset_response.text
+        asset = asset_response.json()
+        current_revision_id = asset["current_revision_id"]
+
+        first_shot_id = shots[0]["plan"]["id"]
+        update_response = client.patch(
+            f"/api/v1/production-shots/{first_shot_id}",
+            json={
+                "expected_revision_id": current_revision_id,
+                "image_prompt": "保持原构图，替换为参考图中的人物，写实自然光。",
+                "reference_bindings": [
+                    {
+                        "reference_asset_id": asset["id"],
+                        "role": "identity",
+                        "weight": 1.2,
+                    }
+                ],
+            },
+        )
+        assert update_response.status_code == 200, update_response.text
+        updated_first = update_response.json()
+        assert len(updated_first["reference_bindings"]) == 1
+        current_revision_id = updated_first["current_revision_id"]
+
+        gate_before = client.get(f"/api/v1/productions/{project_id}/gate-status").json()
+        assert gate_before["allowed"] is False
+        assert gate_before["approved_shot_count"] == 0
+
+        first_candidate_id = None
+        for index, shot in enumerate(shots):
+            shot_id = shot["plan"]["id"]
+            run_response = client.post(
+                f"/api/v1/production-shots/{shot_id}/image-runs",
+                json={
+                    "expected_revision_id": current_revision_id,
+                    "candidate_count": 2 if index == 0 else 1,
+                },
+            )
+            assert run_response.status_code == 201, run_response.text
+            run = run_response.json()
+            assert run["provider"] == "test_image_provider"
+            assert run["execution_mode"] == "remote_api"
+            assert run["actual_cost_micros"] == 0
+            assert len(run["candidates"]) == (2 if index == 0 else 1)
+            candidate = run["candidates"][0]
+            if index == 0:
+                first_candidate_id = candidate["id"]
+            thumbnail = client.get(candidate["thumbnail_url"])
+            assert thumbnail.status_code == 200
+            assert thumbnail.headers["content-type"].startswith("image/webp")
+
+            current_revision_id = client.get(f"/api/v1/productions/{project_id}").json()["project"][
+                "current_revision_id"
+            ]
+            select_response = client.post(
+                f"/api/v1/generation-candidates/{candidate['id']}/select",
+                json={"expected_revision_id": current_revision_id},
+            )
+            assert select_response.status_code == 200, select_response.text
+            selected = select_response.json()
+            assert selected["candidate"]["status"] == "selected"
+            current_revision_id = selected["shot"]["current_revision_id"]
+
+            approval_response = client.post(
+                f"/api/v1/generation-candidates/{candidate['id']}/approvals",
+                json={
+                    "expected_revision_id": current_revision_id,
+                    "decision": "approved",
+                },
+            )
+            assert approval_response.status_code == 200, approval_response.text
+            approved = approval_response.json()
+            assert approved["shot"]["plan"]["image_status"] == "approved"
+            current_revision_id = approved["shot"]["current_revision_id"]
+            if index == 0:
+                duplicate_approval = client.post(
+                    f"/api/v1/generation-candidates/{candidate['id']}/approvals",
+                    json={
+                        "expected_revision_id": current_revision_id,
+                        "decision": "approved",
+                    },
+                )
+                assert duplicate_approval.status_code == 409
+                assert duplicate_approval.json()["detail"] == (
+                    "该分镜图片已审批，如需修改请先调整分镜输入"
+                )
+
+        gate_after = client.get(f"/api/v1/productions/{project_id}/gate-status").json()
+        assert gate_after["allowed"] is True
+        assert gate_after["approved_shot_count"] == 5
+        assert gate_after["stale_shot_count"] == 0
+
+        advance_response = client.post(
+            f"/api/v1/productions/{project_id}/advance",
+            json={
+                "expected_revision_id": current_revision_id,
+                "target_step": "shot_videos",
+            },
+        )
+        assert advance_response.status_code == 200, advance_response.text
+        assert advance_response.json()["project"]["active_step"] == "shot_videos"
+        current_revision_id = advance_response.json()["project"]["current_revision_id"]
+
+        duplicate_advance = client.post(
+            f"/api/v1/productions/{project_id}/advance",
+            json={
+                "expected_revision_id": current_revision_id,
+                "target_step": "shot_videos",
+            },
+        )
+        assert duplicate_advance.status_code == 409
+        assert duplicate_advance.json()["detail"] == "当前方案已进入分段视频阶段"
+
+        branch_response = client.post(
+            f"/api/v1/productions/{project_id}/branches",
+            json={
+                "name": "审批前可回退分支",
+                "source_revision_id": current_revision_id,
+            },
+        )
+        assert branch_response.status_code == 201, branch_response.text
+        branch_id = branch_response.json()["project"]["id"]
+        branch_shots = client.get(f"/api/v1/productions/{branch_id}/shots").json()
+        assert all(item["plan"]["approved_image_candidate_id"] is None for item in branch_shots)
+        assert all(item["plan"]["image_status"] == "ready" for item in branch_shots)
+
+        impact = client.post(
+            f"/api/v1/productions/{project_id}/change-impact",
+            json={
+                "expected_revision_id": current_revision_id,
+                "change_type": "reference_asset",
+                "reference_asset_ids": [asset["id"]],
+            },
+        ).json()
+        assert impact["requires_confirmation"] is True
+        assert impact["impacted_shot_plan_ids"] == [first_shot_id]
+
+        rejected_edit = client.patch(
+            f"/api/v1/references/{asset['id']}",
+            json={
+                "expected_revision_id": current_revision_id,
+                "description": "更新后的人物参考说明",
+            },
+        )
+        assert rejected_edit.status_code == 409
+        assert rejected_edit.json()["detail"] == (
+            "参考资产修改会使已绑定分镜过期，请确认影响范围后重试"
+        )
+
+        confirmed_edit = client.patch(
+            f"/api/v1/references/{asset['id']}",
+            json={
+                "expected_revision_id": current_revision_id,
+                "confirm_stale": True,
+                "description": "更新后的人物参考说明",
+            },
+        )
+        assert confirmed_edit.status_code == 200, confirmed_edit.text
+        current_revision_id = confirmed_edit.json()["current_revision_id"]
+        stale_shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
+        assert stale_shots[0]["plan"]["image_status"] == "stale"
+        assert all(item["plan"]["image_status"] == "approved" for item in stale_shots[1:])
+        assert first_candidate_id is not None
+        stale_candidate = client.post(
+            f"/api/v1/generation-candidates/{first_candidate_id}/select",
+            json={"expected_revision_id": current_revision_id},
+        )
+        assert stale_candidate.status_code == 409
+        assert stale_candidate.json()["detail"] == "分镜输入已修改，请重新生成候选"
+
+        global_update = client.patch(
+            f"/api/v1/productions/{project_id}",
+            json={
+                "expected_revision_id": current_revision_id,
+                "confirm_stale": True,
+                "output_aspect_ratio": "16:9",
+                "output_width": 1920,
+                "output_height": 1080,
+            },
+        )
+        assert global_update.status_code == 200, global_update.text
+        all_stale = client.get(f"/api/v1/productions/{project_id}/shots").json()
+        assert all(item["plan"]["image_status"] == "stale" for item in all_stale)
+
+
+def test_shot_structure_add_reorder_discard_and_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = isolated_service(tmp_path, monkeypatch)
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "分镜编排测试"},
+        ).json()
+        project_id = created["project"]["id"]
+        revision_id = created["project"]["current_revision_id"]
+        initial = client.get(f"/api/v1/productions/{project_id}/shots").json()
+        first_id = initial[0]["plan"]["id"]
+
+        duplicate_response = client.post(
+            f"/api/v1/productions/{project_id}/shots",
+            json={
+                "expected_revision_id": revision_id,
+                "mode": "duplicate",
+                "source_shot_plan_id": first_id,
+                "insert_after_shot_plan_id": first_id,
+            },
+        )
+        assert duplicate_response.status_code == 201, duplicate_response.text
+        duplicate = duplicate_response.json()
+        duplicate_id = duplicate["plan"]["id"]
+        assert duplicate["plan"]["source_kind"] == "duplicate"
+        assert duplicate["plan"]["index"] == 2
+        assert duplicate["plan"]["approved_image_candidate_id"] is None
+
+        revision_id = duplicate["current_revision_id"]
+        shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
+        active_ids = [
+            item["plan"]["id"]
+            for item in shots
+            if item["plan"]["lifecycle_status"] == "active"
+        ]
+        reordered_ids = [active_ids[-1], *active_ids[:-1]]
+        reordered = client.put(
+            f"/api/v1/productions/{project_id}/shots/order",
+            json={
+                "expected_revision_id": revision_id,
+                "ordered_shot_plan_ids": reordered_ids,
+            },
+        )
+        assert reordered.status_code == 200, reordered.text
+        reordered_body = reordered.json()
+        assert [
+            item["plan"]["id"]
+            for item in reordered_body
+            if item["plan"]["lifecycle_status"] == "active"
+        ] == reordered_ids
+        assert [
+            item["plan"]["index"]
+            for item in reordered_body
+            if item["plan"]["lifecycle_status"] == "active"
+        ] == list(range(1, 7))
+
+        revision_id = client.get(
+            f"/api/v1/productions/{project_id}"
+        ).json()["project"]["current_revision_id"]
+        discarded = client.post(
+            f"/api/v1/production-shots/{duplicate_id}/discard",
+            json={"expected_revision_id": revision_id},
+        )
+        assert discarded.status_code == 200, discarded.text
+        discarded_body = discarded.json()
+        discarded_plan = next(
+            item["plan"] for item in discarded_body if item["plan"]["id"] == duplicate_id
+        )
+        assert discarded_plan["lifecycle_status"] == "discarded"
+        assert len([
+            item for item in discarded_body
+            if item["plan"]["lifecycle_status"] == "active"
+        ]) == 5
+        project_detail = client.get(f"/api/v1/productions/{project_id}").json()
+        assert project_detail["shot_count"] == 5
+        assert project_detail["discarded_shot_count"] == 1
+        gate = client.get(f"/api/v1/productions/{project_id}/gate-status").json()
+        assert gate["required_shot_count"] == 5
+
+        blocked_edit = client.patch(
+            f"/api/v1/production-shots/{duplicate_id}",
+            json={
+                "expected_revision_id": project_detail["project"]["current_revision_id"],
+                "image_prompt": "不应允许修改",
+            },
+        )
+        assert blocked_edit.status_code == 409
+
+        restored = client.post(
+            f"/api/v1/production-shots/{duplicate_id}/restore",
+            json={
+                "expected_revision_id": project_detail["project"]["current_revision_id"],
+            },
+        )
+        assert restored.status_code == 200, restored.text
+        restored_active = [
+            item["plan"] for item in restored.json()
+            if item["plan"]["lifecycle_status"] == "active"
+        ]
+        assert len(restored_active) == 6
+        assert restored_active[-1]["id"] == duplicate_id
+
+        revision_id = client.get(
+            f"/api/v1/productions/{project_id}"
+        ).json()["project"]["current_revision_id"]
+        blank = client.post(
+            f"/api/v1/productions/{project_id}/shots",
+            json={
+                "expected_revision_id": revision_id,
+                "mode": "blank",
+                "insert_after_shot_plan_id": duplicate_id,
+                "image_prompt": "纯文字创建的新画面",
+            },
+        )
+        assert blank.status_code == 201, blank.text
+        assert blank.json()["plan"]["source_kind"] == "blank"
+        assert blank.json()["plan"]["source_keyframe_url"] is None
+        assert blank.json()["plan"]["image_status"] == "ready"
+
+
+def test_prompt_asset_mentions_are_stable_and_auto_bind_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = isolated_service(tmp_path, monkeypatch)
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "提示词资产关联"},
+        ).json()
+        project_id = created["project"]["id"]
+        revision_id = created["project"]["current_revision_id"]
+        shot_id = client.get(
+            f"/api/v1/productions/{project_id}/shots"
+        ).json()[0]["plan"]["id"]
+
+        asset_response = client.post(
+            f"/api/v1/productions/{project_id}/references",
+            files={"file": ("person.png", image_bytes("PNG"), "image/png")},
+            data={
+                "expected_revision_id": revision_id,
+                "type": "person",
+                "name": "主角参考图",
+                "rights_confirmed": "true",
+            },
+        )
+        assert asset_response.status_code == 201, asset_response.text
+        asset = asset_response.json()
+
+        updated = client.patch(
+            f"/api/v1/production-shots/{shot_id}",
+            json={
+                "expected_revision_id": asset["current_revision_id"],
+                "image_prompt": "保持原构图，把人物替换为 @主角参考图，写实自然光。",
+                "image_prompt_mentions": [
+                    {
+                        "reference_asset_id": asset["id"],
+                        "label": "主角参考图",
+                    }
+                ],
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        shot = updated.json()
+        assert shot["plan"]["image_prompt_mentions"] == [
+            {
+                "reference_asset_id": asset["id"],
+                "label": "主角参考图",
+            }
+        ]
+        assert len(shot["reference_bindings"]) == 1
+        assert shot["reference_bindings"][0]["reference_asset_id"] == asset["id"]
+        assert shot["reference_bindings"][0]["role"] == "identity"
+
+        run_response = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-runs",
+            json={
+                "expected_revision_id": shot["current_revision_id"],
+                "candidate_count": 1,
+            },
+        )
+        assert run_response.status_code == 201, run_response.text
+        run = run_response.json()
+        stored_run = asyncio.run(repository.get_generation_run(UUID(run["id"])))
+        assert stored_run is not None
+        input_snapshot = service.workspace.resolve(stored_run.input_snapshot_relative_path)
+        filesystem_input = Path(chr(92) * 2 + '?' + chr(92) + str(input_snapshot))
+        input_payload = json.loads(filesystem_input.read_text(encoding="utf-8"))
+        assert input_payload["image_prompt_mentions"] == [
+            {"asset_id": asset["id"], "label": "主角参考图"}
+        ]
+        assert "@主角参考图" in input_payload["image_prompt"]
+        assert input_payload["references"][0]["asset_id"] == asset["id"]
+        assert input_payload["references"][0]["name"] == "主角参考图"
+
+
+def test_create_shot_from_source_video_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+    workspace = WorkspaceManager()
+    repository = InMemoryStore()
+    record, video, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    source_video = workspace.source_root(record.id) / "source.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"fake-video-for-new-shot")
+    video.stored_relative_path = workspace.relative(source_video)
+    asyncio.run(repository.add_video(video))
+    service = ProductionService(
+        repository,
+        workspace,
+        media_processor=FakeFrameProcessor(),
+    )
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "视频选段新增分镜"},
+        ).json()
+        project_id = created["project"]["id"]
+        first_shot_id = client.get(
+            f"/api/v1/productions/{project_id}/shots"
+        ).json()[0]["plan"]["id"]
+        response = client.post(
+            f"/api/v1/productions/{project_id}/shots",
+            json={
+                "expected_revision_id": created["project"]["current_revision_id"],
+                "mode": "video_range",
+                "insert_after_shot_plan_id": first_shot_id,
+                "start_seconds": 1,
+                "end_seconds": 3,
+                "source_keyframe_timestamp_seconds": 2,
+                "image_prompt": "新增的视频选段画面",
+            },
+        )
+        assert response.status_code == 201, response.text
+        plan = response.json()["plan"]
+        assert plan["source_kind"] == "video_range"
+        assert plan["source_keyframe_origin"] == "video_selection"
+        assert plan["source_keyframe_timestamp_seconds"] == 2
+        assert plan["index"] == 2
+        keyframe = client.get(plan["source_keyframe_url"])
+        assert keyframe.status_code == 200
+        with Image.open(BytesIO(keyframe.content)) as rendered:
+            assert rendered.size == (720, 1280)
