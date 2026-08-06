@@ -1,8 +1,8 @@
 # Phase 2 Batch 4.2：图片生成双模式执行与验收
 
-更新时间：2026-08-04
+更新时间：2026-08-06
 
-阶段状态：Batch 4.2.1～4.2.3 已实现；Batch 4.2.4 已完成统一候选 UI、缓存和基础质量检查，持久化后台任务、显式取消与 VLM 语义质检仍待完成，因此本文件暂不把 Batch 4.2 标记为全部完成。
+阶段状态：Batch 4.2.1～4.2.4 工程实现与自动化验证已完成。真实百炼／ImageGen 出图会产生平台费用或消耗订阅配额，仍保留为用户明确触发的人工验收，不在自动测试中执行。
 
 ## 1. 本批目标
 
@@ -20,6 +20,10 @@ ShotPlan + 原关键帧 + ReferenceBinding
                     │
                     ▼
           ImageGenerationGateway
+                    ▲
+                    │
+       持久化队列 + 后台 Worker
+     queued/running/cancel/retry/recovery
              │             │
              │             └── local_tool
              │                 版本化 request.json / result.json
@@ -56,6 +60,8 @@ ShotPlan + 原关键帧 + ReferenceBinding
 - `POST /api/v1/settings/image-generation/auto-configure-codex`
 - `POST /api/v1/production-shots/{shot_plan_id}/image-runs`
 - `GET /api/v1/generation-runs/{run_id}`
+- `POST /api/v1/generation-runs/{run_id}/cancel`
+- `POST /api/v1/generation-runs/{run_id}/retry`
 
 ## 4. Batch 4.2.2：国内 Remote Adapter
 
@@ -86,7 +92,7 @@ ShotPlan + 原关键帧 + ReferenceBinding
 - 原图和参考图复制到本次 run 的隔离输入目录，CLI 只接收本次任务目录。
 - 候选只能来自指定输出目录，拒绝绝对路径、目录穿越、符号链接越界、超大文件、错误文件头、尺寸或哈希不一致。
 - 支持执行超时、Windows 进程树回收、退出码和截断后的标准错误。
-- `local_concurrency` 已在单 API 进程内使用信号量落实，避免同时启动过多本机生成进程。
+- `local_concurrency` 同时使用进程内信号量和工作区文件槽位锁，多个 API worker 共享并发上限，避免同时启动过多本机生成进程。
 - 成本来源支持 `provider_reported`、`configured_rate`、`unmetered`、`subscription_quota` 和 `unknown`；unknown 必须逐次人工确认，不能伪装为零费用；订阅配额不记作 ¥0，也不重复弹未知金额确认。
 
 自动化测试使用假 CLI 完成能力检测、双候选生成、协议校验、文件落盘和未知成本门禁。
@@ -124,7 +130,14 @@ ShotPlan + 原关键帧 + ReferenceBinding
 - 实际宽高、目标宽高、画幅误差和像素比例检查；画幅偏差超过 3% 或像素数低于目标 25% 时写入 warning。
 - 每个候选保存版本化 `quality_report`，工作台显示“基础质检通过／尺寸有提示／未自动质检”，同时始终保留人工确认。
 
-当前不会虚假声称已经自动判断语义一致性。人物身份、产品形态、服装、场景和异常文字根据参考角色列为人工核对项；接入 VLM 自动复核后，仍由人工做最终确认。
+可选 VLM 语义质检已接入，但默认关闭：
+
+- 设置页可启用“生成后使用 VLM 做语义质检”；
+- 每张候选连同原关键帧、已绑定参考资产和结构化检查项发送到模型网关；
+- 输出人物身份、产品形态、服装、场景、异常文字、证据、置信度和总体状态；
+- 调用前执行剩余预算门禁，调用后把 Token、请求 ID、预计费用和实际费用并入本次 GenerationRun；
+- `warning`、`uncertain` 和 `passed` 只作为人工审核证据，任何置信度都不会自动采用、淘汰或审批候选；
+- 质检费用独立于图片生成费用归集，预算不足时明确记录 `skipped_budget`，不会把未执行误报为通过。
 
 ## 8. 成本与失败语义
 
@@ -134,38 +147,61 @@ ShotPlan + 原关键帧 + ReferenceBinding
 - 新一轮生成会归档旧轮次的 ready/selected 候选，避免把旧图片误认为本轮结果。
 - 缓存命中费用为 0，但保留原始付费 run 和来源关系，审计信息不会丢失。
 
+Batch 4.2.4 进一步统一任务状态：
+
+- 创建图片任务先持久化 `queued` 并返回 HTTP 202，前端按 run ID 轮询，不再长时间占用创建请求；
+- Worker 通过 SQLite 原子 claim 把 `queued` 改为 `running`，同一任务不会被多个进程重复执行；
+- 运行期间保存开始时间、更新时间、心跳、请求快照和不可变 `queue.json`；
+- 用户可以显式取消 queued／running 任务；本机工具回收进程树，Provider 不支持远端取消时也不会自动重发；
+- 失败或取消任务可人工重试，新 run 保存 `retry_of_run_id` 和递增 `retry_count`，原运行记录不覆盖；
+- API 启动时重新排队尚未执行的 queued 任务，把未知外部状态的 running 标记为 `generation_interrupted`，禁止盲目重复计费；
+- 重启前处于 `cancellation_requested` 的任务终结为 `cancelled`；
+- 浏览器关闭、切换页面或重新打开方案不会丢失任务，工作台会恢复轮询和最终候选。
+
 ## 9. 自动化与浏览器验收
 
-2026-08-04 验证结果：
+2026-08-06 最终验证结果：
 
-- 后端全量测试：80 项通过。
-- Ruff：`services/api/src` 与 `services/api/tests` 全量通过。
-- 图片生成与生产 API 针对性测试：11 项通过。
-- 前端测试：15 项通过。
-- 前端生产构建：通过，Vite 完成 4575 个模块转换并生成 Sites 产物。
-- Chrome 桌面验收：模型设置双模式字段、能力与费用提示、分镜工作台运行状态和候选区域均可读取。
-- Codex 自动配置 GUI 验收：实际显示 `codex-cli 0.146.0`、已登录、桌面端已安装、ImageGen“待首次出图验证”、`gpt-5.6-sol` 和 `xhigh`；未点击应用配置，页面无控制台错误。
-- 560×820 视口验收：设置弹窗无横向溢出，模式卡片自动切换为单列，内容区可纵向滚动。
-- 页面日志未发现 ViralDNA 应用错误；仅有浏览器扩展自身警告。
+- 后端全量测试：110 项通过；
+- Ruff：`services/api` 全量通过；
+- 异步任务、跨进程 claim／并发槽位、取消、重试、重启恢复和 VLM 成本专项测试通过；
+- 前端测试：23 项通过；
+- 前端生产构建：通过，Vite 完成 4578 个模块转换并生成 Sites 产物；
+- Chrome 本地冒烟：Schema 4 工作区、资产库和模型设置正常加载，VLM 语义质检开关与费用说明可读取；
+- 页面日志未发现 ViralDNA 应用错误；
+- 自动化验证没有调用真实付费图片模型、真实 ImageGen 出图或真实云端存储。
 
-## 10. 尚未完成
+## 10. Batch 4.2.4 完成范围
 
-以下内容仍属于 Batch 4.2，不应误报为已完成：
+本切片完成：
 
-1. 持久化后台任务：当前 POST 仍等待 Adapter 返回，远端超时上限较长，生成期间 HTTP 请求会保持连接。
-2. 显式取消：尚无 `POST /generation-runs/{id}/cancel`；远端 Provider 取消和本机进程即时取消均未形成统一协议。
-3. 崩溃恢复：API 重启后 completed/failed/cached 可恢复，但 queued/running 任务还不能自动续跑或安全终止。
-4. VLM 语义质检：人物一致性、产品形态和异常文字目前是明确的人工核对项，尚未调用 VLM 自动评分。
-5. 双模式真实四分镜验收：Remote 尚未做付费四分镜测试；本机包装器已通过假 Codex 协议测试和真实安装发现，但尚未用真实 imagegen 完成样本出图。
-6. 多进程全局并发：本机并发限制当前只覆盖单 API 进程；多 worker 部署需要数据库租约或外部队列。
+1. 持久化 queued/running 后台任务与 HTTP 202；
+2. 前端轮询、取消、失败重试和重新打开恢复；
+3. SQLite 原子 claim、同工作区多进程本机并发槽位和重复执行保护；
+4. queued／running／cancellation_requested 的启动恢复策略；
+5. 本机工具取消与进程树回收；
+6. 可选 VLM 语义质检、预算门禁、结构化证据和费用归集；
+7. 任务 lineage、不可变请求快照、候选缓存和人工审批门禁；
+8. 全量自动化、静态检查、生产构建和无费用浏览器冒烟。
 
-## 11. 下一执行切片
+## 11. 必须由人工明确触发的验收
 
-建议按以下顺序完成 Batch 4.2.4：
+以下不是工程缺口，而是为了控制费用和外部副作用而保留的人工步骤：
 
-1. 把 GenerationRun 改为先持久化 queued，再由后台执行器更新 running/completed/failed/cached；POST 返回 202 和 run ID，前端轮询。
-2. 增加 cancellation_requested、cancelled 状态和取消 API；本机 Adapter 暴露进程句柄并回收进程树，远端仅在 Provider 支持时调用取消。
-3. API 启动时扫描 queued/running：未发起远端请求的任务可重排队，未知外部状态的任务标记为可重试失败，禁止盲目重复计费。
-4. 增加可选 VLM 候选质检任务，把人物、产品、服装、场景和文字异常输出为结构化证据、置信度和额外费用；低置信度不自动拒绝。
-5. 先由用户在 GUI 明确触发一次 Codex + ImageGen 单镜头冒烟，确认订阅权限、实际输出目录和参考图一致性；Remote 也仅在明确授权后做单镜头付费冒烟，再扩展到目标四分镜。
-6. 完成失败重试、取消、重启恢复、缓存缺失回退、预算并发竞争和四分镜双模式端到端测试后，再把 Batch 4.2 标记为完成。
+1. 使用真实 Codex + ImageGen 生成一个单镜头候选，确认当前订阅、模型可用性、参考图传递和输出目录；
+2. 使用真实百炼模型生成一个单镜头候选，确认当前账号区域、模型权限、实际费用和下载域名；
+3. 启用 VLM 质检生成一个候选，核对额外 Token 和费用是否符合百炼账单；
+4. 单镜头通过后再执行目标四分镜双模式验收，避免一次性扩大成本；
+5. 真实测试前设置项目预算上限，测试后检查项目实际费用、run 明细和平台账单。
+
+完整操作步骤见 `docs/Phase2_Batch4.4.4_4.4.5与4.2.4_人工验收.md`。
+
+## 12. 仍不属于 Batch 4.2 的能力
+
+- Provider 原生服务端任务取消：仅当具体 Provider 提供稳定取消 API 时再由 Adapter 实现；当前取消保证 ViralDNA 不继续采用结果或自动重发；
+- 独立 Redis／消息队列和跨多台服务器的分布式调度；当前保证同一个本地工作区的 SQLite 原子 claim 和本机进程并发安全；
+- 自动批准或自动淘汰图片候选；VLM 始终是人工审核证据；
+- 真实云端文件同步、团队协作和账号权限；
+- 分段视频生成、剪辑与成片导出，属于 Batch 4.5 及后续。
+
+Batch 4.2 至此完成工程收尾。真实模型冒烟的通过与否应记录为环境／账号验收结果，不改变本批代码完成状态。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -24,6 +25,7 @@ from viral_dna_api.models import (
     ImageGenerationCreate,
     ProductionChangeKind,
     ProductionProjectCreate,
+    ProductionStep,
     ReferenceAssetCreate,
     ReferenceAssetType,
     SourceType,
@@ -104,8 +106,12 @@ class FakeRealImageGateway:
         input_mode,
         execution_mode,
         allow_unknown_cost,
+        seed=None,
+        reuse_cache=True,
+        run_id=None,
+        cancel_event=None,
     ):
-        del execution_mode, allow_unknown_cost
+        del execution_mode, allow_unknown_cost, reuse_cache, cancel_event
         run, candidates = await asyncio.to_thread(
             generate_simulated_images,
             self.workspace,
@@ -117,9 +123,20 @@ class FakeRealImageGateway:
             candidate_count=candidate_count,
             source_path=source_path,
             input_mode=input_mode,
+            run_id=run_id,
         )
-        return run.model_copy(
+        if seed is not None:
+            run = run.model_copy(
+                update={
+                    "request_payload": {
+                        **run.request_payload,
+                        "seed": seed,
+                    }
+                }
+            )
+        run = run.model_copy(
             update={
+                "id": run_id or run.id,
                 "provider": "test_image_provider",
                 "model": "test-image-model",
                 "model_snapshot": "test-image-model-v1",
@@ -127,7 +144,41 @@ class FakeRealImageGateway:
                 "adapter_id": "test-image-adapter",
                 "adapter_version": "test-v1",
             }
-        ), candidates
+        )
+        return run, [
+            candidate.model_copy(update={"generation_run_id": run.id})
+            for candidate in candidates
+        ]
+
+
+TERMINAL_GENERATION_STATUSES = {
+    "completed",
+    "cached",
+    "failed",
+    "blocked",
+    "cancelled",
+}
+
+
+async def wait_for_generation(service: ProductionService, run_id: UUID):
+    for _ in range(200):
+        run = await service.get_generation_run(run_id)
+        if run.status in TERMINAL_GENERATION_STATUSES:
+            return run
+        await asyncio.sleep(0.01)
+    raise AssertionError("图片生成任务未在测试超时内完成")
+
+
+def wait_for_generation_http(client: TestClient, run_id: str):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/generation-runs/{run_id}")
+        assert response.status_code == 200, response.text
+        run = response.json()
+        if run["status"] in TERMINAL_GENERATION_STATUSES:
+            return run
+        time.sleep(0.01)
+    raise AssertionError("图片生成任务未在测试超时内完成")
 
 
 async def seed_completed_analysis(repository):
@@ -267,7 +318,7 @@ def test_production_http_api_revision_reference_and_branch_flow(
         revision_response = client.get(f"/api/v1/productions/{project_id}/revisions/{revision_1}")
         assert revision_response.status_code == 200
         snapshot = revision_response.json()["snapshot"]
-        assert snapshot["schema_version"] == "production-revision-v1"
+        assert snapshot["schema_version"] == "production-revision-v2"
         assert snapshot["source_analysis"]["analysis_id"] == str(analysis.id)
         assert len(snapshot["source_analysis"]["shots"]) == 5
         assert "snapshot_relative_path" not in revision_response.json()
@@ -429,6 +480,7 @@ def test_production_service_survives_sqlite_restart(
                 expected_revision_id=asset.current_revision_id,
             ),
         )
+        run = await wait_for_generation(first_service, run.id)
         after_run = await first_service.get_project(detail.project.id)
         selected = await first_service.select_candidate(
             run.candidates[0].id,
@@ -764,8 +816,9 @@ def test_batch41_shot_generation_approval_stale_and_gate_flow(
                     "candidate_count": 2 if index == 0 else 1,
                 },
             )
-            assert run_response.status_code == 201, run_response.text
-            run = run_response.json()
+            assert run_response.status_code == 202, run_response.text
+            queued_run = run_response.json()
+            run = wait_for_generation_http(client, queued_run["id"])
             assert run["provider"] == "test_image_provider"
             assert run["execution_mode"] == "remote_api"
             assert run["actual_cost_micros"] == 0
@@ -909,6 +962,181 @@ def test_batch41_shot_generation_approval_stale_and_gate_flow(
         assert global_update.status_code == 200, global_update.text
         all_stale = client.get(f"/api/v1/productions/{project_id}/shots").json()
         assert all(item["plan"]["image_status"] == "stale" for item in all_stale)
+
+
+def test_single_candidate_approval_can_be_revoked_and_regenerated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = isolated_service(tmp_path, monkeypatch)
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "单候选取消采用测试"},
+        ).json()
+        project_id = created["project"]["id"]
+        shot = client.get(f"/api/v1/productions/{project_id}/shots").json()[0]
+        shot_id = shot["plan"]["id"]
+        revision_id = created["project"]["current_revision_id"]
+
+        first_queued = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-runs",
+            json={
+                "expected_revision_id": revision_id,
+                "candidate_count": 1,
+            },
+        )
+        assert first_queued.status_code == 202, first_queued.text
+        first_run = wait_for_generation_http(client, first_queued.json()["id"])
+        assert len(first_run["candidates"]) == 1
+        first_candidate = first_run["candidates"][0]
+
+        revision_id = client.get(
+            f"/api/v1/productions/{project_id}"
+        ).json()["project"]["current_revision_id"]
+        selected = client.post(
+            f"/api/v1/generation-candidates/{first_candidate['id']}/select",
+            json={"expected_revision_id": revision_id},
+        )
+        assert selected.status_code == 200, selected.text
+        approved = client.post(
+            f"/api/v1/generation-candidates/{first_candidate['id']}/approvals",
+            json={
+                "expected_revision_id": selected.json()["shot"]["current_revision_id"],
+                "decision": "approved",
+            },
+        )
+        assert approved.status_code == 200, approved.text
+        approved_revision_id = approved.json()["shot"]["current_revision_id"]
+
+        revoked = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-approval/revoke",
+            json={
+                "expected_revision_id": approved_revision_id,
+                "reason": "需要生成新的图片候选",
+            },
+        )
+        assert revoked.status_code == 200, revoked.text
+        revoked_body = revoked.json()
+        assert revoked_body["shot"]["plan"]["image_status"] == "review_required"
+        assert revoked_body["shot"]["plan"]["approved_image_candidate_id"] is None
+        assert revoked_body["candidate"]["id"] == first_candidate["id"]
+        assert revoked_body["candidate"]["status"] == "selected"
+        assert revoked_body["approval_event"]["decision"] == "revoked"
+
+        duplicate_revoke = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-approval/revoke",
+            json={
+                "expected_revision_id": revoked_body["shot"]["current_revision_id"],
+            },
+        )
+        assert duplicate_revoke.status_code == 409
+        assert duplicate_revoke.json()["detail"] == "当前分镜图片尚未采用，无需取消"
+
+        second_queued = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-runs",
+            json={
+                "expected_revision_id": revoked_body["shot"]["current_revision_id"],
+                "candidate_count": 1,
+                "generation_intent": "new_variation",
+            },
+        )
+        assert second_queued.status_code == 202, second_queued.text
+        stored_queued = asyncio.run(
+            repository.get_generation_run(UUID(second_queued.json()["id"]))
+        )
+        assert stored_queued is not None
+        assert stored_queued.request_payload["generation_intent"] == "new_variation"
+        assert isinstance(stored_queued.request_payload["seed"], int)
+
+        second_run = wait_for_generation_http(client, second_queued.json()["id"])
+        assert second_run["status"] == "completed"
+        assert second_run["candidates"][0]["id"] != first_candidate["id"]
+        stored_first_candidate = asyncio.run(
+            repository.get_generation_candidate(UUID(first_candidate["id"]))
+        )
+        assert stored_first_candidate is not None
+        assert stored_first_candidate.status == GenerationCandidateStatus.ARCHIVED
+
+        revision_id = client.get(
+            f"/api/v1/productions/{project_id}"
+        ).json()["project"]["current_revision_id"]
+        selected_again = client.post(
+            f"/api/v1/generation-candidates/{second_run['candidates'][0]['id']}/select",
+            json={"expected_revision_id": revision_id},
+        )
+        assert selected_again.status_code == 200, selected_again.text
+        approved_again = client.post(
+            f"/api/v1/generation-candidates/{second_run['candidates'][0]['id']}/approvals",
+            json={
+                "expected_revision_id": selected_again.json()["shot"]["current_revision_id"],
+                "decision": "approved",
+            },
+        )
+        assert approved_again.status_code == 200, approved_again.text
+
+        persisted_plan = asyncio.run(repository.get_shot_plan(UUID(shot_id)))
+        persisted_project = asyncio.run(
+            repository.get_production_project(UUID(project_id))
+        )
+        assert persisted_plan is not None
+        assert persisted_project is not None
+        asyncio.run(
+            repository.save_shot_plan(
+                persisted_plan.model_copy(
+                    update={"video_status": WorkflowItemStatus.APPROVED}
+                )
+            )
+        )
+        asyncio.run(
+            repository.save_production_project(
+                persisted_project.model_copy(
+                    update={"active_step": ProductionStep.SHOT_VIDEOS}
+                )
+            )
+        )
+        approved_revision_id = approved_again.json()["shot"]["current_revision_id"]
+        impact = client.post(
+            f"/api/v1/productions/{project_id}/change-impact",
+            json={
+                "expected_revision_id": approved_revision_id,
+                "change_type": "image_approval_revoke",
+                "shot_plan_ids": [shot_id],
+            },
+        )
+        assert impact.status_code == 200, impact.text
+        assert impact.json()["requires_confirmation"] is True
+        assert impact.json()["stale_candidate_ids"] == []
+        assert impact.json()["stale_stage_ids"] == [
+            "shot_videos",
+            "editing",
+            "export",
+        ]
+
+        blocked_revoke = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-approval/revoke",
+            json={"expected_revision_id": approved_revision_id},
+        )
+        assert blocked_revoke.status_code == 409
+        assert blocked_revoke.json()["detail"] == (
+            "取消采用会使该分镜的后续视频或合成结果过期，请确认影响后重试"
+        )
+        confirmed_revoke = client.post(
+            f"/api/v1/production-shots/{shot_id}/image-approval/revoke",
+            json={
+                "expected_revision_id": approved_revision_id,
+                "confirm_downstream_stale": True,
+            },
+        )
+        assert confirmed_revoke.status_code == 200, confirmed_revoke.text
+        assert confirmed_revoke.json()["shot"]["plan"]["video_status"] == "stale"
+        project_after_revoke = client.get(
+            f"/api/v1/productions/{project_id}"
+        ).json()["project"]
+        assert project_after_revoke["active_step"] == "shot_images"
 
 
 def test_shot_structure_add_reorder_discard_and_restore(
@@ -1101,8 +1329,9 @@ def test_prompt_asset_mentions_are_stable_and_auto_bind_references(
                 "candidate_count": 1,
             },
         )
-        assert run_response.status_code == 201, run_response.text
-        run = run_response.json()
+        assert run_response.status_code == 202, run_response.text
+        queued_run = run_response.json()
+        run = wait_for_generation_http(client, queued_run["id"])
         stored_run = asyncio.run(repository.get_generation_run(UUID(run["id"])))
         assert stored_run is not None
         input_snapshot = service.workspace.resolve(stored_run.input_snapshot_relative_path)

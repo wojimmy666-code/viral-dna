@@ -1,3 +1,3 @@
 from __future__ import annotations
 
-WORKSPACE_SCHEMA_VERSION = 3
+WORKSPACE_SCHEMA_VERSION = 4

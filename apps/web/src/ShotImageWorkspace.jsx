@@ -54,6 +54,8 @@ function generationRunStatusLabel(status) {
   return {
     queued: "排队中",
     running: "生成中",
+    cancellation_requested: "取消中",
+    cancelled: "已取消",
     completed: "已完成",
     cached: "缓存命中",
     failed: "生成失败",
@@ -313,6 +315,7 @@ export function ShotImageWorkspace({
   onSelectShot,
   onSave,
   onGenerate,
+  onCancelRun,
   onSelectKeyframe,
   onApproveSource,
   onCreateShot,
@@ -320,7 +323,9 @@ export function ShotImageWorkspace({
   onSelectCandidate,
   onApprove,
   onReject,
+  onRevokeApproval,
   onReorderShots,
+  onRetryRun,
   onRestoreShot,
   onAdvance,
 }) {
@@ -349,6 +354,9 @@ export function ShotImageWorkspace({
       (candidate) => candidate.status !== "archived",
     );
   }, [latestRun]);
+  const hasPriorAiCandidates = generationRuns.some(
+    (run) => isAiImageGenerationRun(run) && (run.candidates || []).length > 0,
+  );
   const candidateCount = Math.min(
     4,
     Math.max(1, Math.trunc(Number(generationCandidateCount) || 1)),
@@ -393,7 +401,12 @@ export function ShotImageWorkspace({
       : latestRun
         ? `实际 ${formatCostMicros(latestRun.actual_cost_micros)}`
         : "";
-  const latestRunBusy = ["queued", "running"].includes(latestRun?.status);
+  const latestRunBusy = ["queued", "running", "cancellation_requested"].includes(
+    latestRun?.status,
+  );
+  const latestRunRetryable = ["failed", "blocked", "cancelled"].includes(
+    latestRun?.status,
+  );
   const latestRunTone = ["completed", "cached"].includes(latestRun?.status)
     ? "completed"
     : ["failed", "blocked"].includes(latestRun?.status)
@@ -666,6 +679,9 @@ export function ShotImageWorkspace({
           {latestRunTone === "failed" && (
             <em>{latestRun.error_message || "生成未完成，请检查模型设置后重试。"}</em>
           )}
+          {latestRun?.status === "cancelled" && (
+            <em>任务已取消，可保留当前设置重试上次任务。</em>
+          )}
         </div>
         <span className="shot-generation-mode">{modeLabel}</span>
       </div>
@@ -913,6 +929,30 @@ export function ShotImageWorkspace({
               </section>
 
               <div className="shot-review-actions">
+                {latestRunBusy && (
+                  <button
+                    className="secondary-button compact danger-text"
+                    disabled={busy || latestRun.status === "cancellation_requested"}
+                    onClick={() => onCancelRun(latestRun.id)}
+                    type="button"
+                  >
+                    {latestRun.status === "cancellation_requested"
+                      ? <CircleNotch className="spin" size={16} />
+                      : <X size={16} />}
+                    {latestRun.status === "cancellation_requested" ? "正在取消" : "取消任务"}
+                  </button>
+                )}
+                {plan.image_status === "approved" && (
+                  <button
+                    className="secondary-button compact"
+                    disabled={busy || latestRunBusy}
+                    onClick={onRevokeApproval}
+                    type="button"
+                  >
+                    <ArrowCounterClockwise size={16} />
+                    取消采用
+                  </button>
+                )}
                 <button
                   className="secondary-button compact"
                   disabled={
@@ -921,7 +961,11 @@ export function ShotImageWorkspace({
                     || plan.image_status === "approved"
                     || !generationAvailable
                   }
-                  onClick={onGenerate}
+                  onClick={() => (
+                    latestRunRetryable
+                      ? onRetryRun(latestRun.id)
+                      : onGenerate()
+                  )}
                   type="button"
                 >
                   {busy || latestRunBusy
@@ -931,14 +975,17 @@ export function ShotImageWorkspace({
                     ? "请先配置生图模型"
                     : latestRunBusy
                     ? "正在生成"
-                    : latestRunTone === "failed"
-                      ? `重试生成 ${candidateCount} 个候选`
-                      : `生成 ${candidateCount} 个候选`}
+                    : plan.image_status === "approved"
+                      ? "取消采用后可生成"
+                    : latestRunRetryable
+                      ? "重试上次任务"
+                      : `生成 ${candidateCount} 个${hasPriorAiCandidates ? "新" : ""}候选`}
                 </button>
                 <button
                   className="primary-button compact"
                   disabled={
                     busy
+                    || latestRunBusy
                     || plan.image_status === "approved"
                     || (visualChoice === "source" && !plan.source_keyframe_url)
                     || (visualChoice === "candidate" && !selectedForApproval)

@@ -39,7 +39,9 @@ import {
   VideoCamera,
   X,
 } from "@phosphor-icons/react";
+import { AssetLibrary } from "./AssetLibrary.jsx";
 import { ProductionHub } from "./ProductionWorkflow.jsx";
+import { buildRecordBreadcrumb, isRecordDetailView } from "./app-layout.js";
 import { inferVideoOrientation } from "./video-layout.js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
@@ -81,6 +83,7 @@ const DEFAULT_IMAGE_GENERATION_SETTINGS = Object.freeze({
   local_tool_version: null,
   local_cost_source: "unknown",
   local_unit_cost_micros: null,
+  semantic_quality_enabled: false,
   local_model_policy: "latest_flagship",
   local_model: null,
   local_reasoning_effort: "xhigh",
@@ -88,7 +91,9 @@ const DEFAULT_IMAGE_GENERATION_SETTINGS = Object.freeze({
   local_proxy_url: null,
   local_proxy_detected_url: null,
   local_proxy_effective_url: null,
+  local_proxy_delivery: "direct",
   local_proxy_source: "none",
+  local_windows_sandbox_mode: "auto",
   selected_capabilities: null,
   models: [],
 });
@@ -214,6 +219,7 @@ const navItems = [
   { id: "workspace", label: "工作台", icon: SquaresFour },
   { id: "new-analysis", label: "新建分析", icon: Plus },
   { id: "history", label: "分析记录", icon: ClockCounterClockwise },
+  { id: "assets", label: "资产库", icon: FolderOpen },
   { id: "templates", label: "提示词模板", icon: BracketsCurly },
 ];
 
@@ -300,11 +306,13 @@ function imageSettingsDraft(server = DEFAULT_IMAGE_GENERATION_SETTINGS) {
     imageLocalProtocolVersion:
       server.local_protocol_version || "viral-dna-image-tool/v1",
     imageLocalCostSource: server.local_cost_source || "unknown",
+    imageSemanticQualityEnabled: Boolean(server.semantic_quality_enabled),
     imageLocalModelPolicy: server.local_model_policy || "latest_flagship",
     imageLocalModel: server.local_model || "",
     imageLocalReasoningEffort: server.local_reasoning_effort || "xhigh",
     imageLocalProxyMode: server.local_proxy_mode || "system",
     imageLocalProxyUrl: server.local_proxy_url || "",
+    imageLocalWindowsSandboxMode: server.local_windows_sandbox_mode || "auto",
     imageLocalUnitCostYuan:
       server.local_unit_cost_micros == null
         ? ""
@@ -327,6 +335,14 @@ function localProxySourceLabel(value) {
     disabled: "未使用代理",
     none: "未检测到代理",
   }[value] || "未检测到代理";
+}
+
+function localProxyDeliveryLabel(value) {
+  return {
+    codex_native: "由 Codex 读取系统代理",
+    environment: "显式注入进程代理",
+    direct: "直连",
+  }[value] || "直连";
 }
 
 function formatRecordDate(value) {
@@ -394,6 +410,8 @@ export function App() {
   const [codexApplying, setCodexApplying] = useState(false);
   const [codexNetworkTesting, setCodexNetworkTesting] = useState(false);
   const [codexNetworkTest, setCodexNetworkTest] = useState(null);
+  const [codexSandboxTesting, setCodexSandboxTesting] = useState(false);
+  const [codexSandboxTest, setCodexSandboxTest] = useState(null);
   const [workspaceInfo, setWorkspaceInfo] = useState(DEFAULT_WORKSPACE_INFO);
   const [workspaceDraft, setWorkspaceDraft] = useState("");
   const [workspaceValidation, setWorkspaceValidation] = useState(null);
@@ -426,6 +444,8 @@ export function App() {
   const [productionsLoading, setProductionsLoading] = useState(false);
   const [productionsError, setProductionsError] = useState("");
   const [productionCreateSignal, setProductionCreateSignal] = useState(0);
+  const [productionListSignal, setProductionListSignal] = useState(0);
+  const [activeProductionProjectName, setActiveProductionProjectName] = useState("");
   const [notice, setNotice] = useState("");
   const eventSourceRef = useRef(null);
   const historyRequestIdRef = useRef(0);
@@ -512,6 +532,8 @@ export function App() {
     setProductionsLoading(false);
     setProductionsError("");
     setProductionCreateSignal(0);
+    setProductionListSignal(0);
+    setActiveProductionProjectName("");
   }
 
   async function loadProductions(recordId, { quiet = false } = {}) {
@@ -635,6 +657,7 @@ export function App() {
     setImageToolDetection(null);
     setCodexDiscovery(null);
     setCodexNetworkTest(null);
+    setCodexSandboxTest(null);
     setSettingsOpen(true);
     setSettingsLoading(true);
     void discoverLocalCodex({ quiet: true });
@@ -674,6 +697,10 @@ export function App() {
       || Object.hasOwn(update, "imageLocalProxyUrl")
     ) {
       setCodexNetworkTest(null);
+      setCodexSandboxTest(null);
+    }
+    if (Object.hasOwn(update, "imageLocalWindowsSandboxMode")) {
+      setCodexSandboxTest(null);
     }
     setSettingsDraft((current) => ({ ...current, ...update }));
   }
@@ -899,12 +926,15 @@ export function App() {
           local_cost_source: settingsDraft.imageLocalCostSource,
           local_unit_cost_micros:
             localCostNumber === null ? null : Math.round(localCostNumber * 1_000_000),
+          semantic_quality_enabled: Boolean(settingsDraft.imageSemanticQualityEnabled),
           local_model_policy: settingsDraft.imageLocalModelPolicy,
           local_model: String(settingsDraft.imageLocalModel || "").trim() || null,
           local_reasoning_effort: settingsDraft.imageLocalReasoningEffort,
           local_proxy_mode: settingsDraft.imageLocalProxyMode,
           local_proxy_url:
             String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
+          local_windows_sandbox_mode:
+            settingsDraft.imageLocalWindowsSandboxMode,
         }),
       });
       setServerImageSettings(imageRemote);
@@ -991,6 +1021,7 @@ export function App() {
     ]);
     setReport(nextReport);
     setVideo(processedVideo);
+    setActiveNav("workspace");
     setActiveShotId(nextReport.shots[0]?.id || null);
     setActiveReportTab("overview");
     resetProductionWorkspace();
@@ -1194,6 +1225,7 @@ export function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          adapter_id: settingsDraft.imageLocalAdapterId,
           executable_path: settingsDraft.imageLocalExecutablePath.trim(),
           fixed_args: imageFixedArgs(settingsDraft.imageLocalFixedArgs),
           protocol_version: settingsDraft.imageLocalProtocolVersion,
@@ -1258,6 +1290,40 @@ export function App() {
     }
   }
 
+  async function testLocalCodexSandbox() {
+    setCodexSandboxTesting(true);
+    setCodexSandboxTest(null);
+    setSettingsError("");
+    try {
+      const result = await apiRequest(
+        "/settings/image-generation/test-local-sandbox",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            proxy_mode: settingsDraft.imageLocalProxyMode,
+            proxy_url:
+              String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
+            windows_sandbox_mode:
+              settingsDraft.imageLocalWindowsSandboxMode,
+            timeout_seconds: 45,
+          }),
+        },
+      );
+      setCodexSandboxTest(result);
+    } catch (requestError) {
+      setCodexSandboxTest({
+        ready: false,
+        sandbox_mode: settingsDraft.imageLocalWindowsSandboxMode,
+        proxy_delivery: "direct",
+        latency_ms: 0,
+        message: requestError.message,
+      });
+    } finally {
+      setCodexSandboxTesting(false);
+    }
+  }
+
   async function applyLocalCodexConfiguration() {
     setCodexApplying(true);
     setSettingsError("");
@@ -1277,6 +1343,8 @@ export function App() {
             proxy_mode: settingsDraft.imageLocalProxyMode,
             proxy_url:
               String(settingsDraft.imageLocalProxyUrl || "").trim() || null,
+            windows_sandbox_mode:
+              settingsDraft.imageLocalWindowsSandboxMode,
           }),
         },
       );
@@ -1292,8 +1360,15 @@ export function App() {
         protocol_version: result.local_protocol_version,
         capabilities: result.selected_capabilities,
       });
+      setCodexSandboxTest({
+        ready: true,
+        sandbox_mode: result.local_windows_sandbox_mode,
+        proxy_delivery: result.local_proxy_delivery,
+        latency_ms: result.validation_latency_ms || 0,
+        message: "Codex Windows 沙箱预检已通过，本次未调用图片模型。",
+      });
       setNotice(
-        "Codex + ImageGen 已自动配置；本次只做环境检测，首次出图仍需人工触发",
+        "Codex + ImageGen 已自动配置并通过无费用沙箱预检；首次出图仍需人工触发",
       );
     } catch (requestError) {
       setSettingsError(requestError.message);
@@ -1304,6 +1379,7 @@ export function App() {
 
   function changeRecordWorkspace(mode) {
     setRecordWorkspaceMode(mode);
+    if (mode !== "production") setActiveProductionProjectName("");
     if (mode === "production" && video?.record_id) {
       loadProductions(video.record_id, { quiet: productionProjects.length > 0 }).catch(() => undefined);
     }
@@ -1318,6 +1394,41 @@ export function App() {
     setProductionCreateSignal((current) => current + 1);
   }
 
+  function openWorkspaceHome() {
+    setError("");
+    setVideo(null);
+    setAnalysis(null);
+    setAnalysisVersions([]);
+    setReport(null);
+    setActiveReportTab("overview");
+    setActiveShotId(null);
+    setReplacementVersion(null);
+    resetProductionWorkspace();
+    setActiveNav("workspace");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function navigateRecordBreadcrumb(destination) {
+    if (destination === "workspace") {
+      openWorkspaceHome();
+      return;
+    }
+    if (destination === "history") {
+      selectNav("history");
+      return;
+    }
+    if (destination === "production") {
+      setActiveProductionProjectName("");
+      setProductionListSignal((current) => current + 1);
+    }
+  }
+
+  const recordDetailMode = isRecordDetailView(activeNav, report);
+  const recordBreadcrumbItems = buildRecordBreadcrumb(
+    recordWorkspaceMode,
+    activeProductionProjectName,
+  );
+
   return (
     <div className="app-shell">
       <Sidebar
@@ -1330,6 +1441,8 @@ export function App() {
 
       <div className="app-body">
         <Topbar
+          assetMode={activeNav === "assets"}
+          focusMode={recordDetailMode}
           onCreate={() => selectNav("new-analysis")}
           onSearch={(value) => {
             changeHistoryQuery(value);
@@ -1338,7 +1451,13 @@ export function App() {
           searchValue={historyQuery}
         />
 
-        <div className={activeNav === "history" ? "history-layout" : "workspace-layout"}>
+        <div
+          className={
+            activeNav === "history"
+              ? "history-layout"
+              : activeNav === "assets" ? "asset-library-layout" : "workspace-layout"
+          }
+        >
           {activeNav === "history" ? (
             <HistoryPage
               records={records}
@@ -1367,44 +1486,54 @@ export function App() {
               onOpenRecord={openHistoryRecord}
               onCreate={() => selectNav("new-analysis")}
             />
-          ) : (<>
-          <main className="workspace-main">
-            <section className="page-intro">
-              <div>
-                <div className="breadcrumb">
-                  <span>工作台</span>
-                  <CaretRight size={14} />
-                  <span className="breadcrumb-current">单视频拆解</span>
-                </div>
-                <h1>把一个视频拆成可复用的创作指令</h1>
-                <p>识别分镜、主体、服装、场景和爆点，输出可编辑的复刻提示词包。</p>
-              </div>
-              <div className="intro-status">
-                <ShieldCheck size={17} weight="fill" />
-                Phase 1 · 单视频模式
-              </div>
-            </section>
-
-            <ImportPanel
-              ref={importSectionRef}
-              sourceMode={sourceMode}
-              setSourceMode={setSourceMode}
-              url={url}
-              setUrl={setUrl}
-              file={file}
-              setFile={setFile}
-              targetModel={targetModel}
-              setTargetModel={setTargetModel}
-              analysisProfile={analysisProfile}
-              setAnalysisProfile={setAnalysisProfile}
-              maxCostCny={maxCostCny}
-              setMaxCostCny={setMaxCostCny}
-              rightsConfirmed={rightsConfirmed}
-              setRightsConfirmed={setRightsConfirmed}
-              submitting={submitting}
-              error={error}
-              onStart={startAnalysis}
+          ) : activeNav === "assets" ? (
+            <AssetLibrary
+              onNotice={setNotice}
+              request={apiRequest}
+              resolveUrl={resolveArtifactUrl}
             />
+          ) : (<>
+          <main className={`workspace-main ${recordDetailMode ? "detail-mode" : ""}`}>
+            {!recordDetailMode && (
+              <section className="page-intro">
+                <div>
+                  <div className="breadcrumb">
+                    <span>工作台</span>
+                    <CaretRight size={14} />
+                    <span className="breadcrumb-current">单视频拆解</span>
+                  </div>
+                  <h1>把一个视频拆成可复用的创作指令</h1>
+                  <p>识别分镜、主体、服装、场景和爆点，输出可编辑的复刻提示词包。</p>
+                </div>
+                <div className="intro-status">
+                  <ShieldCheck size={17} weight="fill" />
+                  Phase 1 · 单视频模式
+                </div>
+              </section>
+            )}
+
+            {!recordDetailMode && (
+              <ImportPanel
+                ref={importSectionRef}
+                sourceMode={sourceMode}
+                setSourceMode={setSourceMode}
+                url={url}
+                setUrl={setUrl}
+                file={file}
+                setFile={setFile}
+                targetModel={targetModel}
+                setTargetModel={setTargetModel}
+                analysisProfile={analysisProfile}
+                setAnalysisProfile={setAnalysisProfile}
+                maxCostCny={maxCostCny}
+                setMaxCostCny={setMaxCostCny}
+                rightsConfirmed={rightsConfirmed}
+                setRightsConfirmed={setRightsConfirmed}
+                submitting={submitting}
+                error={error}
+                onStart={startAnalysis}
+              />
+            )}
 
             {analysis && analysis.stage !== "completed" && (
               <AnalysisProgress analysis={analysis} video={video} />
@@ -1413,6 +1542,11 @@ export function App() {
             {!analysis && !report && <EmptyWorkspace />}
 
             {report && (
+              <>
+              <RecordBreadcrumb
+                items={recordBreadcrumbItems}
+                onNavigate={navigateRecordBreadcrumb}
+              />
               <section className="report-card" ref={reportSectionRef}>
                 <ReportHeader
                   video={video}
@@ -1477,7 +1611,9 @@ export function App() {
                     createSignal={productionCreateSignal}
                     error={productionsError}
                     imageGenerationSettings={serverImageSettings}
+                    listSignal={productionListSignal}
                     loading={productionsLoading}
+                    onNavigationChange={setActiveProductionProjectName}
                     onNotice={setNotice}
                     onProjectsChanged={() => loadProductions(video.record_id, { quiet: true })}
                     projects={productionProjects}
@@ -1488,6 +1624,7 @@ export function App() {
                   />
                 )}
               </section>
+              </>
             )}
           </main>
 
@@ -1511,6 +1648,8 @@ export function App() {
           codexDiscovery={codexDiscovery}
           codexNetworkTesting={codexNetworkTesting}
           codexNetworkTest={codexNetworkTest}
+          codexSandboxTesting={codexSandboxTesting}
+          codexSandboxTest={codexSandboxTest}
           workspace={workspaceInfo}
           workspaceDraft={workspaceDraft}
           workspaceValidation={workspaceValidation}
@@ -1524,6 +1663,7 @@ export function App() {
           onDetectLocalImageTool={detectLocalImageTool}
           onDiscoverLocalCodex={discoverLocalCodex}
           onTestLocalCodexNetwork={testLocalCodexNetwork}
+          onTestLocalCodexSandbox={testLocalCodexSandbox}
           onClose={() => setSettingsOpen(false)}
           onReset={() =>
             updateSettingsDraft({
@@ -1953,6 +2093,8 @@ function ModelSettingsDialog({
   codexDiscovery,
   codexNetworkTesting,
   codexNetworkTest,
+  codexSandboxTesting,
+  codexSandboxTest,
   workspace,
   workspaceDraft,
   workspaceValidation,
@@ -1966,6 +2108,7 @@ function ModelSettingsDialog({
   onDetectLocalImageTool,
   onDiscoverLocalCodex,
   onTestLocalCodexNetwork,
+  onTestLocalCodexSandbox,
   onClose,
   onReset,
   onSave,
@@ -2008,6 +2151,7 @@ function ModelSettingsDialog({
       && !codexApplying
       && !codexDiscovering
       && !codexNetworkTesting
+      && !codexSandboxTesting
     ) onClose();
   }
 
@@ -2453,12 +2597,23 @@ function ModelSettingsDialog({
                         <div className="codex-proxy-heading">
                           <div>
                             <strong>命令行网络代理</strong>
-                            <p>Codex CLI 不一定继承浏览器代理，生成前会显式注入这里选定的代理。</p>
+                            <p>
+                              Windows 系统代理交给 Codex 原生读取；只有手动或纯环境代理才显式注入，
+                              避免反复刷新沙箱防火墙。
+                            </p>
                           </div>
                           <span>
                             {localProxySourceLabel(
                               codexNetworkTest?.proxy_source
                               || imageServerSettings.local_proxy_source,
+                            )}
+                            {" · "}
+                            {localProxyDeliveryLabel(
+                              draft.imageLocalProxyMode === "manual"
+                                ? "environment"
+                                : draft.imageLocalProxyMode === "disabled"
+                                  ? "direct"
+                                  : imageServerSettings.local_proxy_delivery,
                             )}
                           </span>
                         </div>
@@ -2479,7 +2634,7 @@ function ModelSettingsDialog({
                             <small>
                               {draft.imageLocalProxyMode === "system"
                                 ? imageServerSettings.local_proxy_detected_url
-                                  ? `已检测：${imageServerSettings.local_proxy_detected_url}`
+                                  ? `已检测：${imageServerSettings.local_proxy_detected_url}；Windows 系统代理不会重复注入进程环境。`
                                   : "当前未检测到 Windows 或环境变量代理。"
                                 : draft.imageLocalProxyMode === "disabled"
                                   ? "Codex 将直接连接 ChatGPT。"
@@ -2550,6 +2705,90 @@ function ModelSettingsDialog({
                         )}
                       </div>
 
+                      <div className="codex-proxy-card codex-sandbox-card">
+                        <div className="codex-proxy-heading">
+                          <div>
+                            <strong>Windows 沙箱</strong>
+                            <p>
+                              保存和自动配置前执行一次无模型费用预检；不会生成图片，也不会自动降级。
+                            </p>
+                          </div>
+                          <span>
+                            {draft.imageLocalWindowsSandboxMode === "unelevated"
+                              ? "兼容隔离"
+                              : draft.imageLocalWindowsSandboxMode === "elevated"
+                                ? "增强隔离"
+                                : "自动选择"}
+                          </span>
+                        </div>
+                        <div className="settings-field-grid">
+                          <label className="settings-field settings-field-wide">
+                            <span>沙箱模式</span>
+                            <select
+                              disabled={saving || codexApplying || codexSandboxTesting}
+                              onChange={(event) => onChange({
+                                imageLocalWindowsSandboxMode: event.target.value,
+                              })}
+                              value={draft.imageLocalWindowsSandboxMode}
+                            >
+                              <option value="auto">自动（推荐，优先增强隔离）</option>
+                              <option value="elevated">增强模式（elevated）</option>
+                              <option value="unelevated">兼容模式（unelevated）</option>
+                            </select>
+                            <small>
+                              仅当自动/增强模式持续出现沙箱辅助程序弹窗时，手动选择兼容模式；
+                              兼容模式仍限制文件访问，但网络隔离较弱。
+                            </small>
+                          </label>
+                        </div>
+                        <div className="codex-proxy-actions">
+                          <button
+                            className="secondary-button compact"
+                            disabled={
+                              saving
+                              || codexApplying
+                              || codexSandboxTesting
+                              || !codexDiscovery.codex_found
+                              || (
+                                draft.imageLocalProxyMode === "manual"
+                                && !String(draft.imageLocalProxyUrl || "").trim()
+                              )
+                            }
+                            onClick={onTestLocalCodexSandbox}
+                            type="button"
+                          >
+                            {codexSandboxTesting
+                              ? <CircleNotch className="spin" size={15} />
+                              : <ShieldCheck size={15} />}
+                            {codexSandboxTesting ? "正在预检" : "无费用预检"}
+                          </button>
+                          <small>仅启动受限命令验证沙箱，不请求模型、不消耗订阅额度。</small>
+                        </div>
+                        {codexSandboxTest && (
+                          <div
+                            className={
+                              codexSandboxTest.ready
+                                ? "codex-network-result positive"
+                                : "codex-network-result warning"
+                            }
+                            role="status"
+                          >
+                            {codexSandboxTest.ready
+                              ? <CheckCircle size={17} weight="fill" />
+                              : <Question size={17} weight="fill" />}
+                            <div>
+                              <strong>{codexSandboxTest.message}</strong>
+                              <small>
+                                {localProxyDeliveryLabel(codexSandboxTest.proxy_delivery)}
+                                {codexSandboxTest.latency_ms
+                                  ? " · " + codexSandboxTest.latency_ms + " ms"
+                                  : ""}
+                              </small>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
                       {codexDiscovery.warnings?.length > 0 && (
                         <ul className="codex-warning-list">
                           {codexDiscovery.warnings.map((warning) => (
@@ -2560,13 +2799,15 @@ function ModelSettingsDialog({
 
                       <div className="codex-auto-footer">
                         <small>
-                          自动配置会立即保存本机包装器与订阅配额口径；首次生成仍由你手动触发。
+                          自动配置会先做无费用沙箱预检，再保存包装器与订阅配额口径；
+                          首次生成仍由你手动触发。
                         </small>
                         <button
                           className="primary-button compact"
                           disabled={
                             saving
                             || codexApplying
+                            || codexSandboxTesting
                             || !codexDiscovery.can_auto_configure
                             || (
                               draft.imageLocalModelPolicy === "pinned"
@@ -2739,6 +2980,25 @@ function ModelSettingsDialog({
                 </span>
               </div>
             )}
+
+            <label className="image-semantic-quality-option">
+              <input
+                checked={Boolean(draft.imageSemanticQualityEnabled)}
+                disabled={saving}
+                onChange={(event) => onChange({
+                  imageSemanticQualityEnabled: event.target.checked,
+                })}
+                type="checkbox"
+              />
+              <span><ShieldCheck size={18} weight="fill" /></span>
+              <div>
+                <strong>生成后使用 VLM 做语义质检（可选）</strong>
+                <small>
+                  逐张核对人物、产品、服装、场景和异常文字，并单独记录 Token 与费用；
+                  结果只作为人工审核证据，不会自动采用或淘汰候选。
+                </small>
+              </div>
+            </label>
           </section>
 
           <section className="settings-section" aria-labelledby="analysis-profile-title">
@@ -2843,19 +3103,22 @@ function ModelSettingsDialog({
   );
 }
 
-function Topbar({ onCreate, onSearch, searchValue }) {
+function Topbar({ assetMode = false, focusMode = false, onCreate, onSearch, searchValue }) {
+  const primaryActionsHidden = assetMode || focusMode;
   return (
-    <header className="topbar">
-      <div className="global-search">
-        <MagnifyingGlass size={18} />
-        <input
-          aria-label="搜索分析记录"
-          onChange={(event) => onSearch(event.target.value)}
-          placeholder="搜索视频或报告"
-          value={searchValue}
-        />
-        <kbd>⌘ K</kbd>
-      </div>
+    <header className={`topbar ${assetMode ? "asset-mode" : ""} ${focusMode ? "focus-mode" : ""}`}>
+      {!primaryActionsHidden && (
+        <div className="global-search">
+          <MagnifyingGlass size={18} />
+          <input
+            aria-label="搜索分析记录"
+            onChange={(event) => onSearch(event.target.value)}
+            placeholder="搜索视频或报告"
+            value={searchValue}
+          />
+          <kbd>⌘ K</kbd>
+        </div>
+      )}
       <div className="topbar-actions">
         <button className="icon-button" type="button" aria-label="通知">
           <Bell size={19} />
@@ -2864,10 +3127,12 @@ function Topbar({ onCreate, onSearch, searchValue }) {
         <button className="icon-button" type="button" aria-label="帮助">
           <Question size={19} />
         </button>
-        <button className="primary-button compact" type="button" onClick={onCreate}>
-          <Plus size={17} weight="bold" />
-          新建分析
-        </button>
+        {!primaryActionsHidden && (
+          <button className="primary-button compact" type="button" onClick={onCreate}>
+            <Plus size={17} weight="bold" />
+            新建分析
+          </button>
+        )}
       </div>
     </header>
   );
@@ -3114,6 +3379,33 @@ function EmptyWorkspace() {
         <p>上传视频文件或粘贴公开平台链接后，可以查看真实镜头时间线、关键帧和媒体证据。</p>
       </div>
     </section>
+  );
+}
+
+function RecordBreadcrumb({ items, onNavigate }) {
+  return (
+    <nav className="record-breadcrumb" aria-label="面包屑">
+      <ol>
+        {items.map((item, index) => (
+          <li key={item.id}>
+            {index > 0 && <CaretRight aria-hidden="true" size={14} />}
+            {item.current ? (
+              <span
+                aria-current="page"
+                className={item.id === "project" ? "project-name" : ""}
+                title={item.id === "project" ? item.label : undefined}
+              >
+                {item.label}
+              </span>
+            ) : (
+              <button onClick={() => onNavigate(item.id)} type="button">
+                {item.label}
+              </button>
+            )}
+          </li>
+        ))}
+      </ol>
+    </nav>
   );
 }
 

@@ -34,6 +34,10 @@ from ..models import (
 from ..runtime_config import get_config_value
 from ..workspace import WorkspaceError, WorkspaceManager
 from .catalog import ImageModelCatalogError, load_image_model_catalog
+from .codex_local import (
+    local_tool_proxy_delivery,
+    local_tool_proxy_environment_url,
+)
 from .contracts import (
     IMAGE_PROMPT_VERSION,
     IMAGE_REQUEST_SCHEMA_VERSION,
@@ -46,6 +50,8 @@ from .contracts import (
 )
 from .dashscope import DashScopeQwenImageAdapter
 from .local_tool import LocalToolImageAdapter, detect_local_tool
+from .process_slots import ProcessSlotLimiter
+from .semantic_quality import ImageSemanticQualityService, SemanticQualityOutcome
 from .settings import (
     IMAGE_ADAPTER_ID,
     IMAGE_ADAPTER_VERSION,
@@ -360,6 +366,57 @@ def _save_candidate(
     )
 
 
+def _merge_semantic_quality(
+    base_report: dict[str, Any],
+    outcome: SemanticQualityOutcome,
+) -> dict[str, Any]:
+    report = dict(base_report)
+    semantic = dict(outcome.report)
+    report["semantic_quality"] = semantic
+    if semantic.get("status") == "warning":
+        report["status"] = "warning"
+    base_summary = str(report.get("summary") or "基础文件检查已完成")
+    semantic_summary = str(semantic.get("summary") or "VLM 质检未返回摘要")
+    report["summary"] = f"{base_summary}；{semantic_summary}"[:1200]
+    return report
+
+
+def _update_candidate_quality_metadata(
+    workspace: WorkspaceManager,
+    candidate: GenerationCandidate,
+) -> None:
+    metadata_path = workspace.resolve(candidate.metadata_relative_path)
+    try:
+        metadata = json.loads(_filesystem_path(metadata_path).read_text("utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ImageGenerationGatewayError(
+            500,
+            "candidate_metadata_invalid",
+            "无法更新候选图片质检元数据",
+        ) from exc
+    metadata["quality_report"] = candidate.quality_report
+    _write_atomic(metadata_path, _canonical_json(metadata) + b"\n")
+
+
+def _sum_model_usage(outcomes: list[SemanticQualityOutcome]) -> dict[str, Any]:
+    fields = (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "image_count",
+    )
+    totals = {
+        field: sum(getattr(outcome.usage, field) for outcome in outcomes)
+        for field in fields
+    }
+    totals["call_count"] = sum(
+        bool(outcome.report.get("provider_request_id")) for outcome in outcomes
+    )
+    return totals
+
+
 class ImageGenerationGateway:
     def __init__(
         self,
@@ -367,10 +424,16 @@ class ImageGenerationGateway:
         settings_service: ImageGenerationSettingsService | None = None,
         *,
         repository: ImageGenerationCacheRepository | None = None,
+        semantic_quality_service: ImageSemanticQualityService | None = None,
+        process_slot_limiter: ProcessSlotLimiter | None = None,
     ) -> None:
         self.workspace = workspace
         self.settings_service = settings_service or ImageGenerationSettingsService()
         self.repository = repository
+        self.semantic_quality_service = semantic_quality_service or ImageSemanticQualityService()
+        self.process_slot_limiter = process_slot_limiter or ProcessSlotLimiter(
+            workspace.paths.metadata_dir / "locks"
+        )
         self._local_semaphores: dict[int, asyncio.Semaphore] = {}
 
     async def generate(
@@ -386,6 +449,10 @@ class ImageGenerationGateway:
         input_mode: ImageGenerationInputMode | str = ImageGenerationInputMode.KEYFRAME_EDIT,
         execution_mode: str | None = None,
         allow_unknown_cost: bool = False,
+        seed: int | None = None,
+        reuse_cache: bool = True,
+        run_id: UUID | None = None,
+        cancel_event: Any | None = None,
     ) -> tuple[GenerationRun, list[GenerationCandidate]]:
         try:
             selected_input_mode = ImageGenerationInputMode(input_mode)
@@ -504,6 +571,7 @@ class ImageGenerationGateway:
             candidate_count=candidate_count,
             execution_mode=selected_mode,
             allow_unknown_cost=allow_unknown_cost,
+            seed=seed,
         )
         width, height = _output_dimensions(
             project.output_width,
@@ -521,7 +589,7 @@ class ImageGenerationGateway:
             negative_prompt=negative_prompt,
         )
         fingerprint = self._fingerprint(input_payload)
-        run_id = uuid4()
+        run_id = run_id or uuid4()
         run_root = (
             self.workspace.production_shot_root(project.record_id, project.id, shot.id)
             / "images"
@@ -529,18 +597,22 @@ class ImageGenerationGateway:
         )
         input_path = run_root / "input.json"
         started = time.perf_counter()
-        cached = await self._reuse_cached_generation(
-            project,
-            shot,
-            revision_id,
-            identity,
-            run_id=run_id,
-            run_root=run_root,
-            input_path=input_path,
-            input_payload=input_payload,
-            fingerprint=fingerprint,
-            candidate_count=candidate_count,
-            started=started,
+        cached = (
+            await self._reuse_cached_generation(
+                project,
+                shot,
+                revision_id,
+                identity,
+                run_id=run_id,
+                run_root=run_root,
+                input_path=input_path,
+                input_payload=input_payload,
+                fingerprint=fingerprint,
+                candidate_count=candidate_count,
+                started=started,
+            )
+            if reuse_cache
+            else None
         )
         if cached is not None:
             return cached
@@ -585,8 +657,11 @@ class ImageGenerationGateway:
             negative_prompt=negative_prompt,
             seed=request.seed,
             capability=identity.capability,
+            cancel_event=cancel_event,
         )
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ImageGenerationError(409, "generation_cancelled", "图片生成任务已取消")
             if selected_mode == ImageExecutionMode.LOCAL_TOOL:
                 concurrency = max(1, int(settings.local_concurrency))
                 semaphore = self._local_semaphores.setdefault(
@@ -594,9 +669,12 @@ class ImageGenerationGateway:
                     asyncio.Semaphore(concurrency),
                 )
                 async with semaphore:
-                    result = await adapter.generate(adapter_request)
+                    async with self.process_slot_limiter.acquire(concurrency):
+                        result = await adapter.generate(adapter_request)
             else:
                 result = await adapter.generate(adapter_request)
+            if cancel_event is not None and cancel_event.is_set():
+                raise ImageGenerationError(409, "generation_cancelled", "图片生成任务已取消")
             if not result.images:
                 raise ImageGenerationError(
                     502,
@@ -639,6 +717,82 @@ class ImageGenerationGateway:
             result.actual_cost_micros,
             len(candidates),
         )
+        semantic_outcomes: list[SemanticQualityOutcome] = []
+        if settings.semantic_quality_enabled:
+            remaining_budget = (
+                None
+                if project.budget_limit_micros is None
+                else max(
+                    0,
+                    project.budget_limit_micros
+                    - project.actual_cost_micros
+                    - actual_cost,
+                )
+            )
+            reviewed_candidates: list[GenerationCandidate] = []
+            reference_paths = tuple(item.path for item in references)
+            reference_labels = tuple(
+                f"{item.role}：{item.label}" for item in references
+            )
+            for candidate in candidates:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ImageGenerationGatewayError(
+                        409,
+                        "generation_cancelled",
+                        "图片生成任务已取消",
+                    )
+                outcome = await self.semantic_quality_service.assess(
+                    shot=shot,
+                    candidate_path=self.workspace.resolve(candidate.relative_path),
+                    source_path=source_path,
+                    reference_paths=reference_paths,
+                    reference_labels=reference_labels,
+                    budget_remaining_micros=remaining_budget,
+                )
+                semantic_outcomes.append(outcome)
+                if remaining_budget is not None:
+                    remaining_budget = max(
+                        0,
+                        remaining_budget - outcome.actual_cost_micros,
+                    )
+                reviewed = candidate.model_copy(
+                    update={
+                        "quality_report": _merge_semantic_quality(
+                            candidate.quality_report,
+                            outcome,
+                        )
+                    }
+                )
+                _update_candidate_quality_metadata(self.workspace, reviewed)
+                reviewed_candidates.append(reviewed)
+            candidates = reviewed_candidates
+
+        semantic_estimated_cost = sum(
+            outcome.estimated_cost_micros
+            for outcome in semantic_outcomes
+            if outcome.report.get("status") != "skipped_budget"
+        )
+        semantic_actual_cost = sum(
+            outcome.actual_cost_micros for outcome in semantic_outcomes
+        )
+        estimated_cost = identity.estimated_cost_micros + semantic_estimated_cost
+        actual_cost += semantic_actual_cost
+        if semantic_actual_cost > 0:
+            cost_source = GenerationCostSource.PROVIDER_REPORTED
+        usage_payload: dict[str, Any] = result.usage
+        if semantic_outcomes:
+            usage_payload = {
+                "image_generation": result.usage,
+                "semantic_quality": _sum_model_usage(semantic_outcomes),
+                "semantic_quality_cost_micros": semantic_actual_cost,
+            }
+        execution_summary = dict(identity.execution_summary)
+        execution_summary["semantic_quality"] = {
+            "enabled": settings.semantic_quality_enabled,
+            "candidate_count": len(semantic_outcomes),
+            "estimated_cost_micros": semantic_estimated_cost,
+            "actual_cost_micros": semantic_actual_cost,
+        }
         manifest_path = run_root / "manifest.json"
         manifest = {
             "schema_version": "viral-dna-image-generation-result/v1",
@@ -650,8 +804,9 @@ class ImageGenerationGateway:
             "quality_statuses": [
                 item.quality_report.get("status", "unknown") for item in candidates
             ],
-            "usage": result.usage,
-            "estimated_cost_micros": identity.estimated_cost_micros,
+            "usage": usage_payload,
+            "semantic_quality": [outcome.report for outcome in semantic_outcomes],
+            "estimated_cost_micros": estimated_cost,
             "actual_cost_micros": actual_cost,
             "cost_source": cost_source.value,
         }
@@ -682,13 +837,13 @@ class ImageGenerationGateway:
             protocol_version=identity.protocol_version,
             provider_request_id=result.provider_request_id,
             capability_snapshot=identity.capability.model_dump(mode="json"),
-            execution_summary=identity.execution_summary,
+            execution_summary=execution_summary,
             cost_source=cost_source,
             cost_estimate_known=identity.cost_estimate_known,
-            usage=result.usage,
+            usage=usage_payload,
             output_manifest_relative_path=self.workspace.relative(manifest_path),
             status=ProductionRunStatus.COMPLETED,
-            estimated_cost_micros=identity.estimated_cost_micros,
+            estimated_cost_micros=estimated_cost,
             actual_cost_micros=actual_cost,
             latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
             completed_at=completed_at,
@@ -947,13 +1102,25 @@ class ImageGenerationGateway:
                 "local_tool_not_configured",
                 "本机工具模式尚未配置可执行文件",
             )
+        proxy_environment_url = local_tool_proxy_environment_url(
+            settings.local_adapter_id,
+            settings.local_proxy_mode,
+            settings.local_proxy_effective_url,
+            settings.local_proxy_source,
+        )
+        proxy_delivery = local_tool_proxy_delivery(
+            settings.local_adapter_id,
+            settings.local_proxy_mode,
+            settings.local_proxy_effective_url,
+            settings.local_proxy_source,
+        )
         try:
             detection = await detect_local_tool(
                 settings.local_executable_path,
                 settings.local_fixed_args,
                 timeout_seconds=min(120, settings.local_timeout_seconds),
                 expected_protocol=settings.local_protocol_version,
-                proxy_url=settings.local_proxy_effective_url,
+                proxy_url=proxy_environment_url,
             )
         except ImageGenerationError as exc:
             raise ImageGenerationGatewayError(
@@ -1000,6 +1167,8 @@ class ImageGenerationGateway:
                 "reasoning_effort": settings.local_reasoning_effort,
                 "proxy_source": settings.local_proxy_source,
                 "proxy_enabled": bool(settings.local_proxy_effective_url),
+                "proxy_delivery": proxy_delivery,
+                "windows_sandbox_mode": settings.local_windows_sandbox_mode,
             },
         )
         return identity, LocalToolImageAdapter(
@@ -1007,7 +1176,7 @@ class ImageGenerationGateway:
             executable_path=settings.local_executable_path,
             fixed_args=settings.local_fixed_args,
             timeout_seconds=settings.local_timeout_seconds,
-            proxy_url=settings.local_proxy_effective_url,
+            proxy_url=proxy_environment_url,
         )
 
     @staticmethod

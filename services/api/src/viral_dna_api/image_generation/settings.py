@@ -5,6 +5,7 @@ import json
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from ..ai.providers.dashscope import CredentialValidationResult, DashScopeProvider
@@ -18,6 +19,8 @@ from ..models import (
     LocalCodexDiscoveryResponse,
     LocalCodexNetworkTestRequest,
     LocalCodexNetworkTestResponse,
+    LocalCodexSandboxTestRequest,
+    LocalCodexSandboxTestResponse,
     LocalImageToolDetectRequest,
     LocalImageToolDetectResponse,
 )
@@ -27,11 +30,18 @@ from .codex_local import (
     CODEX_IMAGEGEN_ADAPTER_ID,
     CodexNetworkProbeResult,
     discover_codex_environment,
+    local_tool_proxy_delivery,
+    local_tool_proxy_environment_url,
     probe_codex_network,
+    project_root,
     resolve_codex_model,
 )
 from .contracts import LOCAL_TOOL_PROTOCOL_VERSION, ImageGenerationError
-from .local_tool import detect_local_tool
+from .local_tool import (
+    CodexSandboxPreflightResult,
+    detect_local_tool,
+    preflight_codex_local_tool,
+)
 from .proxy import (
     LocalProxyConfigurationError,
     LocalProxyResolution,
@@ -48,6 +58,7 @@ IMAGE_ADAPTER_VERSION = "1.0.0"
 CredentialProbe = Callable[[str, str], Awaitable[CredentialValidationResult]]
 CodexDiscovery = Callable[[], Awaitable[LocalCodexDiscoveryResponse]]
 CodexNetworkProbe = Callable[[str | None, int], Awaitable[CodexNetworkProbeResult]]
+CodexSandboxPreflight = Callable[..., Awaitable[CodexSandboxPreflightResult]]
 
 
 class ImageGenerationSettingsServiceError(RuntimeError):
@@ -200,10 +211,14 @@ class ImageGenerationSettingsService:
         credential_probe: CredentialProbe | None = None,
         codex_discovery: CodexDiscovery | None = None,
         codex_network_probe: CodexNetworkProbe | None = None,
+        codex_sandbox_preflight: CodexSandboxPreflight | None = None,
     ) -> None:
         self._credential_probe = credential_probe or _default_credential_probe
         self._codex_discovery = codex_discovery or discover_codex_environment
         self._codex_network_probe = codex_network_probe or probe_codex_network
+        self._codex_sandbox_preflight = (
+            codex_sandbox_preflight or preflight_codex_local_tool
+        )
 
     def get(
         self,
@@ -261,6 +276,16 @@ class ImageGenerationSettingsService:
         )
         if local_reasoning_effort not in {"low", "medium", "high", "xhigh"}:
             local_reasoning_effort = "xhigh"
+        local_adapter_id = get_config_value(
+            "VIRAL_DNA_IMAGE_LOCAL_ADAPTER_ID",
+            "viral_dna_json_v1",
+        )
+        local_windows_sandbox_mode = get_config_value(
+            "VIRAL_DNA_IMAGE_LOCAL_WINDOWS_SANDBOX_MODE",
+            "auto",
+        )
+        if local_windows_sandbox_mode not in {"auto", "elevated", "unelevated"}:
+            local_windows_sandbox_mode = "auto"
         local_proxy_mode = get_config_value(
             "VIRAL_DNA_IMAGE_LOCAL_PROXY_MODE",
             "system",
@@ -277,6 +302,12 @@ class ImageGenerationSettingsService:
             local_proxy_mode = "system"
             local_proxy_url = None
             effective_proxy = detected_proxy
+        proxy_delivery = local_tool_proxy_delivery(
+            local_adapter_id,
+            local_proxy_mode,
+            effective_proxy.url,
+            effective_proxy.source,
+        )
         raw_unit_cost = get_config_value("VIRAL_DNA_IMAGE_LOCAL_UNIT_COST_MICROS", "")
         try:
             local_unit_cost = int(raw_unit_cost) if raw_unit_cost else None
@@ -310,10 +341,7 @@ class ImageGenerationSettingsService:
             remote_base_url=remote_base,
             api_key_configured=bool(api_key.strip()),
             api_key_hint=mask_api_key(api_key),
-            local_adapter_id=get_config_value(
-                "VIRAL_DNA_IMAGE_LOCAL_ADAPTER_ID",
-                "viral_dna_json_v1",
-            ),
+            local_adapter_id=local_adapter_id,
             local_executable_path=(
                 get_config_value("VIRAL_DNA_IMAGE_LOCAL_EXECUTABLE", "").strip() or None
             ),
@@ -340,6 +368,10 @@ class ImageGenerationSettingsService:
             ),
             local_cost_source=local_cost_source,
             local_unit_cost_micros=local_unit_cost,
+            semantic_quality_enabled=(
+                get_config_value("VIRAL_DNA_IMAGE_SEMANTIC_QA_ENABLED", "false").lower()
+                == "true"
+            ),
             local_model_policy=local_model_policy,
             local_model=(
                 get_config_value("VIRAL_DNA_IMAGE_LOCAL_MODEL", "").strip() or None
@@ -349,7 +381,9 @@ class ImageGenerationSettingsService:
             local_proxy_url=local_proxy_url,
             local_proxy_detected_url=detected_proxy.url,
             local_proxy_effective_url=effective_proxy.url,
+            local_proxy_delivery=proxy_delivery,
             local_proxy_source=effective_proxy.source,
+            local_windows_sandbox_mode=local_windows_sandbox_mode,
             last_validated_at=_parse_time(
                 get_config_value("VIRAL_DNA_IMAGE_LAST_VALIDATED_AT", "")
             ),
@@ -381,6 +415,12 @@ class ImageGenerationSettingsService:
             payload.local_proxy_mode,
             payload.local_proxy_url,
         )
+        proxy_environment_url = local_tool_proxy_environment_url(
+            payload.local_adapter_id,
+            payload.local_proxy_mode,
+            proxy_resolution.url,
+            proxy_resolution.source,
+        )
         if payload.local_adapter_id == CODEX_IMAGEGEN_ADAPTER_ID:
             try:
                 local_model = resolve_codex_model(
@@ -403,6 +443,11 @@ class ImageGenerationSettingsService:
                 local_fixed_args,
                 "--reasoning-effort",
                 payload.local_reasoning_effort,
+            )
+            local_fixed_args = _replace_fixed_arg(
+                local_fixed_args,
+                "--windows-sandbox-mode",
+                payload.local_windows_sandbox_mode,
             )
             if len(local_fixed_args) > 20:
                 raise _fail(
@@ -436,12 +481,18 @@ class ImageGenerationSettingsService:
                 if payload.local_unit_cost_micros is not None
                 else ""
             ),
+            "VIRAL_DNA_IMAGE_SEMANTIC_QA_ENABLED": (
+                "true" if payload.semantic_quality_enabled else "false"
+            ),
             "VIRAL_DNA_IMAGE_LOCAL_MODEL_POLICY": payload.local_model_policy,
             "VIRAL_DNA_IMAGE_LOCAL_MODEL": local_model or "",
             "VIRAL_DNA_IMAGE_LOCAL_REASONING_EFFORT": payload.local_reasoning_effort,
             "VIRAL_DNA_IMAGE_LOCAL_PROXY_MODE": payload.local_proxy_mode,
             "VIRAL_DNA_IMAGE_LOCAL_PROXY_URL": (
                 proxy_resolution.url if payload.local_proxy_mode == "manual" else ""
+            ),
+            "VIRAL_DNA_IMAGE_LOCAL_WINDOWS_SANDBOX_MODE": (
+                payload.local_windows_sandbox_mode
             ),
             "VIRAL_DNA_IMAGE_LAST_VALIDATED_AT": validated_at,
         }
@@ -497,7 +548,7 @@ class ImageGenerationSettingsService:
                     local_fixed_args,
                     timeout_seconds=min(120, payload.local_timeout_seconds),
                     expected_protocol=payload.local_protocol_version,
-                    proxy_url=proxy_resolution.url,
+                    proxy_url=proxy_environment_url,
                 )
             except ImageGenerationError as exc:
                 raise _fail(exc.status_code, exc.code, str(exc)) from exc
@@ -509,6 +560,18 @@ class ImageGenerationSettingsService:
                 )
             capability = detection.capability
             latency_ms = detection.latency_ms
+            if payload.local_adapter_id == CODEX_IMAGEGEN_ADAPTER_ID:
+                try:
+                    preflight = await self._codex_sandbox_preflight(
+                        payload.local_executable_path or "",
+                        local_fixed_args,
+                        probe_cwd=project_root(),
+                        timeout_seconds=45,
+                        proxy_url=proxy_environment_url,
+                    )
+                except ImageGenerationError as exc:
+                    raise _fail(exc.status_code, exc.code, str(exc)) from exc
+                latency_ms += preflight.latency_ms
             updates.update(
                 {
                     "DASHSCOPE_IMAGE_BASE_URL": normalize_image_base_url(
@@ -537,13 +600,19 @@ class ImageGenerationSettingsService:
             payload.proxy_mode,
             payload.proxy_url,
         )
+        proxy_environment_url = local_tool_proxy_environment_url(
+            payload.adapter_id,
+            payload.proxy_mode,
+            proxy_resolution.url,
+            proxy_resolution.source,
+        )
         try:
             result = await detect_local_tool(
                 payload.executable_path,
                 payload.fixed_args,
                 timeout_seconds=payload.timeout_seconds,
                 expected_protocol=payload.protocol_version,
-                proxy_url=proxy_resolution.url,
+                proxy_url=proxy_environment_url,
             )
         except ImageGenerationError as exc:
             raise _fail(exc.status_code, exc.code, str(exc)) from exc
@@ -589,6 +658,69 @@ class ImageGenerationSettingsService:
             message=message,
         )
 
+    async def test_codex_sandbox(
+        self,
+        payload: LocalCodexSandboxTestRequest,
+    ) -> LocalCodexSandboxTestResponse:
+        discovery = await self.discover_codex()
+        if not discovery.codex_executable_path:
+            raise _fail(409, "codex_cli_not_found", "未找到可直接执行的 Codex CLI")
+        wrapper = Path(discovery.wrapper_path)
+        if not await asyncio.to_thread(wrapper.is_file):
+            raise _fail(
+                409,
+                "codex_wrapper_not_found",
+                "ViralDNA Codex ImageGen 包装器不存在",
+            )
+        proxy_resolution = _resolve_proxy_or_fail(
+            payload.proxy_mode,
+            payload.proxy_url,
+        )
+        proxy_environment_url = local_tool_proxy_environment_url(
+            CODEX_IMAGEGEN_ADAPTER_ID,
+            payload.proxy_mode,
+            proxy_resolution.url,
+            proxy_resolution.source,
+        )
+        fixed_args = [
+            str(wrapper),
+            "--codex-executable",
+            discovery.codex_executable_path,
+            "--windows-sandbox-mode",
+            payload.windows_sandbox_mode,
+            "--codex-timeout",
+            str(payload.timeout_seconds),
+        ]
+        try:
+            preflight = await self._codex_sandbox_preflight(
+                sys.executable,
+                fixed_args,
+                probe_cwd=project_root(),
+                timeout_seconds=payload.timeout_seconds,
+                proxy_url=proxy_environment_url,
+            )
+        except ImageGenerationError as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+        delivery = local_tool_proxy_delivery(
+            CODEX_IMAGEGEN_ADAPTER_ID,
+            payload.proxy_mode,
+            proxy_resolution.url,
+            proxy_resolution.source,
+        )
+        if payload.windows_sandbox_mode == "unelevated":
+            message = (
+                "Codex Windows 兼容沙箱已可启动。文件访问仍受限，"
+                "但网络隔离弱于增强模式。"
+            )
+        else:
+            message = "Codex Windows 增强沙箱已可启动，本次未调用图片模型。"
+        return LocalCodexSandboxTestResponse(
+            sandbox_mode=payload.windows_sandbox_mode,
+            proxy_delivery=delivery,
+            latency_ms=preflight.latency_ms,
+            message=message,
+        )
+
     async def auto_configure_codex(
         self,
         payload: LocalCodexAutoConfigureRequest,
@@ -616,6 +748,8 @@ class ImageGenerationSettingsService:
             payload.model_policy,
             "--reasoning-effort",
             payload.reasoning_effort,
+            "--windows-sandbox-mode",
+            payload.windows_sandbox_mode,
             "--codex-timeout",
             "1200",
         ]
@@ -639,5 +773,7 @@ class ImageGenerationSettingsService:
                 local_reasoning_effort=payload.reasoning_effort,
                 local_proxy_mode=payload.proxy_mode,
                 local_proxy_url=payload.proxy_url,
+                local_windows_sandbox_mode=payload.windows_sandbox_mode,
+                semantic_quality_enabled=current.semantic_quality_enabled,
             )
         )

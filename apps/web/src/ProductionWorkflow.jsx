@@ -9,6 +9,7 @@ import {
   ClockCounterClockwise,
   FileImage,
   FloppyDisk,
+  FolderOpen,
   GitBranch,
   ImageSquare,
   LockSimple,
@@ -27,6 +28,7 @@ import {
   budgetYuanFromMicros,
   constraintsFromText,
   dimensionsForRatio,
+  imageGenerationIntentForShot,
   imageGenerationModeLabel,
   resolveImageExecutionMode,
   formatProductionDate,
@@ -135,6 +137,24 @@ function defaultProductionName(sourceTitle) {
 function formatGenerationCost(micros) {
   const value = Math.max(0, Number(micros || 0)) / 1_000_000;
   return `¥${value.toFixed(value > 0 ? 2 : 0)}`;
+}
+
+const ACTIVE_GENERATION_RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "cancellation_requested",
+]);
+
+function upsertGenerationRun(current, run) {
+  if (!current || current.plan?.id !== run?.shot_plan_id) return current;
+  const existingRuns = current.generation_runs || [];
+  return {
+    ...current,
+    generation_runs: [
+      run,
+      ...existingRuns.filter((item) => item.id !== run.id),
+    ],
+  };
 }
 
 function ProductionDialog({ title, description, children, busy, onClose, size = "medium" }) {
@@ -403,18 +423,26 @@ function ProjectSettings({ detail, draft, setDraft, busy, error, onSave, onOpenR
   );
 }
 
-function ReferenceAssets({ assets, busy, error, resolveUrl, onUpload, onEdit, onArchive }) {
+function ReferenceAssets({
+  assets, busy, error, resolveUrl, onUpload, onOpenLibrary, onEdit, onArchive,
+}) {
   return (
     <section className="production-reference-view">
       <header className="production-section-header compact-heading">
         <div>
           <h3>参考资产</h3>
-          <p>上传已获授权的人物、产品、服装、场景和风格图片，后续可以逐镜头绑定。</p>
+          <p>从工作区资产库添加，或快速上传新图片；项目只保存关联，不复制资产文件。</p>
         </div>
-        <button className="primary-button compact" disabled={busy} onClick={onUpload} type="button">
-          <UploadSimple size={16} />
-          上传参考图
-        </button>
+        <div className="production-reference-actions">
+          <button className="secondary-button compact" disabled={busy} onClick={onUpload} type="button">
+            <UploadSimple size={16} />
+            快速上传
+          </button>
+          <button className="primary-button compact" disabled={busy} onClick={onOpenLibrary} type="button">
+            <FolderOpen size={16} />
+            从资产库添加
+          </button>
+        </div>
       </header>
       {error && <div className="production-inline-error" role="alert"><WarningCircle size={17} />{error}</div>}
       {assets.length === 0 ? (
@@ -422,9 +450,9 @@ function ReferenceAssets({ assets, busy, error, resolveUrl, onUpload, onEdit, on
           <span className="production-empty-icon"><ImageSquare size={28} /></span>
           <div>
             <h4>还没有参考资产</h4>
-            <p>先上传最关键的人物或产品图。每张图都会生成独立缩略图并保存到工作区。</p>
+            <p>先从资产库添加关键人物或产品；也可以快速上传并自动加入资产库。</p>
           </div>
-          <button className="primary-button compact" onClick={onUpload} type="button">选择图片</button>
+          <button className="primary-button compact" onClick={onOpenLibrary} type="button">打开资产库</button>
         </div>
       ) : (
         <div className="reference-asset-grid">
@@ -449,7 +477,7 @@ function ReferenceAssets({ assets, busy, error, resolveUrl, onUpload, onEdit, on
               </div>
               <footer>
                 <button onClick={() => onEdit(asset)} type="button"><PencilSimple size={15} />编辑</button>
-                <button className="danger-text" onClick={() => onArchive(asset)} type="button"><Trash size={15} />归档</button>
+                <button className="danger-text" onClick={() => onArchive(asset)} type="button"><Trash size={15} />移出项目</button>
               </footer>
             </article>
           ))}
@@ -458,6 +486,92 @@ function ReferenceAssets({ assets, busy, error, resolveUrl, onUpload, onEdit, on
     </section>
   );
 }
+
+function AssetPickerDialog({
+  assets,
+  busy,
+  error,
+  linkedIds,
+  loading,
+  onClose,
+  onConfirm,
+  resolveUrl,
+  selectedId,
+  setSelectedId,
+}) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+  const available = assets.filter((asset) => (
+    !linkedIds.has(asset.id)
+    && (!normalizedQuery || [asset.name, asset.description, ...(asset.tags || [])]
+      .join(" ")
+      .toLocaleLowerCase("zh-CN")
+      .includes(normalizedQuery))
+  ));
+  return (
+    <ProductionDialog
+      busy={busy}
+      description="选择工作区资产后只建立项目关联，不会复制图片文件。"
+      onClose={onClose}
+      size="large"
+      title="从资产库添加"
+    >
+      <div className="project-asset-picker">
+        <label className="project-asset-picker-search">
+          <FolderOpen size={18} />
+          <input
+            autoFocus
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索名称、说明或标签"
+            value={query}
+          />
+        </label>
+        {error && <div className="production-inline-error" role="alert"><WarningCircle size={17} />{error}</div>}
+        {loading ? (
+          <div className="production-dialog-loading"><CircleNotch className="spin" size={22} />正在读取资产库</div>
+        ) : available.length === 0 ? (
+          <div className="production-empty-state reference-empty">
+            <span className="production-empty-icon"><ImageSquare size={26} /></span>
+            <div><h4>没有可添加的资产</h4><p>资产可能已经全部加入项目，或没有匹配当前搜索。</p></div>
+          </div>
+        ) : (
+          <div className="project-asset-picker-grid">
+            {available.map((asset) => (
+              <button
+                aria-pressed={selectedId === asset.id}
+                className={selectedId === asset.id ? "selected" : ""}
+                key={asset.id}
+                onClick={() => setSelectedId(asset.id)}
+                type="button"
+              >
+                <span className="project-asset-picker-thumb">
+                  <img alt="" src={resolveUrl(asset.thumbnail_url)} />
+                </span>
+                <span>
+                  <strong>{asset.name}</strong>
+                  <small>{referenceTypeLabel({
+                    clothing: "wardrobe",
+                    logo: "prop",
+                    other: "prop",
+                  }[asset.type] || asset.type)} · {asset.width} × {asset.height}</small>
+                </span>
+                {selectedId === asset.id && <CheckCircle size={18} weight="fill" />}
+              </button>
+            ))}
+          </div>
+        )}
+        <footer className="production-modal-actions">
+          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
+          <button className="primary-button compact" disabled={busy || !selectedId} onClick={onConfirm} type="button">
+            {busy ? <CircleNotch className="spin" size={16} /> : <Plus size={16} />}
+            添加到项目
+          </button>
+        </footer>
+      </div>
+    </ProductionDialog>
+  );
+}
+
 
 function ChangeImpactPanel({ review, busy, onCancel, onConfirm }) {
   if (!review) return null;
@@ -634,7 +748,7 @@ function ReferenceAssetDialog({ mode, draft, setDraft, file, setFile, previewUrl
 
 function ArchiveDialog({ asset, busy, error, onClose, onConfirm }) {
   return (
-    <ProductionDialog busy={busy} description="归档后默认列表将隐藏该资产，历史版本和原文件仍可读取。" onClose={onClose} title="归档参考资产">
+    <ProductionDialog busy={busy} description="只会移除当前项目关联；资产库原图、其他项目引用和历史版本都不受影响。" onClose={onClose} title="从项目移出参考资产">
       <div className="archive-dialog-copy">
         <span><Trash size={22} /></span>
         <div><strong>{asset.name}</strong><p>{referenceTypeLabel(asset.type)} · {asset.width} × {asset.height}</p></div>
@@ -644,7 +758,7 @@ function ArchiveDialog({ asset, busy, error, onClose, onConfirm }) {
         <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
         <button className="danger-button compact" disabled={busy} onClick={onConfirm} type="button">
           {busy ? <CircleNotch className="spin" size={16} /> : <Trash size={16} />}
-          确认归档
+          确认移出
         </button>
       </footer>
     </ProductionDialog>
@@ -702,6 +816,8 @@ export function ProductionHub({
   request,
   resolveUrl,
   imageGenerationSettings = DEFAULT_PRODUCTION_IMAGE_SETTINGS,
+  listSignal = 0,
+  onNavigationChange,
   onProjectsChanged,
   onNotice,
 }) {
@@ -729,6 +845,11 @@ export function ProductionHub({
   const [referenceDraft, setReferenceDraft] = useState({ ...EMPTY_REFERENCE_DRAFT });
   const [referenceFile, setReferenceFile] = useState(null);
   const [archiveAsset, setArchiveAsset] = useState(null);
+  const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const [assetPickerLoading, setAssetPickerLoading] = useState(false);
+  const [assetPickerError, setAssetPickerError] = useState("");
+  const [libraryAssets, setLibraryAssets] = useState([]);
+  const [selectedLibraryAssetId, setSelectedLibraryAssetId] = useState(null);
   const [previewRevision, setPreviewRevision] = useState(null);
   const [previewDetail, setPreviewDetail] = useState(null);
   const [previewError, setPreviewError] = useState("");
@@ -747,6 +868,26 @@ export function ProductionHub({
       imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS,
     );
   }, [imageGenerationSettings]);
+
+  useEffect(() => {
+    if (!listSignal) return;
+    setSelectedProjectId(null);
+    setDetail(null);
+    setContentError("");
+    setActionError("");
+    setActiveSection("project_setup");
+  }, [listSignal]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      onNavigationChange?.("");
+      return;
+    }
+    const projectName = detail?.project?.id === selectedProjectId
+      ? detail.project.name
+      : projects.find((project) => project.id === selectedProjectId)?.name || "";
+    onNavigationChange?.(projectName);
+  }, [detail?.project?.id, detail?.project?.name, onNavigationChange, projects, selectedProjectId]);
 
   useEffect(() => {
     setSelectedProjectId(null);
@@ -783,6 +924,52 @@ export function ProductionHub({
     setActionError("");
     setCreateOpen(true);
   }, [createSignal, sourceTitle]);
+
+  const activeGenerationRun = (shotDetail?.generation_runs || []).find(
+    (run) => ACTIVE_GENERATION_RUN_STATUSES.has(run.status),
+  );
+
+  useEffect(() => {
+    if (!activeGenerationRun?.id || !selectedProjectId || !selectedShotId) {
+      return undefined;
+    }
+    let disposed = false;
+    let timer = null;
+    const runId = activeGenerationRun.id;
+    const projectId = selectedProjectId;
+    const shotPlanId = selectedShotId;
+
+    async function pollGenerationRun() {
+      try {
+        const run = await request(`/generation-runs/${runId}`);
+        if (disposed) return;
+        setShotDetail((current) => upsertGenerationRun(current, run));
+        if (ACTIVE_GENERATION_RUN_STATUSES.has(run.status)) {
+          timer = window.setTimeout(pollGenerationRun, 1000);
+          return;
+        }
+        await Promise.all([
+          refreshProject(projectId, shotPlanId),
+          onProjectsChanged(),
+        ]);
+      } catch {
+        if (!disposed) {
+          timer = window.setTimeout(pollGenerationRun, 2000);
+        }
+      }
+    }
+
+    timer = window.setTimeout(pollGenerationRun, 500);
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [
+    activeGenerationRun?.id,
+    activeGenerationRun?.status,
+    selectedProjectId,
+    selectedShotId,
+  ]);
 
   async function refreshProject(projectId = selectedProjectId, preferredShotId = selectedShotId) {
     if (!projectId) return null;
@@ -1114,25 +1301,36 @@ export function ProductionHub({
             input_mode: generationInputMode,
             execution_mode: executionMode,
             allow_unknown_cost: acceptsUnknownCost,
+            generation_intent: imageGenerationIntentForShot(shotDetail),
           }),
         },
       );
-      await Promise.all([
-        refreshProject(detail.project.id, shotDetail.plan.id),
-        onProjectsChanged(),
-      ]);
-      if (run.status === "failed" || run.status === "blocked") {
-        throw new Error(run.error_message || "图片生成失败，请检查模型配置后重试");
-      }
-      const modeLabel = run.execution_mode === "simulated"
-        ? "模拟模式"
-        : imageGenerationModeLabel({ enabled: true, execution_mode: run.execution_mode });
-      const costLabel = run.cost_source === "subscription_quota"
-        ? "使用订阅配额"
-        : run.cost_source === "unknown"
-          ? "成本未知"
-          : `实际成本 ${formatGenerationCost(run.actual_cost_micros)}`;
-      onNotice(`${modeLabel}已生成 ${run.candidates?.length || 0} 个候选，${costLabel}`);
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      await onProjectsChanged();
+      onNotice(`分镜 ${shotDetail.plan.index} 的图片任务已加入队列`);
+    });
+  }
+
+  async function cancelShotGeneration(runId) {
+    if (!runId) return;
+    await executeAction(async () => {
+      const run = await request(`/generation-runs/${runId}/cancel`, {
+        method: "POST",
+      });
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      onNotice("图片生成任务已取消");
+    });
+  }
+
+  async function retryShotGeneration(runId) {
+    if (!runId) return;
+    await executeAction(async () => {
+      const run = await request(`/generation-runs/${runId}/retry`, {
+        method: "POST",
+      });
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      await onProjectsChanged();
+      onNotice("重试任务已加入队列");
     });
   }
 
@@ -1231,6 +1429,41 @@ export function ProductionHub({
       ]);
       onNotice("当前分镜图片已确认");
     });
+  }
+
+  async function revokeImageApproval() {
+    if (!shotDetail?.plan || shotDetail.plan.image_status !== "approved") return;
+    const shotPlanId = shotDetail.plan.id;
+    const shotIndex = shotDetail.plan.index;
+    const expectedRevisionId = detail.project.current_revision_id;
+    const apply = async (confirmDownstreamStale) => {
+      await request(
+        `/production-shots/${shotPlanId}/image-approval/revoke`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: expectedRevisionId,
+            reason: "用户重新打开图片审核",
+            confirm_downstream_stale: confirmDownstreamStale,
+          }),
+        },
+      );
+      setRejectReason("");
+      await Promise.all([
+        refreshProject(detail.project.id, shotPlanId),
+        onProjectsChanged(),
+      ]);
+      onNotice(`已取消采用分镜 ${shotIndex} 的图片，可重新选择或生成新候选`);
+    };
+    await prepareImpact(
+      {
+        changeType: "image_approval_revoke",
+        shotPlanIds: [shotPlanId],
+        title: "取消采用当前分镜图片",
+      },
+      apply,
+    );
   }
 
   async function rejectCandidate(candidateId) {
@@ -1356,6 +1589,55 @@ export function ProductionHub({
     }
   }
 
+  async function openAssetPicker() {
+    setAssetPickerOpen(true);
+    setAssetPickerLoading(true);
+    setAssetPickerError("");
+    setSelectedLibraryAssetId(null);
+    try {
+      const context = await request("/context");
+      const workspaceId = context?.active_workspace?.id;
+      if (!workspaceId) throw new Error("当前工作区不可用");
+      const result = await request(
+        `/workspaces/${workspaceId}/assets?page=1&page_size=100`,
+      );
+      setLibraryAssets(result?.items || []);
+    } catch (requestError) {
+      setAssetPickerError(requestError.message);
+    } finally {
+      setAssetPickerLoading(false);
+    }
+  }
+
+  async function confirmLibraryAsset() {
+    if (!selectedLibraryAssetId) return;
+    setBusy(true);
+    setAssetPickerError("");
+    try {
+      await request(
+        `/productions/${detail.project.id}/assets/${selectedLibraryAssetId}/link`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+          }),
+        },
+      );
+      setAssetPickerOpen(false);
+      setSelectedLibraryAssetId(null);
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      onNotice("资产已添加到当前项目");
+    } catch (requestError) {
+      setAssetPickerError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openReferenceUpload() {
     setReferenceMode("upload");
     setReferenceAsset(null);
@@ -1417,7 +1699,7 @@ export function ProductionHub({
     const assetId = referenceAsset.id;
     const expectedRevisionId = detail.project.current_revision_id;
     const apply = async (confirmStale) => {
-        await request(`/references/${referenceAsset.id}`, {
+        await request(`/references/${referenceAsset.id}?project_id=${detail.project.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1454,6 +1736,7 @@ export function ProductionHub({
       const params = new URLSearchParams({
         expected_revision_id: expectedRevisionId,
         confirm_stale: String(confirmStale),
+        project_id: detail.project.id,
       });
       await request(`/references/${assetId}?${params.toString()}`, { method: "DELETE" });
       setArchiveAsset(null);
@@ -1461,13 +1744,13 @@ export function ProductionHub({
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("参考资产已归档");
+      onNotice("参考资产已从当前项目移出");
     };
     await prepareImpact(
       {
         changeType: "reference_asset",
         referenceAssetIds: [assetId],
-        title: "归档已绑定参考资产",
+        title: "移出已绑定参考资产",
       },
       apply,
     );
@@ -1544,7 +1827,7 @@ export function ProductionHub({
           <ProductionSteps active={activeSection} gate={gate} onChange={(section) => { setActionError(""); setActiveSection(section); }} project={detail.project} referenceCount={assets.length} />
           <div className="production-stage-content">
             {activeSection === "project_setup" && <ProjectSettings busy={busy} detail={detail} draft={settingsDraft} error={actionError} onOpenReferences={() => setActiveSection("reference_assets")} onSave={submitSettings} setDraft={setSettingsDraft} />}
-            {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onEdit={openReferenceEdit} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
+            {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
             {activeSection === "shot_images" && (
               <ShotImageWorkspace
                 advanced={detail.project.active_step === "shot_videos"}
@@ -1560,11 +1843,14 @@ export function ProductionHub({
                 onAdvance={advanceWorkflow}
                 onApprove={approveCandidate}
                 onApproveSource={approveSourceKeyframe}
+                onCancelRun={cancelShotGeneration}
                 onCreateShot={createShot}
                 onDiscardShot={discardShot}
                 onGenerate={generateShotCandidates}
                 onReject={rejectCandidate}
+                onRevokeApproval={revokeImageApproval}
                 onReorderShots={reorderShots}
+                onRetryRun={retryShotGeneration}
                 onRestoreShot={restoreShot}
                 onSave={submitShot}
                 onSelectCandidate={selectCandidate}
@@ -1593,6 +1879,20 @@ export function ProductionHub({
       {createOpen && <CreateProjectDialog busy={busy} draft={createDraft} error={actionError} onClose={() => setCreateOpen(false)} onSubmit={submitCreate} setDraft={setCreateDraft} />}
       {referenceMode && <ReferenceAssetDialog busy={busy} draft={referenceDraft} error={actionError} file={referenceFile} mode={referenceMode} onClose={() => setReferenceMode(null)} onSubmit={submitReference} previewUrl={referencePreviewUrl} setDraft={setReferenceDraft} setFile={selectReferenceFile} />}
       {archiveAsset && <ArchiveDialog asset={archiveAsset} busy={busy} error={actionError} onClose={() => setArchiveAsset(null)} onConfirm={confirmArchive} />}
+      {assetPickerOpen && (
+        <AssetPickerDialog
+          assets={libraryAssets}
+          busy={busy}
+          error={assetPickerError}
+          linkedIds={new Set(assets.map((asset) => asset.id))}
+          loading={assetPickerLoading}
+          onClose={() => setAssetPickerOpen(false)}
+          onConfirm={confirmLibraryAsset}
+          resolveUrl={resolveUrl}
+          selectedId={selectedLibraryAssetId}
+          setSelectedId={setSelectedLibraryAssetId}
+        />
+      )}
       {previewRevision && <RevisionPreviewDialog busy={busy} detail={previewDetail} error={previewError} onBranch={() => openBranch(previewRevision)} onClose={() => setPreviewRevision(null)} revision={previewRevision} />}
       {branchRevision && <BranchDialog busy={busy} error={actionError} name={branchName} onClose={() => setBranchRevision(null)} onSubmit={submitBranch} revision={branchRevision} setName={setBranchName} />}
       <ChangeImpactPanel

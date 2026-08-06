@@ -11,3 +11,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 ## Branding
 
 - 浏览器标签页图标始终复用侧边栏的项目标识：紫色圆角方块与白色播放三角。
+
+## Record detail layout
+
+- 分析报告与创作方案共用专注的记录详情布局：顶部不显示全局搜索和“新建分析”，正文不显示产品介绍区与“导入短视频”模块；记录卡上方保留紧凑面包屑，支持返回工作台、分析记录和方案列表；这些入口只保留在分析记录页和新建分析流程中。

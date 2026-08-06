@@ -83,6 +83,7 @@ class ModelTask(StrEnum):
     ENTITY_RESOLUTION = "entity_resolution"
     VIRAL_REASONING = "viral_reasoning"
     PROMPT_GENERATION = "prompt_generation"
+    IMAGE_QUALITY_QA = "image_quality_qa"
 
 
 class ModelRunStatus(StrEnum):
@@ -146,6 +147,7 @@ class ProductionChangeKind(StrEnum):
     SOURCE_KEYFRAME_CHANGED = "source_keyframe_changed"
     IMAGE_CANDIDATE_SELECTED = "image_candidate_selected"
     IMAGE_APPROVED = "image_approved"
+    IMAGE_APPROVAL_REVOKED = "image_approval_revoked"
     IMAGE_REJECTED = "image_rejected"
     WORKFLOW_ADVANCED = "workflow_advanced"
     BRANCH_CREATED = "branch_created"
@@ -206,6 +208,8 @@ class GenerationCostSource(StrEnum):
 class ProductionRunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    CANCELLATION_REQUESTED = "cancellation_requested"
+    CANCELLED = "cancelled"
     COMPLETED = "completed"
     FAILED = "failed"
     CACHED = "cached"
@@ -221,6 +225,7 @@ class GenerationCandidateStatus(StrEnum):
 
 class ApprovalDecision(StrEnum):
     APPROVED = "approved"
+    REVOKED = "revoked"
     REJECTED = "rejected"
 
 
@@ -333,6 +338,8 @@ class ImageGenerationSettingsUpdate(BaseModel):
     local_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
     local_proxy_mode: Literal["system", "manual", "disabled"] = "system"
     local_proxy_url: str | None = Field(default=None, max_length=500)
+    local_windows_sandbox_mode: Literal["auto", "elevated", "unelevated"] = "auto"
+    semantic_quality_enabled: bool = False
 
     @field_validator("local_fixed_args")
     @classmethod
@@ -378,13 +385,16 @@ class ImageGenerationSettingsResponse(BaseModel):
     local_tool_version: str | None = None
     local_cost_source: GenerationCostSource = GenerationCostSource.UNKNOWN
     local_unit_cost_micros: int | None = None
+    semantic_quality_enabled: bool = False
     local_model_policy: str = "latest_flagship"
     local_model: str | None = None
     local_reasoning_effort: str = "xhigh"
+    local_windows_sandbox_mode: Literal["auto", "elevated", "unelevated"] = "auto"
     local_proxy_mode: Literal["system", "manual", "disabled"] = "system"
     local_proxy_url: str | None = None
     local_proxy_detected_url: str | None = None
     local_proxy_effective_url: str | None = None
+    local_proxy_delivery: Literal["codex_native", "environment", "direct"] = "direct"
     local_proxy_source: Literal[
         "manual",
         "windows_user_proxy",
@@ -401,6 +411,12 @@ class ImageGenerationSettingsResponse(BaseModel):
 
 
 class LocalImageToolDetectRequest(BaseModel):
+    adapter_id: str = Field(
+        default="viral_dna_json_v1",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
     executable_path: str = Field(min_length=1, max_length=2048)
     fixed_args: list[str] = Field(default_factory=list, max_length=20)
     protocol_version: str = Field(
@@ -450,6 +466,7 @@ class LocalCodexAutoConfigureRequest(BaseModel):
     default_candidate_count: int = Field(default=1, ge=1, le=4)
     proxy_mode: Literal["system", "manual", "disabled"] = "system"
     proxy_url: str | None = Field(default=None, max_length=500)
+    windows_sandbox_mode: Literal["auto", "elevated", "unelevated"] = "auto"
 
 
 class LocalCodexNetworkTestRequest(BaseModel):
@@ -477,6 +494,27 @@ class LocalCodexNetworkTestResponse(BaseModel):
         "none",
     ]
     effective_proxy_url: str | None = None
+    latency_ms: int = Field(ge=0)
+    message: str
+
+
+class LocalCodexSandboxTestRequest(BaseModel):
+    proxy_mode: Literal["system", "manual", "disabled"] = "system"
+    proxy_url: str | None = Field(default=None, max_length=500)
+    windows_sandbox_mode: Literal["auto", "elevated", "unelevated"] = "auto"
+    timeout_seconds: int = Field(default=30, ge=5, le=120)
+
+    @model_validator(mode="after")
+    def validate_proxy(self) -> LocalCodexSandboxTestRequest:
+        if self.proxy_mode == "manual" and not (self.proxy_url or "").strip():
+            raise ValueError("手动代理模式必须填写代理地址")
+        return self
+
+
+class LocalCodexSandboxTestResponse(BaseModel):
+    ready: bool = True
+    sandbox_mode: Literal["auto", "elevated", "unelevated"]
+    proxy_delivery: Literal["codex_native", "environment", "direct"]
     latency_ms: int = Field(ge=0)
     message: str
 
@@ -1128,6 +1166,19 @@ class ReferenceAsset(BaseModel):
         return normalized
 
 
+class ProjectAssetLink(BaseModel):
+    """Stable association between a project and a workspace-level asset."""
+
+    id: UUID = Field(default_factory=uuid4)
+    workspace_id: UUID
+    project_id: UUID
+    asset_id: UUID
+    reference_type: ReferenceAssetType
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    removed_at: datetime | None = None
+
+
 class ReferenceBinding(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     shot_plan_id: UUID
@@ -1265,6 +1316,9 @@ class GenerationRun(BaseModel):
     cost_source: GenerationCostSource = GenerationCostSource.UNMETERED
     cost_estimate_known: bool = True
     usage: dict[str, Any] = Field(default_factory=dict)
+    request_payload: dict[str, Any] = Field(default_factory=dict)
+    retry_of_run_id: UUID | None = None
+    cancellation_requested: bool = False
     output_manifest_relative_path: str | None = Field(default=None, max_length=2048)
     status: ProductionRunStatus = ProductionRunStatus.QUEUED
     estimated_cost_micros: int = Field(default=0, ge=0)
@@ -1274,6 +1328,9 @@ class GenerationRun(BaseModel):
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=2000)
     created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+    last_heartbeat_at: datetime | None = None
     completed_at: datetime | None = None
 
     @field_validator("input_snapshot_relative_path")
@@ -1413,6 +1470,11 @@ class ReferenceAssetCreate(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=20)
     rights_confirmed: bool = False
     rights_note: str | None = Field(default=None, max_length=1000)
+
+
+class ProjectAssetLinkCreate(BaseModel):
+    expected_revision_id: UUID
+    type: ReferenceAssetType | None = None
 
 
 class ReferenceAssetUpdate(BaseModel):
@@ -1607,6 +1669,7 @@ class ChangeImpactRequest(BaseModel):
         "reference_asset",
         "shot_plan",
         "candidate_selection",
+        "image_approval_revoke",
     ]
     shot_plan_ids: list[UUID] = Field(default_factory=list, max_length=100)
     reference_asset_ids: list[UUID] = Field(default_factory=list, max_length=50)
@@ -1627,6 +1690,8 @@ class ImageGenerationCreate(BaseModel):
     input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT
     execution_mode: Literal["remote_api", "local_tool"] | None = None
     allow_unknown_cost: bool = False
+    generation_intent: Literal["standard", "new_variation"] = "standard"
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
 
 
 class ShotKeyframeSelectRequest(BaseModel):
@@ -1638,6 +1703,12 @@ class ShotKeyframeSelectRequest(BaseModel):
 class ShotSourceFrameApprovalRequest(BaseModel):
     expected_revision_id: UUID
     reason: str | None = Field(default=None, max_length=1000)
+
+
+class ShotImageApprovalRevokeRequest(BaseModel):
+    expected_revision_id: UUID
+    reason: str | None = Field(default=None, max_length=1000)
+    confirm_downstream_stale: bool = False
 
 
 class GenerationCandidateResponse(BaseModel):
@@ -1679,9 +1750,15 @@ class GenerationRunResponse(BaseModel):
     estimated_cost_micros: int
     actual_cost_micros: int
     latency_ms: int | None = None
+    retry_count: int = 0
+    retry_of_run_id: UUID | None = None
+    cancellation_requested: bool = False
     error_code: str | None = None
     error_message: str | None = None
     created_at: datetime
+    started_at: datetime | None = None
+    updated_at: datetime
+    last_heartbeat_at: datetime | None = None
     completed_at: datetime | None = None
     candidates: list[GenerationCandidateResponse] = Field(default_factory=list)
 

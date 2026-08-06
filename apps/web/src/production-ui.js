@@ -25,6 +25,7 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   source_keyframe_changed: "更换分镜关键帧",
   image_candidate_selected: "选择图片候选",
   image_approved: "确认分镜图片",
+  image_approval_revoked: "取消采用分镜图片",
   image_rejected: "退回图片候选",
   workflow_advanced: "推进工作流",
   branch_created: "创建版本分支",
@@ -88,6 +89,13 @@ export function isAiImageGenerationRun(run) {
   );
 }
 
+export function imageGenerationIntentForShot(shotDetail) {
+  const hasPriorAiCandidate = (shotDetail?.generation_runs || []).some(
+    (run) => isAiImageGenerationRun(run) && (run.candidates || []).length > 0,
+  );
+  return hasPriorAiCandidate ? "new_variation" : "standard";
+}
+
 export function imageGenerationRunLabel(run) {
   if (!run) return "未生成";
   if (run.provider === "simulated" || run.execution_mode === "simulated") {
@@ -115,6 +123,12 @@ export function isImageEngineConfigured(settings, executionMode) {
 export function generationFailureGuidance(run) {
   const code = String(run?.error_code || "");
   const message = String(run?.error_message || "");
+  if (code === "codex_windows_sandbox_setup_failed") {
+    return (
+      "Codex Windows 沙箱未能启动。请到“模型与设置 → Windows 沙箱”执行无费用预检；"
+      + "若自动/增强模式仍失败，请手动选择兼容模式（unelevated）后再生成。"
+    );
+  }
   if (
     code === "local_tool_timeout"
     || /执行超过|timed?\s*out/i.test(message)
@@ -161,6 +175,15 @@ export function estimateImageGenerationCostMicros(
 
 export function imageQualityLabel(report) {
   if (!report?.status) return "未自动质检 · 请人工核对";
+  const semanticStatus = report.semantic_quality?.status;
+  if (semanticStatus === "warning") return "VLM 发现语义风险 · 请人工核对";
+  if (semanticStatus === "uncertain") return "VLM 证据不足 · 请人工核对";
+  if (semanticStatus === "passed" && report.status === "warning") {
+    return "尺寸有提示 · VLM 未发现明显语义问题 · 请人工核对";
+  }
+  if (semanticStatus === "passed") {
+    return "VLM 未发现明显语义问题 · 请人工核对";
+  }
   if (report.status === "warning") return "尺寸有提示 · 请人工核对";
   if (report.status === "manual_review_required") return "基础质检通过 · 请人工核对";
   if (report.status === "passed") return "自动质检通过";

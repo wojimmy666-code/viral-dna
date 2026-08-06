@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+from .asset_library import Asset, AssetFolder
 from .chinese import simplify_model
 from .exports import archive_report
 from .models import (
@@ -22,6 +23,8 @@ from .models import (
     PriceSnapshot,
     ProductionProject,
     ProductionRevision,
+    ProductionRunStatus,
+    ProjectAssetLink,
     RecordFolder,
     ReferenceAsset,
     ReferenceBinding,
@@ -30,6 +33,7 @@ from .models import (
     Video,
     VideoStatus,
 )
+from .storage_objects import ObjectReplica, StorageObject
 from .workspace import WorkspaceError, workspace_manager
 
 
@@ -60,6 +64,11 @@ class InMemoryStore:
         self.generation_runs: dict[UUID, GenerationRun] = {}
         self.generation_candidates: dict[UUID, GenerationCandidate] = {}
         self.approval_events: dict[UUID, ApprovalEvent] = {}
+        self.storage_objects: dict[UUID, StorageObject] = {}
+        self.object_replicas: dict[UUID, ObjectReplica] = {}
+        self.asset_folders: dict[UUID, AssetFolder] = {}
+        self.assets: dict[UUID, Asset] = {}
+        self.project_asset_links: dict[UUID, ProjectAssetLink] = {}
 
     async def add_video(self, video: Video) -> Video:
         async with self._lock:
@@ -239,6 +248,84 @@ class InMemoryStore:
     async def get_reference_asset(self, asset_id: UUID) -> ReferenceAsset | None:
         return self.reference_assets.get(asset_id)
 
+    async def save_storage_bundle(
+        self,
+        storage_object: StorageObject,
+        replica: ObjectReplica,
+    ) -> tuple[StorageObject, ObjectReplica]:
+        async with self._lock:
+            self.storage_objects[storage_object.id] = storage_object
+            self.object_replicas[replica.id] = replica
+        return storage_object, replica
+
+    async def save_storage_object(self, storage_object: StorageObject) -> StorageObject:
+        async with self._lock:
+            self.storage_objects[storage_object.id] = storage_object
+        return storage_object
+
+    async def get_storage_object(self, object_id: UUID) -> StorageObject | None:
+        return self.storage_objects.get(object_id)
+
+    async def save_object_replica(self, replica: ObjectReplica) -> ObjectReplica:
+        async with self._lock:
+            self.object_replicas[replica.id] = replica
+        return replica
+
+    async def get_object_replica(self, replica_id: UUID) -> ObjectReplica | None:
+        return self.object_replicas.get(replica_id)
+
+    async def list_object_replicas(self, object_id: UUID) -> list[ObjectReplica]:
+        return sorted(
+            (
+                replica
+                for replica in self.object_replicas.values()
+                if replica.storage_object_id == object_id
+            ),
+            key=lambda replica: replica.created_at,
+        )
+
+    async def save_asset_folder(self, folder: AssetFolder) -> AssetFolder:
+        async with self._lock:
+            self.asset_folders[folder.id] = folder
+        return folder
+
+    async def get_asset_folder(self, folder_id: UUID) -> AssetFolder | None:
+        return self.asset_folders.get(folder_id)
+
+    async def list_asset_folders(self) -> list[AssetFolder]:
+        return sorted(
+            self.asset_folders.values(),
+            key=lambda folder: (folder.sort_order, folder.created_at),
+        )
+
+    async def save_asset(self, asset: Asset) -> Asset:
+        async with self._lock:
+            self.assets[asset.id] = asset
+        return asset
+
+    async def get_asset(self, asset_id: UUID) -> Asset | None:
+        return self.assets.get(asset_id)
+
+    async def list_assets(self) -> list[Asset]:
+        return sorted(self.assets.values(), key=lambda asset: asset.created_at)
+
+    async def save_project_asset_link(self, link: ProjectAssetLink) -> ProjectAssetLink:
+        async with self._lock:
+            self.project_asset_links[link.id] = link
+        return link
+
+    async def get_project_asset_link(self, link_id: UUID) -> ProjectAssetLink | None:
+        return self.project_asset_links.get(link_id)
+
+    async def list_project_asset_links(
+        self,
+        project_id: UUID | None = None,
+    ) -> list[ProjectAssetLink]:
+        links = list(self.project_asset_links.values())
+        if project_id is not None:
+            links = [item for item in links if item.project_id == project_id]
+        return sorted(links, key=lambda item: item.created_at)
+
     async def list_reference_assets(self, project_id: UUID) -> list[ReferenceAsset]:
         return sorted(
             (asset for asset in self.reference_assets.values() if asset.project_id == project_id),
@@ -326,6 +413,26 @@ class InMemoryStore:
         async with self._lock:
             self.generation_runs[run.id] = run
         return run
+
+    async def claim_generation_run(
+        self,
+        run_id: UUID,
+        claimed_at: datetime,
+    ) -> GenerationRun | None:
+        async with self._lock:
+            run = self.generation_runs.get(run_id)
+            if run is None or run.status != ProductionRunStatus.QUEUED:
+                return None
+            claimed = run.model_copy(
+                update={
+                    "status": ProductionRunStatus.RUNNING,
+                    "started_at": run.started_at or claimed_at,
+                    "updated_at": claimed_at,
+                    "last_heartbeat_at": claimed_at,
+                }
+            )
+            self.generation_runs[run_id] = claimed
+            return claimed
 
     async def get_generation_run(self, run_id: UUID) -> GenerationRun | None:
         return self.generation_runs.get(run_id)

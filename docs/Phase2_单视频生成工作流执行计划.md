@@ -1,8 +1,8 @@
 # Phase 2：单视频生成工作流执行计划
 
-更新时间：2026-08-04
+更新时间：2026-08-06
 
-文档状态：Batch 4.1 已完成；Batch 4.2.1～4.2.3 已实现，Batch 4.2.4 进行中
+文档状态：Batch 4.1、Batch 4.2.1～4.2.4、Batch 4.3 和 Batch 4.4.1～4.4.5 已完成；下一主线为 Batch 4.5 分段视频闭环
 
 ## 0. 路线调整与结论
 
@@ -898,6 +898,16 @@ Batch 4.1 到此完成。当前候选是用于验证工作流、版本、文件�
 
 ## 19. Batch 4.2 当前执行记录（2026-08-04）
 
-已实现统一 ImageGenerationGateway、DashScope Qwen Image Remote Adapter、安全本机 CLI Adapter、GUI 双模式设置、API Key 校验、模型能力与价格快照、真实费用门禁、未知成本确认、统一候选 UI、稳定请求指纹、候选缓存复用、单进程本机并发上限，以及文件／画幅基础质量报告。后端 76 项测试、Ruff、前端 15 项测试和生产构建均通过。
+已实现统一 ImageGenerationGateway、DashScope Qwen Image Remote Adapter、安全本机 CLI Adapter、GUI 双模式设置、API Key 校验、模型能力与价格快照、真实费用门禁、未知成本确认、统一候选 UI、稳定请求指纹、候选缓存复用以及文件／画幅基础质量报告。
 
-Batch 4.2 尚未全部完成：持久化 queued/running 后台任务、显式取消、API 重启后的执行恢复、VLM 人物／产品／文字语义质检、真实付费 Remote 冒烟和真实本机 imagegen 包装器四分镜验收仍待执行。详细实现与验收边界见 `docs/Phase2_Batch4.2_图片生成双模式执行验收.md`。
+## 20. Batch 4.2.4 与 Batch 4.4 收尾记录（2026-08-06）
+
+- 图片生成改为持久化 queued/running 后台任务，创建接口返回 HTTP 202，前端恢复轮询；
+- 增加取消、重试、重启恢复、SQLite 原子 claim 和跨 API worker 的本机工具并发槽位；
+- 增加可选 VLM 语义质检、结构化人工审核证据、预算门禁和额外 Token／费用归集；
+- 完成工作区资产 `ProjectAssetLink`、旧 ReferenceAsset 零拷贝幂等迁移和 Production Snapshot v2；
+- 使用 `FakeCloudStorageDriver` 验证同一对象多副本、幂等复制、`download_required` 和 `unavailable`，但未连接真实云端；
+- 后端 110 项测试、Ruff、前端 23 项测试、生产构建与本地浏览器冒烟通过；
+- 真实百炼／ImageGen 单镜头和四分镜出图仍需用户按人工验收流程明确触发，因为会产生费用或消耗订阅配额。
+
+详细实现边界见 `docs/Phase2_Batch4.2_图片生成双模式执行验收.md` 和 `docs/Phase2_Batch4.4_账户工作区与混合资产库执行计划.md`；人工步骤见 `docs/Phase2_Batch4.4.4_4.4.5与4.2.4_人工验收.md`。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -83,6 +84,7 @@ class AdapterRequest:
     negative_prompt: str
     seed: int | None
     capability: ImageGenerationCapability
+    cancel_event: Event | None = None
 
 
 @dataclass(frozen=True, slots=True)

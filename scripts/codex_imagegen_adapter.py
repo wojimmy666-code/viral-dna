@@ -11,7 +11,7 @@ from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-ADAPTER_VERSION = "1.0.0"
+ADAPTER_VERSION = "1.1.0"
 PROTOCOL_VERSION = "viral-dna-image-tool/v1"
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_LOG_BYTES = 1024 * 1024
@@ -40,6 +40,48 @@ def _sha256(path: Path) -> str:
 
 def _codex_command(args: argparse.Namespace, *extra: str) -> list[str]:
     return [args.codex_executable, *args.codex_fixed_arg, *extra]
+
+
+def _windows_sandbox_config(args: argparse.Namespace) -> list[str]:
+    if args.windows_sandbox_mode == "auto":
+        return []
+    return [
+        "--config",
+        f'windows.sandbox="{args.windows_sandbox_mode}"',
+    ]
+
+
+def _codex_failure_message(raw: str, *, preflight: bool = False) -> str:
+    message = raw[-MAX_LOG_BYTES:].strip()
+    normalized = message.lower()
+    sandbox_markers = (
+        "codex-windows-sandbox-setup",
+        "helper_unknown_error",
+        "setup refresh had errors",
+        "sandbox setup marker missing",
+        "specified module could not be found",
+        "找不到指定的模块",
+    )
+    proxy_state_markers = (
+        "offline firewall settings changed",
+        "stored_ports",
+        "desired_ports",
+    )
+    if any(marker in normalized for marker in sandbox_markers + proxy_state_markers):
+        prefix = "Codex Windows 沙箱预检失败" if preflight else "Codex Windows 增强沙箱初始化失败"
+        suffix = (
+            "本次没有调用图片模型，不会消耗图片额度。"
+            if preflight
+            else "ViralDNA 未自动重试，避免重复消耗订阅额度。"
+        )
+        return (
+            f"{prefix}。请在“模型与设置 → Windows 沙箱”中重新执行无费用预检；"
+            "若“自动/增强模式”仍失败，请手动切换为“兼容模式（unelevated）”。"
+            f"兼容模式仍限制文件访问，但网络隔离较弱。{suffix}"
+        )
+    detail = message[-1000:] or "未返回说明"
+    operation = "Codex Windows 沙箱预检" if preflight else "Codex ImageGen 执行"
+    return f"{operation}失败：{detail}"
 
 
 def _codex_version(args: argparse.Namespace) -> str:
@@ -91,6 +133,7 @@ def _capabilities(args: argparse.Namespace) -> int:
             "model": args.model,
             "model_policy": args.model_policy,
             "reasoning_effort": args.reasoning_effort,
+            "windows_sandbox_mode": args.windows_sandbox_mode,
             "imagegen_validation": "smoke_test_required",
             "cost_source": "subscription_quota",
         },
@@ -115,7 +158,7 @@ def _input_paths(request_path: Path, payload: dict[str, Any]) -> list[tuple[str,
     root = request_path.parent.resolve()
     inputs = payload.get("inputs")
     if not isinstance(inputs, list):
-        raise RuntimeError("request.json 的输入图片字段无效")
+        raise TypeError("request.json 的输入图片字段无效")
     resolved: list[tuple[str, Path]] = []
     for item in inputs:
         if not isinstance(item, dict):
@@ -202,6 +245,61 @@ def _generated_candidates(output_root: Path, expected_count: int) -> list[dict[s
     return candidates
 
 
+def _preflight(args: argparse.Namespace) -> int:
+    version = _codex_version(args)
+    cwd = Path(args.cwd).resolve()
+    if not cwd.is_dir():
+        raise RuntimeError("Codex 沙箱预检目录不存在")
+    if os.name == "nt":
+        system_root = Path(os.environ.get("SYSTEMROOT") or r"C:\Windows")
+        probe_command = [
+            os.environ.get("COMSPEC") or str(system_root / "System32" / "cmd.exe"),
+            "/d",
+            "/c",
+            "exit 0",
+        ]
+    else:
+        probe_command = ["/bin/sh", "-c", "exit 0"]
+    command = _codex_command(
+        args,
+        *_windows_sandbox_config(args),
+        "sandbox",
+        "--permission-profile",
+        ":workspace",
+        "--cd",
+        str(cwd),
+        *probe_command,
+    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            text=True,
+            timeout=args.timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Codex Windows 沙箱预检超过 {args.timeout} 秒") from exc
+    if result.returncode != 0:
+        raw = f"{result.stderr}\n{result.stdout}"
+        raise RuntimeError(_codex_failure_message(raw, preflight=True))
+    print(
+        json.dumps(
+            {
+                "ready": True,
+                "codex_version": version,
+                "windows_sandbox_mode": args.windows_sandbox_mode,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def _generate(args: argparse.Namespace) -> int:
     _codex_version(args)
     request_path = Path(args.request).resolve()
@@ -220,10 +318,12 @@ def _generate(args: argparse.Namespace) -> int:
     prompt = _generation_prompt(payload, inputs, output_root)
     command = _codex_command(
         args,
+        *_windows_sandbox_config(args),
         "--ask-for-approval",
         "never",
         "exec",
         "--ephemeral",
+        "--ignore-user-config",
         "--json",
         "--skip-git-repo-check",
         "--sandbox",
@@ -254,8 +354,8 @@ def _generate(args: argparse.Namespace) -> int:
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Codex ImageGen 执行超过 {args.codex_timeout} 秒") from exc
     if result.returncode != 0:
-        message = (result.stderr or result.stdout)[-MAX_LOG_BYTES:].strip()
-        raise RuntimeError(f"Codex ImageGen 执行失败：{message[-1000:] or '未返回说明'}")
+        raw = f"{result.stderr}\n{result.stdout}"
+        raise RuntimeError(_codex_failure_message(raw))
     candidates = _generated_candidates(output_root, expected_count)
     _write_json(
         output_root / "result.json",
@@ -294,9 +394,17 @@ def _parser() -> argparse.ArgumentParser:
         default="xhigh",
     )
     parser.add_argument("--codex-timeout", type=int, default=1200)
+    parser.add_argument(
+        "--windows-sandbox-mode",
+        choices=["auto", "elevated", "unelevated"],
+        default="auto",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     capabilities = subparsers.add_parser("capabilities")
     capabilities.add_argument("--json", action="store_true")
+    preflight = subparsers.add_parser("preflight")
+    preflight.add_argument("--cwd", required=True)
+    preflight.add_argument("--timeout", type=int, default=30)
     generate = subparsers.add_parser("generate")
     generate.add_argument("--request", required=True)
     generate.add_argument("--output", required=True)
@@ -312,6 +420,8 @@ def main() -> int:
     try:
         if args.command == "capabilities":
             return _capabilities(args)
+        if args.command == "preflight":
+            return _preflight(args)
         return _generate(args)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

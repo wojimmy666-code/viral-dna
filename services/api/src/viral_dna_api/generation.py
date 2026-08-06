@@ -178,6 +178,7 @@ def generate_simulated_images(
     candidate_count: int,
     source_path: Path | None,
     input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT,
+    run_id: UUID | None = None,
 ) -> tuple[GenerationRun, list[GenerationCandidate]]:
     started = time.perf_counter()
     input_payload = build_generation_input(
@@ -189,7 +190,7 @@ def generate_simulated_images(
         input_mode,
     )
     fingerprint = hashlib.sha256(_canonical_json(input_payload)).hexdigest()
-    run_id = uuid4()
+    run_id = run_id or uuid4()
     run_root = (
         workspace.production_shot_root(project.record_id, project.id, plan.id)
         / "images"

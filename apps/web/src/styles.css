@@ -261,6 +261,11 @@ button:disabled {
   gap: 7px;
 }
 
+.topbar.asset-mode .topbar-actions,
+.topbar.focus-mode .topbar-actions {
+  margin-left: auto;
+}
+
 .icon-button {
   width: 36px;
   height: 36px;
@@ -368,6 +373,73 @@ button:disabled {
   min-width: 0;
   display: grid;
   gap: 18px;
+}
+
+.workspace-main.detail-mode {
+  gap: 12px;
+}
+
+.record-breadcrumb {
+  min-width: 0;
+  padding: 1px 2px 0;
+}
+
+.record-breadcrumb ol {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  scrollbar-width: none;
+}
+
+.record-breadcrumb ol::-webkit-scrollbar {
+  display: none;
+}
+
+.record-breadcrumb li {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  color: #aeafba;
+}
+
+.record-breadcrumb button,
+.record-breadcrumb [aria-current="page"] {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 0;
+  border: 0;
+  color: #9293a0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.record-breadcrumb button {
+  cursor: pointer;
+}
+
+.record-breadcrumb button:hover {
+  color: var(--purple);
+}
+
+.record-breadcrumb [aria-current="page"] {
+  color: #4f4f5c;
+  font-weight: 700;
+}
+
+.record-breadcrumb .project-name {
+  max-width: min(320px, 34vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .page-intro {
@@ -3416,6 +3488,56 @@ button:disabled {
   background: #f7f5ff;
   font-size: 9px;
   font-weight: 650;
+}
+
+.image-semantic-quality-option {
+  display: grid;
+  grid-template-columns: auto 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #dfdcef;
+  border-radius: 12px;
+  color: #59546a;
+  background: #faf9fe;
+  cursor: pointer;
+}
+
+.image-semantic-quality-option:has(input:checked) {
+  border-color: #bdb3fb;
+  background: #f6f3ff;
+}
+
+.image-semantic-quality-option > input {
+  margin-top: 9px;
+  accent-color: #6554e8;
+}
+
+.image-semantic-quality-option > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #6554d9;
+  background: #ece8ff;
+}
+
+.image-semantic-quality-option > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.image-semantic-quality-option strong {
+  font-size: 11px;
+}
+
+.image-semantic-quality-option small {
+  color: #817d8c;
+  font-size: 9px;
+  line-height: 1.55;
 }
 
 .server-model-note {

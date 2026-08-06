@@ -1,5 +1,9 @@
 # Phase 2 · Batch 4.4 账户、逻辑工作区与混合资产库执行计划
 
+更新时间：2026-08-06
+
+阶段状态：Batch 4.4.1～4.4.5 已完成；当前仍只启用本地存储，真实云端 Provider 明确保留为后续实现。
+
 ## 1. 批次定位
 
 Batch 4.4 在继续分段视频生成之前，先补齐账户、工作区和资产库的基础设施，使人物、产品、服装、场景等参考资产可以跨创作方案复用，并为未来“部分文件在本地、部分文件在云端”的混合工作区保留稳定扩展点。
@@ -395,7 +399,7 @@ GET    /api/v1/assets/{asset_id}/thumbnail
 
 ```http
 GET    /api/v1/productions/{project_id}/assets
-POST   /api/v1/productions/{project_id}/assets/{asset_id}
+POST   /api/v1/productions/{project_id}/assets/{asset_id}/link
 DELETE /api/v1/productions/{project_id}/assets/{asset_id}
 ```
 
@@ -487,7 +491,8 @@ POST /api/v1/storage-objects/{object_id}/materialize
 
 ### 10.3 Schema
 
-- 工作区 Schema 从 2 升级到 3；
+- Batch 4.4.1 将工作区 Schema 从 2 升级到 3；
+- Batch 4.4.4 将 Schema 升级到 4，新增项目资产关联和异步生成任务所需字段；
 - 新增账户／工作区标识、存储位置、存储对象、副本、资产目录、资产和项目资产关联表；
 - 升级前创建 SQLite 备份；
 - 迁移在单个事务中写入数据库，文件只做校验不做搬移；
@@ -665,4 +670,73 @@ POST /api/v1/storage-objects/{object_id}/materialize
 - Web 生产构建通过；
 - Ruff 针对性检查、Python 编译检查和 Git 差异检查通过。
 
-下一步进入 Batch 4.4.2：实现 `StorageObject`／`ObjectReplica`、本地文件驱动和兼容旧参考资产的迁移适配；仍不接入真实云端。
+## 17. Batch 4.4.2～4.4.3 实施记录（2026-08-06）
+
+已完成统一本地对象存储和资产库：
+
+- 新增 `StorageObject`、`ObjectReplica`、本地 `StorageLocation`、`LocalFileStorageDriver`、`StorageManager` 和统一内容解析；
+- 新上传的资产原图和缩略图分别保存为逻辑对象，普通 API 只返回对象 ID、内容 URL、可用性和同步状态；
+- 本地驱动执行路径边界、原子写入、SHA-256、媒体类型和副本健康检查；
+- 资产库支持一级目录、未分类、分页、搜索、类型／存储状态筛选、软归档、恢复和详情编辑；
+- 资产卡片和详情预览统一使用 `object-fit: contain`，竖版图片不裁切；上传成功后返回列表，不强制打开详情；
+- 资产库页移除与资产管理无关的全局搜索和“新建分析”入口；
+- 详情抽屉、上传弹窗和新建目录弹窗采用受控宽度，桌面与窄屏均不产生横向溢出。
+
+## 18. Batch 4.4.4 实施记录（2026-08-06）
+
+项目引用与旧资产迁移已完成：
+
+- 新增持久化 `ProjectAssetLink`，项目引用工作区资产时只新增关联，不复制原图或缩略图；
+- 同一资产可被多个项目使用；解除某个项目的关联不会归档或删除全局资产；
+- 项目参考资产区新增资产库选择器，并保留快速上传兼容入口；
+- 原 `ReferenceAsset` API 继续可用，由 `ProjectAssetService` 转换为工作区资产和项目关联；
+- 旧资产首次打开时保留原 UUID、`ReferenceBinding` 与提示词 `@资产` 关系；
+- 迁移通过 `register_existing_local_object()` 注册既有受管理文件，不移动、不复制媒体字节，重复执行保持幂等；
+- 资产改名和移动目录只修改资产元数据，不改变 `StorageObject`、`ObjectReplica.object_key` 或项目绑定；
+- Production Snapshot 升级为 v2，只保存稳定资产 ID、对象 ID、SHA-256 和业务字段，不保存绝对路径、工作区相对路径、`object_key` 或临时 URL；
+- 从旧 Revision 建立分支时仍可恢复资产引用，旧项目可继续打开、绑定和生成。
+
+关键自动化覆盖：
+
+- 旧资产 UUID 保留、幂等迁移和零拷贝；
+- 跨项目复用不新增存储对象；
+- 改名、移动目录后项目引用稳定；
+- 解除关联不删除全局资产；
+- 快照不泄露本机路径和副本定位信息。
+
+## 19. Batch 4.4.5 实施记录（2026-08-06）
+
+混合存储扩展缝验证已完成，但没有连接真实云端：
+
+- 新增仅供测试使用的 `FakeCloudStorageDriver`，与本地驱动实现同一协议；
+- `StorageManager.replicate_object()` 可把同一逻辑对象复制到模拟云端位置，重复同步保持幂等；
+- 本地和模拟云端副本使用相同对象 ID、SHA-256 和稳定对象键语义；
+- 本地副本缺失且云端健康时返回 `download_required`，所有副本不可用时返回 `unavailable`；
+- `sync_state` 由副本状态实时计算，可表达 `local_only`、`cloud_only`、`synced`、`download_required` 和 `unavailable`；
+- 业务层、项目引用、分镜绑定和快照均不依赖具体云厂商，新增真实驱动无需改变这些接口。
+
+### 19.1 真实云端 Provider 后续接入清单
+
+真实 OSS／COS／S3 驱动必须补齐以下能力后才能启用：
+
+1. 使用本机密钥存储或服务端 Secret Manager，仅在 `StorageLocation` 保存凭据引用；
+2. 实现流式上传、分片上传、断点续传、幂等重试和超时取消；
+3. 上传完成后校验服务端 ETag／Checksum 与本地 SHA-256，不以 HTTP 200 直接判定健康；
+4. 实现下载到临时文件、校验后原子进入本地缓存的 `materialize_local()`；
+5. 通过短期签名 URL 或 API 流式响应提供浏览器内容，不把永久 Bucket／Object Key 暴露给普通 DTO；
+6. 记录上传／下载任务、失败原因、重试次数、流量和存储费用；
+7. 删除本地或云端副本前验证至少存在另一份健康非缓存副本，并检查 Revision 引用；
+8. 增加跨设备并发、离线恢复、凭据过期、限流、部分分片失败和校验和不一致测试；
+9. 真实 Provider 集成测试使用隔离 Bucket 和生命周期规则，默认测试套件不得产生云费用；
+10. 上线前执行数据驻留、隐私、内容权利、访问日志和灾备审查。
+
+## 20. 最终验证结果（2026-08-06）
+
+- 后端全量测试：110 项通过；
+- Ruff：`services/api` 全量通过；
+- 前端测试：23 项通过；
+- 前端生产构建与 Sites 产物准备：通过；
+- 本地浏览器冒烟：Schema 4 工作区可加载，资产库无横向溢出，竖图原图／缩略图均为完整包含显示，VLM 质检开关可见，控制台无 ViralDNA 应用错误；
+- 未调用真实百炼生图、真实 ImageGen 或真实云存储，因此没有产生新的模型或云存储费用。
+
+Batch 4.4 至此完成。真实云端同步属于后续独立批次，不能把 `FakeCloudStorageDriver` 视为已接入云服务。

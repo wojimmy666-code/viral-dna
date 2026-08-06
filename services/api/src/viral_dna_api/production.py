@@ -5,11 +5,13 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from threading import Event
 from typing import Protocol
 from urllib.parse import unquote
 from uuid import UUID, uuid4
@@ -65,6 +67,7 @@ from .models import (
     ReferenceBinding,
     ReferenceBindingInput,
     ReferenceRole,
+    ShotImageApprovalRevokeRequest,
     ShotKeyframeSelectRequest,
     ShotLifecycleStatus,
     ShotLifecycleUpdate,
@@ -88,7 +91,8 @@ MAX_REFERENCE_IMAGE_DIMENSION = 16_384
 MAX_REFERENCE_IMAGE_PIXELS = 64_000_000
 MAX_REFERENCE_ASSETS_PER_PROJECT = 50
 REFERENCE_THUMBNAIL_SIZE = 480
-PRODUCTION_SNAPSHOT_SCHEMA = "production-revision-v1"
+PRODUCTION_SNAPSHOT_SCHEMA = "production-revision-v2"
+SUPPORTED_PRODUCTION_SNAPSHOT_SCHEMAS = {"production-revision-v1", PRODUCTION_SNAPSHOT_SCHEMA}
 
 _IMAGE_FORMATS = {
     "JPEG": (".jpg", "image/jpeg"),
@@ -190,6 +194,14 @@ class ProductionRepository(Protocol):
 
     async def get_shot_plan(self, shot_plan_id: UUID) -> ShotPlan | None: ...
 
+    async def save_generation_run(self, run: GenerationRun) -> GenerationRun: ...
+
+    async def claim_generation_run(
+        self,
+        run_id: UUID,
+        claimed_at: datetime,
+    ) -> GenerationRun | None: ...
+
     async def get_generation_run(self, run_id: UUID) -> GenerationRun | None: ...
 
     async def list_generation_runs(
@@ -213,6 +225,67 @@ class ProductionRepository(Protocol):
         project_id: UUID,
         shot_plan_id: UUID | None = None,
     ) -> list[ApprovalEvent]: ...
+
+
+class ProjectAssetBridge(Protocol):
+    async def create_reference(
+        self,
+        project: ProductionProject,
+        payload: ReferenceAssetCreate,
+        file_payload: bytes,
+        filename: str,
+        declared_mime_type: str | None,
+    ) -> ReferenceAsset: ...
+
+    async def link_asset(
+        self,
+        project: ProductionProject,
+        asset_id: UUID,
+        reference_type: ReferenceAssetType | None = None,
+    ) -> ReferenceAsset: ...
+
+    async def list_references(
+        self,
+        project_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> list[ReferenceAsset]: ...
+
+    async def get_reference(
+        self,
+        asset_id: UUID,
+        project_id: UUID | None = None,
+        *,
+        include_archived: bool = True,
+    ) -> ReferenceAsset | None: ...
+
+    async def update_reference(
+        self,
+        project_id: UUID,
+        asset_id: UUID,
+        payload: ReferenceAssetUpdate,
+    ) -> ReferenceAsset: ...
+
+    async def unlink_reference(self, project_id: UUID, asset_id: UUID) -> ReferenceAsset: ...
+
+    async def resolve_content(
+        self,
+        asset_id: UUID,
+        *,
+        thumbnail: bool,
+    ) -> tuple[Path, str]: ...
+
+    async def snapshot_reference(
+        self,
+        project_id: UUID,
+        reference: ReferenceAsset,
+    ) -> dict[str, object]: ...
+
+    async def link_snapshot_reference(
+        self,
+        project: ProductionProject,
+        payload: dict[str, object],
+    ) -> ReferenceAsset: ...
 
 
 class ProductionServiceError(RuntimeError):
@@ -382,9 +455,11 @@ class ProductionService:
         workspace: WorkspaceManager,
         image_gateway: ImageGenerationGateway | None = None,
         media_processor: MediaProcessor | None = None,
+        project_assets: ProjectAssetBridge | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
+        self.project_assets = project_assets
         self.image_gateway = image_gateway or ImageGenerationGateway(
             workspace,
             repository=repository,
@@ -392,6 +467,8 @@ class ProductionService:
         self.media_processor = media_processor or MediaProcessor()
         self._lock_guard = asyncio.Lock()
         self._project_locks: dict[UUID, asyncio.Lock] = {}
+        self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._generation_cancellations: dict[UUID, Event] = {}
 
     async def _project_lock(self, project_id: UUID) -> asyncio.Lock:
         async with self._lock_guard:
@@ -475,7 +552,7 @@ class ProductionService:
         project = await self._require_project(project_id)
         project, shots = await self._ensure_project_shots(project)
         revisions = await self.repository.list_production_revisions(project.id)
-        references = await self.repository.list_reference_assets(project.id)
+        references = await self._list_reference_assets(project.id)
         current = next(
             (item for item in revisions if item.id == project.current_revision_id),
             None,
@@ -662,7 +739,7 @@ class ProductionService:
         await self.repository.save_production_bundle(
             branch,
             revision,
-            reference_assets=cloned_assets,
+            reference_assets=cloned_assets if self.project_assets is None else None,
             shot_plans=cloned_shots,
             reference_bindings=cloned_bindings,
         )
@@ -711,8 +788,13 @@ class ProductionService:
         payload: ReferenceAssetCreate,
         file_payload: bytes,
         declared_mime_type: str | None,
+        filename: str = "",
     ) -> ReferenceAssetResponse:
         project = await self._require_project(project_id)
+        if self.project_assets is not None:
+            return await self._create_workspace_reference(
+                project, payload, file_payload, filename, declared_mime_type
+            )
         image = await asyncio.to_thread(
             inspect_reference_image,
             file_payload,
@@ -722,7 +804,7 @@ class ProductionService:
         async with lock:
             project = await self._require_project(project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            existing = await self.repository.list_reference_assets(project.id)
+            existing = await self._list_reference_assets(project.id)
             active_count = sum(item.archived_at is None for item in existing)
             if active_count >= MAX_REFERENCE_ASSETS_PER_PROJECT:
                 raise _fail(409, "reference_asset_limit", "每个创作方案最多保存 50 个参考资产")
@@ -799,6 +881,221 @@ class ProductionService:
             )
         return self._reference_response(asset, next_project.current_revision_id)
 
+    async def _create_workspace_reference(
+        self,
+        project: ProductionProject,
+        payload: ReferenceAssetCreate,
+        file_payload: bytes,
+        filename: str,
+        declared_mime_type: str | None,
+    ) -> ReferenceAssetResponse:
+        if self.project_assets is None:
+            raise _fail(500, "project_asset_bridge_missing", "项目资产服务未初始化")
+        lock = await self._project_lock(project.id)
+        async with lock:
+            project = await self._require_project(project.id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            existing = await self._list_reference_assets(project.id)
+            if len(existing) >= MAX_REFERENCE_ASSETS_PER_PROJECT:
+                raise _fail(409, "reference_asset_limit", "每个创作方案最多保存 50 个参考资产")
+            asset = await self.project_assets.create_reference(
+                project,
+                payload,
+                file_payload,
+                filename,
+                declared_mime_type,
+            )
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": ProductionStep.REFERENCE_ASSETS,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.REFERENCE_CHANGED,
+                f"新增参考资产：{asset.name}",
+                reference_assets=[*existing, asset],
+            )
+            await self.repository.save_production_bundle(next_project, revision)
+        return self._reference_response(asset, next_project.current_revision_id)
+
+    async def link_reference(
+        self,
+        project_id: UUID,
+        asset_id: UUID,
+        expected_revision_id: UUID,
+        reference_type: ReferenceAssetType | None = None,
+    ) -> ReferenceAssetResponse:
+        if self.project_assets is None:
+            raise _fail(409, "asset_library_not_enabled", "资产库尚未启用")
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id)
+            self._require_expected_revision(project, expected_revision_id)
+            existing = await self._list_reference_assets(project.id)
+            if any(item.id == asset_id for item in existing):
+                raise _fail(409, "asset_already_linked", "该资产已添加到当前创作方案")
+            if len(existing) >= MAX_REFERENCE_ASSETS_PER_PROJECT:
+                raise _fail(409, "reference_asset_limit", "每个创作方案最多保存 50 个参考资产")
+            asset = await self.project_assets.link_asset(project, asset_id, reference_type)
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": ProductionStep.REFERENCE_ASSETS,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.REFERENCE_CHANGED,
+                f"从资产库添加：{asset.name}",
+                reference_assets=[*existing, asset],
+            )
+            await self.repository.save_production_bundle(next_project, revision)
+        return self._reference_response(asset, next_project.current_revision_id)
+
+    async def _update_workspace_reference(
+        self,
+        asset_id: UUID,
+        payload: ReferenceAssetUpdate,
+        project_id: UUID | None,
+    ) -> ReferenceAssetResponse:
+        if self.project_assets is None:
+            raise _fail(500, "project_asset_bridge_missing", "项目资产服务未初始化")
+        asset = await self.project_assets.get_reference(asset_id, project_id)
+        if asset is None:
+            raise _fail(404, "reference_asset_not_found", "项目参考资产不存在")
+        lock = await self._project_lock(asset.project_id)
+        async with lock:
+            asset = await self.project_assets.get_reference(asset_id, asset.project_id)
+            if asset is None or asset.archived_at is not None:
+                raise _fail(409, "reference_asset_archived", "已移出项目的参考资产不能修改")
+            project = await self._require_project(asset.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            plans = await self.repository.list_shot_plans(project.id)
+            all_bindings = await self._all_bindings(plans)
+            impacted_ids = {
+                item.shot_plan_id
+                for item in all_bindings
+                if item.reference_asset_id == asset.id
+            }
+            if (
+                any(
+                    item.id in impacted_ids
+                    and item.image_status == WorkflowItemStatus.APPROVED
+                    for item in plans
+                )
+                and not payload.confirm_stale
+            ):
+                raise _fail(
+                    409,
+                    "stale_confirmation_required",
+                    "参考资产修改会使已绑定分镜过期，请确认影响范围后重试",
+                )
+            updated_asset = await self.project_assets.update_reference(
+                project.id,
+                asset.id,
+                payload,
+            )
+            snapshot_assets = await self._list_reference_assets(
+                project.id,
+                include_archived=True,
+            )
+            revision_id = uuid4()
+            next_plans, changed_plans = self._mark_plans_stale(
+                plans,
+                impacted_ids,
+                revision_id,
+            )
+            next_project = project.model_copy(update={"updated_at": utc_now()})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.REFERENCE_CHANGED,
+                f"更新资产库参考：{updated_asset.name}",
+                revision_id=revision_id,
+                reference_assets=snapshot_assets,
+                shot_plans=next_plans,
+                reference_bindings=all_bindings,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=changed_plans,
+            )
+        return self._reference_response(updated_asset, next_project.current_revision_id)
+
+    async def _archive_workspace_reference(
+        self,
+        asset_id: UUID,
+        expected_revision_id: UUID,
+        confirm_stale: bool,
+        project_id: UUID | None,
+    ) -> ReferenceAssetResponse:
+        if self.project_assets is None:
+            raise _fail(500, "project_asset_bridge_missing", "项目资产服务未初始化")
+        asset = await self.project_assets.get_reference(asset_id, project_id)
+        if asset is None:
+            raise _fail(404, "reference_asset_not_found", "项目参考资产不存在")
+        lock = await self._project_lock(asset.project_id)
+        async with lock:
+            asset = await self.project_assets.get_reference(asset_id, asset.project_id)
+            if asset is None:
+                raise _fail(404, "reference_asset_not_found", "项目参考资产不存在")
+            project = await self._require_project(asset.project_id)
+            self._require_expected_revision(project, expected_revision_id)
+            if asset.archived_at is not None:
+                return self._reference_response(asset, project.current_revision_id)
+            plans = await self.repository.list_shot_plans(project.id)
+            all_bindings = await self._all_bindings(plans)
+            impacted_ids = {
+                item.shot_plan_id
+                for item in all_bindings
+                if item.reference_asset_id == asset.id
+            }
+            if (
+                any(
+                    item.id in impacted_ids
+                    and item.image_status == WorkflowItemStatus.APPROVED
+                    for item in plans
+                )
+                and not confirm_stale
+            ):
+                raise _fail(
+                    409,
+                    "stale_confirmation_required",
+                    "移出参考资产会使已绑定分镜过期，请确认影响范围后重试",
+                )
+            archived = await self.project_assets.unlink_reference(project.id, asset.id)
+            snapshot_assets = await self._list_reference_assets(
+                project.id,
+                include_archived=True,
+            )
+            revision_id = uuid4()
+            next_plans, changed_plans = self._mark_plans_stale(
+                plans,
+                impacted_ids,
+                revision_id,
+            )
+            next_project = project.model_copy(update={"updated_at": utc_now()})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.REFERENCE_CHANGED,
+                f"从项目移出参考资产：{archived.name}",
+                revision_id=revision_id,
+                reference_assets=snapshot_assets,
+                shot_plans=next_plans,
+                reference_bindings=all_bindings,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=changed_plans,
+            )
+        return self._reference_response(archived, next_project.current_revision_id)
+
+
     async def list_references(
         self,
         project_id: UUID,
@@ -808,8 +1105,10 @@ class ProductionService:
         project = await self._require_project(project_id)
         if project.current_revision_id is None:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
-        assets = await self.repository.list_reference_assets(project.id)
-        if not include_archived:
+        assets = await self._list_reference_assets(
+            project.id, include_archived=include_archived
+        )
+        if not include_archived and self.project_assets is None:
             assets = [item for item in assets if item.archived_at is None]
         return [self._reference_response(item, project.current_revision_id) for item in assets]
 
@@ -817,7 +1116,11 @@ class ProductionService:
         self,
         asset_id: UUID,
         payload: ReferenceAssetUpdate,
+        *,
+        project_id: UUID | None = None,
     ) -> ReferenceAssetResponse:
+        if self.project_assets is not None:
+            return await self._update_workspace_reference(asset_id, payload, project_id)
         asset = await self._require_asset(asset_id)
         lock = await self._project_lock(asset.project_id)
         async with lock:
@@ -864,7 +1167,7 @@ class ProductionService:
             updated_asset = ReferenceAsset.model_validate(
                 {**asset.model_dump(mode="python"), **updates}
             )
-            existing = await self.repository.list_reference_assets(project.id)
+            existing = await self._list_reference_assets(project.id, include_archived=True)
             snapshot_assets = [updated_asset if item.id == asset.id else item for item in existing]
             plans = await self.repository.list_shot_plans(project.id)
             all_bindings = await self._all_bindings(plans)
@@ -918,7 +1221,12 @@ class ProductionService:
         expected_revision_id: UUID,
         *,
         confirm_stale: bool = False,
+        project_id: UUID | None = None,
     ) -> ReferenceAssetResponse:
+        if self.project_assets is not None:
+            return await self._archive_workspace_reference(
+                asset_id, expected_revision_id, confirm_stale, project_id
+            )
         asset = await self._require_asset(asset_id)
         lock = await self._project_lock(asset.project_id)
         async with lock:
@@ -930,7 +1238,7 @@ class ProductionService:
             archived = ReferenceAsset.model_validate(
                 {**asset.model_dump(mode="python"), "archived_at": utc_now()}
             )
-            existing = await self.repository.list_reference_assets(project.id)
+            existing = await self._list_reference_assets(project.id, include_archived=True)
             snapshot_assets = [archived if item.id == asset.id else item for item in existing]
             plans = await self.repository.list_shot_plans(project.id)
             all_bindings = await self._all_bindings(plans)
@@ -984,6 +1292,8 @@ class ProductionService:
         *,
         thumbnail: bool = False,
     ) -> tuple[Path, str]:
+        if self.project_assets is not None:
+            return await self.project_assets.resolve_content(asset_id, thumbnail=thumbnail)
         asset = await self._require_asset(asset_id)
         project = await self._require_project(asset.project_id)
         relative_path = asset.thumbnail_relative_path if thumbnail else asset.relative_path
@@ -1754,7 +2064,10 @@ class ProductionService:
             requested = set(payload.shot_plan_ids)
             impacted = [item for item in plans if item.id in requested]
 
-        downstream_only = payload.change_type == "candidate_selection"
+        downstream_only = payload.change_type in {
+            "candidate_selection",
+            "image_approval_revoke",
+        }
         stale_stages = (
             [
                 ProductionStep.SHOT_VIDEOS,
@@ -1769,19 +2082,37 @@ class ProductionService:
                 ProductionStep.EXPORT,
             ]
         )
-        stale_candidates = [
-            item.approved_image_candidate_id
-            for item in impacted
-            if item.approved_image_candidate_id is not None
-        ]
-        requires_confirmation = any(
+        stale_candidates = (
+            []
+            if payload.change_type == "image_approval_revoke"
+            else [
+                item.approved_image_candidate_id
+                for item in impacted
+                if item.approved_image_candidate_id is not None
+            ]
+        )
+        downstream_result_statuses = {
+            WorkflowItemStatus.GENERATING,
+            WorkflowItemStatus.REVIEW_REQUIRED,
+            WorkflowItemStatus.APPROVED,
+            WorkflowItemStatus.STALE,
+        }
+        downstream_stage_active = project.active_step in {
+            ProductionStep.SHOT_VIDEOS,
+            ProductionStep.EDITING,
+            ProductionStep.EXPORT,
+        }
+        requires_confirmation = (
             (
-                item.video_status == WorkflowItemStatus.APPROVED
-                if downstream_only
-                else item.image_status == WorkflowItemStatus.APPROVED
-                or item.video_status == WorkflowItemStatus.APPROVED
+                any(item.video_status in downstream_result_statuses for item in impacted)
+                or (bool(impacted) and downstream_stage_active)
             )
-            for item in impacted
+            if downstream_only
+            else any(
+                item.image_status == WorkflowItemStatus.APPROVED
+                or item.video_status == WorkflowItemStatus.APPROVED
+                for item in impacted
+            )
         )
         count = len(impacted)
         return ChangeImpactResponse(
@@ -1791,9 +2122,13 @@ class ProductionService:
             stale_stage_ids=stale_stages if count else [],
             requires_confirmation=requires_confirmation,
             summary=(
-                f"将影响 {count} 个分镜，并使其后续结果过期"
-                if count
-                else "当前修改不会使已生成结果过期"
+                f"将重新打开 {count} 个分镜的图片审核，并使其后续结果过期"
+                if count and payload.change_type == "image_approval_revoke"
+                else (
+                    f"将影响 {count} 个分镜，并使其后续结果过期"
+                    if count
+                    else "当前修改不会使已生成结果过期"
+                )
             ),
         )
 
@@ -2051,6 +2386,321 @@ class ProductionService:
         shot_plan_id: UUID,
         payload: ImageGenerationCreate,
     ) -> GenerationRunResponse:
+        run = await self._enqueue_image_run(shot_plan_id, payload)
+        self._schedule_image_run(run.id)
+        return await self._run_response(run)
+
+    async def _enqueue_image_run(
+        self,
+        shot_plan_id: UUID,
+        payload: ImageGenerationCreate,
+        *,
+        retry_of_run_id: UUID | None = None,
+        retry_count: int = 0,
+    ) -> GenerationRun:
+        plan = await self._require_shot(shot_plan_id)
+        self._ensure_shot_active(plan)
+        project = await self._require_project(plan.project_id)
+        self._require_expected_revision(project, payload.expected_revision_id)
+        if payload.generation_intent == "new_variation" and payload.seed is None:
+            payload = payload.model_copy(
+                update={"seed": secrets.randbelow(2_147_483_648)}
+            )
+        if not plan.image_prompt.strip():
+            raise _fail(409, "image_prompt_required", "请先填写图片提示词")
+        if plan.image_status == WorkflowItemStatus.APPROVED:
+            raise _fail(409, "image_already_approved", "已审批分镜需要先修改输入再重新生成")
+        active_statuses = {
+            ProductionRunStatus.QUEUED,
+            ProductionRunStatus.RUNNING,
+            ProductionRunStatus.CANCELLATION_REQUESTED,
+        }
+        existing_runs = await self.repository.list_generation_runs(project.id, plan.id)
+        if any(item.status in active_statuses for item in existing_runs):
+            raise _fail(409, "generation_already_running", "该分镜已有图片生成任务在执行")
+        settings_service = getattr(self.image_gateway, "settings_service", None)
+        settings = settings_service.get() if settings_service is not None else None
+        if settings is not None and not settings.enabled:
+            raise _fail(409, "image_generation_not_configured", "请先配置并启用真实图片生成引擎")
+        try:
+            execution_mode = ImageExecutionMode(
+                payload.execution_mode
+                or (
+                    settings.execution_mode
+                    if settings is not None
+                    else ImageExecutionMode.REMOTE_API
+                )
+            )
+        except ValueError as exc:
+            raise _fail(422, "image_execution_mode_invalid", "图片生成执行模式无效") from exc
+        run_id = uuid4()
+        request_payload = payload.model_dump(mode="json")
+        queue_root = (
+            self.workspace.production_shot_root(project.record_id, project.id, plan.id)
+            / "images"
+            / str(run_id)
+        )
+        queue_path = queue_root / "queue.json"
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                request_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        await asyncio.to_thread(
+            self._write_json_atomic,
+            queue_path,
+            {
+                "schema_version": "viral-dna-image-job/v1",
+                "run_id": str(run_id),
+                "shot_plan_id": str(plan.id),
+                "request": request_payload,
+                "retry_of_run_id": str(retry_of_run_id) if retry_of_run_id else None,
+                "retry_count": retry_count,
+            },
+        )
+        now = utc_now()
+        run = GenerationRun(
+            id=run_id,
+            project_id=project.id,
+            shot_plan_id=plan.id,
+            revision_id=payload.expected_revision_id,
+            kind=GenerationKind.IMAGE,
+            input_mode=payload.input_mode,
+            provider="pending",
+            model="pending",
+            model_snapshot="pending",
+            prompt_version="shot-image-v2",
+            schema_version="viral-dna-image-job/v1",
+            pricing_version="pending",
+            request_fingerprint=fingerprint,
+            input_snapshot_relative_path=self.workspace.relative(queue_path),
+            execution_mode=execution_mode,
+            adapter_id="pending",
+            adapter_version="batch4.2.4",
+            cost_source=GenerationCostSource.UNKNOWN,
+            cost_estimate_known=False,
+            request_payload=request_payload,
+            retry_of_run_id=retry_of_run_id,
+            retry_count=retry_count,
+            status=ProductionRunStatus.QUEUED,
+            created_at=now,
+            updated_at=now,
+        )
+        await self.repository.save_generation_run(run)
+        return run
+
+    def _schedule_image_run(self, run_id: UUID) -> None:
+        current = self._generation_tasks.get(run_id)
+        if current is not None and not current.done():
+            return
+        cancellation = Event()
+        self._generation_cancellations[run_id] = cancellation
+        task = asyncio.create_task(
+            self._run_queued_image(run_id, cancellation),
+            name=f"viral-dna-image-{run_id}",
+        )
+        self._generation_tasks[run_id] = task
+
+    async def _run_queued_image(self, run_id: UUID, cancellation: Event) -> None:
+        try:
+            running = await self.repository.claim_generation_run(run_id, utc_now())
+            if running is None:
+                return
+            payload = ImageGenerationCreate.model_validate(running.request_payload)
+            await self._execute_image_run_request(
+                running.shot_plan_id,
+                payload,
+                run_id=running.id,
+                cancellation=cancellation,
+                queued_run=running,
+            )
+        except asyncio.CancelledError:
+            await self._mark_generation_terminal(
+                run_id,
+                ProductionRunStatus.CANCELLED,
+                "generation_cancelled",
+                "图片生成任务已取消",
+            )
+        except ProductionServiceError as exc:
+            if cancellation.is_set() or exc.code == "generation_cancelled":
+                await self._mark_generation_terminal(
+                    run_id,
+                    ProductionRunStatus.CANCELLED,
+                    "generation_cancelled",
+                    "图片生成任务已取消",
+                )
+            else:
+                await self._mark_generation_terminal(
+                    run_id,
+                    ProductionRunStatus.FAILED,
+                    exc.code,
+                    str(exc),
+                )
+        except Exception as exc:
+            await self._mark_generation_terminal(
+                run_id,
+                ProductionRunStatus.FAILED,
+                "generation_worker_failed",
+                str(exc)[:2000],
+            )
+        finally:
+            self._generation_cancellations.pop(run_id, None)
+            current = self._generation_tasks.get(run_id)
+            if current is asyncio.current_task():
+                self._generation_tasks.pop(run_id, None)
+
+    async def _mark_generation_terminal(
+        self,
+        run_id: UUID,
+        status: ProductionRunStatus,
+        error_code: str,
+        error_message: str,
+    ) -> GenerationRun:
+        run = await self._require_run(run_id)
+        if run.status in {
+            ProductionRunStatus.COMPLETED,
+            ProductionRunStatus.CACHED,
+            ProductionRunStatus.CANCELLED,
+        }:
+            return run
+        now = utc_now()
+        updated = run.model_copy(
+            update={
+                "status": status,
+                "cancellation_requested": status == ProductionRunStatus.CANCELLED,
+                "error_code": error_code,
+                "error_message": error_message,
+                "updated_at": now,
+                "last_heartbeat_at": now,
+                "completed_at": now,
+            }
+        )
+        await self.repository.save_generation_run(updated)
+        return updated
+
+    async def cancel_generation_run(self, run_id: UUID) -> GenerationRunResponse:
+        run = await self._require_run(run_id)
+        if run.status in {
+            ProductionRunStatus.COMPLETED,
+            ProductionRunStatus.CACHED,
+            ProductionRunStatus.FAILED,
+            ProductionRunStatus.CANCELLED,
+            ProductionRunStatus.BLOCKED,
+        }:
+            return await self._run_response(run)
+        now = utc_now()
+        requested = run.model_copy(
+            update={
+                "status": ProductionRunStatus.CANCELLATION_REQUESTED,
+                "cancellation_requested": True,
+                "updated_at": now,
+            }
+        )
+        await self.repository.save_generation_run(requested)
+        cancellation = self._generation_cancellations.get(run_id)
+        if cancellation is not None:
+            cancellation.set()
+        task = self._generation_tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            latest = await self._require_run(run_id)
+            if latest.status not in {
+                ProductionRunStatus.COMPLETED,
+                ProductionRunStatus.CACHED,
+                ProductionRunStatus.CANCELLED,
+            }:
+                await self._mark_generation_terminal(
+                    run_id,
+                    ProductionRunStatus.CANCELLED,
+                    "generation_cancelled",
+                    "图片生成任务已取消",
+                )
+        else:
+            await self._mark_generation_terminal(
+                run_id,
+                ProductionRunStatus.CANCELLED,
+                "generation_cancelled",
+                "图片生成任务已取消",
+            )
+        return await self.get_generation_run(run_id)
+
+    async def retry_generation_run(self, run_id: UUID) -> GenerationRunResponse:
+        source = await self._require_run(run_id)
+        if source.status not in {
+            ProductionRunStatus.FAILED,
+            ProductionRunStatus.CANCELLED,
+            ProductionRunStatus.BLOCKED,
+        }:
+            raise _fail(409, "generation_retry_unavailable", "只有失败或已取消的任务可以重试")
+        project = await self._require_project(source.project_id)
+        payload_data = dict(source.request_payload)
+        payload_data["expected_revision_id"] = str(project.current_revision_id)
+        payload = ImageGenerationCreate.model_validate(payload_data)
+        run = await self._enqueue_image_run(
+            source.shot_plan_id,
+            payload,
+            retry_of_run_id=source.id,
+            retry_count=source.retry_count + 1,
+        )
+        self._schedule_image_run(run.id)
+        return await self._run_response(run)
+
+    async def recover_generation_runs(self) -> dict[str, int]:
+        recovered = 0
+        interrupted = 0
+        cancelled = 0
+        for project in await self.repository.list_production_projects():
+            for run in await self.repository.list_generation_runs(project.id):
+                if run.status == ProductionRunStatus.QUEUED and run.request_payload:
+                    self._schedule_image_run(run.id)
+                    recovered += 1
+                elif run.status == ProductionRunStatus.CANCELLATION_REQUESTED:
+                    await self._mark_generation_terminal(
+                        run.id,
+                        ProductionRunStatus.CANCELLED,
+                        "generation_cancelled",
+                        "服务重启前已请求取消任务",
+                    )
+                    cancelled += 1
+                elif run.status == ProductionRunStatus.RUNNING:
+                    await self._mark_generation_terminal(
+                        run.id,
+                        ProductionRunStatus.FAILED,
+                        "generation_interrupted",
+                        "服务重启导致任务中断，请人工重试以避免重复计费",
+                    )
+                    interrupted += 1
+        return {
+            "recovered": recovered,
+            "interrupted": interrupted,
+            "cancelled": cancelled,
+        }
+
+    async def shutdown_generation_runs(self) -> None:
+        tasks = [task for task in self._generation_tasks.values() if not task.done()]
+        for cancellation in self._generation_cancellations.values():
+            cancellation.set()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _execute_image_run_request(
+        self,
+        shot_plan_id: UUID,
+        payload: ImageGenerationCreate,
+        *,
+        run_id: UUID,
+        cancellation: Event,
+        queued_run: GenerationRun,
+    ) -> GenerationRunResponse:
         plan = await self._require_shot(shot_plan_id)
         lock = await self._project_lock(plan.project_id)
         async with lock:
@@ -2070,7 +2720,7 @@ class ProductionService:
                 else []
             )
             assets = (
-                await self.repository.list_reference_assets(project.id)
+                await self._list_reference_assets(project.id)
                 if uses_images
                 else []
             )
@@ -2102,9 +2752,37 @@ class ProductionService:
                     input_mode=payload.input_mode,
                     execution_mode=payload.execution_mode,
                     allow_unknown_cost=payload.allow_unknown_cost,
+                    seed=payload.seed,
+                    reuse_cache=payload.generation_intent != "new_variation",
+                    run_id=run_id,
+                    cancel_event=cancellation,
                 )
             except ImageGenerationGatewayError as exc:
                 raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            now = utc_now()
+            run = run.model_copy(
+                update={
+                    "request_payload": queued_run.request_payload,
+                    "retry_of_run_id": queued_run.retry_of_run_id,
+                    "retry_count": queued_run.retry_count,
+                    "created_at": queued_run.created_at,
+                    "started_at": queued_run.started_at,
+                    "updated_at": now,
+                    "last_heartbeat_at": now,
+                }
+            )
+            if cancellation.is_set() or run.error_code == "generation_cancelled":
+                cancelled = run.model_copy(
+                    update={
+                        "status": ProductionRunStatus.CANCELLED,
+                        "cancellation_requested": True,
+                        "error_code": "generation_cancelled",
+                        "error_message": "图片生成任务已取消",
+                        "completed_at": now,
+                    }
+                )
+                await self.repository.save_generation_run(cancelled)
+                return await self._run_response(cancelled)
             if _is_simulated_image_run(run):
                 raise _fail(
                     409,
@@ -2391,6 +3069,143 @@ class ProductionService:
                 next_project,
                 change_kind,
                 summary,
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=[updated_candidate],
+                approval_events=[event],
+            )
+        return CandidateActionResponse(
+            shot=ShotPlanResponse(
+                plan=updated_plan,
+                reference_bindings=await self.repository.list_reference_bindings(plan.id),
+                current_revision_id=next_project.current_revision_id,
+            ),
+            candidate=self._candidate_response(updated_candidate),
+            approval_event=event,
+        )
+
+    async def revoke_image_approval(
+        self,
+        shot_plan_id: UUID,
+        payload: ShotImageApprovalRevokeRequest,
+    ) -> CandidateActionResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            if plan.image_status != WorkflowItemStatus.APPROVED:
+                raise _fail(409, "image_not_approved", "当前分镜图片尚未采用，无需取消")
+            if plan.approved_image_candidate_id is None:
+                raise _fail(
+                    409,
+                    "approved_candidate_missing",
+                    "当前分镜的已采用图片记录不完整，请重新打开方案后重试",
+                )
+
+            candidate = await self._require_candidate(plan.approved_image_candidate_id)
+            run = await self._require_run(candidate.generation_run_id)
+            if (
+                candidate.kind != GenerationKind.IMAGE
+                or run.project_id != project.id
+                or run.shot_plan_id != plan.id
+            ):
+                raise _fail(
+                    409,
+                    "approved_candidate_mismatch",
+                    "当前分镜的已采用图片与候选记录不匹配",
+                )
+            if candidate.status in {
+                GenerationCandidateStatus.REJECTED,
+                GenerationCandidateStatus.ARCHIVED,
+            }:
+                raise _fail(
+                    409,
+                    "approved_candidate_unavailable",
+                    "当前已采用图片已归档或退回，无法重新打开审核",
+                )
+
+            downstream_result_statuses = {
+                WorkflowItemStatus.GENERATING,
+                WorkflowItemStatus.REVIEW_REQUIRED,
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }
+            downstream_stage_active = project.active_step in {
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+            has_downstream_impact = (
+                plan.video_status in downstream_result_statuses
+                or downstream_stage_active
+            )
+            if has_downstream_impact and not payload.confirm_downstream_stale:
+                raise _fail(
+                    409,
+                    "downstream_stale_confirmation_required",
+                    "取消采用会使该分镜的后续视频或合成结果过期，请确认影响后重试",
+                )
+
+            revision_id = uuid4()
+            event = ApprovalEvent(
+                project_id=project.id,
+                revision_id=revision_id,
+                shot_plan_id=plan.id,
+                candidate_id=candidate.id,
+                target_kind=GenerationKind.IMAGE,
+                decision=ApprovalDecision.REVOKED,
+                reason=(
+                    _simplified_text(
+                        payload.reason,
+                        field_name="取消采用说明",
+                        allow_empty=True,
+                        max_length=1000,
+                    )
+                    if payload.reason is not None
+                    else "重新打开图片审核"
+                ),
+            )
+            updated_candidate = (
+                candidate
+                if candidate.status == GenerationCandidateStatus.SELECTED
+                else candidate.model_copy(
+                    update={"status": GenerationCandidateStatus.SELECTED}
+                )
+            )
+            updated_plan = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                    "video_status": (
+                        WorkflowItemStatus.STALE
+                        if plan.video_status in downstream_result_statuses
+                        else plan.video_status
+                    ),
+                    "approved_image_candidate_id": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.IMAGE_APPROVAL_REVOKED,
+                f"取消采用分镜 {plan.index} 图片，重新打开图片审核",
                 revision_id=revision_id,
                 shot_plans=next_plans,
             )
@@ -3050,7 +3865,7 @@ class ProductionService:
     ) -> list[PromptAssetMention]:
         assets = {
             item.id: item
-            for item in await self.repository.list_reference_assets(project.id)
+            for item in await self._list_reference_assets(project.id)
         }
         normalized: list[PromptAssetMention] = []
         for mention in mentions:
@@ -3087,7 +3902,7 @@ class ProductionService:
     ) -> list[ReferenceBindingInput]:
         assets = {
             item.id: item
-            for item in await self.repository.list_reference_assets(project.id)
+            for item in await self._list_reference_assets(project.id)
         }
         existing_ids = {item.reference_asset_id for item in inputs}
         merged = list(inputs)
@@ -3118,7 +3933,7 @@ class ProductionService:
         plan: ShotPlan,
         inputs: list[ReferenceBindingInput],
     ) -> list[ReferenceBinding]:
-        assets = {item.id: item for item in await self.repository.list_reference_assets(project.id)}
+        assets = {item.id: item for item in await self._list_reference_assets(project.id)}
         bindings: list[ReferenceBinding] = []
         for item in inputs:
             asset = assets.get(item.reference_asset_id)
@@ -3190,9 +4005,15 @@ class ProductionService:
             estimated_cost_micros=run.estimated_cost_micros,
             actual_cost_micros=run.actual_cost_micros,
             latency_ms=run.latency_ms,
+            retry_count=run.retry_count,
+            retry_of_run_id=run.retry_of_run_id,
+            cancellation_requested=run.cancellation_requested,
             error_code=run.error_code,
             error_message=run.error_message,
             created_at=run.created_at,
+            started_at=run.started_at,
+            updated_at=run.updated_at,
+            last_heartbeat_at=run.last_heartbeat_at,
             completed_at=run.completed_at,
             candidates=[self._candidate_response(item) for item in candidates],
         )
@@ -3544,8 +4365,31 @@ class ProductionService:
             raise _fail(404, "revision_not_found", "创作方案版本不存在")
         return revision
 
-    async def _require_asset(self, asset_id: UUID) -> ReferenceAsset:
-        asset = await self.repository.get_reference_asset(asset_id)
+    async def _list_reference_assets(
+        self,
+        project_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> list[ReferenceAsset]:
+        if self.project_assets is not None:
+            return await self.project_assets.list_references(
+                project_id, include_archived=include_archived
+            )
+        assets = await self.repository.list_reference_assets(project_id)
+        if not include_archived:
+            assets = [item for item in assets if item.archived_at is None]
+        return assets
+
+    async def _require_asset(
+        self,
+        asset_id: UUID,
+        project_id: UUID | None = None,
+    ) -> ReferenceAsset:
+        asset = (
+            await self.project_assets.get_reference(asset_id, project_id)
+            if self.project_assets is not None
+            else await self.repository.get_reference_asset(asset_id)
+        )
         if asset is None:
             raise _fail(404, "reference_asset_not_found", "参考资产不存在")
         return asset
@@ -3627,7 +4471,7 @@ class ProductionService:
         assets = (
             list(reference_assets)
             if reference_assets is not None
-            else await self.repository.list_reference_assets(project.id)
+            else await self._list_reference_assets(project.id, include_archived=True)
         )
         plans = (
             list(shot_plans)
@@ -3643,6 +4487,14 @@ class ProductionService:
         binding_groups = {
             plan.id: [item for item in bindings if item.shot_plan_id == plan.id] for plan in plans
         }
+        reference_snapshots = (
+            [
+                await self.project_assets.snapshot_reference(project.id, item)
+                for item in assets
+            ]
+            if self.project_assets is not None
+            else [item.model_dump(mode="json") for item in assets]
+        )
         return {
             "schema_version": PRODUCTION_SNAPSHOT_SCHEMA,
             "revision": _revision_response(revision).model_dump(mode="json"),
@@ -3655,7 +4507,7 @@ class ProductionService:
                 "prompt_package": report.prompt_package.model_dump(mode="json"),
                 "shots": [item.model_dump(mode="json") for item in report.shots],
             },
-            "references": [item.model_dump(mode="json") for item in assets],
+            "references": reference_snapshots,
             "shot_plans": [
                 {
                     "shot_plan": plan.model_dump(mode="json"),
@@ -3694,7 +4546,7 @@ class ProductionService:
             raise _fail(409, "invalid_revision_snapshot", "创作方案版本快照已损坏") from exc
         if (
             not isinstance(snapshot, dict)
-            or snapshot.get("schema_version") != PRODUCTION_SNAPSHOT_SCHEMA
+            or snapshot.get("schema_version") not in SUPPORTED_PRODUCTION_SNAPSHOT_SCHEMAS
         ):
             raise _fail(409, "invalid_revision_snapshot", "创作方案版本快照格式不受支持")
         return snapshot
@@ -3779,6 +4631,19 @@ class ProductionService:
             raise _fail(409, "invalid_revision_snapshot", "源版本参考资产快照无效")
         cloned: list[ReferenceAsset] = []
         id_map: dict[UUID, UUID] = {}
+        if self.project_assets is not None:
+            for raw_asset in raw_assets:
+                if not isinstance(raw_asset, dict):
+                    raise _fail(409, "invalid_revision_snapshot", "源版本参考资产快照无效")
+                if raw_asset.get("removed_at") or raw_asset.get("archived_at"):
+                    continue
+                linked = await self.project_assets.link_snapshot_reference(branch, raw_asset)
+                raw_id = raw_asset.get("asset_id") or raw_asset.get("id")
+                if raw_id is None:
+                    raise _fail(409, "invalid_revision_snapshot", "源版本资产标识缺失")
+                id_map[UUID(str(raw_id))] = linked.id
+                cloned.append(linked)
+            return cloned, id_map
         for raw_asset in raw_assets:
             try:
                 source_asset = ReferenceAsset.model_validate(raw_asset)
@@ -3980,8 +4845,8 @@ class ProductionService:
         ).encode("utf-8")
         cls._write_atomic(destination, serialized)
 
-    @staticmethod
     def _reference_response(
+        self,
         asset: ReferenceAsset,
         current_revision_id: UUID | None,
     ) -> ReferenceAssetResponse:
@@ -4000,8 +4865,16 @@ class ProductionService:
             tags=asset.tags,
             rights_confirmed=asset.rights_confirmed,
             rights_note=asset.rights_note,
-            content_url=f"/api/v1/references/{asset.id}/content",
-            thumbnail_url=f"/api/v1/references/{asset.id}/thumbnail",
+            content_url=(
+                f"/api/v1/assets/{asset.id}/content"
+                if self.project_assets is not None
+                else f"/api/v1/references/{asset.id}/content"
+            ),
+            thumbnail_url=(
+                f"/api/v1/assets/{asset.id}/thumbnail"
+                if self.project_assets is not None
+                else f"/api/v1/references/{asset.id}/thumbnail"
+            ),
             current_revision_id=current_revision_id,
             created_at=asset.created_at,
             archived_at=asset.archived_at,

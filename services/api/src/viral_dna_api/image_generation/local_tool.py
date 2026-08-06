@@ -8,13 +8,16 @@ import shutil
 import signal
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from threading import Event
 from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import ValidationError
 
 from ..models import GenerationCostSource, ImageGenerationCapability
+from .codex_local import CODEX_IMAGEGEN_ADAPTER_ID
 from .contracts import (
     LOCAL_TOOL_PROTOCOL_VERSION,
     AdapterIdentity,
@@ -33,6 +36,45 @@ SUPPORTED_IMAGE_FORMATS = {
     "PNG": "image/png",
     "WEBP": "image/webp",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class CodexSandboxPreflightResult:
+    latency_ms: int
+
+
+def _codex_windows_sandbox_error(raw: str) -> ImageGenerationError | None:
+    message = raw[-MAX_PROCESS_OUTPUT_BYTES:].strip()
+    normalized = message.lower()
+    markers = (
+        "codex Windows 沙箱预检失败".lower(),
+        "codex Windows 增强沙箱初始化失败".lower(),
+        "codex-windows-sandbox-setup",
+        "helper_unknown_error",
+        "setup refresh had errors",
+        "sandbox setup marker missing",
+        "specified module could not be found",
+        "找不到指定的模块",
+        "offline firewall settings changed",
+        "stored_ports",
+        "desired_ports",
+    )
+    if not any(marker in normalized for marker in markers):
+        return None
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    detail = lines[-1] if lines else ""
+    if "兼容模式" not in detail:
+        detail = (
+            "Codex Windows 增强沙箱初始化失败。请在“模型与设置 → Windows 沙箱”"
+            "中执行无费用预检；若自动/增强模式仍失败，请手动切换为"
+            "“兼容模式（unelevated）”。兼容模式仍限制文件访问，但网络隔离较弱。"
+        )
+    return ImageGenerationError(
+        409,
+        "codex_windows_sandbox_setup_failed",
+        detail[:1000],
+        retryable=False,
+    )
 
 
 def _filesystem_path(path: Path) -> Path:
@@ -155,6 +197,7 @@ def _run_process(
     cwd: Path,
     timeout_seconds: int,
     proxy_url: str | None = None,
+    cancel_event: Event | None = None,
 ) -> tuple[int, str, str]:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     process = subprocess.Popen(
@@ -171,17 +214,31 @@ def _run_process(
         creationflags=flags,
         start_new_session=os.name != "nt",
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        _kill_process_tree(process)
-        stdout, stderr = process.communicate()
-        raise ImageGenerationError(
-            504,
-            "local_tool_timeout",
-            f"本机工具执行超过 {timeout_seconds} 秒",
-            retryable=True,
-        ) from exc
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            _kill_process_tree(process)
+            process.communicate()
+            raise ImageGenerationError(
+                409,
+                "generation_cancelled",
+                "图片生成任务已取消",
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _kill_process_tree(process)
+            process.communicate()
+            raise ImageGenerationError(
+                504,
+                "local_tool_timeout",
+                f"本机工具执行超过 {timeout_seconds} 秒",
+                retryable=True,
+            )
+        try:
+            stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
     return (
         process.returncode,
         stdout[-MAX_PROCESS_OUTPUT_BYTES:],
@@ -262,6 +319,63 @@ async def detect_local_tool(
         tool_version=tool_version[:120],
         protocol_version=protocol,
         capability=_capability_from_payload(payload.get("capabilities")),
+        latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
+    )
+
+
+async def preflight_codex_local_tool(
+    executable_path: str,
+    fixed_args: list[str],
+    *,
+    probe_cwd: Path,
+    timeout_seconds: int = 30,
+    proxy_url: str | None = None,
+) -> CodexSandboxPreflightResult:
+    executable = validate_executable_path(executable_path)
+    safe_args = validate_fixed_args(fixed_args)
+    resolved_cwd = await asyncio.to_thread(probe_cwd.resolve)
+    if not await asyncio.to_thread(resolved_cwd.is_dir):
+        raise ImageGenerationError(
+            422,
+            "codex_sandbox_preflight_directory_invalid",
+            "Codex 沙箱预检目录不存在",
+        )
+    started = time.perf_counter()
+    return_code, stdout, stderr = await asyncio.to_thread(
+        _run_process,
+        [
+            str(executable),
+            *safe_args,
+            "preflight",
+            "--cwd",
+            str(resolved_cwd),
+            "--timeout",
+            str(timeout_seconds),
+        ],
+        cwd=executable.parent,
+        timeout_seconds=timeout_seconds + 5,
+        proxy_url=proxy_url,
+    )
+    if return_code != 0:
+        raw = f"{stderr}\n{stdout}"
+        known_error = _codex_windows_sandbox_error(raw)
+        if known_error is not None:
+            raise known_error
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        detail = lines[-1] if lines else "未返回错误说明"
+        raise ImageGenerationError(
+            422,
+            "codex_sandbox_preflight_failed",
+            f"Codex Windows 沙箱预检失败（退出码 {return_code}）：{detail[:700]}",
+        )
+    payload = _parse_json_document(stdout.strip(), field_name="Codex 沙箱预检结果")
+    if payload.get("ready") is not True:
+        raise ImageGenerationError(
+            422,
+            "codex_sandbox_preflight_failed",
+            "Codex Windows 沙箱预检没有返回就绪状态",
+        )
+    return CodexSandboxPreflightResult(
         latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
     )
 
@@ -426,8 +540,13 @@ class LocalToolImageAdapter:
             cwd=self.executable.parent,
             timeout_seconds=self.timeout_seconds,
             proxy_url=self.proxy_url,
+            cancel_event=request.cancel_event,
         )
         if return_code != 0:
+            if self.identity.adapter_id == CODEX_IMAGEGEN_ADAPTER_ID:
+                known_error = _codex_windows_sandbox_error(stderr)
+                if known_error is not None:
+                    raise known_error
             message = stderr.strip().splitlines()[-1] if stderr.strip() else "未返回错误说明"
             raise ImageGenerationError(
                 502,

@@ -27,6 +27,48 @@ class CodexNetworkProbeResult:
     message: str
 
 
+def local_tool_proxy_environment_url(
+    adapter_id: str,
+    proxy_mode: str,
+    effective_proxy_url: str | None,
+    proxy_source: str,
+) -> str | None:
+    """Return only the proxy that should be injected into a child tool process.
+
+    Codex 0.146+ reads the Windows user proxy itself. Re-injecting that same
+    proxy through HTTP_PROXY causes the Windows sandbox helper to repeatedly
+    rebuild firewall state. Manual proxies and environment-only proxies still
+    need explicit delivery, as do non-Codex local tools.
+    """
+
+    if proxy_mode == "disabled" or not effective_proxy_url:
+        return None
+    if (
+        adapter_id == CODEX_IMAGEGEN_ADAPTER_ID
+        and proxy_mode == "system"
+        and proxy_source == "windows_user_proxy"
+    ):
+        return None
+    return effective_proxy_url
+
+
+def local_tool_proxy_delivery(
+    adapter_id: str,
+    proxy_mode: str,
+    effective_proxy_url: str | None,
+    proxy_source: str,
+) -> str:
+    if proxy_mode == "disabled" or not effective_proxy_url:
+        return "direct"
+    if (
+        adapter_id == CODEX_IMAGEGEN_ADAPTER_ID
+        and proxy_mode == "system"
+        and proxy_source == "windows_user_proxy"
+    ):
+        return "codex_native"
+    return "environment"
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[5]
 

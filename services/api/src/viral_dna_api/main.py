@@ -19,6 +19,8 @@ from pydantic import ValidationError
 from . import __version__
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
+from .asset_library import AssetLibraryService
+from .asset_routes import create_asset_router
 from .chinese import to_simplified
 from .exports import ExportService
 from .image_generation import (
@@ -61,6 +63,8 @@ from .models import (
     LocalCodexDiscoveryResponse,
     LocalCodexNetworkTestRequest,
     LocalCodexNetworkTestResponse,
+    LocalCodexSandboxTestRequest,
+    LocalCodexSandboxTestResponse,
     LocalImageToolDetectRequest,
     LocalImageToolDetectResponse,
     ModelRun,
@@ -75,6 +79,7 @@ from .models import (
     ProductionProjectUpdate,
     ProductionRevisionDetail,
     ProductionRevisionResponse,
+    ProjectAssetLinkCreate,
     RecordFolder,
     ReferenceAssetCreate,
     ReferenceAssetResponse,
@@ -82,6 +87,7 @@ from .models import (
     ReferenceAssetUpdate,
     ReplacementCreate,
     ReplacementVersion,
+    ShotImageApprovalRevokeRequest,
     ShotKeyframeSelectRequest,
     ShotLifecycleUpdate,
     ShotPlanBulkUpdate,
@@ -104,8 +110,10 @@ from .production import (
     ProductionService,
     ProductionServiceError,
 )
+from .project_assets import ProjectAssetService
 from .real_pipeline import HybridAnalysisPipeline
 from .records import RecordService, resolve_video_path, write_source_metadata
+from .storage_objects import StorageManager
 from .store import store
 from .thumbnails import thumbnail_etag, thumbnail_service
 from .workspace import WORKSPACE_SCHEMA_VERSION, WorkspaceError, workspace_manager
@@ -146,8 +154,13 @@ def parse_cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await account_context_service.ensure_current()
+    await project_asset_service.bootstrap_legacy_references()
     await record_service.bootstrap(recover_interrupted=True)
-    yield
+    await production_service.recover_generation_runs()
+    try:
+        yield
+    finally:
+        await production_service.shutdown_generation_runs()
 
 
 app = FastAPI(
@@ -174,9 +187,19 @@ image_generation_gateway = ImageGenerationGateway(
     image_generation_settings_service,
     repository=store,
 )
-production_service = ProductionService(store, workspace_manager, image_generation_gateway)
-
 account_context_service = create_account_context_service(workspace_manager)
+storage_manager = StorageManager(store, workspace_manager)
+asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
+project_asset_service = ProjectAssetService(
+    store, workspace_manager, storage_manager, account_context_service
+)
+production_service = ProductionService(
+    store,
+    workspace_manager,
+    image_generation_gateway,
+    project_assets=project_asset_service,
+)
+app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -546,9 +569,31 @@ async def upload_production_reference(
             payload,
             bytes(content),
             file.content_type,
+            filename,
         )
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/assets/{{asset_id}}/link",
+    response_model=ReferenceAssetResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def link_production_asset(
+    project_id: UUID,
+    asset_id: UUID,
+    payload: ProjectAssetLinkCreate,
+) -> ReferenceAssetResponse:
+    try:
+        return await production_service.link_reference(
+            project_id,
+            asset_id,
+            payload.expected_revision_id,
+            payload.type,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
 
 
 @app.get(
@@ -575,9 +620,12 @@ async def list_production_references(
 async def update_production_reference(
     asset_id: UUID,
     payload: ReferenceAssetUpdate,
+    project_id: Annotated[UUID | None, Query()] = None,
 ) -> ReferenceAssetResponse:
     try:
-        return await production_service.update_reference(asset_id, payload)
+        return await production_service.update_reference(
+            asset_id, payload, project_id=project_id
+        )
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -590,12 +638,14 @@ async def archive_production_reference(
     asset_id: UUID,
     expected_revision_id: Annotated[UUID, Query()],
     confirm_stale: Annotated[bool, Query()] = False,
+    project_id: Annotated[UUID | None, Query()] = None,
 ) -> ReferenceAssetResponse:
     try:
         return await production_service.archive_reference(
             asset_id,
             expected_revision_id,
             confirm_stale=confirm_stale,
+            project_id=project_id,
         )
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -751,9 +801,7 @@ async def restore_production_shot(
 @app.get(f"{API_PREFIX}/production-shots/{{shot_plan_id}}/source-keyframe")
 async def get_production_source_keyframe(shot_plan_id: UUID) -> FileResponse:
     try:
-        path, media_type = await production_service.resolve_source_keyframe_content(
-            shot_plan_id
-        )
+        path, media_type = await production_service.resolve_source_keyframe_content(shot_plan_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return FileResponse(
@@ -796,6 +844,33 @@ async def approve_production_source_keyframe(
 
 
 @app.post(
+    f"{API_PREFIX}/settings/image-generation/test-local-sandbox",
+    response_model=LocalCodexSandboxTestResponse,
+)
+async def test_local_codex_sandbox(
+    payload: LocalCodexSandboxTestRequest,
+) -> LocalCodexSandboxTestResponse:
+    try:
+        return await image_generation_settings_service.test_codex_sandbox(payload)
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/image-approval/revoke",
+    response_model=CandidateActionResponse,
+)
+async def revoke_production_image_approval(
+    shot_plan_id: UUID,
+    payload: ShotImageApprovalRevokeRequest,
+) -> CandidateActionResponse:
+    try:
+        return await production_service.revoke_image_approval(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
     f"{API_PREFIX}/production-shots/bulk-update",
     response_model=list[ShotPlanResponse],
 )
@@ -826,7 +901,7 @@ async def get_production_change_impact(
 @app.post(
     f"{API_PREFIX}/production-shots/{{shot_plan_id}}/image-runs",
     response_model=GenerationRunResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def create_production_image_run(
     shot_plan_id: UUID,
@@ -845,6 +920,29 @@ async def create_production_image_run(
 async def get_production_generation_run(run_id: UUID) -> GenerationRunResponse:
     try:
         return await production_service.get_generation_run(run_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/generation-runs/{{run_id}}/cancel",
+    response_model=GenerationRunResponse,
+)
+async def cancel_production_generation_run(run_id: UUID) -> GenerationRunResponse:
+    try:
+        return await production_service.cancel_generation_run(run_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/generation-runs/{{run_id}}/retry",
+    response_model=GenerationRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_production_generation_run(run_id: UUID) -> GenerationRunResponse:
+    try:
+        return await production_service.retry_generation_run(run_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

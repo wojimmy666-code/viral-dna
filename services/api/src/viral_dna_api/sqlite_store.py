@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
 
+from .asset_library import Asset, AssetFolder
 from .models import (
     AnalysisJob,
     AnalysisRecord,
@@ -22,6 +24,8 @@ from .models import (
     PriceSnapshot,
     ProductionProject,
     ProductionRevision,
+    ProductionRunStatus,
+    ProjectAssetLink,
     RecordFolder,
     ReferenceAsset,
     ReferenceBinding,
@@ -30,6 +34,7 @@ from .models import (
     Video,
 )
 from .schema import WORKSPACE_SCHEMA_VERSION
+from .storage_objects import ObjectReplica, StorageObject
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -80,6 +85,31 @@ _PRODUCTION_INDEXES = (
     ("idx_approval_events_shot_plan_id", "approval_events", "shot_plan_id"),
 )
 
+_WORKSPACE_ASSET_TABLES = frozenset(
+    {
+        "storage_objects",
+        "object_replicas",
+        "asset_folders",
+        "assets",
+    }
+)
+
+_WORKSPACE_ASSET_INDEXES = (
+    ("idx_storage_objects_workspace_id", "storage_objects", "workspace_id"),
+    ("idx_object_replicas_object_id", "object_replicas", "storage_object_id"),
+    ("idx_asset_folders_workspace_id", "asset_folders", "workspace_id"),
+    ("idx_assets_workspace_id", "assets", "workspace_id"),
+    ("idx_assets_folder_id", "assets", "folder_id"),
+)
+
+_PROJECT_ASSET_TABLES = frozenset({"project_asset_links"})
+
+_PROJECT_ASSET_INDEXES = (
+    ("idx_project_asset_links_workspace_id", "project_asset_links", "workspace_id"),
+    ("idx_project_asset_links_project_id", "project_asset_links", "project_id"),
+    ("idx_project_asset_links_asset_id", "project_asset_links", "asset_id"),
+)
+
 
 class SQLiteSchemaError(RuntimeError):
     """Raised when the durable database schema cannot be migrated safely."""
@@ -88,7 +118,12 @@ class SQLiteSchemaError(RuntimeError):
 class SQLiteStore:
     """Durable single-node repository using versioned Pydantic JSON records."""
 
-    _allowed_tables = _LEGACY_TABLES | _PRODUCTION_TABLES
+    _allowed_tables = (
+        _LEGACY_TABLES
+        | _PRODUCTION_TABLES
+        | _WORKSPACE_ASSET_TABLES
+        | _PROJECT_ASSET_TABLES
+    )
 
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path.resolve()
@@ -136,8 +171,15 @@ class SQLiteStore:
                 if 2 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (2)")
 
+                self._create_json_tables(connection, _WORKSPACE_ASSET_TABLES)
+                self._create_workspace_asset_indexes(connection)
                 if 3 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (3)")
+
+                self._create_json_tables(connection, _PROJECT_ASSET_TABLES)
+                self._create_project_asset_indexes(connection)
+                if 4 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (4)")
             except Exception:
                 connection.rollback()
                 raise
@@ -163,6 +205,22 @@ class SQLiteStore:
         for index_name, table, payload_field in _PRODUCTION_INDEXES:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608 - internal allowlist
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_workspace_asset_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _WORKSPACE_ASSET_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608 - internal allowlist
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_project_asset_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _PROJECT_ASSET_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
             )
 
@@ -421,6 +479,77 @@ class SQLiteStore:
     async def get_reference_asset(self, asset_id: UUID) -> ReferenceAsset | None:
         return await self._get("reference_assets", asset_id, ReferenceAsset)
 
+    async def save_storage_bundle(
+        self,
+        storage_object: StorageObject,
+        replica: ObjectReplica,
+    ) -> tuple[StorageObject, ObjectReplica]:
+        entries = [
+            ("storage_objects", str(storage_object.id), self._serialize(storage_object)),
+            ("object_replicas", str(replica.id), self._serialize(replica)),
+        ]
+        async with self._lock:
+            await asyncio.to_thread(self._upsert_many, entries)
+        return storage_object, replica
+
+    async def save_storage_object(self, storage_object: StorageObject) -> StorageObject:
+        return await self._save("storage_objects", storage_object.id, storage_object)
+
+    async def get_storage_object(self, object_id: UUID) -> StorageObject | None:
+        return await self._get("storage_objects", object_id, StorageObject)
+
+    async def save_object_replica(self, replica: ObjectReplica) -> ObjectReplica:
+        return await self._save("object_replicas", replica.id, replica)
+
+    async def get_object_replica(self, replica_id: UUID) -> ObjectReplica | None:
+        return await self._get("object_replicas", replica_id, ObjectReplica)
+
+    async def list_object_replicas(self, object_id: UUID) -> list[ObjectReplica]:
+        payloads = await asyncio.to_thread(self._read_all, "object_replicas")
+        replicas = [ObjectReplica.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (item for item in replicas if item.storage_object_id == object_id),
+            key=lambda item: item.created_at,
+        )
+
+    async def save_asset_folder(self, folder: AssetFolder) -> AssetFolder:
+        return await self._save("asset_folders", folder.id, folder)
+
+    async def get_asset_folder(self, folder_id: UUID) -> AssetFolder | None:
+        return await self._get("asset_folders", folder_id, AssetFolder)
+
+    async def list_asset_folders(self) -> list[AssetFolder]:
+        payloads = await asyncio.to_thread(self._read_all, "asset_folders")
+        folders = [AssetFolder.model_validate_json(payload) for payload in payloads]
+        return sorted(folders, key=lambda item: (item.sort_order, item.created_at))
+
+    async def save_asset(self, asset: Asset) -> Asset:
+        return await self._save("assets", asset.id, asset)
+
+    async def get_asset(self, asset_id: UUID) -> Asset | None:
+        return await self._get("assets", asset_id, Asset)
+
+    async def list_assets(self) -> list[Asset]:
+        payloads = await asyncio.to_thread(self._read_all, "assets")
+        assets = [Asset.model_validate_json(payload) for payload in payloads]
+        return sorted(assets, key=lambda item: item.created_at)
+
+    async def save_project_asset_link(self, link: ProjectAssetLink) -> ProjectAssetLink:
+        return await self._save("project_asset_links", link.id, link)
+
+    async def get_project_asset_link(self, link_id: UUID) -> ProjectAssetLink | None:
+        return await self._get("project_asset_links", link_id, ProjectAssetLink)
+
+    async def list_project_asset_links(
+        self,
+        project_id: UUID | None = None,
+    ) -> list[ProjectAssetLink]:
+        payloads = await asyncio.to_thread(self._read_all, "project_asset_links")
+        links = [ProjectAssetLink.model_validate_json(payload) for payload in payloads]
+        if project_id is not None:
+            links = [item for item in links if item.project_id == project_id]
+        return sorted(links, key=lambda item: item.created_at)
+
     async def list_reference_assets(self, project_id: UUID) -> list[ReferenceAsset]:
         payloads = await asyncio.to_thread(self._read_all, "reference_assets")
         assets = [ReferenceAsset.model_validate_json(payload) for payload in payloads]
@@ -524,6 +653,57 @@ class SQLiteStore:
 
     async def save_generation_run(self, run: GenerationRun) -> GenerationRun:
         return await self._save("generation_runs", run.id, run)
+
+    def _claim_generation_run(
+        self,
+        run_id: UUID,
+        claimed_at: datetime,
+    ) -> GenerationRun | None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT payload FROM generation_runs WHERE record_key = ?",
+                    (str(run_id),),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                run = GenerationRun.model_validate_json(str(row[0]))
+                if run.status != ProductionRunStatus.QUEUED:
+                    connection.commit()
+                    return None
+                claimed = run.model_copy(
+                    update={
+                        "status": ProductionRunStatus.RUNNING,
+                        "started_at": run.started_at or claimed_at,
+                        "updated_at": claimed_at,
+                        "last_heartbeat_at": claimed_at,
+                    }
+                )
+                connection.execute(
+                    "UPDATE generation_runs SET payload = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE record_key = ?",
+                    (self._serialize(claimed), str(run_id)),
+                )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+                return claimed
+
+    async def claim_generation_run(
+        self,
+        run_id: UUID,
+        claimed_at: datetime,
+    ) -> GenerationRun | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._claim_generation_run,
+                run_id,
+                claimed_at,
+            )
 
     async def get_generation_run(self, run_id: UUID) -> GenerationRun | None:
         return await self._get("generation_runs", run_id, GenerationRun)

@@ -9,6 +9,7 @@ import {
   dimensionsForRatio,
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
+  imageGenerationIntentForShot,
   imageGenerationModeLabel,
   imageGenerationRunLabel,
   imageQualityLabel,
@@ -77,6 +78,35 @@ test("normalizes shot constraints and exposes approval status labels", () => {
   assert.equal(workflowStatusLabel("stale"), "已过期");
   assert.equal(workflowStatusClass("approved"), "positive");
   assert.equal(workflowStatusClass("stale"), "warning");
+  assert.equal(productionChangeLabel("image_approval_revoked"), "取消采用分镜图片");
+});
+
+test("requests a fresh variation only after a real AI candidate exists", () => {
+  assert.equal(imageGenerationIntentForShot(null), "standard");
+  assert.equal(
+    imageGenerationIntentForShot({
+      generation_runs: [
+        {
+          execution_mode: "source_frame",
+          provider: "source_video",
+          candidates: [{ id: "source" }],
+        },
+      ],
+    }),
+    "standard",
+  );
+  assert.equal(
+    imageGenerationIntentForShot({
+      generation_runs: [
+        {
+          execution_mode: "local_tool",
+          provider: "codex_imagegen",
+          candidates: [{ id: "candidate-1" }],
+        },
+      ],
+    }),
+    "new_variation",
+  );
 });
 
 test("normalizes image generation settings and never treats unknown cost as zero", () => {
@@ -170,9 +200,29 @@ test("labels automated image quality without replacing manual review", () => {
     "尺寸有提示 · 请人工核对",
   );
   assert.equal(imageQualityLabel({}), "未自动质检 · 请人工核对");
+  assert.equal(
+    imageQualityLabel({
+      status: "warning",
+      semantic_quality: { status: "warning" },
+    }),
+    "VLM 发现语义风险 · 请人工核对",
+  );
+  assert.equal(
+    imageQualityLabel({
+      status: "manual_review_required",
+      semantic_quality: { status: "passed" },
+    }),
+    "VLM 未发现明显语义问题 · 请人工核对",
+  );
 });
 
 test("explains proxy-related local ImageGen failures with a retry path", () => {
+  assert.match(
+    generationFailureGuidance({
+      error_code: "codex_windows_sandbox_setup_failed",
+    }),
+    /Windows 沙箱.*无费用预检.*unelevated/,
+  );
   assert.match(
     generationFailureGuidance({
       error_code: "local_tool_failed",

@@ -25,6 +25,8 @@ from viral_dna_api.image_generation.gateway import (
     ImageGenerationGatewayError,
 )
 from viral_dna_api.image_generation.local_tool import (
+    CodexSandboxPreflightResult,
+    _codex_windows_sandbox_error,
     detect_local_tool,
     validate_fixed_args,
 )
@@ -40,6 +42,7 @@ from viral_dna_api.models import (
     LocalCodexAutoConfigureRequest,
     LocalCodexDiscoveryResponse,
     LocalCodexNetworkTestRequest,
+    LocalCodexSandboxTestRequest,
     ModelUsage,
     ProductionProject,
     ReferenceAsset,
@@ -73,6 +76,7 @@ IMAGE_ENV_KEYS = (
     "VIRAL_DNA_IMAGE_LOCAL_REASONING_EFFORT",
     "VIRAL_DNA_IMAGE_LOCAL_PROXY_MODE",
     "VIRAL_DNA_IMAGE_LOCAL_PROXY_URL",
+    "VIRAL_DNA_IMAGE_LOCAL_WINDOWS_SANDBOX_MODE",
     "VIRAL_DNA_IMAGE_CAPABILITY_SNAPSHOT",
     "VIRAL_DNA_IMAGE_LAST_VALIDATED_AT",
     "DASHSCOPE_API_KEY",
@@ -150,6 +154,7 @@ if __name__ == "__main__":
 FAKE_CODEX = """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -160,9 +165,18 @@ def main() -> None:
     if "--version" in sys.argv:
         print("codex-cli 99.0-test")
         return
+    if "sandbox" in sys.argv:
+        run_root = Path(sys.argv[sys.argv.index("--cd") + 1])
+        (run_root / "codex-sandbox-argv.json").write_text(
+            json.dumps(sys.argv),
+            "utf-8",
+        )
+        print("viral-dna-codex-sandbox-ok")
+        return
     if "exec" not in sys.argv:
         raise SystemExit(2)
     run_root = Path(sys.argv[sys.argv.index("--cd") + 1])
+    (run_root / "codex-exec-argv.json").write_text(json.dumps(sys.argv), "utf-8")
     output_root = run_root / "tool-output"
     output_root.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (320, 576), (76, 103, 220)).save(
@@ -661,11 +675,35 @@ def test_gateway_reuses_verified_candidates_without_repeat_cost(
             source_path=source,
             allow_unknown_cost=False,
         )
-        return first_run, first_candidates, second_run, second_candidates
+        variation_run, variation_candidates = await gateway.generate(
+            project,
+            shot,
+            uuid4(),
+            [],
+            [],
+            candidate_count=2,
+            source_path=source,
+            allow_unknown_cost=True,
+            seed=8675309,
+            reuse_cache=False,
+        )
+        return (
+            first_run,
+            first_candidates,
+            second_run,
+            second_candidates,
+            variation_run,
+            variation_candidates,
+        )
 
-    first_run, first_candidates, second_run, second_candidates = asyncio.run(
-        exercise_cache()
-    )
+    (
+        first_run,
+        first_candidates,
+        second_run,
+        second_candidates,
+        variation_run,
+        variation_candidates,
+    ) = asyncio.run(exercise_cache())
     assert first_run.status == "completed"
     assert second_run.status == "cached"
     assert second_run.request_fingerprint == first_run.request_fingerprint
@@ -676,6 +714,11 @@ def test_gateway_reuses_verified_candidates_without_repeat_cost(
         item.id for item in first_candidates
     ]
     assert [item.relative_path for item in second_candidates] == [
+        item.relative_path for item in first_candidates
+    ]
+    assert variation_run.status == "completed"
+    assert variation_run.request_fingerprint != first_run.request_fingerprint
+    assert [item.relative_path for item in variation_candidates] != [
         item.relative_path for item in first_candidates
     ]
 
@@ -807,13 +850,27 @@ def test_codex_auto_configuration_persists_wrapper_and_model_policy(
             can_auto_configure=True,
         )
 
-    service = ImageGenerationSettingsService(codex_discovery=discovery)
+    preflight_calls: list[tuple[str, list[str], dict[str, object]]] = []
+
+    async def sandbox_preflight(
+        executable_path: str,
+        fixed_args: list[str],
+        **kwargs: object,
+    ) -> CodexSandboxPreflightResult:
+        preflight_calls.append((executable_path, fixed_args, kwargs))
+        return CodexSandboxPreflightResult(latency_ms=7)
+
+    service = ImageGenerationSettingsService(
+        codex_discovery=discovery,
+        codex_sandbox_preflight=sandbox_preflight,
+    )
     saved = asyncio.run(
         service.auto_configure_codex(
             LocalCodexAutoConfigureRequest(
                 model_policy="latest_flagship",
                 reasoning_effort="xhigh",
                 default_candidate_count=3,
+                windows_sandbox_mode="unelevated",
             )
         )
     )
@@ -822,14 +879,21 @@ def test_codex_auto_configuration_persists_wrapper_and_model_policy(
     assert saved.local_model_policy == "latest_flagship"
     assert saved.local_model == "gpt-5.6-sol"
     assert saved.local_reasoning_effort == "xhigh"
+    assert saved.local_windows_sandbox_mode == "unelevated"
     assert saved.local_cost_source == GenerationCostSource.SUBSCRIPTION_QUOTA
     assert saved.local_tool_id == "openai-codex-imagegen"
     assert saved.default_candidate_count == 3
     assert "--model" in saved.local_fixed_args
     assert "gpt-5.6-sol" in saved.local_fixed_args
+    assert "--windows-sandbox-mode" in saved.local_fixed_args
+    assert "unelevated" in saved.local_fixed_args
+    assert len(preflight_calls) == 1
+    assert preflight_calls[0][0] == sys.executable
+    assert preflight_calls[0][2]["timeout_seconds"] == 45
     persisted = (tmp_path / ".env.local").read_text("utf-8")
     assert "VIRAL_DNA_IMAGE_LOCAL_MODEL=gpt-5.6-sol" in persisted
     assert "VIRAL_DNA_IMAGE_LOCAL_COST_SOURCE=subscription_quota" in persisted
+    assert "VIRAL_DNA_IMAGE_LOCAL_WINDOWS_SANDBOX_MODE=unelevated" in persisted
 
 
 def test_codex_network_probe_uses_selected_proxy_and_reports_login(
@@ -882,6 +946,141 @@ def test_codex_network_probe_uses_selected_proxy_and_reports_login(
     assert result.proxy_source == "manual"
     assert result.effective_proxy_url == "http://127.0.0.1:10808"
     assert "可以执行本机 ImageGen" in result.message
+
+
+def test_codex_windows_system_proxy_is_not_reinjected_into_child_process() -> None:
+    proxy_url = "http://127.0.0.1:10808"
+
+    assert codex_local.local_tool_proxy_environment_url(
+        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+        "system",
+        proxy_url,
+        "windows_user_proxy",
+    ) is None
+    assert codex_local.local_tool_proxy_delivery(
+        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+        "system",
+        proxy_url,
+        "windows_user_proxy",
+    ) == "codex_native"
+    assert codex_local.local_tool_proxy_environment_url(
+        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+        "manual",
+        proxy_url,
+        "manual",
+    ) == proxy_url
+    assert codex_local.local_tool_proxy_environment_url(
+        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+        "system",
+        proxy_url,
+        "environment",
+    ) == proxy_url
+    assert codex_local.local_tool_proxy_environment_url(
+        "custom-image-tool",
+        "system",
+        proxy_url,
+        "windows_user_proxy",
+    ) == proxy_url
+
+
+def test_codex_sandbox_preflight_uses_selected_mode_without_model_call(
+    tmp_path: Path,
+) -> None:
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    fake_codex = write_fake_codex(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(wrapper),
+            "--codex-executable",
+            sys.executable,
+            "--codex-fixed-arg",
+            str(fake_codex),
+            "--windows-sandbox-mode",
+            "unelevated",
+            "preflight",
+            "--cwd",
+            str(tmp_path),
+            "--timeout",
+            "15",
+        ],
+        capture_output=True,
+        check=True,
+        encoding="utf-8",
+        text=True,
+        timeout=30,
+    )
+
+    payload = json.loads(result.stdout)
+    argv = json.loads((tmp_path / "codex-sandbox-argv.json").read_text("utf-8"))
+    assert payload["ready"] is True
+    assert payload["windows_sandbox_mode"] == "unelevated"
+    assert "sandbox" in argv
+    assert "exec" not in argv
+    assert argv[argv.index("--permission-profile") + 1] == ":workspace"
+    assert 'windows.sandbox="unelevated"' in argv
+
+
+def test_codex_sandbox_service_reports_delivery_and_never_generates(
+    tmp_path: Path,
+) -> None:
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+
+    async def discovery() -> LocalCodexDiscoveryResponse:
+        return LocalCodexDiscoveryResponse(
+            codex_found=True,
+            codex_executable_path=sys.executable,
+            codex_version="codex-cli test",
+            auth_status="authenticated",
+            imagegen_status="installed_unverified",
+            model_catalog_version="test-catalog",
+            wrapper_path=str(wrapper),
+        )
+
+    calls: list[tuple[str, list[str], dict[str, object]]] = []
+
+    async def sandbox_preflight(
+        executable_path: str,
+        fixed_args: list[str],
+        **kwargs: object,
+    ) -> CodexSandboxPreflightResult:
+        calls.append((executable_path, fixed_args, kwargs))
+        return CodexSandboxPreflightResult(latency_ms=11)
+
+    service = ImageGenerationSettingsService(
+        codex_discovery=discovery,
+        codex_sandbox_preflight=sandbox_preflight,
+    )
+    result = asyncio.run(
+        service.test_codex_sandbox(
+            LocalCodexSandboxTestRequest(
+                proxy_mode="manual",
+                proxy_url="127.0.0.1:10808",
+                windows_sandbox_mode="unelevated",
+                timeout_seconds=20,
+            )
+        )
+    )
+
+    assert result.ready is True
+    assert result.sandbox_mode == "unelevated"
+    assert result.proxy_delivery == "environment"
+    assert result.latency_ms == 11
+    assert calls[0][0] == sys.executable
+    assert calls[0][2]["proxy_url"] == "http://127.0.0.1:10808"
+    assert "--windows-sandbox-mode" in calls[0][1]
+    assert "unelevated" in calls[0][1]
+
+
+def test_codex_sandbox_setup_error_is_actionable_and_not_retryable() -> None:
+    error = _codex_windows_sandbox_error(
+        "codex-windows-sandbox-setup.exe：找不到指定的模块。"
+    )
+
+    assert error is not None
+    assert error.code == "codex_windows_sandbox_setup_failed"
+    assert error.retryable is False
+    assert "兼容模式（unelevated）" in str(error)
 
 
 def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None:
@@ -941,6 +1140,8 @@ def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None
     assert manifest["usage"]["model"] == "gpt-5.6-sol"
     assert manifest["usage"]["cost_source"] == "subscription_quota"
     assert manifest["candidates"][0]["path"] == "codex-candidate.png"
+    argv = json.loads((run_root / "codex-exec-argv.json").read_text("utf-8"))
+    assert "--ignore-user-config" in argv
 
 
 def _project() -> ProductionProject:
