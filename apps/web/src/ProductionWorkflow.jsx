@@ -30,13 +30,16 @@ import {
   dimensionsForRatio,
   imageGenerationIntentForShot,
   imageGenerationModeLabel,
+  normalizeVideoDuration,
   resolveImageExecutionMode,
   formatProductionDate,
   normalizeReferenceTags,
+  productionDefaultsForSource,
   productionChangeLabel,
   referenceTypeLabel,
 } from "./production-ui.js";
 import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
+import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
 import "./production-workflow.css";
 
 const EMPTY_CREATE_DRAFT = Object.freeze({
@@ -65,6 +68,15 @@ const EMPTY_SHOT_DRAFT = Object.freeze({
   referenceBindings: [],
 });
 
+const EMPTY_VIDEO_DRAFT = Object.freeze({
+  videoPrompt: "",
+  negativeConstraints: "",
+  durationSeconds: "",
+  candidateCount: 1,
+  modelAlias: "bailian_wan_2_7_i2v",
+  resolution: "720P",
+});
+
 const DEFAULT_PRODUCTION_IMAGE_SETTINGS = Object.freeze({
   enabled: false,
   execution_mode: "remote_api",
@@ -74,6 +86,14 @@ const DEFAULT_PRODUCTION_IMAGE_SETTINGS = Object.freeze({
   local_tool_id: null,
   local_cost_source: "unknown",
   local_unit_cost_micros: null,
+  models: [],
+});
+
+const DEFAULT_PRODUCTION_VIDEO_SETTINGS = Object.freeze({
+  enabled: true,
+  default_model_alias: "bailian_wan_2_7_i2v",
+  default_resolution: "720P",
+  providers: [],
   models: [],
 });
 
@@ -95,6 +115,34 @@ function shotDraftFromDetail(detail) {
       crop_hint: item.crop_hint,
       notes: item.notes,
     })),
+  };
+}
+
+function videoDraftFromDetail(
+  detail,
+  settings = DEFAULT_PRODUCTION_VIDEO_SETTINGS,
+) {
+  const modelAlias = settings.default_model_alias;
+  const selectedModel = (settings.models || []).find(
+    (item) => item.alias === modelAlias,
+  );
+  const durationSeconds = normalizeVideoDuration(
+    detail?.plan?.duration_seconds,
+    selectedModel,
+  );
+  if (!detail?.plan) return {
+    ...EMPTY_VIDEO_DRAFT,
+    durationSeconds: String(durationSeconds),
+    modelAlias,
+    resolution: settings.default_resolution,
+  };
+  return {
+    videoPrompt: detail.plan.video_prompt || "",
+    negativeConstraints: (detail.plan.video_negative_constraints || []).join("\n"),
+    durationSeconds: String(durationSeconds),
+    candidateCount: 1,
+    modelAlias,
+    resolution: settings.default_resolution,
   };
 }
 
@@ -284,7 +332,9 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
   return (
     <nav aria-label="创作工作流" className="production-stepper">
       {PRODUCTION_STEPS.map((step, index) => {
-        const locked = Boolean(step.locked);
+        const locked = Boolean(step.locked) || (
+          step.id === "shot_videos" && index > activeIndex
+        );
         const selected = active === step.id;
         const completed = index < activeIndex || (step.id === "project_setup" && project.current_revision_id);
         return (
@@ -304,7 +354,9 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
               <small>
                 {step.id === "reference_assets" && referenceCount > 0
                   ? `${referenceCount} 项资产`
-                  : step.id === "shot_images" && gate
+                  : ["shot_images", "shot_videos"].includes(step.id)
+                    && step.id === project.active_step
+                    && gate
                     ? `${gate.approved_shot_count} / ${gate.required_shot_count} 已确认`
                     : step.description}
               </small>
@@ -637,7 +689,15 @@ function RevisionHistory({ revisions, currentRevisionId, busy, onPreview, onBran
   );
 }
 
-function CreateProjectDialog({ draft, setDraft, busy, error, onClose, onSubmit }) {
+function CreateProjectDialog({
+  draft,
+  setDraft,
+  busy,
+  error,
+  onClose,
+  onSubmit,
+  sourceDefaultRatio,
+}) {
   function selectRatio(value) {
     const dimensions = dimensionsForRatio(value);
     setDraft((state) => ({
@@ -667,6 +727,9 @@ function CreateProjectDialog({ draft, setDraft, busy, error, onClose, onSubmit }
               <button className={draft.outputAspectRatio === ratio ? "active" : ""} key={ratio} onClick={() => selectRatio(ratio)} type="button">{ratio}</button>
             ))}
           </div>
+          <small className="production-ratio-hint">
+            已按源视频预选 {sourceDefaultRatio}，可在创建前手动调整。
+          </small>
         </fieldset>
         <div className="production-field-pair">
           <label className="production-field"><span>宽度</span><input min={256} max={8192} onChange={(event) => setDraft((state) => ({ ...state, outputWidth: Number(event.target.value) }))} type="number" value={draft.outputWidth} /></label>
@@ -809,18 +872,29 @@ export function ProductionHub({
   recordId,
   analysisId,
   sourceTitle,
+  sourceMedia = {},
   projects,
   loading,
   error,
-  createSignal,
   request,
   resolveUrl,
   imageGenerationSettings = DEFAULT_PRODUCTION_IMAGE_SETTINGS,
+  videoGenerationSettings = DEFAULT_PRODUCTION_VIDEO_SETTINGS,
   listSignal = 0,
+  navigationTarget = null,
   onNavigationChange,
+  onNotificationsChanged,
   onProjectsChanged,
   onNotice,
 }) {
+  const sourceProductionDefaults = useMemo(
+    () => productionDefaultsForSource({
+      width: sourceMedia.width,
+      height: sourceMedia.height,
+      aspectRatio: sourceMedia.aspectRatio,
+    }),
+    [sourceMedia.aspectRatio, sourceMedia.height, sourceMedia.width],
+  );
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [assets, setAssets] = useState([]);
@@ -830,6 +904,7 @@ export function ProductionHub({
   const [selectedShotId, setSelectedShotId] = useState(null);
   const [shotDetail, setShotDetail] = useState(null);
   const [shotDraft, setShotDraft] = useState({ ...EMPTY_SHOT_DRAFT });
+  const [videoDraft, setVideoDraft] = useState({ ...EMPTY_VIDEO_DRAFT });
   const [rejectReason, setRejectReason] = useState("");
   const [impactReview, setImpactReview] = useState(null);
   const [activeSection, setActiveSection] = useState("project_setup");
@@ -838,7 +913,10 @@ export function ProductionHub({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const [createDraft, setCreateDraft] = useState({ ...EMPTY_CREATE_DRAFT });
+  const [createDraft, setCreateDraft] = useState({
+    ...EMPTY_CREATE_DRAFT,
+    ...sourceProductionDefaults,
+  });
   const [settingsDraft, setSettingsDraft] = useState({ ...EMPTY_CREATE_DRAFT });
   const [referenceMode, setReferenceMode] = useState(null);
   const [referenceAsset, setReferenceAsset] = useState(null);
@@ -861,7 +939,24 @@ export function ProductionHub({
   const [generationEngine, setGenerationEngine] = useState("default");
   const [generationInputMode, setGenerationInputMode] = useState("keyframe_edit");
   const [generationCandidateCount, setGenerationCandidateCount] = useState(1);
+  const [focusedCandidateId, setFocusedCandidateId] = useState("");
   const referencePreviewUrl = useObjectUrl(referenceFile);
+  const imageGate = useMemo(() => {
+    const requiredShots = shots.filter(
+      (item) => item.plan.lifecycle_status !== "discarded" && item.plan.required !== false,
+    );
+    const approvedCount = requiredShots.filter(
+      (item) => item.plan.image_status === "approved",
+    ).length;
+    return {
+      allowed: requiredShots.length > 0 && approvedCount === requiredShots.length,
+      required_shot_count: requiredShots.length,
+      approved_shot_count: approvedCount,
+      blocker_messages: approvedCount === requiredShots.length
+        ? []
+        : [`仍有 ${requiredShots.length - approvedCount} 个必需分镜图片未确认`],
+    };
+  }, [shots]);
 
   useEffect(() => {
     setGenerationSettings(
@@ -899,6 +994,7 @@ export function ProductionHub({
     setSelectedShotId(null);
     setShotDetail(null);
     setShotDraft({ ...EMPTY_SHOT_DRAFT });
+    setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
     setRejectReason("");
     setImpactReview(null);
     setActiveSection("project_setup");
@@ -913,17 +1009,23 @@ export function ProductionHub({
     setGenerationEngine("default");
     setGenerationInputMode("keyframe_edit");
     setGenerationCandidateCount(1);
+    setFocusedCandidateId("");
   }, [recordId]);
 
   useEffect(() => {
-    if (!createSignal) return;
-    setCreateDraft({
-      ...EMPTY_CREATE_DRAFT,
-      name: defaultProductionName(sourceTitle),
-    });
-    setActionError("");
-    setCreateOpen(true);
-  }, [createSignal, sourceTitle]);
+    if (
+      !navigationTarget?.token
+      || !navigationTarget.projectId
+      || (navigationTarget.recordId && navigationTarget.recordId !== recordId)
+    ) {
+      return;
+    }
+    setFocusedCandidateId(navigationTarget.candidateId || "");
+    openProject(navigationTarget.projectId, {
+      section: navigationTarget.step || "shot_videos",
+      shotPlanId: navigationTarget.shotPlanId || null,
+    }).catch(() => undefined);
+  }, [navigationTarget?.token, recordId]);
 
   const activeGenerationRun = (shotDetail?.generation_runs || []).find(
     (run) => ACTIVE_GENERATION_RUN_STATUSES.has(run.status),
@@ -951,6 +1053,7 @@ export function ProductionHub({
         await Promise.all([
           refreshProject(projectId, shotPlanId),
           onProjectsChanged(),
+          onNotificationsChanged?.(),
         ]);
       } catch {
         if (!disposed) {
@@ -1011,24 +1114,30 @@ export function ProductionHub({
       const nextShotDetail = await request(`/production-shots/${targetShotId}`);
       setShotDetail(nextShotDetail);
       setShotDraft(shotDraftFromDetail(nextShotDetail));
+      setVideoDraft(videoDraftFromDetail(nextShotDetail, videoGenerationSettings));
     } else {
       setShotDetail(null);
       setShotDraft({ ...EMPTY_SHOT_DRAFT });
+      setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
     }
     return nextDetail;
   }
 
-  async function openProject(projectId) {
+  async function openProject(
+    projectId,
+    { section = "project_setup", shotPlanId = null } = {},
+  ) {
     setSelectedProjectId(projectId);
     setContentLoading(true);
     setContentError("");
     setActionError("");
-    setActiveSection("project_setup");
+    setActiveSection(section);
     setSelectedShotId(null);
     setShotDetail(null);
+    setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
     setImpactReview(null);
     try {
-      await refreshProject(projectId, null);
+      await refreshProject(projectId, shotPlanId);
     } catch (requestError) {
       setContentError(requestError.message);
     } finally {
@@ -1046,6 +1155,7 @@ export function ProductionHub({
       const nextShotDetail = await request(`/production-shots/${shotPlanId}`);
       setShotDetail(nextShotDetail);
       setShotDraft(shotDraftFromDetail(nextShotDetail));
+      setVideoDraft(videoDraftFromDetail(nextShotDetail, videoGenerationSettings));
     } catch (requestError) {
       setActionError(requestError.message);
     }
@@ -1058,6 +1168,11 @@ export function ProductionHub({
       await action(false);
     } catch (requestError) {
       setActionError(requestError.message);
+      onNotice({
+        type: "error",
+        title: "操作失败",
+        message: requestError.message,
+      });
     } finally {
       setBusy(false);
     }
@@ -1507,13 +1622,235 @@ export function ProductionHub({
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("图片阶段已完成，分段视频阶段将在 Batch 4.2 之后开放");
+      setActiveSection("shot_videos");
+      onNotice("图片阶段已完成，已进入分段视频工作台");
+    });
+  }
+
+  async function saveVideoPrompt() {
+    if (!shotDetail?.plan) return;
+    const original = videoDraftFromDetail(shotDetail, videoGenerationSettings);
+    const nextConstraints = constraintsFromText(videoDraft.negativeConstraints);
+    const currentConstraints = constraintsFromText(original.negativeConstraints);
+    const changes = {};
+    if (videoDraft.videoPrompt.trim() !== original.videoPrompt.trim()) {
+      changes.video_prompt = videoDraft.videoPrompt.trim();
+    }
+    if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
+      changes.video_negative_constraints = nextConstraints;
+    }
+    if (Object.keys(changes).length === 0) {
+      onNotice("当前视频提示词没有需要保存的修改");
+      return;
+    }
+    const confirmStale = shotDetail.plan.video_status === "approved";
+    if (
+      confirmStale
+      && !window.confirm("修改视频提示词会使当前已采用视频过期。是否继续？")
+    ) {
+      return;
+    }
+    await executeAction(async () => {
+      await request(`/production-shots/${shotDetail.plan.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          confirm_stale: confirmStale,
+          ...changes,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, shotDetail.plan.id),
+        onProjectsChanged(),
+      ]);
+      onNotice(`分镜 ${shotDetail.plan.index} 的视频提示词已保存`);
+    });
+  }
+
+  async function generateVideoCandidates() {
+    if (!shotDetail?.plan) return;
+    const candidateCount = Math.min(
+      4,
+      Math.max(1, Math.trunc(Number(videoDraft.candidateCount) || 1)),
+    );
+    const durationSeconds = Number(videoDraft.durationSeconds);
+    const hasPriorCandidate = (shotDetail.generation_runs || []).some(
+      (run) => run.kind === "video" && (run.candidates || []).length > 0,
+    );
+    const selectedModel = (videoGenerationSettings.models || []).find(
+      (item) => item.alias === videoDraft.modelAlias,
+    );
+    const costUnknown = !selectedModel
+      || ["unknown", "provider_usage_tokens"].includes(selectedModel.pricing?.kind);
+    if (
+      costUnknown
+      && !window.confirm("该模型需要按 Provider 实际用量结算，提交前无法给出可靠金额。是否继续？")
+    ) {
+      return;
+    }
+    await executeAction(async () => {
+      const run = await request(
+        `/production-shots/${shotDetail.plan.id}/video-runs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            candidate_count: candidateCount,
+            input_mode: "image_to_video",
+            execution_mode: "remote_api",
+            model_alias: videoDraft.modelAlias,
+            resolution: videoDraft.resolution,
+            duration_seconds: Number.isFinite(durationSeconds)
+              ? durationSeconds
+              : shotDetail.plan.duration_seconds,
+            generation_intent: hasPriorCandidate ? "new_variation" : "standard",
+            allow_unknown_cost: costUnknown,
+          }),
+        },
+      );
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      await onProjectsChanged();
+      await onNotificationsChanged?.();
+      onNotice(`分镜 ${shotDetail.plan.index} 的 ${selectedModel?.label || "视频"} 任务已加入队列`);
+    });
+  }
+
+  async function cancelVideoGeneration(runId) {
+    if (!runId) return;
+    await executeAction(async () => {
+      const run = await request(`/generation-runs/${runId}/cancel`, {
+        method: "POST",
+      });
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      await onNotificationsChanged?.();
+      onNotice("视频生成任务已取消");
+    });
+  }
+
+  async function retryVideoGeneration(runId) {
+    if (!runId) return;
+    await executeAction(async () => {
+      const run = await request(`/generation-runs/${runId}/retry`, {
+        method: "POST",
+      });
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      await onProjectsChanged();
+      await onNotificationsChanged?.();
+      onNotice("视频重试任务已加入队列");
+    });
+  }
+
+  async function selectVideoCandidate(candidateId) {
+    await executeAction(async () => {
+      await request(`/generation-candidates/${candidateId}/select`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      onNotice("视频候选已选择，请继续人工确认");
+    });
+  }
+
+  async function approveVideoCandidate(candidateId) {
+    await executeAction(async () => {
+      await request(`/generation-candidates/${candidateId}/approvals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          decision: "approved",
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      onNotice("当前分镜视频已确认采用");
+    });
+  }
+
+  async function rejectVideoCandidate(candidateId, reason) {
+    await executeAction(async () => {
+      await request(`/generation-candidates/${candidateId}/approvals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          decision: "rejected",
+          reason,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      onNotice("视频候选已退回，可调整提示词后重新生成");
+    });
+  }
+
+  async function revokeVideoApproval() {
+    if (!shotDetail?.plan || shotDetail.plan.video_status !== "approved") return;
+    const hasDownstreamImpact = ["editing", "export"].includes(
+      detail.project.active_step,
+    );
+    if (
+      hasDownstreamImpact
+      && !window.confirm("取消采用会使剪辑或导出结果过期。是否继续？")
+    ) {
+      return;
+    }
+    await executeAction(async () => {
+      await request(
+        `/production-shots/${shotDetail.plan.id}/video-approval/revoke`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            reason: "用户重新打开视频审核",
+            confirm_downstream_stale: hasDownstreamImpact,
+          }),
+        },
+      );
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      setActiveSection("shot_videos");
+      onNotice(`已取消采用分镜 ${shotDetail.plan.index} 的视频`);
+    });
+  }
+
+  async function advanceToEditing() {
+    await executeAction(async () => {
+      await request(`/productions/${detail.project.id}/advance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          target_step: "editing",
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      onNotice("分段视频阶段已完成；剪辑合成将在后续 Batch 开放");
     });
   }
 
   function openCreate() {
     setCreateDraft({
       ...EMPTY_CREATE_DRAFT,
+      ...sourceProductionDefaults,
       name: defaultProductionName(sourceTitle),
     });
     setActionError("");
@@ -1803,7 +2140,17 @@ export function ProductionHub({
     return (
       <>
         <ProductionList error={error} loading={loading} onCreate={openCreate} onOpen={openProject} projects={projects} />
-        {createOpen && <CreateProjectDialog busy={busy} draft={createDraft} error={actionError} onClose={() => setCreateOpen(false)} onSubmit={submitCreate} setDraft={setCreateDraft} />}
+        {createOpen && (
+          <CreateProjectDialog
+            busy={busy}
+            draft={createDraft}
+            error={actionError}
+            onClose={() => setCreateOpen(false)}
+            onSubmit={submitCreate}
+            setDraft={setCreateDraft}
+            sourceDefaultRatio={sourceProductionDefaults.outputAspectRatio}
+          />
+        )}
       </>
     );
   }
@@ -1830,12 +2177,14 @@ export function ProductionHub({
             {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
             {activeSection === "shot_images" && (
               <ShotImageWorkspace
-                advanced={detail.project.active_step === "shot_videos"}
+                advanced={["shot_videos", "editing", "export"].includes(
+                  detail.project.active_step,
+                )}
                 assets={assets}
                 busy={busy}
                 draft={shotDraft}
                 error={actionError}
-                gate={gate}
+                gate={detail.project.active_step === "shot_images" ? gate : imageGate}
                 generationCandidateCount={generationCandidateCount}
                 generationEngine={generationEngine}
                 generationInputMode={generationInputMode}
@@ -1856,6 +2205,7 @@ export function ProductionHub({
                 onSelectCandidate={selectCandidate}
                 onSelectKeyframe={selectSourceKeyframe}
                 onSelectShot={selectShot}
+                project={detail.project}
                 rejectReason={rejectReason}
                 resolveUrl={resolveUrl}
                 selectedShotId={selectedShotId}
@@ -1869,6 +2219,33 @@ export function ProductionHub({
                 sourceVideoUrl={resolveUrl(
                   "/api/v1/productions/" + detail.project.id + "/source-video",
                 )}
+              />
+            )}
+            {activeSection === "shot_videos" && (
+              <ShotVideoWorkspace
+                advanced={["editing", "export"].includes(detail.project.active_step)}
+                busy={busy}
+                error={actionError}
+                gate={gate}
+                initialCandidateId={focusedCandidateId}
+                onAdvance={advanceToEditing}
+                onApprove={approveVideoCandidate}
+                onCancelRun={cancelVideoGeneration}
+                onGenerate={generateVideoCandidates}
+                onReject={rejectVideoCandidate}
+                onRetryRun={retryVideoGeneration}
+                onRevokeApproval={revokeVideoApproval}
+                onSave={saveVideoPrompt}
+                onSelectCandidate={selectVideoCandidate}
+                onSelectShot={selectShot}
+                project={detail.project}
+                resolveUrl={resolveUrl}
+                selectedShotId={selectedShotId}
+                setVideoDraft={setVideoDraft}
+                shotDetail={shotDetail}
+                shots={shots}
+                videoDraft={videoDraft}
+                videoGenerationSettings={videoGenerationSettings}
               />
             )}
             {activeSection === "revisions" && <RevisionHistory busy={busy} currentRevisionId={detail.project.current_revision_id} onBranch={openBranch} onPreview={openRevisionPreview} revisions={revisions} />}

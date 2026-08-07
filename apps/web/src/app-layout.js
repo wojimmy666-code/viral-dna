@@ -2,6 +2,15 @@ export function isRecordDetailView(activeNav, report) {
   return activeNav === "workspace" && Boolean(report);
 }
 
+export function isProductionDetailView(activeNav, report, workspaceMode) {
+  return isRecordDetailView(activeNav, report) && workspaceMode === "production";
+}
+
+export function shouldShowTopbarCreate(activeNav, report) {
+  return !["assets", "history"].includes(activeNav)
+    && !isRecordDetailView(activeNav, report);
+}
+
 export function buildRecordBreadcrumb(workspaceMode, projectName = "") {
   const items = [
     { id: "workspace", label: "工作台", current: false },

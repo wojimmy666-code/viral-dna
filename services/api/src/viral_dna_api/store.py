@@ -31,6 +31,7 @@ from .models import (
     ReplacementVersion,
     ShotPlan,
     Video,
+    VideoProviderTask,
     VideoStatus,
 )
 from .storage_objects import ObjectReplica, StorageObject
@@ -63,6 +64,7 @@ class InMemoryStore:
         self.reference_bindings: dict[UUID, ReferenceBinding] = {}
         self.generation_runs: dict[UUID, GenerationRun] = {}
         self.generation_candidates: dict[UUID, GenerationCandidate] = {}
+        self.video_provider_tasks: dict[UUID, VideoProviderTask] = {}
         self.approval_events: dict[UUID, ApprovalEvent] = {}
         self.storage_objects: dict[UUID, StorageObject] = {}
         self.object_replicas: dict[UUID, ObjectReplica] = {}
@@ -472,6 +474,40 @@ class InMemoryStore:
                 if candidate.generation_run_id == generation_run_id
             ),
             key=lambda candidate: candidate.ordinal,
+        )
+
+    async def list_generation_candidates_by_run_ids(
+        self,
+        generation_run_ids: set[UUID],
+    ) -> list[GenerationCandidate]:
+        return sorted(
+            (
+                candidate
+                for candidate in self.generation_candidates.values()
+                if candidate.generation_run_id in generation_run_ids
+            ),
+            key=lambda candidate: (candidate.created_at, candidate.ordinal),
+        )
+
+    async def save_video_provider_task(self, task: VideoProviderTask) -> VideoProviderTask:
+        async with self._lock:
+            self.video_provider_tasks[task.id] = task
+        return task
+
+    async def get_video_provider_task(self, task_id: UUID) -> VideoProviderTask | None:
+        return self.video_provider_tasks.get(task_id)
+
+    async def list_video_provider_tasks(
+        self,
+        generation_run_id: UUID,
+    ) -> list[VideoProviderTask]:
+        return sorted(
+            (
+                item
+                for item in self.video_provider_tasks.values()
+                if item.generation_run_id == generation_run_id
+            ),
+            key=lambda item: item.ordinal,
         )
 
     async def save_approval_event(self, event: ApprovalEvent) -> ApprovalEvent:

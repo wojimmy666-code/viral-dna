@@ -242,6 +242,10 @@ async def _run_command(args: list[str], *, timeout_seconds: float) -> tuple[str,
 
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+    except asyncio.CancelledError:
+        process.kill()
+        await process.communicate()
+        raise
     except TimeoutError as exc:
         process.kill()
         await process.communicate()
@@ -544,6 +548,68 @@ class MediaProcessor:
             raise MediaProcessingError(
                 "frame_extract_failed",
                 "没有从源视频提取到关键帧",
+            )
+
+    async def create_still_video(
+        self,
+        image_path: Path,
+        output_path: Path,
+        *,
+        duration_seconds: float,
+        width: int,
+        height: int,
+    ) -> None:
+        if duration_seconds <= 0:
+            raise MediaProcessingError(
+                "video_duration_invalid",
+                "视频时长必须大于 0",
+            )
+        target_width = max(2, int(width) // 2 * 2)
+        target_height = max(2, int(height) // 2 * 2)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        video_filter = (
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            "setsar=1,format=yuv420p"
+        )
+        await _run_command(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-loop",
+                "1",
+                "-framerate",
+                "25",
+                "-i",
+                str(image_path),
+                "-t",
+                f"{duration_seconds:.3f}",
+                "-vf",
+                video_filter,
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "24",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ],
+            timeout_seconds=max(120, min(600, duration_seconds * 20)),
+        )
+        valid_output = await asyncio.to_thread(
+            lambda: output_path.is_file() and output_path.stat().st_size > 0
+        )
+        if not valid_output:
+            raise MediaProcessingError(
+                "video_render_failed",
+                "没有生成可播放的视频文件",
             )
 
     async def detect_scene_boundaries(

@@ -71,6 +71,7 @@ from .models import (
     ShotKeyframeSelectRequest,
     ShotLifecycleStatus,
     ShotLifecycleUpdate,
+    ShotMediaPreview,
     ShotPlan,
     ShotPlanBulkUpdate,
     ShotPlanCreate,
@@ -81,9 +82,17 @@ from .models import (
     ShotPlanUpdate,
     ShotSourceFrameApprovalRequest,
     ShotSourceKind,
+    ShotVideoApprovalRevokeRequest,
     Video,
+    VideoGenerationCreate,
+    VideoGenerationInputMode,
+    VideoProviderTask,
+    VideoProviderTaskResponse,
+    VideoProviderTaskStatus,
     WorkflowItemStatus,
 )
+from .notifications import NotificationPublisher
+from .video_generation import VideoGenerationGateway, VideoGenerationGatewayError
 from .workspace import WorkspaceError, WorkspaceManager
 
 MAX_REFERENCE_IMAGE_BYTES = 15 * 1024 * 1024
@@ -112,8 +121,11 @@ _DEFAULT_ROLE_BY_REFERENCE_TYPE = {
 
 def _is_simulated_image_run(run: GenerationRun) -> bool:
     return (
-        run.execution_mode == ImageExecutionMode.SIMULATED
-        or run.provider.strip().casefold() == "simulated"
+        run.kind == GenerationKind.IMAGE
+        and (
+            run.execution_mode == ImageExecutionMode.SIMULATED
+            or run.provider.strip().casefold() == "simulated"
+        )
     )
 
 
@@ -219,6 +231,26 @@ class ProductionRepository(Protocol):
         self,
         generation_run_id: UUID,
     ) -> list[GenerationCandidate]: ...
+
+    async def list_generation_candidates_by_run_ids(
+        self,
+        generation_run_ids: set[UUID],
+    ) -> list[GenerationCandidate]: ...
+
+    async def save_video_provider_task(
+        self,
+        task: VideoProviderTask,
+    ) -> VideoProviderTask: ...
+
+    async def get_video_provider_task(
+        self,
+        task_id: UUID,
+    ) -> VideoProviderTask | None: ...
+
+    async def list_video_provider_tasks(
+        self,
+        generation_run_id: UUID,
+    ) -> list[VideoProviderTask]: ...
 
     async def list_approval_events(
         self,
@@ -375,6 +407,41 @@ def _output_settings(
     return ratio, width, height
 
 
+_SUPPORTED_OUTPUT_RATIOS = ("9:16", "16:9", "1:1", "4:5")
+
+
+def _default_output_ratio(
+    width: int | None,
+    height: int | None,
+    fallback: str,
+) -> str:
+    if not width or not height or width <= 0 or height <= 0:
+        return fallback
+    source_ratio = width / height
+
+    def orientation(value: float) -> str:
+        if abs(1 - value) <= 0.06:
+            return "square"
+        return "landscape" if value > 1 else "portrait"
+
+    source_orientation = orientation(source_ratio)
+    ranked: list[tuple[int, int, int, str]] = []
+    for index, candidate in enumerate(_SUPPORTED_OUTPUT_RATIOS):
+        candidate_width, candidate_height = (
+            int(part) for part in candidate.split(":")
+        )
+        candidate_ratio = candidate_width / candidate_height
+        ranked.append(
+            (
+                round(abs(math.log(source_ratio / candidate_ratio)) * 1_000_000_000_000),
+                0 if orientation(candidate_ratio) == source_orientation else 1,
+                index,
+                candidate,
+            )
+        )
+    return min(ranked)[3]
+
+
 def inspect_reference_image(payload: bytes, declared_mime_type: str | None) -> ReferenceImageInfo:
     if not payload:
         raise _fail(422, "empty_reference_image", "参考图片不能为空")
@@ -456,15 +523,22 @@ class ProductionService:
         image_gateway: ImageGenerationGateway | None = None,
         media_processor: MediaProcessor | None = None,
         project_assets: ProjectAssetBridge | None = None,
+        video_gateway: VideoGenerationGateway | None = None,
+        notification_publisher: NotificationPublisher | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
         self.project_assets = project_assets
+        self.media_processor = media_processor or MediaProcessor()
         self.image_gateway = image_gateway or ImageGenerationGateway(
             workspace,
             repository=repository,
         )
-        self.media_processor = media_processor or MediaProcessor()
+        self.video_gateway = video_gateway or VideoGenerationGateway(
+            workspace,
+            media_processor=self.media_processor,
+        )
+        self.notification_publisher = notification_publisher
         self._lock_guard = asyncio.Lock()
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -473,6 +547,115 @@ class ProductionService:
     async def _project_lock(self, project_id: UUID) -> asyncio.Lock:
         async with self._lock_guard:
             return self._project_locks.setdefault(project_id, asyncio.Lock())
+
+    async def _notify_generation_run(self, run: GenerationRun) -> None:
+        """Publish a safe account notification without affecting generation results."""
+        if self.notification_publisher is None:
+            return
+        if run.status not in {
+            ProductionRunStatus.QUEUED,
+            ProductionRunStatus.RUNNING,
+            ProductionRunStatus.COMPLETED,
+            ProductionRunStatus.CACHED,
+            ProductionRunStatus.FAILED,
+            ProductionRunStatus.BLOCKED,
+            ProductionRunStatus.CANCELLED,
+        }:
+            return
+        try:
+            project = await self._require_project(run.project_id)
+            plan = await self._require_shot(run.shot_plan_id)
+            candidates = await self.repository.list_generation_candidates(run.id)
+            candidate = next(
+                (
+                    item
+                    for item in candidates
+                    if item.status
+                    in {
+                        GenerationCandidateStatus.READY,
+                        GenerationCandidateStatus.SELECTED,
+                    }
+                ),
+                candidates[0] if candidates else None,
+            )
+            kind_label = "视频" if run.kind == GenerationKind.VIDEO else "图片"
+            category = (
+                "video_generation"
+                if run.kind == GenerationKind.VIDEO
+                else "image_generation"
+            )
+            model_label = run.model_display_name or run.model_alias or run.model
+            action_payload = {
+                "record_id": str(project.record_id),
+                "project_id": str(project.id),
+                "shot_plan_id": str(plan.id),
+                "step": "shot_videos" if run.kind == GenerationKind.VIDEO else "shot_images",
+                "run_id": str(run.id),
+            }
+            if candidate is not None:
+                action_payload["candidate_id"] = str(candidate.id)
+
+            if run.status in {ProductionRunStatus.QUEUED, ProductionRunStatus.RUNNING}:
+                notification_status = "in_progress"
+                level = "info"
+                title = f"分镜 {plan.index} 的{kind_label}生成已开始"
+                message = f"{model_label} 正在处理，完成后会在这里通知你。"
+                action_label = "查看进度"
+            elif run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}:
+                notification_status = "succeeded"
+                level = "success"
+                title = f"分镜 {plan.index} 的{kind_label}候选已生成"
+                if run.actual_cost_known:
+                    cost_text = f"实际 ¥{run.actual_cost_micros / 1_000_000:.2f}"
+                elif run.cost_estimate_known:
+                    cost_text = f"预计 ¥{run.estimated_cost_micros / 1_000_000:.2f}"
+                else:
+                    cost_text = "费用待 Provider 回传"
+                message = f"{model_label} · {len(candidates)} 个候选 · {cost_text}"
+                action_label = "查看候选"
+            elif run.status in {ProductionRunStatus.FAILED, ProductionRunStatus.BLOCKED}:
+                notification_status = "failed"
+                level = "error"
+                if run.error_code == "video_provider_balance_insufficient":
+                    title = "视频生成失败：API 余额不足"
+                    message = "请充值对应 Provider 账户，或切换到其他已配置的视频模型。"
+                    action_label = "检查模型设置"
+                    await self.notification_publisher.publish(
+                        category=category,
+                        level=level,
+                        status=notification_status,
+                        title=title,
+                        message=message,
+                        event_key=f"generation:{run.id}",
+                        action_kind="model_settings",
+                        action_label=action_label,
+                        action_payload=action_payload,
+                    )
+                    return
+                title = f"分镜 {plan.index} 的{kind_label}生成失败"
+                message = "请打开对应分镜查看错误详情，调整设置后重试。"
+                action_label = "查看分镜"
+            else:
+                notification_status = "cancelled"
+                level = "warning"
+                title = f"分镜 {plan.index} 的{kind_label}生成已取消"
+                message = "本次任务未产生可审核候选。"
+                action_label = "返回分镜"
+
+            await self.notification_publisher.publish(
+                category=category,
+                level=level,
+                status=notification_status,
+                title=title,
+                message=message,
+                event_key=f"generation:{run.id}",
+                action_kind="production_shot",
+                action_label=action_label,
+                action_payload=action_payload,
+            )
+        except Exception:
+            # Notification delivery is secondary and must never change generation state.
+            return
 
     async def create_project(
         self,
@@ -490,7 +673,11 @@ class ProductionService:
         if video is None:
             raise _fail(409, "video_missing", "分析记录缺少视频信息")
 
-        ratio_value = payload.output_aspect_ratio or report.prompt_package.aspect_ratio
+        ratio_value = payload.output_aspect_ratio or _default_output_ratio(
+            video.width,
+            video.height,
+            report.prompt_package.aspect_ratio,
+        )
         ratio, width, height = _output_settings(
             ratio_value,
             payload.output_width,
@@ -1305,16 +1492,103 @@ class ProductionService:
             raise _fail(404, "reference_file_missing", "参考资产文件不存在")
         return filesystem_candidate, "image/webp" if thumbnail else asset.mime_type
 
+    @staticmethod
+    def _shot_media_preview(
+        plan: ShotPlan,
+        kind: GenerationKind,
+        candidates: list[GenerationCandidate],
+    ) -> ShotMediaPreview | None:
+        approved_id = (
+            plan.approved_image_candidate_id
+            if kind == GenerationKind.IMAGE
+            else plan.approved_video_candidate_id
+        )
+        available = [
+            candidate
+            for candidate in candidates
+            if candidate.kind == kind
+            and candidate.thumbnail_relative_path is not None
+            and candidate.status
+            not in {GenerationCandidateStatus.REJECTED, GenerationCandidateStatus.ARCHIVED}
+        ]
+        if not available:
+            return None
+
+        approved = next(
+            (candidate for candidate in available if candidate.id == approved_id),
+            None,
+        )
+        selected = [
+            candidate
+            for candidate in available
+            if candidate.status == GenerationCandidateStatus.SELECTED
+        ]
+        candidate = approved or max(
+            selected or available,
+            key=lambda item: (item.created_at, item.ordinal),
+        )
+        stage = kind.value
+        preview_kind = (
+            f"approved_{stage}"
+            if approved is not None
+            else f"selected_{stage}"
+            if candidate.status == GenerationCandidateStatus.SELECTED
+            else f"candidate_{stage}"
+        )
+        return ShotMediaPreview(
+            thumbnail_url=f"/api/v1/generation-candidates/{candidate.id}/thumbnail",
+            kind=preview_kind,
+            candidate_id=candidate.id,
+            updated_at=candidate.created_at,
+        )
+
+    async def _shot_media_previews(
+        self,
+        project_id: UUID,
+        plans: list[ShotPlan],
+    ) -> dict[UUID, tuple[ShotMediaPreview | None, ShotMediaPreview | None]]:
+        runs = await self.repository.list_generation_runs(project_id)
+        run_by_id = {run.id: run for run in runs}
+        candidates = await self.repository.list_generation_candidates_by_run_ids(
+            set(run_by_id)
+        )
+        candidates_by_shot: dict[UUID, list[GenerationCandidate]] = {
+            plan.id: [] for plan in plans
+        }
+        for candidate in candidates:
+            run = run_by_id.get(candidate.generation_run_id)
+            if run is not None and run.shot_plan_id in candidates_by_shot:
+                candidates_by_shot[run.shot_plan_id].append(candidate)
+
+        return {
+            plan.id: (
+                self._shot_media_preview(
+                    plan,
+                    GenerationKind.IMAGE,
+                    candidates_by_shot[plan.id],
+                ),
+                self._shot_media_preview(
+                    plan,
+                    GenerationKind.VIDEO,
+                    candidates_by_shot[plan.id],
+                ),
+            )
+            for plan in plans
+        }
+
     async def list_shots(self, project_id: UUID) -> list[ShotPlanResponse]:
         project = await self._require_project(project_id)
         project, plans = await self._ensure_project_shots(project)
         if project.current_revision_id is None:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
+        previews = await self._shot_media_previews(project.id, plans)
         return [
             ShotPlanResponse(
                 plan=plan,
                 reference_bindings=await self.repository.list_reference_bindings(plan.id),
                 current_revision_id=project.current_revision_id,
+                image_preview=previews[plan.id][0],
+                video_preview=previews[plan.id][1],
             )
             for plan in plans
         ]
@@ -1888,10 +2162,15 @@ class ProductionService:
                 video_changed=video_changed,
             )
             next_plans = [updated if item.id == updated.id else item for item in plans]
+            next_active_step = project.active_step
+            if image_changed:
+                next_active_step = ProductionStep.SHOT_IMAGES
+            elif video_changed:
+                next_active_step = ProductionStep.SHOT_VIDEOS
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": next_active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -2390,6 +2669,243 @@ class ProductionService:
         self._schedule_image_run(run.id)
         return await self._run_response(run)
 
+    async def create_video_run(
+        self,
+        shot_plan_id: UUID,
+        payload: VideoGenerationCreate,
+    ) -> GenerationRunResponse:
+        run = await self._enqueue_video_run(shot_plan_id, payload)
+        self._schedule_video_run(run.id)
+        return await self._run_response(run)
+
+    async def _enqueue_video_run(
+        self,
+        shot_plan_id: UUID,
+        payload: VideoGenerationCreate,
+        *,
+        retry_of_run_id: UUID | None = None,
+        retry_count: int = 0,
+    ) -> GenerationRun:
+        plan = await self._require_shot(shot_plan_id)
+        self._ensure_shot_active(plan)
+        project = await self._require_project(plan.project_id)
+        self._require_expected_revision(project, payload.expected_revision_id)
+        if project.active_step != ProductionStep.SHOT_VIDEOS:
+            raise _fail(
+                409,
+                "video_stage_not_active",
+                "请先完成全部必需分镜图片并进入分段视频阶段",
+            )
+        if not plan.video_prompt.strip():
+            raise _fail(409, "video_prompt_required", "请先填写视频提示词")
+        if not await self._has_valid_approved_image_output(project, plan):
+            raise _fail(
+                409,
+                "approved_image_required",
+                "当前分镜缺少有效的已确认图片",
+            )
+        if plan.video_status == WorkflowItemStatus.APPROVED:
+            raise _fail(
+                409,
+                "video_already_approved",
+                "已确认视频需要先取消采用再生成新候选",
+            )
+        if payload.generation_intent == "new_variation" and payload.seed is None:
+            payload = payload.model_copy(
+                update={"seed": secrets.randbelow(2_147_483_648)}
+            )
+        try:
+            execution_mode = ImageExecutionMode(payload.execution_mode)
+        except ValueError as exc:
+            raise _fail(422, "video_execution_mode_invalid", "视频生成执行模式无效") from exc
+        validate_mode = getattr(self.video_gateway, "validate_execution_mode", None)
+        if callable(validate_mode):
+            try:
+                validate_mode(execution_mode)
+            except VideoGenerationGatewayError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+
+        duration_seconds = round(payload.duration_seconds or plan.duration_seconds, 3)
+        try:
+            identity, resolved = self.video_gateway.resolve_identity(
+                execution_mode=execution_mode.value,
+                model_alias=payload.model_alias,
+                duration_seconds=duration_seconds,
+                resolution=payload.resolution,
+                candidate_count=payload.candidate_count,
+                allow_unknown_cost=payload.allow_unknown_cost,
+            )
+        except VideoGenerationGatewayError as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+        payload = payload.model_copy(
+            update={
+                "duration_seconds": duration_seconds,
+                "model_alias": identity.model_alias,
+                "resolution": resolved.resolution if resolved is not None else payload.resolution,
+            }
+        )
+
+        active_statuses = {
+            ProductionRunStatus.QUEUED,
+            ProductionRunStatus.RUNNING,
+            ProductionRunStatus.CANCELLATION_REQUESTED,
+        }
+        existing_runs = await self.repository.list_generation_runs(project.id, plan.id)
+        if any(
+            item.kind == GenerationKind.VIDEO and item.status in active_statuses
+            for item in existing_runs
+        ):
+            raise _fail(409, "generation_already_running", "该分镜已有视频生成任务在执行")
+
+        run_id = uuid4()
+        request_payload = payload.model_dump(mode="json")
+        queue_root = (
+            self.workspace.production_shot_root(project.record_id, project.id, plan.id)
+            / "videos"
+            / str(run_id)
+        )
+        queue_path = queue_root / "queue.json"
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                request_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        await asyncio.to_thread(
+            self._write_json_atomic,
+            queue_path,
+            {
+                "schema_version": "viral-dna-video-job/v1",
+                "run_id": str(run_id),
+                "shot_plan_id": str(plan.id),
+                "request": request_payload,
+                "retry_of_run_id": str(retry_of_run_id) if retry_of_run_id else None,
+                "retry_count": retry_count,
+            },
+        )
+        now = utc_now()
+        run = GenerationRun(
+            id=run_id,
+            project_id=project.id,
+            shot_plan_id=plan.id,
+            revision_id=payload.expected_revision_id,
+            kind=GenerationKind.VIDEO,
+            input_mode=VideoGenerationInputMode.IMAGE_TO_VIDEO,
+            provider=identity.provider,
+            model=identity.model,
+            model_snapshot=identity.model_snapshot,
+            model_alias=identity.model_alias,
+            model_display_name=identity.model_display_name,
+            prompt_version="shot-video-v1",
+            schema_version="viral-dna-video-job/v1",
+            pricing_version=identity.pricing_version,
+            request_fingerprint=fingerprint,
+            input_snapshot_relative_path=self.workspace.relative(queue_path),
+            execution_mode=execution_mode,
+            adapter_id=identity.adapter_id,
+            adapter_version=identity.adapter_version,
+            protocol_version=identity.protocol_version,
+            capability_snapshot=identity.capability.model_dump(mode="json"),
+            execution_summary=identity.execution_summary,
+            cost_source=identity.cost_source,
+            cost_estimate_known=identity.cost_estimate_known,
+            actual_cost_known=False,
+            cost_currency="CNY",
+            pricing_snapshot=identity.pricing_snapshot,
+            request_payload=request_payload,
+            retry_of_run_id=retry_of_run_id,
+            retry_count=retry_count,
+            status=ProductionRunStatus.QUEUED,
+            estimated_cost_micros=identity.estimated_cost_micros,
+            created_at=now,
+            updated_at=now,
+        )
+        await self.repository.save_generation_run(run)
+        await self._notify_generation_run(run)
+        if retry_of_run_id is not None:
+            source_tasks = await self.repository.list_video_provider_tasks(retry_of_run_id)
+            for source_task in source_tasks:
+                if not source_task.provider_task_id or source_task.status in {
+                    VideoProviderTaskStatus.FAILED,
+                    VideoProviderTaskStatus.CANCELLED,
+                }:
+                    continue
+                await self.repository.save_video_provider_task(
+                    source_task.model_copy(
+                        update={
+                            "id": uuid4(),
+                            "generation_run_id": run.id,
+                            "project_id": run.project_id,
+                            "shot_plan_id": run.shot_plan_id,
+                            "created_at": now,
+                            "updated_at": now,
+                        }
+                    )
+                )
+        return run
+
+    def _schedule_video_run(self, run_id: UUID) -> None:
+        current = self._generation_tasks.get(run_id)
+        if current is not None and not current.done():
+            return
+        cancellation = Event()
+        self._generation_cancellations[run_id] = cancellation
+        task = asyncio.create_task(
+            self._run_queued_video(run_id, cancellation),
+            name=f"viral-dna-video-{run_id}",
+        )
+        self._generation_tasks[run_id] = task
+
+    async def _run_queued_video(self, run_id: UUID, cancellation: Event) -> None:
+        try:
+            running = await self.repository.claim_generation_run(run_id, utc_now())
+            if running is None:
+                return
+            payload = VideoGenerationCreate.model_validate(running.request_payload)
+            await self._execute_video_run_request(
+                running.shot_plan_id,
+                payload,
+                run_id=running.id,
+                cancellation=cancellation,
+                queued_run=running,
+            )
+        except asyncio.CancelledError:
+            await self._mark_generation_terminal(
+                run_id,
+                ProductionRunStatus.CANCELLED,
+                "generation_cancelled",
+                "视频生成任务已取消",
+            )
+        except ProductionServiceError as exc:
+            if cancellation.is_set() or exc.code == "generation_cancelled":
+                await self._mark_generation_terminal(
+                    run_id,
+                    ProductionRunStatus.CANCELLED,
+                    "generation_cancelled",
+                    "视频生成任务已取消",
+                )
+            else:
+                await self._mark_generation_terminal(
+                    run_id,
+                    ProductionRunStatus.FAILED,
+                    exc.code,
+                    str(exc),
+                )
+        except Exception as exc:
+            await self._mark_generation_terminal(
+                run_id,
+                ProductionRunStatus.FAILED,
+                "generation_worker_failed",
+                str(exc)[:2000],
+            )
+        finally:
+            self._generation_cancellations.pop(run_id, None)
+            current = self._generation_tasks.get(run_id)
+            if current is asyncio.current_task():
+                self._generation_tasks.pop(run_id, None)
+
     async def _enqueue_image_run(
         self,
         shot_plan_id: UUID,
@@ -2490,6 +3006,7 @@ class ProductionService:
             updated_at=now,
         )
         await self.repository.save_generation_run(run)
+        await self._notify_generation_run(run)
         return run
 
     def _schedule_image_run(self, run_id: UUID) -> None:
@@ -2530,7 +3047,7 @@ class ProductionService:
                     run_id,
                     ProductionRunStatus.CANCELLED,
                     "generation_cancelled",
-                    "图片生成任务已取消",
+                    "生成任务已取消",
                 )
             else:
                 await self._mark_generation_terminal(
@@ -2563,6 +3080,8 @@ class ProductionService:
         if run.status in {
             ProductionRunStatus.COMPLETED,
             ProductionRunStatus.CACHED,
+            ProductionRunStatus.FAILED,
+            ProductionRunStatus.BLOCKED,
             ProductionRunStatus.CANCELLED,
         }:
             return run
@@ -2579,6 +3098,7 @@ class ProductionService:
             }
         )
         await self.repository.save_generation_run(updated)
+        await self._notify_generation_run(updated)
         return updated
 
     async def cancel_generation_run(self, run_id: UUID) -> GenerationRunResponse:
@@ -2600,6 +3120,13 @@ class ProductionService:
             }
         )
         await self.repository.save_generation_run(requested)
+        if run.kind == GenerationKind.VIDEO:
+            try:
+                await self.video_gateway.cancel(run_id)
+            except Exception:
+                # Local cancellation must still complete even when an upstream Provider
+                # does not expose cancellation or is temporarily unreachable.
+                pass
         cancellation = self._generation_cancellations.get(run_id)
         if cancellation is not None:
             cancellation.set()
@@ -2627,7 +3154,7 @@ class ProductionService:
                 run_id,
                 ProductionRunStatus.CANCELLED,
                 "generation_cancelled",
-                "图片生成任务已取消",
+                "生成任务已取消",
             )
         return await self.get_generation_run(run_id)
 
@@ -2642,14 +3169,39 @@ class ProductionService:
         project = await self._require_project(source.project_id)
         payload_data = dict(source.request_payload)
         payload_data["expected_revision_id"] = str(project.current_revision_id)
-        payload = ImageGenerationCreate.model_validate(payload_data)
-        run = await self._enqueue_image_run(
-            source.shot_plan_id,
-            payload,
-            retry_of_run_id=source.id,
-            retry_count=source.retry_count + 1,
-        )
-        self._schedule_image_run(run.id)
+        if source.kind == GenerationKind.VIDEO:
+            provider_tasks = await self.repository.list_video_provider_tasks(source.id)
+            if any(
+                not item.provider_task_id
+                and item.status
+                in {
+                    VideoProviderTaskStatus.PENDING_SUBMISSION,
+                    VideoProviderTaskStatus.UNKNOWN,
+                }
+                for item in provider_tasks
+            ):
+                raise _fail(
+                    409,
+                    "video_provider_submission_ambiguous",
+                    "上游提交结果不明确；为避免重复扣费，请先在 Provider 控制台核对任务",
+                )
+            video_payload = VideoGenerationCreate.model_validate(payload_data)
+            run = await self._enqueue_video_run(
+                source.shot_plan_id,
+                video_payload,
+                retry_of_run_id=source.id,
+                retry_count=source.retry_count + 1,
+            )
+            self._schedule_video_run(run.id)
+        else:
+            image_payload = ImageGenerationCreate.model_validate(payload_data)
+            run = await self._enqueue_image_run(
+                source.shot_plan_id,
+                image_payload,
+                retry_of_run_id=source.id,
+                retry_count=source.retry_count + 1,
+            )
+            self._schedule_image_run(run.id)
         return await self._run_response(run)
 
     async def recover_generation_runs(self) -> dict[str, int]:
@@ -2659,7 +3211,10 @@ class ProductionService:
         for project in await self.repository.list_production_projects():
             for run in await self.repository.list_generation_runs(project.id):
                 if run.status == ProductionRunStatus.QUEUED and run.request_payload:
-                    self._schedule_image_run(run.id)
+                    if run.kind == GenerationKind.VIDEO:
+                        self._schedule_video_run(run.id)
+                    else:
+                        self._schedule_image_run(run.id)
                     recovered += 1
                 elif run.status == ProductionRunStatus.CANCELLATION_REQUESTED:
                     await self._mark_generation_terminal(
@@ -2670,13 +3225,40 @@ class ProductionService:
                     )
                     cancelled += 1
                 elif run.status == ProductionRunStatus.RUNNING:
-                    await self._mark_generation_terminal(
-                        run.id,
-                        ProductionRunStatus.FAILED,
-                        "generation_interrupted",
-                        "服务重启导致任务中断，请人工重试以避免重复计费",
+                    provider_tasks = (
+                        await self.repository.list_video_provider_tasks(run.id)
+                        if run.kind == GenerationKind.VIDEO
+                        and run.execution_mode == ImageExecutionMode.REMOTE_API
+                        else []
                     )
-                    interrupted += 1
+                    if provider_tasks and all(
+                        item.provider_task_id
+                        or item.status
+                        in {
+                            VideoProviderTaskStatus.FAILED,
+                            VideoProviderTaskStatus.CANCELLED,
+                        }
+                        for item in provider_tasks
+                    ):
+                        resumed = run.model_copy(
+                            update={
+                                "status": ProductionRunStatus.QUEUED,
+                                "updated_at": utc_now(),
+                                "error_code": None,
+                                "error_message": None,
+                            }
+                        )
+                        await self.repository.save_generation_run(resumed)
+                        self._schedule_video_run(run.id)
+                        recovered += 1
+                    else:
+                        await self._mark_generation_terminal(
+                            run.id,
+                            ProductionRunStatus.FAILED,
+                            "generation_interrupted",
+                            "服务重启导致任务中断，请人工重试以避免重复计费",
+                        )
+                        interrupted += 1
         return {
             "recovered": recovered,
             "interrupted": interrupted,
@@ -2852,6 +3434,157 @@ class ProductionService:
                 generation_runs=[run],
                 generation_candidates=[*prior_candidate_updates, *candidates],
             )
+        await self._notify_generation_run(run)
+        return await self.get_generation_run(run.id)
+
+    async def _execute_video_run_request(
+        self,
+        shot_plan_id: UUID,
+        payload: VideoGenerationCreate,
+        *,
+        run_id: UUID,
+        cancellation: Event,
+        queued_run: GenerationRun,
+    ) -> GenerationRunResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            if project.active_step != ProductionStep.SHOT_VIDEOS:
+                raise _fail(
+                    409,
+                    "video_stage_not_active",
+                    "当前方案不在分段视频阶段",
+                )
+            if not plan.video_prompt.strip():
+                raise _fail(409, "video_prompt_required", "请先填写视频提示词")
+            if not await self._has_valid_approved_image_output(project, plan):
+                raise _fail(
+                    409,
+                    "approved_image_required",
+                    "当前分镜缺少有效的已确认图片",
+                )
+            approved_image_id = plan.approved_image_candidate_id
+            if approved_image_id is None:
+                raise _fail(409, "approved_image_required", "当前分镜缺少已确认图片")
+            approved_image = await self._require_candidate(approved_image_id)
+            approved_image_path, _ = await self.resolve_candidate_content(
+                approved_image.id
+            )
+            duration_seconds = round(
+                payload.duration_seconds or plan.duration_seconds,
+                3,
+            )
+            try:
+                run, candidates = await self.video_gateway.generate(
+                    project,
+                    plan,
+                    payload.expected_revision_id,
+                    approved_image.id,
+                    approved_image_path,
+                    approved_image.sha256,
+                    approved_image_relative_path=approved_image.relative_path,
+                    candidate_count=payload.candidate_count,
+                    duration_seconds=duration_seconds,
+                    execution_mode=payload.execution_mode,
+                    model_alias=payload.model_alias,
+                    resolution=payload.resolution,
+                    allow_unknown_cost=payload.allow_unknown_cost,
+                    seed=payload.seed,
+                    run_id=run_id,
+                    cancel_event=cancellation,
+                )
+            except VideoGenerationGatewayError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+
+            now = utc_now()
+            run = run.model_copy(
+                update={
+                    "request_payload": queued_run.request_payload,
+                    "retry_of_run_id": queued_run.retry_of_run_id,
+                    "retry_count": queued_run.retry_count,
+                    "created_at": queued_run.created_at,
+                    "started_at": queued_run.started_at,
+                    "updated_at": now,
+                    "last_heartbeat_at": now,
+                }
+            )
+            if cancellation.is_set() or run.error_code == "generation_cancelled":
+                cancelled = run.model_copy(
+                    update={
+                        "status": ProductionRunStatus.CANCELLED,
+                        "cancellation_requested": True,
+                        "error_code": "generation_cancelled",
+                        "error_message": "视频生成任务已取消",
+                        "completed_at": now,
+                    }
+                )
+                await self.repository.save_generation_run(cancelled)
+                return await self._run_response(cancelled)
+
+            prior_candidate_updates: list[GenerationCandidate] = []
+            for prior_run in await self.repository.list_generation_runs(
+                project.id,
+                plan.id,
+            ):
+                if prior_run.kind != GenerationKind.VIDEO or prior_run.id == run.id:
+                    continue
+                for prior_candidate in await self.repository.list_generation_candidates(
+                    prior_run.id
+                ):
+                    if prior_candidate.status in {
+                        GenerationCandidateStatus.READY,
+                        GenerationCandidateStatus.SELECTED,
+                    }:
+                        prior_candidate_updates.append(
+                            prior_candidate.model_copy(
+                                update={"status": GenerationCandidateStatus.ARCHIVED}
+                            )
+                        )
+            revision_id = uuid4()
+            updated_plan = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "video_status": (
+                        WorkflowItemStatus.REVIEW_REQUIRED
+                        if candidates
+                        else WorkflowItemStatus.FAILED
+                    ),
+                    "approved_video_candidate_id": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": ProductionStep.SHOT_VIDEOS,
+                    "estimated_cost_micros": (
+                        project.estimated_cost_micros + run.estimated_cost_micros
+                    ),
+                    "actual_cost_micros": project.actual_cost_micros + run.actual_cost_micros,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.VIDEO_CANDIDATES_CREATED,
+                f"为分镜 {plan.index} 创建 {len(candidates)} 个视频候选",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_runs=[run],
+                generation_candidates=[*prior_candidate_updates, *candidates],
+            )
+        await self._notify_generation_run(run)
         return await self.get_generation_run(run.id)
 
     async def get_generation_run(self, run_id: UUID) -> GenerationRunResponse:
@@ -2874,7 +3607,9 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(run.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if _is_simulated_image_run(run):
+            if candidate.kind != run.kind:
+                raise _fail(409, "candidate_kind_mismatch", "候选类型与生成任务不匹配")
+            if run.kind == GenerationKind.IMAGE and _is_simulated_image_run(run):
                 raise _fail(
                     409,
                     "simulated_candidate_forbidden",
@@ -2885,12 +3620,21 @@ class ProductionService:
                 GenerationCandidateStatus.ARCHIVED,
             }:
                 raise _fail(409, "candidate_unavailable", "该候选已退回或归档")
-            if plan.image_status == WorkflowItemStatus.STALE:
-                raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
-            shot_runs = await self.repository.list_generation_runs(
-                project.id,
-                plan.id,
+            target_status = (
+                plan.image_status
+                if run.kind == GenerationKind.IMAGE
+                else plan.video_status
             )
+            if target_status == WorkflowItemStatus.STALE:
+                raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
+            shot_runs = [
+                item
+                for item in await self.repository.list_generation_runs(
+                    project.id,
+                    plan.id,
+                )
+                if item.kind == run.kind
+            ]
             if not shot_runs or shot_runs[-1].id != run.id:
                 raise _fail(409, "candidate_superseded", "该候选已被较新的生成任务替代")
 
@@ -2915,11 +3659,26 @@ class ProductionService:
             ]
             selected = next(item for item in updated_candidates if item.id == candidate.id)
             revision_id = uuid4()
+            if run.kind == GenerationKind.IMAGE:
+                plan_updates = {
+                    "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                    "approved_image_candidate_id": None,
+                }
+                change_kind = ProductionChangeKind.IMAGE_CANDIDATE_SELECTED
+                summary = f"选择分镜 {plan.index} 的图片候选 {candidate.ordinal}"
+            else:
+                if project.active_step != ProductionStep.SHOT_VIDEOS:
+                    raise _fail(409, "video_stage_not_active", "当前方案不在分段视频阶段")
+                plan_updates = {
+                    "video_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                    "approved_video_candidate_id": None,
+                }
+                change_kind = ProductionChangeKind.VIDEO_CANDIDATE_SELECTED
+                summary = f"选择分镜 {plan.index} 的视频候选 {candidate.ordinal}"
             updated_plan = plan.model_copy(
                 update={
                     "revision_id": revision_id,
-                    "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
-                    "approved_image_candidate_id": None,
+                    **plan_updates,
                     "updated_at": utc_now(),
                 }
             )
@@ -2928,8 +3687,8 @@ class ProductionService:
             next_project = project.model_copy(update={"updated_at": utc_now()})
             next_project, revision = await self._prepare_revision(
                 next_project,
-                ProductionChangeKind.IMAGE_CANDIDATE_SELECTED,
-                f"选择分镜 {plan.index} 的候选 {candidate.ordinal}",
+                change_kind,
+                summary,
                 revision_id=revision_id,
                 shot_plans=next_plans,
             )
@@ -2963,19 +3722,32 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(run.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if _is_simulated_image_run(run):
+            if candidate.kind != run.kind:
+                raise _fail(409, "candidate_kind_mismatch", "候选类型与生成任务不匹配")
+            if run.kind == GenerationKind.IMAGE and _is_simulated_image_run(run):
                 raise _fail(
                     409,
                     "simulated_candidate_forbidden",
                     "模拟占位候选不能确认，请使用真实模型生成或直接采用源关键帧",
                 )
-            if candidate.kind != GenerationKind.IMAGE:
-                raise _fail(409, "candidate_kind_mismatch", "当前阶段只能审批图片候选")
-            if plan.image_status == WorkflowItemStatus.APPROVED:
+            target_status = (
+                plan.image_status
+                if run.kind == GenerationKind.IMAGE
+                else plan.video_status
+            )
+            if target_status == WorkflowItemStatus.APPROVED:
                 raise _fail(
                     409,
-                    "image_already_approved",
-                    "该分镜图片已审批，如需修改请先调整分镜输入",
+                    (
+                        "image_already_approved"
+                        if run.kind == GenerationKind.IMAGE
+                        else "video_already_approved"
+                    ),
+                    (
+                        "该分镜图片已审批，如需修改请先调整分镜输入"
+                        if run.kind == GenerationKind.IMAGE
+                        else "该分镜视频已审批，如需修改请先取消采用"
+                    ),
                 )
             if (
                 payload.decision == ApprovalDecision.APPROVED
@@ -2984,12 +3756,16 @@ class ProductionService:
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
             if candidate.status == GenerationCandidateStatus.ARCHIVED:
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
-            if plan.image_status == WorkflowItemStatus.STALE:
+            if target_status == WorkflowItemStatus.STALE:
                 raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
-            shot_runs = await self.repository.list_generation_runs(
-                project.id,
-                plan.id,
-            )
+            shot_runs = [
+                item
+                for item in await self.repository.list_generation_runs(
+                    project.id,
+                    plan.id,
+                )
+                if item.kind == run.kind
+            ]
             if not shot_runs or shot_runs[-1].id != run.id:
                 raise _fail(409, "candidate_superseded", "该候选已被较新的生成任务替代")
 
@@ -2999,7 +3775,7 @@ class ProductionService:
                 revision_id=revision_id,
                 shot_plan_id=plan.id,
                 candidate_id=candidate.id,
-                target_kind=GenerationKind.IMAGE,
+                target_kind=run.kind,
                 decision=payload.decision,
                 reason=(
                     _simplified_text(
@@ -3022,10 +3798,18 @@ class ProductionService:
             )
             if payload.decision == ApprovalDecision.APPROVED:
                 updated_candidate = candidate
-                image_status = WorkflowItemStatus.APPROVED
+                next_status = WorkflowItemStatus.APPROVED
                 approved_candidate_id: UUID | None = candidate.id
-                change_kind = ProductionChangeKind.IMAGE_APPROVED
-                summary = f"审批通过分镜 {plan.index} 图片"
+                change_kind = (
+                    ProductionChangeKind.IMAGE_APPROVED
+                    if run.kind == GenerationKind.IMAGE
+                    else ProductionChangeKind.VIDEO_APPROVED
+                )
+                summary = (
+                    f"审批通过分镜 {plan.index} 图片"
+                    if run.kind == GenerationKind.IMAGE
+                    else f"审批通过分镜 {plan.index} 视频"
+                )
             else:
                 updated_candidate = candidate.model_copy(
                     update={"status": GenerationCandidateStatus.REJECTED}
@@ -3040,19 +3824,40 @@ class ProductionService:
                         GenerationCandidateStatus.SELECTED,
                     }
                 ]
-                image_status = (
+                next_status = (
                     WorkflowItemStatus.REVIEW_REQUIRED
                     if other_candidates
                     else WorkflowItemStatus.READY
                 )
                 approved_candidate_id = None
-                change_kind = ProductionChangeKind.IMAGE_REJECTED
-                summary = f"退回分镜 {plan.index} 图片候选"
+                change_kind = (
+                    ProductionChangeKind.IMAGE_REJECTED
+                    if run.kind == GenerationKind.IMAGE
+                    else ProductionChangeKind.VIDEO_REJECTED
+                )
+                summary = (
+                    f"退回分镜 {plan.index} 图片候选"
+                    if run.kind == GenerationKind.IMAGE
+                    else f"退回分镜 {plan.index} 视频候选"
+                )
+            if run.kind == GenerationKind.IMAGE:
+                plan_updates = {
+                    "image_status": next_status,
+                    "approved_image_candidate_id": approved_candidate_id,
+                }
+                active_step = ProductionStep.SHOT_IMAGES
+            else:
+                if project.active_step != ProductionStep.SHOT_VIDEOS:
+                    raise _fail(409, "video_stage_not_active", "当前方案不在分段视频阶段")
+                plan_updates = {
+                    "video_status": next_status,
+                    "approved_video_candidate_id": approved_candidate_id,
+                }
+                active_step = ProductionStep.SHOT_VIDEOS
             updated_plan = plan.model_copy(
                 update={
                     "revision_id": revision_id,
-                    "image_status": image_status,
-                    "approved_image_candidate_id": approved_candidate_id,
+                    **plan_updates,
                     "updated_at": utc_now(),
                 }
             )
@@ -3061,7 +3866,7 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -3160,7 +3965,7 @@ class ProductionService:
                 revision_id=revision_id,
                 shot_plan_id=plan.id,
                 candidate_id=candidate.id,
-                target_kind=GenerationKind.IMAGE,
+                target_kind=run.kind,
                 decision=ApprovalDecision.REVOKED,
                 reason=(
                     _simplified_text(
@@ -3226,6 +4031,126 @@ class ProductionService:
             approval_event=event,
         )
 
+    async def revoke_video_approval(
+        self,
+        shot_plan_id: UUID,
+        payload: ShotVideoApprovalRevokeRequest,
+    ) -> CandidateActionResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            if plan.video_status != WorkflowItemStatus.APPROVED:
+                raise _fail(409, "video_not_approved", "当前分镜视频尚未采用，无需取消")
+            if plan.approved_video_candidate_id is None:
+                raise _fail(
+                    409,
+                    "approved_video_candidate_missing",
+                    "当前分镜的已采用视频记录不完整，请重新打开方案后重试",
+                )
+            candidate = await self._require_candidate(plan.approved_video_candidate_id)
+            run = await self._require_run(candidate.generation_run_id)
+            if (
+                candidate.kind != GenerationKind.VIDEO
+                or run.kind != GenerationKind.VIDEO
+                or run.project_id != project.id
+                or run.shot_plan_id != plan.id
+            ):
+                raise _fail(
+                    409,
+                    "approved_video_candidate_mismatch",
+                    "当前分镜的已采用视频与候选记录不匹配",
+                )
+            if candidate.status in {
+                GenerationCandidateStatus.REJECTED,
+                GenerationCandidateStatus.ARCHIVED,
+            }:
+                raise _fail(
+                    409,
+                    "approved_video_candidate_unavailable",
+                    "当前已采用视频已归档或退回，无法重新打开审核",
+                )
+            has_downstream_impact = project.active_step in {
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+            if has_downstream_impact and not payload.confirm_downstream_stale:
+                raise _fail(
+                    409,
+                    "downstream_stale_confirmation_required",
+                    "取消采用会使剪辑或导出结果过期，请确认影响后重试",
+                )
+
+            revision_id = uuid4()
+            event = ApprovalEvent(
+                project_id=project.id,
+                revision_id=revision_id,
+                shot_plan_id=plan.id,
+                candidate_id=candidate.id,
+                target_kind=GenerationKind.VIDEO,
+                decision=ApprovalDecision.REVOKED,
+                reason=(
+                    _simplified_text(
+                        payload.reason,
+                        field_name="取消采用说明",
+                        allow_empty=True,
+                        max_length=1000,
+                    )
+                    if payload.reason is not None
+                    else "重新打开视频审核"
+                ),
+            )
+            updated_candidate = (
+                candidate
+                if candidate.status == GenerationCandidateStatus.SELECTED
+                else candidate.model_copy(
+                    update={"status": GenerationCandidateStatus.SELECTED}
+                )
+            )
+            updated_plan = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "video_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                    "approved_video_candidate_id": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": ProductionStep.SHOT_VIDEOS,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.VIDEO_APPROVAL_REVOKED,
+                f"取消采用分镜 {plan.index} 视频，重新打开视频审核",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=[updated_candidate],
+                approval_events=[event],
+            )
+        return CandidateActionResponse(
+            shot=ShotPlanResponse(
+                plan=updated_plan,
+                reference_bindings=await self.repository.list_reference_bindings(plan.id),
+                current_revision_id=next_project.current_revision_id,
+            ),
+            candidate=self._candidate_response(updated_candidate),
+            approval_event=event,
+        )
+
     async def resolve_candidate_content(
         self,
         candidate_id: UUID,
@@ -3249,7 +4174,7 @@ class ProductionService:
                 project.id,
                 plan.id,
             )
-            / "images"
+            / ("images" if candidate.kind == GenerationKind.IMAGE else "videos")
             / str(run.id)
         ).resolve()
         try:
@@ -3259,7 +4184,13 @@ class ProductionService:
         filesystem_path = _filesystem_path(resolved)
         if not filesystem_path.is_file():
             raise _fail(404, "candidate_file_missing", "候选文件不存在")
-        return filesystem_path, "image/webp" if thumbnail else "image/jpeg"
+        if thumbnail:
+            return filesystem_path, "image/webp"
+        return filesystem_path, (
+            "image/jpeg"
+            if candidate.kind == GenerationKind.IMAGE
+            else "video/mp4"
+        )
 
     async def _has_valid_approved_image_output(
         self,
@@ -3286,6 +4217,36 @@ class ProductionService:
             and not _is_simulated_image_run(run)
         )
 
+    async def _has_valid_approved_video_output(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+    ) -> bool:
+        candidate_id = plan.approved_video_candidate_id
+        if plan.video_status != WorkflowItemStatus.APPROVED or candidate_id is None:
+            return False
+        candidate = await self.repository.get_generation_candidate(candidate_id)
+        if (
+            candidate is None
+            or candidate.kind != GenerationKind.VIDEO
+            or candidate.status != GenerationCandidateStatus.SELECTED
+        ):
+            return False
+        run = await self.repository.get_generation_run(candidate.generation_run_id)
+        if not (
+            run is not None
+            and run.project_id == project.id
+            and run.shot_plan_id == plan.id
+            and run.kind == GenerationKind.VIDEO
+            and run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+        ):
+            return False
+        try:
+            await self.resolve_candidate_content(candidate.id)
+        except ProductionServiceError:
+            return False
+        return True
+
     async def gate_status(self, project_id: UUID) -> ProductionGateStatus:
         project = await self._require_project(project_id)
         project, plans = await self._ensure_project_shots(project)
@@ -3293,24 +4254,51 @@ class ProductionService:
             item for item in plans
             if item.lifecycle_status == ShotLifecycleStatus.ACTIVE and item.required
         ]
-        approved = [
-            item
-            for item in required
-            if await self._has_valid_approved_image_output(project, item)
-        ]
-        stale = [item for item in required if item.image_status == WorkflowItemStatus.STALE]
+        video_stage = project.active_step in {
+            ProductionStep.SHOT_VIDEOS,
+            ProductionStep.EDITING,
+            ProductionStep.EXPORT,
+        }
+        if video_stage:
+            approved = [
+                item
+                for item in required
+                if await self._has_valid_approved_video_output(project, item)
+            ]
+            stale = [
+                item for item in required
+                if item.video_status == WorkflowItemStatus.STALE
+            ]
+            next_step = (
+                ProductionStep.EDITING
+                if project.active_step == ProductionStep.SHOT_VIDEOS
+                else None
+            )
+            pending_label = "必需分镜视频"
+        else:
+            approved = [
+                item
+                for item in required
+                if await self._has_valid_approved_image_output(project, item)
+            ]
+            stale = [
+                item for item in required
+                if item.image_status == WorkflowItemStatus.STALE
+            ]
+            next_step = ProductionStep.SHOT_VIDEOS
+            pending_label = "必需分镜图片"
         blockers: list[str] = []
         if not required:
             blockers.append("创作方案没有必需分镜")
         pending = len(required) - len(approved)
         if pending:
-            blockers.append(f"仍有 {pending} 个必需分镜未审批")
+            blockers.append(f"仍有 {pending} 个{pending_label}未审批")
         if stale:
             blockers.append(f"有 {len(stale)} 个分镜结果已过期")
         return ProductionGateStatus(
             project_id=project.id,
             current_step=project.active_step,
-            next_step=ProductionStep.SHOT_VIDEOS,
+            next_step=next_step,
             allowed=bool(required) and not blockers,
             required_shot_count=len(required),
             approved_shot_count=len(approved),
@@ -3329,10 +4317,24 @@ class ProductionService:
         async with lock:
             project = await self._require_project(project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if payload.target_step != ProductionStep.SHOT_VIDEOS:
-                raise _fail(409, "unsupported_target_step", "Batch 4.1 只能推进到分段视频阶段")
             if project.active_step == payload.target_step:
-                raise _fail(409, "workflow_already_advanced", "当前方案已进入分段视频阶段")
+                label = (
+                    "分段视频"
+                    if payload.target_step == ProductionStep.SHOT_VIDEOS
+                    else "剪辑合成"
+                )
+                raise _fail(409, "workflow_already_advanced", f"当前方案已进入{label}阶段")
+            expected_target = (
+                ProductionStep.EDITING
+                if project.active_step == ProductionStep.SHOT_VIDEOS
+                else ProductionStep.SHOT_VIDEOS
+            )
+            if payload.target_step != expected_target:
+                raise _fail(
+                    409,
+                    "unsupported_target_step",
+                    f"当前阶段只能推进到 {expected_target.value}",
+                )
             gate = await self.gate_status(project.id)
             if not gate.allowed:
                 raise _fail(
@@ -3343,14 +4345,18 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_VIDEOS,
+                    "active_step": payload.target_step,
                     "updated_at": utc_now(),
                 }
             )
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.WORKFLOW_ADVANCED,
-                "所有必需分镜图片已审批，推进到分段视频",
+                (
+                    "所有必需分镜视频已审批，推进到剪辑合成"
+                    if payload.target_step == ProductionStep.EDITING
+                    else "所有必需分镜图片已审批，推进到分段视频"
+                ),
             )
             await self.repository.save_production_bundle(next_project, revision)
         return await self.get_project(project_id)
@@ -3846,16 +4852,27 @@ class ProductionService:
                 else WorkflowItemStatus.DRAFT
             )
         elif video_changed:
-            updates["video_status"] = (
-                WorkflowItemStatus.STALE
-                if plan.video_status
+            next_video_prompt = str(updates.get("video_prompt", plan.video_prompt))
+            has_prior_result = (
+                plan.approved_video_candidate_id is not None
+                or plan.video_status
                 in {
                     WorkflowItemStatus.APPROVED,
                     WorkflowItemStatus.REVIEW_REQUIRED,
                     WorkflowItemStatus.STALE,
                 }
-                else WorkflowItemStatus.DRAFT
             )
+            updates["video_status"] = (
+                WorkflowItemStatus.STALE
+                if has_prior_result
+                else (
+                    WorkflowItemStatus.READY
+                    if next_video_prompt.strip()
+                    else WorkflowItemStatus.DRAFT
+                )
+            )
+            if not has_prior_result:
+                updates["approved_video_candidate_id"] = None
         return ShotPlan.model_validate({**plan.model_dump(mode="python"), **updates})
 
     async def _validate_prompt_mentions(
@@ -3982,6 +4999,11 @@ class ProductionService:
 
     async def _run_response(self, run: GenerationRun) -> GenerationRunResponse:
         candidates = await self.repository.list_generation_candidates(run.id)
+        provider_tasks = (
+            await self.repository.list_video_provider_tasks(run.id)
+            if run.kind == GenerationKind.VIDEO
+            else []
+        )
         return GenerationRunResponse(
             id=run.id,
             project_id=run.project_id,
@@ -3992,6 +5014,8 @@ class ProductionService:
             provider=run.provider,
             model=run.model,
             model_snapshot=run.model_snapshot,
+            model_alias=run.model_alias,
+            model_display_name=run.model_display_name,
             execution_mode=run.execution_mode,
             adapter_id=run.adapter_id,
             adapter_version=run.adapter_version,
@@ -4000,6 +5024,9 @@ class ProductionService:
             capability_snapshot=run.capability_snapshot,
             cost_source=run.cost_source,
             cost_estimate_known=run.cost_estimate_known,
+            actual_cost_known=run.actual_cost_known,
+            cost_currency=run.cost_currency,
+            pricing_snapshot=run.pricing_snapshot,
             usage=run.usage,
             status=run.status,
             estimated_cost_micros=run.estimated_cost_micros,
@@ -4016,6 +5043,32 @@ class ProductionService:
             last_heartbeat_at=run.last_heartbeat_at,
             completed_at=run.completed_at,
             candidates=[self._candidate_response(item) for item in candidates],
+            provider_tasks=[
+                VideoProviderTaskResponse.model_validate(
+                    item.model_dump(
+                        include={
+                            "id",
+                            "generation_run_id",
+                            "ordinal",
+                            "provider",
+                            "model_alias",
+                            "provider_model",
+                            "provider_task_id",
+                            "status",
+                            "estimated_cost_micros",
+                            "actual_cost_micros",
+                            "cost_known",
+                            "error_code",
+                            "error_message",
+                            "retryable",
+                            "submitted_at",
+                            "last_polled_at",
+                            "completed_at",
+                        }
+                    )
+                )
+                for item in provider_tasks
+            ],
         )
 
     @staticmethod

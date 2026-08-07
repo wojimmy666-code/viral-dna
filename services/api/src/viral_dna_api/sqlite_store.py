@@ -32,6 +32,7 @@ from .models import (
     ReplacementVersion,
     ShotPlan,
     Video,
+    VideoProviderTask,
 )
 from .schema import WORKSPACE_SCHEMA_VERSION
 from .storage_objects import ObjectReplica, StorageObject
@@ -64,6 +65,7 @@ _PRODUCTION_TABLES = frozenset(
         "reference_bindings",
         "generation_runs",
         "generation_candidates",
+        "video_provider_tasks",
         "approval_events",
     }
 )
@@ -79,6 +81,11 @@ _PRODUCTION_INDEXES = (
     (
         "idx_generation_candidates_generation_run_id",
         "generation_candidates",
+        "generation_run_id",
+    ),
+    (
+        "idx_video_provider_tasks_generation_run_id",
+        "video_provider_tasks",
         "generation_run_id",
     ),
     ("idx_approval_events_project_id", "approval_events", "project_id"),
@@ -180,6 +187,11 @@ class SQLiteStore:
                 self._create_project_asset_indexes(connection)
                 if 4 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (4)")
+
+                self._create_json_tables(connection, frozenset({"video_provider_tasks"}))
+                self._create_production_indexes(connection)
+                if 5 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (5)")
             except Exception:
                 connection.rollback()
                 raise
@@ -749,6 +761,40 @@ class SQLiteStore:
                 if candidate.generation_run_id == generation_run_id
             ),
             key=lambda candidate: candidate.ordinal,
+        )
+
+    async def list_generation_candidates_by_run_ids(
+        self,
+        generation_run_ids: set[UUID],
+    ) -> list[GenerationCandidate]:
+        if not generation_run_ids:
+            return []
+        payloads = await asyncio.to_thread(self._read_all, "generation_candidates")
+        candidates = [GenerationCandidate.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.generation_run_id in generation_run_ids
+            ),
+            key=lambda candidate: (candidate.created_at, candidate.ordinal),
+        )
+
+    async def save_video_provider_task(self, task: VideoProviderTask) -> VideoProviderTask:
+        return await self._save("video_provider_tasks", task.id, task)
+
+    async def get_video_provider_task(self, task_id: UUID) -> VideoProviderTask | None:
+        return await self._get("video_provider_tasks", task_id, VideoProviderTask)
+
+    async def list_video_provider_tasks(
+        self,
+        generation_run_id: UUID,
+    ) -> list[VideoProviderTask]:
+        payloads = await asyncio.to_thread(self._read_all, "video_provider_tasks")
+        tasks = [VideoProviderTask.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (item for item in tasks if item.generation_run_id == generation_run_id),
+            key=lambda item: item.ordinal,
         )
 
     async def save_approval_event(self, event: ApprovalEvent) -> ApprovalEvent:

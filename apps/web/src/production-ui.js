@@ -2,7 +2,7 @@ export const PRODUCTION_STEPS = Object.freeze([
   { id: "project_setup", label: "创作方案", description: "画幅、尺寸和预算" },
   { id: "reference_assets", label: "参考资产", description: "人物、产品和场景" },
   { id: "shot_images", label: "分镜图片", description: "逐镜头生成和审核" },
-  { id: "shot_videos", label: "分段视频", description: "图片转视频", locked: true },
+  { id: "shot_videos", label: "分段视频", description: "图片转视频" },
   { id: "editing", label: "剪辑合成", description: "排序、音轨和字幕", locked: true },
   { id: "export", label: "导出成片", description: "渲染和归档", locked: true },
 ]);
@@ -27,6 +27,11 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   image_approved: "确认分镜图片",
   image_approval_revoked: "取消采用分镜图片",
   image_rejected: "退回图片候选",
+  video_candidates_created: "生成视频候选",
+  video_candidate_selected: "选择视频候选",
+  video_approved: "确认分镜视频",
+  video_approval_revoked: "取消采用分镜视频",
+  video_rejected: "退回视频候选",
   workflow_advanced: "推进工作流",
   branch_created: "创建版本分支",
 });
@@ -86,6 +91,125 @@ export function isAiImageGenerationRun(run) {
     run
     && run.provider !== "simulated"
     && ["remote_api", "local_tool"].includes(run.execution_mode),
+  );
+}
+
+export function isVideoGenerationRun(run) {
+  return run?.kind === "video";
+}
+
+export function latestRunByKind(runs, kind) {
+  return (runs || []).find((run) => run?.kind === kind) || null;
+}
+
+export function videoGenerationRunLabel(run) {
+  if (!run) return "尚未生成";
+  if (run.execution_mode === "simulated" || run.provider === "simulated") {
+    return "流程模拟视频（非 AI）";
+  }
+  if (run.execution_mode === "remote_api") {
+    const provider = {
+      bailian: "百炼",
+      volc_ark: "火山方舟",
+      minimax: "MiniMax",
+    }[run.provider] || run.provider || "国内 API";
+    return `${provider} · ${run.model_display_name || run.model_alias || run.model || "视频模型"}`;
+  }
+  return run.provider || "视频生成任务";
+}
+
+const FALLBACK_VIDEO_DURATIONS = Object.freeze(
+  Array.from({ length: 13 }, (_, index) => index + 3),
+);
+
+function normalizedDurationNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function roundedDuration(value) {
+  return Number(Number(value).toFixed(6));
+}
+
+export function videoDurationOptions(model) {
+  const capabilities = model?.capabilities || model || {};
+  const supported = [...new Set(
+    (capabilities.supported_durations || [])
+      .map(normalizedDurationNumber)
+      .filter(Boolean)
+      .map(roundedDuration),
+  )].sort((left, right) => left - right);
+  if (supported.length > 0) return supported;
+
+  const minimum = normalizedDurationNumber(
+    capabilities.minimum_duration_seconds,
+  );
+  const maximum = normalizedDurationNumber(
+    capabilities.maximum_duration_seconds,
+  );
+  const step = normalizedDurationNumber(
+    capabilities.duration_step_seconds,
+  ) || 1;
+  if (minimum == null || maximum == null || maximum < minimum) {
+    return [...FALLBACK_VIDEO_DURATIONS];
+  }
+
+  const values = [];
+  const maximumStops = 600;
+  for (
+    let index = 0;
+    index < maximumStops && minimum + index * step <= maximum + 0.000001;
+    index += 1
+  ) {
+    values.push(roundedDuration(minimum + index * step));
+  }
+  return values.length > 0 ? values : [...FALLBACK_VIDEO_DURATIONS];
+}
+
+export function normalizeVideoDuration(value, model) {
+  const options = videoDurationOptions(model);
+  const capabilities = model?.capabilities || model || {};
+  const requested = normalizedDurationNumber(value)
+    ?? normalizedDurationNumber(capabilities.default_duration_seconds)
+    ?? options[0];
+  return options.reduce((closest, candidate) => {
+    const candidateDistance = Math.abs(candidate - requested);
+    const closestDistance = Math.abs(closest - requested);
+    if (candidateDistance < closestDistance) return candidate;
+    if (candidateDistance === closestDistance && candidate > closest) return candidate;
+    return closest;
+  }, options[0]);
+}
+
+export function formatVideoDuration(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return Number.isInteger(number)
+    ? String(number)
+    : String(roundedDuration(number));
+}
+
+export function videoDurationConstraintLabel(model) {
+  const capabilities = model?.capabilities || model || {};
+  const options = videoDurationOptions(model);
+  const explicitDurations = (capabilities.supported_durations || []).length > 0;
+  const differences = options.slice(1).map((item, index) => (
+    roundedDuration(item - options[index])
+  ));
+  const uniformStep = differences.length > 0
+    && differences.every((item) => item === differences[0]);
+  const isSparse = explicitDurations
+    && (options.length <= 5 || !uniformStep || differences[0] > 1);
+  if (isSparse) {
+    return `仅支持 ${options.map(formatVideoDuration).join("、")} 秒`;
+  }
+  if (options.length === 1) return `固定 ${formatVideoDuration(options[0])} 秒`;
+  const step = differences[0]
+    || normalizedDurationNumber(capabilities.duration_step_seconds)
+    || 1;
+  return (
+    `支持 ${formatVideoDuration(options[0])}–${formatVideoDuration(options.at(-1))} 秒`
+    + `，按 ${formatVideoDuration(step)} 秒调整`
   );
 }
 
@@ -200,6 +324,76 @@ const RATIO_DIMENSIONS = Object.freeze({
   "1:1": { width: 1080, height: 1080 },
   "4:5": { width: 1080, height: 1350 },
 });
+
+const PRODUCTION_ASPECT_RATIOS = Object.freeze(Object.keys(RATIO_DIMENSIONS));
+
+function positiveDimension(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function parseRatio(value) {
+  const match = String(value || "").match(
+    /^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$/,
+  );
+  if (!match) return null;
+  const width = positiveDimension(match[1]);
+  const height = positiveDimension(match[2]);
+  return width && height ? { width, height } : null;
+}
+
+function ratioOrientation(value) {
+  if (Math.abs(1 - value) <= 0.06) return "square";
+  return value > 1 ? "landscape" : "portrait";
+}
+
+export function closestProductionAspectRatio({ width, height, aspectRatio } = {}) {
+  const parsed = parseRatio(aspectRatio);
+  const sourceWidth = positiveDimension(width) || parsed?.width;
+  const sourceHeight = positiveDimension(height) || parsed?.height;
+  if (!sourceWidth || !sourceHeight) return "9:16";
+
+  const sourceRatio = sourceWidth / sourceHeight;
+  const sourceOrientation = ratioOrientation(sourceRatio);
+  return PRODUCTION_ASPECT_RATIOS
+    .map((ratio, index) => {
+      const dimensions = RATIO_DIMENSIONS[ratio];
+      const candidateRatio = dimensions.width / dimensions.height;
+      return {
+        ratio,
+        index,
+        distance: Math.round(Math.abs(Math.log(sourceRatio / candidateRatio)) * 1e12),
+        orientationMismatch: ratioOrientation(candidateRatio) === sourceOrientation ? 0 : 1,
+      };
+    })
+    .sort((left, right) => (
+      left.distance - right.distance
+      || left.orientationMismatch - right.orientationMismatch
+      || left.index - right.index
+    ))[0].ratio;
+}
+
+export function productionDefaultsForSource(source = {}) {
+  const outputAspectRatio = closestProductionAspectRatio(source);
+  const dimensions = dimensionsForRatio(outputAspectRatio);
+  return {
+    outputAspectRatio,
+    outputWidth: dimensions.width,
+    outputHeight: dimensions.height,
+  };
+}
+
+export function productionPreviewLayout(project = {}) {
+  const parsed = parseRatio(project.output_aspect_ratio);
+  const width = positiveDimension(project.output_width) || parsed?.width || 9;
+  const height = positiveDimension(project.output_height) || parsed?.height || 16;
+  const ratio = width / height;
+  return {
+    aspectRatio: `${width} / ${height}`,
+    maxWidth: ratio < 1 ? `${Math.round(640 * ratio)}px` : "100%",
+    orientation: ratioOrientation(ratio),
+  };
+}
 
 export function dimensionsForRatio(ratio) {
   return RATIO_DIMENSIONS[ratio] || RATIO_DIMENSIONS["9:16"];

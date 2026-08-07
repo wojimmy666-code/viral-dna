@@ -97,12 +97,28 @@ from .models import (
     ShotPlanResponse,
     ShotPlanUpdate,
     ShotSourceFrameApprovalRequest,
+    ShotVideoApprovalRevokeRequest,
     SourceType,
     Video,
+    VideoCostEstimateRequest,
+    VideoCostEstimateResponse,
+    VideoGenerationCreate,
+    VideoGenerationSettingsResponse,
+    VideoGenerationSettingsUpdate,
+    VideoProviderValidationRequest,
+    VideoProviderValidationResponse,
     VideoStatus,
     WorkspaceInfo,
     WorkspacePathRequest,
     WorkspaceValidationResponse,
+)
+from .notifications import (
+    AccountNotification,
+    NotificationListResponse,
+    NotificationReadAllResponse,
+    NotificationServiceError,
+    NotificationStatus,
+    create_notification_service,
 )
 from .pipeline import create_replacement_version
 from .production import (
@@ -116,6 +132,11 @@ from .records import RecordService, resolve_video_path, write_source_metadata
 from .storage_objects import StorageManager
 from .store import store
 from .thumbnails import thumbnail_etag, thumbnail_service
+from .video_generation import VideoGenerationGateway
+from .video_generation.settings import (
+    VideoGenerationSettingsService,
+    VideoGenerationSettingsServiceError,
+)
 from .workspace import WORKSPACE_SCHEMA_VERSION, WorkspaceError, workspace_manager
 from .workspace_catalog import (
     Account,
@@ -154,6 +175,7 @@ def parse_cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await account_context_service.ensure_current()
+    await notification_service.initialize()
     await project_asset_service.bootstrap_legacy_references()
     await record_service.bootstrap(recover_interrupted=True)
     await production_service.recover_generation_runs()
@@ -180,6 +202,7 @@ app.add_middleware(
 pipeline = HybridAnalysisPipeline(store)
 model_settings_service = ModelSettingsService()
 image_generation_settings_service = ImageGenerationSettingsService()
+video_generation_settings_service = VideoGenerationSettingsService()
 record_service = RecordService(store)
 export_service = ExportService(store)
 image_generation_gateway = ImageGenerationGateway(
@@ -187,7 +210,13 @@ image_generation_gateway = ImageGenerationGateway(
     image_generation_settings_service,
     repository=store,
 )
+video_generation_gateway = VideoGenerationGateway(
+    workspace_manager,
+    settings_service=video_generation_settings_service,
+    repository=store,
+)
 account_context_service = create_account_context_service(workspace_manager)
+notification_service = create_notification_service(account_context_service)
 storage_manager = StorageManager(store, workspace_manager)
 asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
 project_asset_service = ProjectAssetService(
@@ -198,6 +227,8 @@ production_service = ProductionService(
     workspace_manager,
     image_generation_gateway,
     project_assets=project_asset_service,
+    video_gateway=video_generation_gateway,
+    notification_publisher=notification_service,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 
@@ -843,6 +874,43 @@ async def approve_production_source_keyframe(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.get(
+    f"{API_PREFIX}/me/notifications",
+    response_model=NotificationListResponse,
+)
+async def list_current_account_notifications(
+    notification_status: Annotated[NotificationStatus | None, Query(alias="status")] = None,
+    unread_only: bool = False,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+) -> NotificationListResponse:
+    return await notification_service.list_notifications(
+        status=notification_status,
+        unread_only=unread_only,
+        limit=limit,
+    )
+
+
+@app.post(
+    f"{API_PREFIX}/me/notifications/read-all",
+    response_model=NotificationReadAllResponse,
+)
+async def mark_all_current_account_notifications_read() -> NotificationReadAllResponse:
+    return await notification_service.mark_all_read()
+
+
+@app.patch(
+    f"{API_PREFIX}/me/notifications/{{notification_id}}/read",
+    response_model=AccountNotification,
+)
+async def mark_current_account_notification_read(
+    notification_id: UUID,
+) -> AccountNotification:
+    try:
+        return await notification_service.mark_read(notification_id)
+    except NotificationServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.post(
     f"{API_PREFIX}/settings/image-generation/test-local-sandbox",
     response_model=LocalCodexSandboxTestResponse,
@@ -856,6 +924,57 @@ async def test_local_codex_sandbox(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.get(
+    f"{API_PREFIX}/settings/video-generation",
+    response_model=VideoGenerationSettingsResponse,
+)
+async def get_video_generation_settings() -> VideoGenerationSettingsResponse:
+    try:
+        return video_generation_settings_service.get()
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/settings/video-generation",
+    response_model=VideoGenerationSettingsResponse,
+)
+async def update_video_generation_settings(
+    payload: VideoGenerationSettingsUpdate,
+) -> VideoGenerationSettingsResponse:
+    try:
+        return await video_generation_settings_service.update(payload)
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/video-generation/providers/{{provider}}/validate",
+    response_model=VideoProviderValidationResponse,
+)
+async def validate_video_provider(
+    provider: Literal["bailian", "volc_ark", "minimax"],
+    payload: VideoProviderValidationRequest,
+) -> VideoProviderValidationResponse:
+    try:
+        return await video_generation_settings_service.validate_provider(provider, payload)
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/video-generation/estimate",
+    response_model=VideoCostEstimateResponse,
+)
+async def estimate_video_generation_cost(
+    payload: VideoCostEstimateRequest,
+) -> VideoCostEstimateResponse:
+    try:
+        return video_generation_settings_service.estimate(payload)
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.post(
     f"{API_PREFIX}/production-shots/{{shot_plan_id}}/image-approval/revoke",
     response_model=CandidateActionResponse,
@@ -866,6 +985,20 @@ async def revoke_production_image_approval(
 ) -> CandidateActionResponse:
     try:
         return await production_service.revoke_image_approval(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/video-approval/revoke",
+    response_model=CandidateActionResponse,
+)
+async def revoke_production_video_approval(
+    shot_plan_id: UUID,
+    payload: ShotVideoApprovalRevokeRequest,
+) -> CandidateActionResponse:
+    try:
+        return await production_service.revoke_video_approval(shot_plan_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -909,6 +1042,21 @@ async def create_production_image_run(
 ) -> GenerationRunResponse:
     try:
         return await production_service.create_image_run(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/video-runs",
+    response_model=GenerationRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_production_video_run(
+    shot_plan_id: UUID,
+    payload: VideoGenerationCreate,
+) -> GenerationRunResponse:
+    try:
+        return await production_service.create_video_run(shot_plan_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

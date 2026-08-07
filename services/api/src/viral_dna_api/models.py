@@ -149,6 +149,11 @@ class ProductionChangeKind(StrEnum):
     IMAGE_APPROVED = "image_approved"
     IMAGE_APPROVAL_REVOKED = "image_approval_revoked"
     IMAGE_REJECTED = "image_rejected"
+    VIDEO_CANDIDATES_CREATED = "video_candidates_created"
+    VIDEO_CANDIDATE_SELECTED = "video_candidate_selected"
+    VIDEO_APPROVED = "video_approved"
+    VIDEO_APPROVAL_REVOKED = "video_approval_revoked"
+    VIDEO_REJECTED = "video_rejected"
     WORKFLOW_ADVANCED = "workflow_advanced"
     BRANCH_CREATED = "branch_created"
 
@@ -197,6 +202,10 @@ class ImageGenerationInputMode(StrEnum):
     TEXT_TO_IMAGE = "text_to_image"
 
 
+class VideoGenerationInputMode(StrEnum):
+    IMAGE_TO_VIDEO = "image_to_video"
+
+
 class GenerationCostSource(StrEnum):
     PROVIDER_REPORTED = "provider_reported"
     CONFIGURED_RATE = "configured_rate"
@@ -214,6 +223,17 @@ class ProductionRunStatus(StrEnum):
     FAILED = "failed"
     CACHED = "cached"
     BLOCKED = "blocked"
+
+
+class VideoProviderTaskStatus(StrEnum):
+    PENDING_SUBMISSION = "pending_submission"
+    SUBMITTED = "submitted"
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
 
 
 class GenerationCandidateStatus(StrEnum):
@@ -280,6 +300,135 @@ class ImageGenerationCapability(BaseModel):
     supports_seed: bool = True
 
 
+class VideoGenerationCapability(BaseModel):
+    image_to_video: bool = True
+    start_frame: bool = True
+    end_frame: bool = False
+    max_candidates: int = Field(default=4, ge=1, le=20)
+    minimum_duration_seconds: float = Field(default=0.1, gt=0, le=60)
+    maximum_duration_seconds: float = Field(default=60, gt=0, le=600)
+    duration_step_seconds: float = Field(default=1, gt=0, le=60)
+    default_duration_seconds: float | None = Field(default=None, gt=0, le=600)
+    supported_durations: list[float] = Field(default_factory=list, max_length=30)
+    maximum_width: int = Field(default=1920, ge=256, le=8192)
+    maximum_height: int = Field(default=1920, ge=256, le=8192)
+    native_audio: bool = False
+    supports_negative_prompt: bool = True
+    supports_seed: bool = True
+    supports_camera_constraints: bool = True
+    supported_resolutions: list[str] = Field(default_factory=list, max_length=20)
+    supported_aspect_ratios: list[str] = Field(default_factory=list, max_length=20)
+    maximum_prompt_characters: int = Field(default=2000, ge=1, le=100_000)
+
+
+class VideoGenerationModelOption(BaseModel):
+    alias: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_.-]+$")
+    provider: Literal["bailian", "volc_ark", "minimax"]
+    model: str | None = Field(default=None, max_length=160)
+    label: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    available: bool = True
+    availability_note: str | None = Field(default=None, max_length=500)
+    recommended: bool = False
+    pricing_version: str = Field(min_length=1, max_length=80)
+    pricing: dict[str, Any] = Field(default_factory=dict)
+    capabilities: VideoGenerationCapability
+
+
+class VideoProviderCredentialUpdate(BaseModel):
+    provider: Literal["bailian", "volc_ark", "minimax"]
+    api_key: SecretStr | None = Field(default=None, max_length=2048)
+    base_url: str | None = Field(default=None, max_length=500)
+    clear_api_key: bool = False
+
+
+class VideoGenerationSettingsUpdate(BaseModel):
+    enabled: bool = True
+    default_model_alias: str = Field(
+        default="bailian_wan_2_7_i2v",
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
+    default_resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    poll_interval_seconds: float = Field(default=5, ge=0.2, le=60)
+    task_timeout_seconds: int = Field(default=900, ge=30, le=7200)
+    providers: list[VideoProviderCredentialUpdate] = Field(default_factory=list, max_length=3)
+
+    @field_validator("providers")
+    @classmethod
+    def validate_unique_video_providers(
+        cls,
+        values: list[VideoProviderCredentialUpdate],
+    ) -> list[VideoProviderCredentialUpdate]:
+        providers = [item.provider for item in values]
+        if len(providers) != len(set(providers)):
+            raise ValueError("同一视频 Provider 不能重复配置")
+        return values
+
+
+class VideoProviderSettingsResponse(BaseModel):
+    provider: Literal["bailian", "volc_ark", "minimax"]
+    label: str
+    api_key_configured: bool = False
+    api_key_hint: str | None = None
+    base_url: str
+    last_validated_at: datetime | None = None
+    validation_status: Literal["not_configured", "valid", "invalid", "unknown"] = "not_configured"
+    validation_message: str | None = None
+    balance_known: bool = False
+    balance_micros: int | None = Field(default=None, ge=0)
+    currency: str = "CNY"
+
+
+class VideoGenerationSettingsResponse(BaseModel):
+    enabled: bool = True
+    default_model_alias: str
+    default_resolution: str = "720P"
+    poll_interval_seconds: float = 5
+    task_timeout_seconds: int = 900
+    catalog_version: str
+    pricing_version: str
+    providers: list[VideoProviderSettingsResponse] = Field(default_factory=list)
+    models: list[VideoGenerationModelOption] = Field(default_factory=list)
+
+
+class VideoProviderValidationRequest(BaseModel):
+    api_key: SecretStr | None = Field(default=None, max_length=2048)
+    base_url: str | None = Field(default=None, max_length=500)
+
+
+class VideoProviderValidationResponse(BaseModel):
+    provider: Literal["bailian", "volc_ark", "minimax"]
+    valid: bool
+    message: str
+    latency_ms: int | None = Field(default=None, ge=0)
+    balance_known: bool = False
+    balance_micros: int | None = Field(default=None, ge=0)
+    currency: str = "CNY"
+
+
+class VideoCostEstimateRequest(BaseModel):
+    model_alias: str = Field(min_length=1, max_length=80)
+    duration_seconds: float = Field(gt=0, le=60)
+    resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    candidate_count: int = Field(default=1, ge=1, le=4)
+
+
+class VideoCostEstimateResponse(BaseModel):
+    model_alias: str
+    provider: str
+    model: str | None = None
+    duration_seconds: float
+    resolution: str
+    candidate_count: int
+    estimate_known: bool
+    estimated_cost_micros: int | None = Field(default=None, ge=0)
+    currency: str = "CNY"
+    pricing_version: str
+    explanation: str
+
+
 class ImageGenerationModelOption(BaseModel):
     alias: str = Field(min_length=1, max_length=80)
     provider: str = Field(min_length=1, max_length=80)
@@ -326,9 +475,7 @@ class ImageGenerationSettingsUpdate(BaseModel):
         "unknown",
     ] = "unknown"
     local_unit_cost_micros: int | None = Field(default=None, ge=0)
-    local_model_policy: Literal["latest_flagship", "pinned", "balanced"] = (
-        "latest_flagship"
-    )
+    local_model_policy: Literal["latest_flagship", "pinned", "balanced"] = "latest_flagship"
     local_model: str | None = Field(
         default=None,
         min_length=1,
@@ -458,9 +605,7 @@ class LocalCodexDiscoveryResponse(BaseModel):
 
 
 class LocalCodexAutoConfigureRequest(BaseModel):
-    model_policy: Literal["latest_flagship", "pinned", "balanced"] = (
-        "latest_flagship"
-    )
+    model_policy: Literal["latest_flagship", "pinned", "balanced"] = "latest_flagship"
     model: str | None = Field(default=None, max_length=160)
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
     default_candidate_count: int = Field(default=1, ge=1, le=4)
@@ -1293,10 +1438,14 @@ class GenerationRun(BaseModel):
     shot_plan_id: UUID
     revision_id: UUID
     kind: GenerationKind
-    input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT
+    input_mode: ImageGenerationInputMode | VideoGenerationInputMode = (
+        ImageGenerationInputMode.KEYFRAME_EDIT
+    )
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=160)
     model_snapshot: str = Field(min_length=1, max_length=160)
+    model_alias: str | None = Field(default=None, max_length=80)
+    model_display_name: str | None = Field(default=None, max_length=160)
     prompt_version: str = Field(min_length=1, max_length=80)
     schema_version: str = Field(min_length=1, max_length=80)
     pricing_version: str = Field(min_length=1, max_length=80)
@@ -1315,6 +1464,9 @@ class GenerationRun(BaseModel):
     execution_summary: dict[str, Any] = Field(default_factory=dict)
     cost_source: GenerationCostSource = GenerationCostSource.UNMETERED
     cost_estimate_known: bool = True
+    actual_cost_known: bool = True
+    cost_currency: str = Field(default="CNY", min_length=3, max_length=8)
+    pricing_snapshot: dict[str, Any] = Field(default_factory=dict)
     usage: dict[str, Any] = Field(default_factory=dict)
     request_payload: dict[str, Any] = Field(default_factory=dict)
     retry_of_run_id: UUID | None = None
@@ -1342,6 +1494,65 @@ class GenerationRun(BaseModel):
     @classmethod
     def validate_output_manifest_path(cls, value: str | None) -> str | None:
         return _normalize_workspace_relative_path(value) if value is not None else None
+
+
+class VideoProviderTask(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    generation_run_id: UUID
+    project_id: UUID
+    shot_plan_id: UUID
+    ordinal: int = Field(ge=1, le=20)
+    provider: Literal["bailian", "volc_ark", "minimax"]
+    model_alias: str = Field(min_length=1, max_length=80)
+    provider_model: str = Field(min_length=1, max_length=160)
+    provider_task_id: str | None = Field(default=None, max_length=500)
+    status: VideoProviderTaskStatus = VideoProviderTaskStatus.PENDING_SUBMISSION
+    submission_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    request_snapshot: dict[str, Any] = Field(default_factory=dict)
+    response_snapshot: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    output_url: str | None = Field(default=None, max_length=4096)
+    output_relative_path: str | None = Field(default=None, max_length=2048)
+    estimated_cost_micros: int | None = Field(default=None, ge=0)
+    actual_cost_micros: int | None = Field(default=None, ge=0)
+    cost_known: bool = False
+    error_code: str | None = Field(default=None, max_length=120)
+    error_message: str | None = Field(default=None, max_length=2000)
+    retryable: bool = False
+    submitted_at: datetime | None = None
+    last_polled_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("output_relative_path")
+    @classmethod
+    def validate_provider_output_path(cls, value: str | None) -> str | None:
+        return _normalize_workspace_relative_path(value) if value is not None else None
+
+
+class VideoProviderTaskResponse(BaseModel):
+    id: UUID
+    generation_run_id: UUID
+    ordinal: int
+    provider: str
+    model_alias: str
+    provider_model: str
+    provider_task_id: str | None = None
+    status: VideoProviderTaskStatus
+    estimated_cost_micros: int | None = None
+    actual_cost_micros: int | None = None
+    cost_known: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
+    submitted_at: datetime | None = None
+    last_polled_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class GenerationCandidate(BaseModel):
@@ -1656,10 +1867,26 @@ class ShotPlanReorder(BaseModel):
         return values
 
 
+class ShotMediaPreview(BaseModel):
+    thumbnail_url: str = Field(min_length=1, max_length=2048)
+    kind: Literal[
+        "candidate_image",
+        "selected_image",
+        "approved_image",
+        "candidate_video",
+        "selected_video",
+        "approved_video",
+    ]
+    candidate_id: UUID
+    updated_at: datetime
+
+
 class ShotPlanResponse(BaseModel):
     plan: ShotPlan
     reference_bindings: list[ReferenceBinding] = Field(default_factory=list)
     current_revision_id: UUID
+    image_preview: ShotMediaPreview | None = None
+    video_preview: ShotMediaPreview | None = None
 
 
 class ChangeImpactRequest(BaseModel):
@@ -1694,6 +1921,23 @@ class ImageGenerationCreate(BaseModel):
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
 
 
+class VideoGenerationCreate(BaseModel):
+    expected_revision_id: UUID
+    candidate_count: int = Field(default=1, ge=1, le=4)
+    input_mode: Literal["image_to_video"] = "image_to_video"
+    execution_mode: Literal["simulated", "remote_api"] = "simulated"
+    model_alias: str | None = Field(
+        default=None,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
+    resolution: str | None = Field(default=None, pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
+    allow_unknown_cost: bool = False
+    generation_intent: Literal["standard", "new_variation"] = "standard"
+    seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+
+
 class ShotKeyframeSelectRequest(BaseModel):
     expected_revision_id: UUID
     timestamp_seconds: float = Field(ge=0)
@@ -1706,6 +1950,12 @@ class ShotSourceFrameApprovalRequest(BaseModel):
 
 
 class ShotImageApprovalRevokeRequest(BaseModel):
+    expected_revision_id: UUID
+    reason: str | None = Field(default=None, max_length=1000)
+    confirm_downstream_stale: bool = False
+
+
+class ShotVideoApprovalRevokeRequest(BaseModel):
     expected_revision_id: UUID
     reason: str | None = Field(default=None, max_length=1000)
     confirm_downstream_stale: bool = False
@@ -1733,10 +1983,12 @@ class GenerationRunResponse(BaseModel):
     shot_plan_id: UUID
     revision_id: UUID
     kind: GenerationKind
-    input_mode: ImageGenerationInputMode
+    input_mode: ImageGenerationInputMode | VideoGenerationInputMode
     provider: str
     model: str
     model_snapshot: str
+    model_alias: str | None = None
+    model_display_name: str | None = None
     execution_mode: ImageExecutionMode
     adapter_id: str
     adapter_version: str
@@ -1745,6 +1997,9 @@ class GenerationRunResponse(BaseModel):
     capability_snapshot: dict[str, Any] = Field(default_factory=dict)
     cost_source: GenerationCostSource
     cost_estimate_known: bool
+    actual_cost_known: bool = True
+    cost_currency: str = "CNY"
+    pricing_snapshot: dict[str, Any] = Field(default_factory=dict)
     usage: dict[str, Any] = Field(default_factory=dict)
     status: ProductionRunStatus
     estimated_cost_micros: int
@@ -1761,6 +2016,7 @@ class GenerationRunResponse(BaseModel):
     last_heartbeat_at: datetime | None = None
     completed_at: datetime | None = None
     candidates: list[GenerationCandidateResponse] = Field(default_factory=list)
+    provider_tasks: list[VideoProviderTaskResponse] = Field(default_factory=list)
 
 
 class ShotPlanDetailResponse(ShotPlanResponse):

@@ -23,13 +23,17 @@ from viral_dna_api.models import (
     GenerationCandidateStatus,
     ImageExecutionMode,
     ImageGenerationCreate,
+    ProductionAdvanceRequest,
     ProductionChangeKind,
     ProductionProjectCreate,
     ProductionStep,
     ReferenceAssetCreate,
     ReferenceAssetType,
+    ShotPlanUpdate,
+    ShotVideoApprovalRevokeRequest,
     SourceType,
     Video,
+    VideoGenerationCreate,
     VideoStatus,
     WorkflowItemStatus,
 )
@@ -41,6 +45,7 @@ from viral_dna_api.production import (
 )
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
+from viral_dna_api.video_generation import VideoGenerationGateway
 from viral_dna_api.workspace import WorkspaceManager
 
 
@@ -87,6 +92,42 @@ class FakeFrameProcessor:
             timestamp_seconds,
             output_path,
         )
+
+
+class FakeStillVideoProcessor:
+    async def create_still_video(
+        self,
+        image_path: Path,
+        output_path: Path,
+        *,
+        duration_seconds: float,
+        width: int,
+        height: int,
+    ) -> None:
+        await asyncio.to_thread(
+            write_fake_video,
+            image_path,
+            output_path,
+            duration_seconds,
+            width,
+            height,
+        )
+
+
+def write_fake_video(
+    image_path: Path,
+    output_path: Path,
+    duration_seconds: float,
+    width: int,
+    height: int,
+) -> None:
+    assert image_path.is_file()
+    assert duration_seconds > 0
+    assert width > 0 and height > 0
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(
+        b"\x00\x00\x00\x18ftypmp42viral-dna-video-foundation"
+    )
 
 
 class FakeRealImageGateway:
@@ -232,6 +273,29 @@ def isolated_service(
         workspace,
         image_gateway=FakeRealImageGateway(workspace),
     ), repository
+
+
+def test_project_default_output_follows_source_video_ratio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, video, analysis, _ = await seed_completed_analysis(repository)
+        await repository.save_video(
+            video.model_copy(update={"width": 1920, "height": 1080})
+        )
+
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+
+        assert detail.project.output_aspect_ratio == "16:9"
+        assert detail.project.output_width == 1920
+        assert detail.project.output_height == 1080
+
+    asyncio.run(scenario())
 
 
 def test_reference_image_validation_uses_file_content_and_generates_thumbnail() -> None:
@@ -1397,3 +1461,197 @@ def test_create_shot_from_source_video_range(
         assert keyframe.status_code == 200
         with Image.open(BytesIO(keyframe.content)) as rendered:
             assert rendered.size == (720, 1280)
+
+
+def test_batch451_video_generation_review_revoke_and_gate_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis.id,
+                name="Batch 4.5.1 视频基础架构",
+            ),
+        )
+        shots = await service.list_shots(detail.project.id)
+
+        for shot in shots:
+            current = await service.get_project(detail.project.id)
+            image_run = await service.create_image_run(
+                shot.plan.id,
+                ImageGenerationCreate(
+                    expected_revision_id=current.project.current_revision_id,
+                ),
+            )
+            image_run = await wait_for_generation(service, image_run.id)
+            assert image_run.status == "completed"
+            current = await service.get_project(detail.project.id)
+            selected = await service.select_candidate(
+                image_run.candidates[0].id,
+                CandidateSelectRequest(
+                    expected_revision_id=current.project.current_revision_id,
+                ),
+            )
+            await service.approve_candidate(
+                image_run.candidates[0].id,
+                CandidateApprovalRequest(
+                    expected_revision_id=selected.shot.current_revision_id,
+                    decision=ApprovalDecision.APPROVED,
+                ),
+            )
+
+        image_preview_shots = await service.list_shots(detail.project.id)
+        assert all(item.image_preview is not None for item in image_preview_shots)
+        assert all(
+            item.image_preview.kind == "approved_image"
+            for item in image_preview_shots
+            if item.image_preview is not None
+        )
+        assert all(item.video_preview is None for item in image_preview_shots)
+
+        current = await service.get_project(detail.project.id)
+        advanced = await service.advance(
+            detail.project.id,
+            ProductionAdvanceRequest(
+                expected_revision_id=current.project.current_revision_id,
+                target_step=ProductionStep.SHOT_VIDEOS,
+            ),
+        )
+        assert advanced.project.active_step == ProductionStep.SHOT_VIDEOS
+        updated_video_plan = await service.update_shot(
+            shots[0].plan.id,
+            ShotPlanUpdate(
+                expected_revision_id=advanced.project.current_revision_id,
+                video_prompt="镜头缓慢向人物推进，人物自然抬手展示产品。",
+                video_negative_constraints=["人物身份漂移", "画面抖动"],
+            ),
+        )
+        assert updated_video_plan.plan.video_status == WorkflowItemStatus.READY
+        current_after_video_edit = await service.get_project(detail.project.id)
+        assert current_after_video_edit.project.active_step == ProductionStep.SHOT_VIDEOS
+        service.video_gateway = VideoGenerationGateway(
+            service.workspace,
+            media_processor=FakeStillVideoProcessor(),
+        )
+
+        with pytest.raises(ProductionServiceError) as remote:
+            await service.create_video_run(
+                shots[0].plan.id,
+                VideoGenerationCreate(
+                    expected_revision_id=current_after_video_edit.project.current_revision_id,
+                    execution_mode="remote_api",
+                ),
+            )
+        assert remote.value.code == "video_remote_provider_not_configured"
+
+        first_candidate_id = None
+        for index, shot in enumerate(shots):
+            current = await service.get_project(detail.project.id)
+            video_run = await service.create_video_run(
+                shot.plan.id,
+                VideoGenerationCreate(
+                    expected_revision_id=current.project.current_revision_id,
+                    candidate_count=2 if index == 0 else 1,
+                    duration_seconds=2.5,
+                ),
+            )
+            video_run = await wait_for_generation(service, video_run.id)
+            assert video_run.status == "completed", (
+                video_run.error_code,
+                video_run.error_message,
+            )
+            assert video_run.kind == "video"
+            assert video_run.input_mode == "image_to_video"
+            assert video_run.execution_mode == "simulated"
+            assert len(video_run.candidates) == (2 if index == 0 else 1)
+            candidate = video_run.candidates[0]
+            assert candidate.status == "ready", video_run.model_dump(mode="json")
+            content_path, content_type = await service.resolve_candidate_content(
+                candidate.id
+            )
+            thumbnail_path, thumbnail_type = await service.resolve_candidate_content(
+                candidate.id,
+                thumbnail=True,
+            )
+            assert content_path.is_file()
+            assert content_type == "video/mp4"
+            assert thumbnail_path.is_file()
+            assert thumbnail_type == "image/webp"
+
+            current = await service.get_project(detail.project.id)
+            selected = await service.select_candidate(
+                candidate.id,
+                CandidateSelectRequest(
+                    expected_revision_id=current.project.current_revision_id,
+                ),
+            )
+            approved = await service.approve_candidate(
+                candidate.id,
+                CandidateApprovalRequest(
+                    expected_revision_id=selected.shot.current_revision_id,
+                    decision=ApprovalDecision.APPROVED,
+                ),
+            )
+            assert approved.shot.plan.video_status == WorkflowItemStatus.APPROVED
+            assert approved.approval_event is not None
+            assert approved.approval_event.target_kind == "video"
+
+            if index == 0:
+                first_candidate_id = candidate.id
+                reopened = await service.revoke_video_approval(
+                    shot.plan.id,
+                    ShotVideoApprovalRevokeRequest(
+                        expected_revision_id=approved.shot.current_revision_id,
+                    ),
+                )
+                assert reopened.shot.plan.video_status == WorkflowItemStatus.REVIEW_REQUIRED
+                reselected = await service.select_candidate(
+                    candidate.id,
+                    CandidateSelectRequest(
+                        expected_revision_id=reopened.shot.current_revision_id,
+                    ),
+                )
+                approved = await service.approve_candidate(
+                    candidate.id,
+                    CandidateApprovalRequest(
+                        expected_revision_id=reselected.shot.current_revision_id,
+                        decision=ApprovalDecision.APPROVED,
+                    ),
+                )
+                assert approved.shot.plan.approved_video_candidate_id == candidate.id
+
+        assert first_candidate_id is not None
+        video_preview_shots = await service.list_shots(detail.project.id)
+        assert all(item.video_preview is not None for item in video_preview_shots)
+        assert all(
+            item.video_preview.kind == "approved_video"
+            for item in video_preview_shots
+            if item.video_preview is not None
+        )
+        first_detail = await service.get_shot(shots[0].plan.id)
+        assert [run.kind for run in first_detail.generation_runs[:2]] == [
+            "video",
+            "image",
+        ]
+        gate = await service.gate_status(detail.project.id)
+        assert gate.current_step == ProductionStep.SHOT_VIDEOS
+        assert gate.next_step == ProductionStep.EDITING
+        assert gate.allowed is True
+        assert gate.approved_shot_count == len(shots)
+
+        current = await service.get_project(detail.project.id)
+        editing = await service.advance(
+            detail.project.id,
+            ProductionAdvanceRequest(
+                expected_revision_id=current.project.current_revision_id,
+                target_step=ProductionStep.EDITING,
+            ),
+        )
+        assert editing.project.active_step == ProductionStep.EDITING
+        await service.shutdown_generation_runs()
+
+    asyncio.run(scenario())

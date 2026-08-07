@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from urllib.parse import urlsplit, urlunsplit
+
+from ..models import (
+    VideoCostEstimateRequest,
+    VideoCostEstimateResponse,
+    VideoGenerationSettingsResponse,
+    VideoGenerationSettingsUpdate,
+    VideoProviderSettingsResponse,
+    VideoProviderValidationRequest,
+    VideoProviderValidationResponse,
+)
+from ..runtime_config import RuntimeConfigError, get_config_value, persist_config_values
+from .catalog import (
+    VideoModelCatalogError,
+    load_video_model_catalog,
+    video_duration_constraint_text,
+    video_duration_is_supported,
+)
+from .costing import estimate_video_cost
+from .registry import VideoProviderRegistry, VideoProviderRegistryError
+
+DEFAULT_VIDEO_MODEL_ALIAS = "bailian_wan_2_7_i2v"
+DEFAULT_BASE_URLS = {
+    "bailian": "https://dashscope.aliyuncs.com/api/v1",
+    "volc_ark": "https://ark.cn-beijing.volces.com/api/v3",
+    "minimax": "https://api.minimaxi.com/v1",
+}
+PROVIDER_LABELS = {
+    "bailian": "阿里云百炼",
+    "volc_ark": "火山方舟 Seedance",
+    "minimax": "MiniMax",
+}
+KEY_ENV = {
+    "bailian": "DASHSCOPE_API_KEY",
+    "volc_ark": "ARK_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+}
+BASE_ENV = {
+    "bailian": "DASHSCOPE_VIDEO_BASE_URL",
+    "volc_ark": "ARK_VIDEO_BASE_URL",
+    "minimax": "MINIMAX_VIDEO_BASE_URL",
+}
+VALIDATED_ENV = {
+    "bailian": "VIRAL_DNA_VIDEO_BAILIAN_VALIDATED_AT",
+    "volc_ark": "VIRAL_DNA_VIDEO_VOLC_ARK_VALIDATED_AT",
+    "minimax": "VIRAL_DNA_VIDEO_MINIMAX_VALIDATED_AT",
+}
+
+
+class VideoGenerationSettingsServiceError(RuntimeError):
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+
+def _fail(status_code: int, code: str, message: str) -> VideoGenerationSettingsServiceError:
+    return VideoGenerationSettingsServiceError(status_code, code, message)
+
+
+def _mask(value: str) -> str | None:
+    stripped = value.strip()
+    if not stripped:
+        return None
+    suffix = stripped[-4:] if len(stripped) >= 4 else stripped
+    return f"••••••••{suffix}"
+
+
+def _parse_time(value: str) -> datetime | None:
+    if not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=parsed.tzinfo or UTC)
+
+
+def normalize_provider_base_url(provider: str, value: str) -> str:
+    raw = value.strip().rstrip("/")
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError as exc:
+        raise _fail(422, "video_endpoint_invalid", "视频 Provider 服务地址格式无效") from exc
+    host = (parts.hostname or "").lower()
+    allowed = False
+    required_path = ""
+    if provider == "bailian":
+        allowed = host in {
+            "dashscope.aliyuncs.com",
+            "dashscope-intl.aliyuncs.com",
+            "dashscope-us.aliyuncs.com",
+        } or host.endswith(".maas.aliyuncs.com")
+        required_path = "/api/v1"
+    elif provider == "volc_ark":
+        allowed = host in {"ark.cn-beijing.volces.com", "ark.cn-shanghai.volces.com"}
+        required_path = "/api/v3"
+    elif provider == "minimax":
+        allowed = host in {"api.minimaxi.com", "api.minimax.chat"}
+        required_path = "/v1"
+    if (
+        not allowed
+        or parts.scheme.lower() != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or port not in {None, 443}
+        or parts.query
+        or parts.fragment
+        or parts.path.rstrip("/") != required_path
+    ):
+        raise _fail(
+            422,
+            "video_endpoint_not_allowed",
+            "为保护 API Key，只允许对应 Provider 的官方 HTTPS 接口",
+        )
+    return urlunsplit(("https", parts.netloc, required_path, "", ""))
+
+
+class VideoGenerationSettingsService:
+    def __init__(self, registry: VideoProviderRegistry | None = None) -> None:
+        self.registry = registry or VideoProviderRegistry()
+
+    def api_key(self, provider: str) -> str:
+        try:
+            name = KEY_ENV[provider]
+        except KeyError as exc:
+            raise _fail(422, "video_provider_invalid", "未知的视频 Provider") from exc
+        return get_config_value(name, "").strip()
+
+    def base_url(self, provider: str) -> str:
+        try:
+            configured = get_config_value(BASE_ENV[provider], DEFAULT_BASE_URLS[provider])
+            return normalize_provider_base_url(provider, configured)
+        except KeyError as exc:
+            raise _fail(422, "video_provider_invalid", "未知的视频 Provider") from exc
+
+    def get(self) -> VideoGenerationSettingsResponse:
+        catalog = load_video_model_catalog()
+        alias = get_config_value(
+            "VIRAL_DNA_VIDEO_DEFAULT_MODEL_ALIAS", DEFAULT_VIDEO_MODEL_ALIAS
+        ).strip()
+        try:
+            selected = catalog.option(alias)
+        except VideoModelCatalogError:
+            alias = DEFAULT_VIDEO_MODEL_ALIAS
+            selected = catalog.option(alias)
+        resolution = get_config_value("VIRAL_DNA_VIDEO_DEFAULT_RESOLUTION", "720P").strip().upper()
+        if resolution not in selected.capability.supported_resolutions:
+            resolution = selected.capability.supported_resolutions[0]
+        try:
+            poll_interval = float(get_config_value("VIRAL_DNA_VIDEO_POLL_INTERVAL_SECONDS", "5"))
+        except ValueError:
+            poll_interval = 5
+        try:
+            timeout = int(get_config_value("VIRAL_DNA_VIDEO_TASK_TIMEOUT_SECONDS", "900"))
+        except ValueError:
+            timeout = 900
+        provider_settings: list[VideoProviderSettingsResponse] = []
+        for provider in ("bailian", "volc_ark", "minimax"):
+            key = self.api_key(provider)
+            validated_at = _parse_time(get_config_value(VALIDATED_ENV[provider], ""))
+            provider_settings.append(
+                VideoProviderSettingsResponse(
+                    provider=provider,
+                    label=PROVIDER_LABELS[provider],
+                    api_key_configured=bool(key),
+                    api_key_hint=_mask(key),
+                    base_url=self.base_url(provider),
+                    last_validated_at=validated_at,
+                    validation_status=(
+                        "valid" if key and validated_at else "unknown" if key else "not_configured"
+                    ),
+                    validation_message=(
+                        "已校验"
+                        if key and validated_at
+                        else "尚未校验"
+                        if key
+                        else "未配置 API Key"
+                    ),
+                )
+            )
+        return VideoGenerationSettingsResponse(
+            enabled=get_config_value("VIRAL_DNA_VIDEO_GENERATION_ENABLED", "true").lower()
+            == "true",
+            default_model_alias=alias,
+            default_resolution=resolution,
+            poll_interval_seconds=min(60, max(0.2, poll_interval)),
+            task_timeout_seconds=min(7200, max(30, timeout)),
+            catalog_version=catalog.catalog_version,
+            pricing_version=catalog.pricing_version,
+            providers=provider_settings,
+            models=catalog.options(),
+        )
+
+    async def validate_provider(
+        self,
+        provider: str,
+        payload: VideoProviderValidationRequest,
+    ) -> VideoProviderValidationResponse:
+        key = (
+            payload.api_key.get_secret_value().strip()
+            if payload.api_key is not None
+            else self.api_key(provider)
+        )
+        if not key:
+            raise _fail(422, "video_api_key_required", "请先填写该 Provider 的 API Key")
+        base_url = normalize_provider_base_url(
+            provider, payload.base_url or self.base_url(provider)
+        )
+        try:
+            adapter = self.registry.get(provider)
+        except VideoProviderRegistryError as exc:
+            raise _fail(422, "video_provider_invalid", str(exc)) from exc
+        result = await adapter.validate_credentials(key, base_url)
+        if result.valid and payload.api_key is None:
+            try:
+                persist_config_values({VALIDATED_ENV[provider]: datetime.now(UTC).isoformat()})
+            except RuntimeConfigError as exc:
+                raise _fail(500, "video_settings_save_failed", str(exc)) from exc
+        return VideoProviderValidationResponse(
+            provider=provider,
+            valid=result.valid,
+            message=result.message,
+            latency_ms=result.latency_ms,
+            balance_known=result.balance_known,
+            balance_micros=result.balance_micros,
+            currency=result.currency,
+        )
+
+    async def update(
+        self, payload: VideoGenerationSettingsUpdate
+    ) -> VideoGenerationSettingsResponse:
+        catalog = load_video_model_catalog()
+        try:
+            selected = catalog.option(payload.default_model_alias)
+        except VideoModelCatalogError as exc:
+            raise _fail(422, "video_model_invalid", str(exc)) from exc
+        if payload.default_resolution not in selected.capability.supported_resolutions:
+            raise _fail(422, "video_resolution_unsupported", "默认分辨率不受所选视频模型支持")
+        updates = {
+            "VIRAL_DNA_VIDEO_GENERATION_ENABLED": "true" if payload.enabled else "false",
+            "VIRAL_DNA_VIDEO_DEFAULT_MODEL_ALIAS": payload.default_model_alias,
+            "VIRAL_DNA_VIDEO_DEFAULT_RESOLUTION": payload.default_resolution,
+            "VIRAL_DNA_VIDEO_POLL_INTERVAL_SECONDS": str(payload.poll_interval_seconds),
+            "VIRAL_DNA_VIDEO_TASK_TIMEOUT_SECONDS": str(payload.task_timeout_seconds),
+        }
+        for item in payload.providers:
+            base_url = normalize_provider_base_url(
+                item.provider, item.base_url or self.base_url(item.provider)
+            )
+            updates[BASE_ENV[item.provider]] = base_url
+            new_key = item.api_key.get_secret_value().strip() if item.api_key is not None else ""
+            if item.clear_api_key:
+                updates[KEY_ENV[item.provider]] = ""
+                updates[VALIDATED_ENV[item.provider]] = ""
+                continue
+            if not new_key:
+                continue
+            result = await self.validate_provider(
+                item.provider,
+                VideoProviderValidationRequest(api_key=new_key, base_url=base_url),
+            )
+            if not result.valid:
+                raise _fail(401, "video_api_key_invalid", result.message)
+            updates[KEY_ENV[item.provider]] = new_key
+            updates[VALIDATED_ENV[item.provider]] = datetime.now(UTC).isoformat()
+        try:
+            persist_config_values(updates)
+        except RuntimeConfigError as exc:
+            raise _fail(500, "video_settings_save_failed", str(exc)) from exc
+        return self.get()
+
+    def estimate(self, payload: VideoCostEstimateRequest) -> VideoCostEstimateResponse:
+        try:
+            spec = load_video_model_catalog().option(payload.model_alias)
+        except VideoModelCatalogError as exc:
+            raise _fail(422, "video_model_invalid", str(exc)) from exc
+        if payload.resolution not in spec.capability.supported_resolutions:
+            raise _fail(
+                422, "video_resolution_unsupported", f"{spec.label} 不支持 {payload.resolution}"
+            )
+        if not video_duration_is_supported(
+            spec.capability,
+            payload.duration_seconds,
+        ):
+            raise _fail(
+                422,
+                "video_duration_unsupported",
+                f"{spec.label} {video_duration_constraint_text(spec.capability)}",
+            )
+        estimate = estimate_video_cost(
+            spec,
+            duration_seconds=payload.duration_seconds,
+            resolution=payload.resolution,
+            candidate_count=payload.candidate_count,
+        )
+        return VideoCostEstimateResponse(
+            model_alias=spec.alias,
+            provider=spec.provider,
+            model=spec.model,
+            duration_seconds=payload.duration_seconds,
+            resolution=payload.resolution,
+            candidate_count=payload.candidate_count,
+            estimate_known=estimate.known,
+            estimated_cost_micros=estimate.micros,
+            pricing_version=estimate.pricing_version,
+            explanation=estimate.explanation,
+        )

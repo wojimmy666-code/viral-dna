@@ -168,7 +168,7 @@ def test_sqlite_migrates_v1_to_v2_without_losing_existing_rows(
             ("legacy-video",),
         ).fetchone()
 
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     assert {
         "production_projects",
         "production_revisions",

@@ -5,6 +5,7 @@ import {
   PRODUCTION_STEPS,
   budgetMicrosFromYuan,
   budgetYuanFromMicros,
+  closestProductionAspectRatio,
   constraintsFromText,
   dimensionsForRatio,
   estimateImageGenerationCostMicros,
@@ -15,11 +16,20 @@ import {
   imageQualityLabel,
   isAiImageGenerationRun,
   isImageEngineConfigured,
+  isVideoGenerationRun,
+  latestRunByKind,
   normalizeReferenceTags,
   normalizedImageCandidateCount,
+  productionDefaultsForSource,
   productionChangeLabel,
+  productionPreviewLayout,
   referenceTypeLabel,
   resolveImageExecutionMode,
+  formatVideoDuration,
+  normalizeVideoDuration,
+  videoDurationConstraintLabel,
+  videoDurationOptions,
+  videoGenerationRunLabel,
   workflowStatusClass,
   workflowStatusLabel,
 } from "../src/production-ui.js";
@@ -28,7 +38,62 @@ test("maps supported ratios to their default output dimensions", () => {
   assert.deepEqual(dimensionsForRatio("9:16"), { width: 1080, height: 1920 });
   assert.deepEqual(dimensionsForRatio("16:9"), { width: 1920, height: 1080 });
   assert.deepEqual(dimensionsForRatio("1:1"), { width: 1080, height: 1080 });
+  assert.deepEqual(dimensionsForRatio("4:5"), { width: 1080, height: 1350 });
   assert.deepEqual(dimensionsForRatio("unknown"), { width: 1080, height: 1920 });
+});
+
+test("defaults production output to the closest supported source-video ratio", () => {
+  assert.equal(
+    closestProductionAspectRatio({ width: 1920, height: 1080 }),
+    "16:9",
+  );
+  assert.equal(
+    closestProductionAspectRatio({ width: 1080, height: 1920 }),
+    "9:16",
+  );
+  assert.equal(
+    closestProductionAspectRatio({ width: 1080, height: 1350 }),
+    "4:5",
+  );
+  assert.equal(
+    closestProductionAspectRatio({ aspectRatio: "1:1" }),
+    "1:1",
+  );
+  assert.equal(
+    closestProductionAspectRatio({ width: 1440, height: 1080 }),
+    "16:9",
+  );
+  assert.deepEqual(
+    productionDefaultsForSource({ width: 1920, height: 1080 }),
+    {
+      outputAspectRatio: "16:9",
+      outputWidth: 1920,
+      outputHeight: 1080,
+    },
+  );
+});
+
+test("sizes shot-image preview canvases from the project output ratio", () => {
+  assert.deepEqual(
+    productionPreviewLayout({
+      output_aspect_ratio: "16:9",
+      output_width: 1920,
+      output_height: 1080,
+    }),
+    {
+      aspectRatio: "1920 / 1080",
+      maxWidth: "100%",
+      orientation: "landscape",
+    },
+  );
+  assert.deepEqual(
+    productionPreviewLayout({ output_aspect_ratio: "9:16" }),
+    {
+      aspectRatio: "9 / 16",
+      maxWidth: "360px",
+      orientation: "portrait",
+    },
+  );
 });
 
 test("converts production budgets between yuan and integer micros", () => {
@@ -62,10 +127,10 @@ test("exposes stable simplified-Chinese labels and locks future stages", () => {
   assert.equal(referenceTypeLabel("unknown"), "参考图");
   assert.equal(productionChangeLabel("branch_created"), "创建版本分支");
   assert.equal(productionChangeLabel("shot_structure_changed"), "调整分镜结构");
-  assert.equal(PRODUCTION_STEPS.filter((step) => step.locked).length, 3);
+  assert.equal(PRODUCTION_STEPS.filter((step) => step.locked).length, 2);
   assert.deepEqual(
-    PRODUCTION_STEPS.slice(0, 3).map((step) => step.id),
-    ["project_setup", "reference_assets", "shot_images"],
+    PRODUCTION_STEPS.slice(0, 4).map((step) => step.id),
+    ["project_setup", "reference_assets", "shot_images", "shot_videos"],
   );
 });
 
@@ -188,6 +253,79 @@ test("never presents simulated or source-frame runs as AI generated images", () 
   assert.equal(isAiImageGenerationRun(simulated), false);
   assert.equal(isAiImageGenerationRun(sourceFrame), false);
   assert.equal(isAiImageGenerationRun(localTool), true);
+});
+
+test("labels video runs and selects the latest run by media kind", () => {
+  const imageRun = { id: "image-1", kind: "image" };
+  const videoRun = {
+    id: "video-1",
+    kind: "video",
+    provider: "simulated",
+    execution_mode: "simulated",
+  };
+  assert.equal(isVideoGenerationRun(videoRun), true);
+  assert.equal(isVideoGenerationRun(imageRun), false);
+  assert.equal(latestRunByKind([videoRun, imageRun], "image"), imageRun);
+  assert.equal(latestRunByKind([videoRun, imageRun], "video"), videoRun);
+  assert.equal(videoGenerationRunLabel(null), "尚未生成");
+  assert.equal(videoGenerationRunLabel(videoRun), "流程模拟视频（非 AI）");
+  assert.equal(
+    videoGenerationRunLabel({
+      kind: "video",
+      execution_mode: "remote_api",
+      provider: "bailian",
+      model_display_name: "百炼 Wan 2.7 图生视频",
+    }),
+    "百炼 · 百炼 Wan 2.7 图生视频",
+  );
+});
+
+test("maps source-shot decimals to the nearest duration supported by the video model", () => {
+  const wan = {
+    label: "百炼 Wan 2.7",
+    capabilities: {
+      minimum_duration_seconds: 2,
+      maximum_duration_seconds: 15,
+      duration_step_seconds: 1,
+      default_duration_seconds: 5,
+      supported_durations: Array.from({ length: 14 }, (_, index) => index + 2),
+    },
+  };
+  assert.deepEqual(videoDurationOptions(wan), [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  assert.equal(normalizeVideoDuration(6.567, wan), 7);
+  assert.equal(normalizeVideoDuration(null, wan), 5);
+  assert.equal(formatVideoDuration(7), "7");
+  assert.equal(videoDurationConstraintLabel(wan), "支持 2–15 秒，按 1 秒调整");
+});
+
+test("uses discrete slider stops for video models with fixed durations", () => {
+  const hailuo = {
+    capabilities: {
+      minimum_duration_seconds: 6,
+      maximum_duration_seconds: 10,
+      duration_step_seconds: 1,
+      default_duration_seconds: 6,
+      supported_durations: [6, 10],
+    },
+  };
+  assert.deepEqual(videoDurationOptions(hailuo), [6, 10]);
+  assert.equal(normalizeVideoDuration(8, hailuo), 10);
+  assert.equal(videoDurationConstraintLabel(hailuo), "仅支持 6、10 秒");
+});
+
+test("builds range-model slider stops from minimum, maximum and step", () => {
+  const ranged = {
+    capabilities: {
+      minimum_duration_seconds: 5,
+      maximum_duration_seconds: 15,
+      duration_step_seconds: 2,
+      default_duration_seconds: 9,
+      supported_durations: [],
+    },
+  };
+  assert.deepEqual(videoDurationOptions(ranged), [5, 7, 9, 11, 13, 15]);
+  assert.equal(normalizeVideoDuration(undefined, ranged), 9);
+  assert.equal(videoDurationConstraintLabel(ranged), "支持 5–15 秒，按 2 秒调整");
 });
 
 test("labels automated image quality without replacing manual review", () => {

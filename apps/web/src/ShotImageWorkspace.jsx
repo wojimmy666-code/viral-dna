@@ -27,10 +27,12 @@ import {
   imageQualityLabel,
   isAiImageGenerationRun,
   isImageEngineConfigured,
+  productionPreviewLayout,
   resolveImageExecutionMode,
   workflowStatusClass,
   workflowStatusLabel,
 } from "./production-ui.js";
+import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 
 const DEFAULT_ROLE_BY_TYPE = Object.freeze({
   person: "identity",
@@ -302,6 +304,7 @@ export function ShotImageWorkspace({
   generationEngine,
   generationInputMode,
   generationSettings,
+  project,
   advanced,
   busy,
   error,
@@ -338,6 +341,11 @@ export function ShotImageWorkspace({
   const [mentionMenu, setMentionMenu] = useState(null);
   const promptRef = useRef(null);
   const plan = shotDetail?.plan;
+  const previewLayout = productionPreviewLayout(project);
+  const previewCanvasStyle = {
+    "--shot-preview-aspect-ratio": previewLayout.aspectRatio,
+    "--shot-preview-max-width": previewLayout.maxWidth,
+  };
   const activeShots = useMemo(
     () => shots.filter((item) => item.plan.lifecycle_status !== "discarded"),
     [shots],
@@ -347,7 +355,7 @@ export function ShotImageWorkspace({
     [shots],
   );
   const generationRuns = shotDetail?.generation_runs || [];
-  const latestRun = generationRuns[0] || null;
+  const latestRun = generationRuns.find((run) => run.kind === "image") || null;
   const candidates = useMemo(() => {
     if (!isAiImageGenerationRun(latestRun)) return [];
     return (latestRun?.candidates || []).filter(
@@ -715,7 +723,17 @@ export function ShotImageWorkspace({
                 >
                   <DotsSixVertical className="shot-drag-handle" size={17} />
                   <button className="shot-navigation-main" onClick={() => onSelectShot(shot.id)} type="button">
-                    <span className="shot-navigation-index">{String(shot.index).padStart(2, "0")}</span>
+                    <ShotNavigationThumbnail
+                      index={shot.index}
+                      resolveUrl={resolveUrl}
+                      sources={[
+                        item.image_preview && {
+                          kind: item.image_preview.kind,
+                          url: item.image_preview.thumbnail_url,
+                        },
+                        { kind: "source_keyframe", url: shot.source_keyframe_url },
+                      ]}
+                    />
                     <span className="shot-navigation-copy">
                       <strong>分镜 {shot.index}</strong>
                       <small>{seconds(shot.start_seconds)}s — {seconds(shot.end_seconds)}s</small>
@@ -741,7 +759,19 @@ export function ShotImageWorkspace({
               </button>
               {showDiscarded && discardedShots.map((item) => (
                 <div className="shot-discarded-item" key={item.plan.id}>
-                  <span>原分镜 · {seconds(item.plan.start_seconds)}s—{seconds(item.plan.end_seconds)}s</span>
+                  <ShotNavigationThumbnail
+                    className="compact muted"
+                    index={item.plan.index}
+                    resolveUrl={resolveUrl}
+                    sources={[
+                      item.image_preview && {
+                        kind: item.image_preview.kind,
+                        url: item.image_preview.thumbnail_url,
+                      },
+                      { kind: "source_keyframe", url: item.plan.source_keyframe_url },
+                    ]}
+                  />
+                  <span className="shot-discarded-copy">原分镜 · {seconds(item.plan.start_seconds)}s—{seconds(item.plan.end_seconds)}s</span>
                   <button disabled={busy} onClick={() => onRestoreShot(item.plan.id)} type="button"><ArrowCounterClockwise size={13} />恢复</button>
                 </div>
               ))}
@@ -772,7 +802,10 @@ export function ShotImageWorkspace({
                   上游输入已经修改，旧审批图仍保留，但必须重新生成并确认。
                 </div>
               )}
-              <div className="shot-compare-grid">
+              <div
+                className={`shot-compare-grid shot-compare-${previewLayout.orientation}`}
+                style={previewCanvasStyle}
+              >
                 <figure
                   className={visualChoice === "source" ? "selected" : ""}
                   onClick={() => {

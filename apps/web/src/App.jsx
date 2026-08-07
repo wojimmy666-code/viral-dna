@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
   Bell,
@@ -40,8 +40,18 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
+import {
+  NotificationDrawer,
+  ToastViewport,
+} from "./NotificationCenter.jsx";
+import { notificationToastPayload } from "./notification-ui.js";
 import { ProductionHub } from "./ProductionWorkflow.jsx";
-import { buildRecordBreadcrumb, isRecordDetailView } from "./app-layout.js";
+import {
+  buildRecordBreadcrumb,
+  isProductionDetailView,
+  isRecordDetailView,
+  shouldShowTopbarCreate,
+} from "./app-layout.js";
 import { inferVideoOrientation } from "./video-layout.js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
@@ -95,6 +105,21 @@ const DEFAULT_IMAGE_GENERATION_SETTINGS = Object.freeze({
   local_proxy_source: "none",
   local_windows_sandbox_mode: "auto",
   selected_capabilities: null,
+  models: [],
+});
+const DEFAULT_VIDEO_GENERATION_SETTINGS = Object.freeze({
+  enabled: true,
+  default_model_alias: "bailian_wan_2_7_i2v",
+  default_resolution: "720P",
+  poll_interval_seconds: 5,
+  task_timeout_seconds: 900,
+  catalog_version: "",
+  pricing_version: "",
+  providers: [
+    { provider: "bailian", label: "阿里云百炼", api_key_configured: false, base_url: "https://dashscope.aliyuncs.com/api/v1" },
+    { provider: "volc_ark", label: "火山方舟 Seedance", api_key_configured: false, base_url: "https://ark.cn-beijing.volces.com/api/v3" },
+    { provider: "minimax", label: "MiniMax", api_key_configured: false, base_url: "https://api.minimaxi.com/v1" },
+  ],
   models: [],
 });
 const DEFAULT_WORKSPACE_INFO = Object.freeze({
@@ -337,6 +362,25 @@ function localProxySourceLabel(value) {
   }[value] || "未检测到代理";
 }
 
+function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
+  const providers = server.providers?.length
+    ? server.providers
+    : DEFAULT_VIDEO_GENERATION_SETTINGS.providers;
+  return {
+    videoEnabled: server.enabled !== false,
+    videoDefaultModelAlias:
+      server.default_model_alias || DEFAULT_VIDEO_GENERATION_SETTINGS.default_model_alias,
+    videoDefaultResolution:
+      server.default_resolution || DEFAULT_VIDEO_GENERATION_SETTINGS.default_resolution,
+    videoPollIntervalSeconds: Number(server.poll_interval_seconds || 5),
+    videoTaskTimeoutSeconds: Number(server.task_timeout_seconds || 900),
+    videoProviderKeys: Object.fromEntries(providers.map((item) => [item.provider, ""])),
+    videoProviderBaseUrls: Object.fromEntries(
+      providers.map((item) => [item.provider, item.base_url]),
+    ),
+  };
+}
+
 function localProxyDeliveryLabel(value) {
   return {
     codex_native: "由 Codex 读取系统代理",
@@ -392,9 +436,13 @@ export function App() {
   const [serverImageSettings, setServerImageSettings] = useState(
     DEFAULT_IMAGE_GENERATION_SETTINGS,
   );
+  const [serverVideoSettings, setServerVideoSettings] = useState(
+    DEFAULT_VIDEO_GENERATION_SETTINGS,
+  );
   const [settingsDraft, setSettingsDraft] = useState({
     ...initialModelSettings,
     ...imageSettingsDraft(),
+    ...videoSettingsDraft(),
     provider: DEFAULT_SERVER_MODEL_SETTINGS.provider,
     modelAlias: DEFAULT_SERVER_MODEL_SETTINGS.model_alias,
     baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
@@ -443,11 +491,19 @@ export function App() {
   const [productionProjects, setProductionProjects] = useState([]);
   const [productionsLoading, setProductionsLoading] = useState(false);
   const [productionsError, setProductionsError] = useState("");
-  const [productionCreateSignal, setProductionCreateSignal] = useState(0);
   const [productionListSignal, setProductionListSignal] = useState(0);
   const [activeProductionProjectName, setActiveProductionProjectName] = useState("");
-  const [notice, setNotice] = useState("");
+  const [toasts, setToasts] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notificationFilter, setNotificationFilter] = useState("all");
+  const [notificationLoading, setNotificationLoading] = useState(false);
+  const [notificationTarget, setNotificationTarget] = useState(null);
   const eventSourceRef = useRef(null);
+  const toastSequenceRef = useRef(0);
+  const notificationSnapshotRef = useRef(new Map());
+  const notificationFeedInitializedRef = useRef(false);
   const historyRequestIdRef = useRef(0);
   const productionRequestIdRef = useRef(0);
   const importSectionRef = useRef(null);
@@ -455,14 +511,69 @@ export function App() {
   const videoRef = useRef(null);
   const filePreview = useFilePreview(file);
 
+  const dismissToast = useCallback((toastId) => {
+    setToasts((current) => current.filter((item) => item.id !== toastId));
+  }, []);
+
+  const showNotice = useCallback((notice) => {
+    if (!notice) {
+      setToasts([]);
+      return;
+    }
+    const normalized = typeof notice === "string"
+      ? { message: notice, type: "success" }
+      : {
+          message: notice.message || notice.title || "操作已完成",
+          title: notice.message && notice.title ? notice.title : "",
+          type: notice.type || notice.level || "success",
+          duration: notice.duration,
+        };
+    const id = `toast-${Date.now()}-${toastSequenceRef.current += 1}`;
+    setToasts((current) => [...current.slice(-2), { id, ...normalized }]);
+  }, []);
+
+  const refreshNotifications = useCallback(async ({ announce = true } = {}) => {
+    try {
+      const feed = await apiRequest("/me/notifications?limit=100");
+      const items = feed.items || [];
+      const nextSnapshot = new Map(
+        items.map((item) => [item.id, `${item.status}:${item.updated_at}`]),
+      );
+      if (announce && notificationFeedInitializedRef.current) {
+        for (const item of [...items].reverse()) {
+          const previous = notificationSnapshotRef.current.get(item.id);
+          const changed = previous !== nextSnapshot.get(item.id);
+          if (changed && ["succeeded", "failed", "cancelled"].includes(item.status)) {
+            showNotice(notificationToastPayload(item));
+          }
+        }
+      }
+      notificationSnapshotRef.current = nextSnapshot;
+      notificationFeedInitializedRef.current = true;
+      setNotifications(items);
+      setNotificationUnreadCount(Number(feed.unread_count || 0));
+    } catch {
+      // The message center is auxiliary; a temporary polling failure should stay silent.
+    }
+  }, [showNotice]);
+
   useEffect(() => {
     return () => eventSourceRef.current?.close();
   }, []);
 
   useEffect(() => {
     loadWorkspace().catch(() => undefined);
+    loadGenerationSettings().catch(() => undefined);
     refreshHistory({ quiet: true }).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    refreshNotifications({ announce: false }).catch(() => undefined);
+    const timer = window.setInterval(() => {
+      refreshNotifications().catch(() => undefined);
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [refreshNotifications]);
 
   useEffect(() => {
     if (activeNav !== "history") return undefined;
@@ -499,12 +610,6 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!notice) return undefined;
-    const timer = window.setTimeout(() => setNotice(""), 2200);
-    return () => window.clearTimeout(timer);
-  }, [notice]);
-
-  useEffect(() => {
     if (!settingsOpen) return undefined;
     const previousOverflow = document.body.style.overflow;
     const closeOnEscape = (event) => {
@@ -525,15 +630,28 @@ export function App() {
     return next;
   }
 
+  async function loadGenerationSettings() {
+    const [imageResult, videoResult] = await Promise.allSettled([
+      apiRequest("/settings/image-generation"),
+      apiRequest("/settings/video-generation"),
+    ]);
+    if (imageResult.status === "fulfilled") {
+      setServerImageSettings(imageResult.value);
+    }
+    if (videoResult.status === "fulfilled") {
+      setServerVideoSettings(videoResult.value);
+    }
+  }
+
   function resetProductionWorkspace() {
     productionRequestIdRef.current += 1;
     setRecordWorkspaceMode("analysis");
     setProductionProjects([]);
     setProductionsLoading(false);
     setProductionsError("");
-    setProductionCreateSignal(0);
     setProductionListSignal(0);
     setActiveProductionProjectName("");
+    setNotificationTarget(null);
   }
 
   async function loadProductions(recordId, { quiet = false } = {}) {
@@ -648,6 +766,7 @@ export function App() {
       analysisProfile,
       maxCostCny,
       ...imageSettingsDraft(serverImageSettings),
+      ...videoSettingsDraft(serverVideoSettings),
       provider: serverModelSettings.provider,
       modelAlias: serverModelSettings.model_alias,
       baseUrl: serverModelSettings.base_url,
@@ -662,9 +781,10 @@ export function App() {
     setSettingsLoading(true);
     void discoverLocalCodex({ quiet: true });
     try {
-      const [remote, imageRemote, nextWorkspace] = await Promise.all([
+      const [remote, imageRemote, videoRemote, nextWorkspace] = await Promise.all([
         apiRequest("/settings/model"),
         apiRequest("/settings/image-generation"),
+        apiRequest("/settings/video-generation"),
         apiRequest("/workspace"),
       ]);
       setWorkspaceInfo(nextWorkspace);
@@ -673,11 +793,13 @@ export function App() {
       setWorkspaceError("");
       setServerModelSettings(remote);
       setServerImageSettings(imageRemote);
+      setServerVideoSettings(videoRemote);
       setSettingsDraft({
         targetModel,
         analysisProfile,
         maxCostCny,
         ...imageSettingsDraft(imageRemote),
+        ...videoSettingsDraft(videoRemote),
         provider: remote.provider,
         modelAlias: remote.model_alias,
         baseUrl: remote.base_url,
@@ -769,7 +891,7 @@ export function App() {
         status: "",
         sort: DEFAULT_HISTORY_STATE.sort,
       });
-      setNotice("工作区已切换，历史记录已重新加载");
+      showNotice("工作区已切换，历史记录已重新加载");
     } catch (requestError) {
       setWorkspaceError(requestError.message);
     } finally {
@@ -787,7 +909,7 @@ export function App() {
         body: JSON.stringify({ name: name.trim() }),
       });
       await refreshHistory({ quiet: true });
-      setNotice("目录已创建");
+      showNotice("目录已创建");
     } catch (requestError) {
       setHistoryError(requestError.message);
     }
@@ -803,7 +925,7 @@ export function App() {
         body: JSON.stringify({ name: name.trim() }),
       });
       await refreshHistory({ quiet: true });
-      setNotice("目录名称已更新");
+      showNotice("目录名称已更新");
     } catch (requestError) {
       setHistoryError(requestError.message);
     }
@@ -817,7 +939,7 @@ export function App() {
         body: JSON.stringify(update),
       });
       await refreshHistory({ quiet: true });
-      if (successMessage) setNotice(successMessage);
+      if (successMessage) showNotice(successMessage);
     } catch (requestError) {
       setHistoryError(requestError.message);
     }
@@ -846,9 +968,81 @@ export function App() {
       window.setTimeout(() => {
         reportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 120);
+      return detail;
     } catch (requestError) {
       setHistoryError(requestError.message);
+      showNotice({ type: "error", title: "无法打开分析记录", message: requestError.message });
+      return null;
     }
+  }
+
+  function toggleNotificationCenter() {
+    const nextOpen = !notificationOpen;
+    setNotificationOpen(nextOpen);
+    if (!nextOpen) return;
+    setNotificationLoading(true);
+    refreshNotifications({ announce: false })
+      .finally(() => setNotificationLoading(false));
+  }
+
+  async function markNotificationRead(notificationId) {
+    const current = notifications.find((item) => item.id === notificationId);
+    if (!current || current.read_at) return;
+    try {
+      const updated = await apiRequest(`/me/notifications/${notificationId}/read`, {
+        method: "PATCH",
+      });
+      setNotifications((items) => items.map(
+        (item) => (item.id === notificationId ? updated : item),
+      ));
+      setNotificationUnreadCount((count) => Math.max(0, count - 1));
+    } catch (requestError) {
+      showNotice({ type: "error", title: "消息状态更新失败", message: requestError.message });
+    }
+  }
+
+  async function markAllNotificationsRead() {
+    if (!notificationUnreadCount) return;
+    try {
+      await apiRequest("/me/notifications/read-all", { method: "POST" });
+      const readAt = new Date().toISOString();
+      setNotifications((items) => items.map(
+        (item) => (item.read_at ? item : { ...item, read_at: readAt }),
+      ));
+      setNotificationUnreadCount(0);
+    } catch (requestError) {
+      showNotice({ type: "error", title: "消息状态更新失败", message: requestError.message });
+    }
+  }
+
+  async function openNotificationAction(notification) {
+    await markNotificationRead(notification.id);
+    setNotificationOpen(false);
+    const payload = notification.action_payload || {};
+    if (notification.action_kind === "model_settings") {
+      await openModelSettings();
+      return;
+    }
+    if (notification.action_kind === "asset_library") {
+      selectNav("assets");
+      return;
+    }
+    if (notification.action_kind === "analysis_record") {
+      if (payload.record_id) await openHistoryRecord(payload.record_id);
+      return;
+    }
+    if (notification.action_kind !== "production_shot" || !payload.record_id) return;
+    const opened = await openHistoryRecord(payload.record_id);
+    if (!opened) return;
+    setRecordWorkspaceMode("production");
+    setNotificationTarget({
+      candidateId: payload.candidate_id || "",
+      projectId: payload.project_id || "",
+      recordId: payload.record_id,
+      shotPlanId: payload.shot_plan_id || "",
+      step: payload.step || "shot_videos",
+      token: `${notification.id}:${Date.now()}`,
+    });
   }
 
   async function saveModelSettings() {
@@ -939,6 +1133,29 @@ export function App() {
       });
       setServerImageSettings(imageRemote);
 
+      const videoRemote = await apiRequest("/settings/video-generation", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: Boolean(settingsDraft.videoEnabled),
+          default_model_alias: settingsDraft.videoDefaultModelAlias,
+          default_resolution: settingsDraft.videoDefaultResolution,
+          poll_interval_seconds: Number(settingsDraft.videoPollIntervalSeconds || 5),
+          task_timeout_seconds: Number(settingsDraft.videoTaskTimeoutSeconds || 900),
+          providers: (serverVideoSettings.providers || []).map((provider) => ({
+            provider: provider.provider,
+            api_key:
+              String(settingsDraft.videoProviderKeys?.[provider.provider] || "").trim()
+              || null,
+            base_url:
+              settingsDraft.videoProviderBaseUrls?.[provider.provider]
+              || provider.base_url,
+            clear_api_key: false,
+          })),
+        }),
+      });
+      setServerVideoSettings(videoRemote);
+
       const nextSettings = {
         targetModel: settingsDraft.targetModel,
         analysisProfile: settingsDraft.analysisProfile,
@@ -953,11 +1170,17 @@ export function App() {
       } catch {
         persisted = false;
       }
-      setSettingsDraft((current) => ({ ...current, apiKey: "" }));
+      setSettingsDraft((current) => ({
+        ...current,
+        apiKey: "",
+        videoProviderKeys: Object.fromEntries(
+          (videoRemote.providers || []).map((provider) => [provider.provider, ""]),
+        ),
+      }));
       setSettingsOpen(false);
-      setNotice(
+      showNotice(
         persisted
-          ? "模型与图片生成配置已验证并保存"
+          ? "分析、图片与视频模型配置已验证并保存"
           : "配置已应用，但浏览器未保存分析默认值",
       );
     } catch (requestError) {
@@ -1035,7 +1258,7 @@ export function App() {
 
   async function startAnalysis() {
     setError("");
-    setNotice("");
+    showNotice("");
     if (!rightsConfirmed) {
       setError("请先确认拥有视频分析和使用权限");
       return;
@@ -1111,7 +1334,7 @@ export function App() {
 
   async function copyText(text, message = "已复制") {
     await navigator.clipboard.writeText(text);
-    setNotice(message);
+    showNotice(message);
   }
 
   async function downloadPromptPackage() {
@@ -1135,7 +1358,7 @@ export function App() {
           anchor.href = resolveApiUrl(`/exports/${artifact.id}/download`);
           anchor.download = artifact.filename;
           anchor.click();
-          setNotice(
+          showNotice(
             replacementVersion
               ? "替换版提示词包已保存到工作区并开始下载"
               : "提示词包已保存到工作区并开始下载",
@@ -1156,14 +1379,14 @@ export function App() {
     anchor.download = `viral-dna-prompt-v${currentPromptPackage.version}.json`;
     anchor.click();
     URL.revokeObjectURL(href);
-    setNotice("替换版提示词包已下载");
+    showNotice("替换版提示词包已下载");
   }
 
   async function openAnalysisVersion(analysisId) {
     if (!analysisId || analysisId === report?.analysis_id) return;
     const selected = analysisVersions.find((item) => item.id === analysisId);
     if (selected?.stage !== "completed") {
-      setNotice("该分析版本尚未完成");
+      showNotice("该分析版本尚未完成");
       return;
     }
     setError("");
@@ -1175,7 +1398,7 @@ export function App() {
       setActiveShotId(nextReport.shots?.[0]?.id || null);
       setActiveReportTab("overview");
       setRecordWorkspaceMode("analysis");
-      setNotice("已切换分析版本");
+      showNotice("已切换分析版本");
     } catch (requestError) {
       setError(requestError.message);
     }
@@ -1367,7 +1590,7 @@ export function App() {
         latency_ms: result.validation_latency_ms || 0,
         message: "Codex Windows 沙箱预检已通过，本次未调用图片模型。",
       });
-      setNotice(
+      showNotice(
         "Codex + ImageGen 已自动配置并通过无费用沙箱预检；首次出图仍需人工触发",
       );
     } catch (requestError) {
@@ -1383,15 +1606,6 @@ export function App() {
     if (mode === "production" && video?.record_id) {
       loadProductions(video.record_id, { quiet: productionProjects.length > 0 }).catch(() => undefined);
     }
-  }
-
-  function createProductionFromReport() {
-    if (!video?.record_id || !report?.analysis_id) {
-      setError("当前分析记录尚未准备好创建创作方案");
-      return;
-    }
-    setRecordWorkspaceMode("production");
-    setProductionCreateSignal((current) => current + 1);
   }
 
   function openWorkspaceHome() {
@@ -1424,6 +1638,11 @@ export function App() {
   }
 
   const recordDetailMode = isRecordDetailView(activeNav, report);
+  const productionFocusMode = isProductionDetailView(
+    activeNav,
+    report,
+    recordWorkspaceMode,
+  );
   const recordBreadcrumbItems = buildRecordBreadcrumb(
     recordWorkspaceMode,
     activeProductionProjectName,
@@ -1443,7 +1662,11 @@ export function App() {
         <Topbar
           assetMode={activeNav === "assets"}
           focusMode={recordDetailMode}
+          hideCreate={!shouldShowTopbarCreate(activeNav, report)}
+          notificationOpen={notificationOpen}
+          notificationUnreadCount={notificationUnreadCount}
           onCreate={() => selectNav("new-analysis")}
+          onToggleNotifications={toggleNotificationCenter}
           onSearch={(value) => {
             changeHistoryQuery(value);
             if (value) setActiveNav("history");
@@ -1455,7 +1678,9 @@ export function App() {
           className={
             activeNav === "history"
               ? "history-layout"
-              : activeNav === "assets" ? "asset-library-layout" : "workspace-layout"
+              : activeNav === "assets"
+                ? "asset-library-layout"
+                : `workspace-layout ${productionFocusMode ? "production-mode" : ""}`
           }
         >
           {activeNav === "history" ? (
@@ -1488,7 +1713,7 @@ export function App() {
             />
           ) : activeNav === "assets" ? (
             <AssetLibrary
-              onNotice={setNotice}
+              onNotice={showNotice}
               request={apiRequest}
               resolveUrl={resolveArtifactUrl}
             />
@@ -1556,7 +1781,6 @@ export function App() {
                   onRestart={reanalyzeCurrent}
                   analysisVersions={analysisVersions}
                   activeAnalysisId={report.analysis_id}
-                  onCreateProduction={createProductionFromReport}
                   onVersionChange={openAnalysisVersion}
                 />
                 <RecordWorkspaceTabs
@@ -1608,18 +1832,27 @@ export function App() {
                 ) : (
                   <ProductionHub
                     analysisId={report.analysis_id}
-                    createSignal={productionCreateSignal}
                     error={productionsError}
                     imageGenerationSettings={serverImageSettings}
+                    videoGenerationSettings={serverVideoSettings}
                     listSignal={productionListSignal}
                     loading={productionsLoading}
+                    navigationTarget={notificationTarget}
                     onNavigationChange={setActiveProductionProjectName}
-                    onNotice={setNotice}
+                    onNotificationsChanged={refreshNotifications}
+                    onNotice={showNotice}
                     onProjectsChanged={() => loadProductions(video.record_id, { quiet: true })}
                     projects={productionProjects}
                     recordId={video.record_id}
                     request={apiRequest}
                     resolveUrl={resolveArtifactUrl}
+                    sourceMedia={{
+                      aspectRatio: report.media_evidence?.metadata?.aspect_ratio
+                        || report.overview?.aspect_ratio
+                        || currentPromptPackage?.aspect_ratio,
+                      height: video.height || report.media_evidence?.metadata?.height,
+                      width: video.width || report.media_evidence?.metadata?.width,
+                    }}
                     sourceTitle={video.title}
                   />
                 )}
@@ -1628,7 +1861,9 @@ export function App() {
             )}
           </main>
 
-          <InsightsPanel report={report} analysis={analysis} onOpenTab={setActiveReportTab} />
+          {!productionFocusMode && (
+            <InsightsPanel report={report} analysis={analysis} onOpenTab={setActiveReportTab} />
+          )}
           </>)}
         </div>
       </div>
@@ -1641,6 +1876,7 @@ export function App() {
           saving={settingsSaving}
           serverSettings={serverModelSettings}
           imageServerSettings={serverImageSettings}
+          videoServerSettings={serverVideoSettings}
           imageToolDetecting={imageToolDetecting}
           imageToolDetection={imageToolDetection}
           codexApplying={codexApplying}
@@ -1669,6 +1905,7 @@ export function App() {
             updateSettingsDraft({
               ...DEFAULT_MODEL_SETTINGS,
               ...imageSettingsDraft(),
+              ...videoSettingsDraft(),
               provider: DEFAULT_SERVER_MODEL_SETTINGS.provider,
               modelAlias: DEFAULT_SERVER_MODEL_SETTINGS.model_alias,
               baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
@@ -1679,12 +1916,19 @@ export function App() {
         />
       )}
 
-      {notice && (
-        <div className="toast" role="status">
-          <CheckCircle size={18} weight="fill" />
-          {notice}
-        </div>
-      )}
+      <NotificationDrawer
+        filter={notificationFilter}
+        items={notifications}
+        loading={notificationLoading}
+        onAction={openNotificationAction}
+        onClose={() => setNotificationOpen(false)}
+        onFilterChange={setNotificationFilter}
+        onMarkAllRead={markAllNotificationsRead}
+        onMarkRead={markNotificationRead}
+        open={notificationOpen}
+        unreadCount={notificationUnreadCount}
+      />
+      <ToastViewport onDismiss={dismissToast} toasts={toasts} />
     </div>
   );
 }
@@ -2086,6 +2330,7 @@ function ModelSettingsDialog({
   saving,
   serverSettings,
   imageServerSettings,
+  videoServerSettings,
   imageToolDetecting,
   imageToolDetection,
   codexApplying,
@@ -2128,6 +2373,11 @@ function ModelSettingsDialog({
     imageToolDetection?.capabilities
     || imageServerSettings.selected_capabilities
     || selectedImageModel?.capabilities;
+  const videoModelOptions = videoServerSettings.models || [];
+  const selectedVideoModel = videoModelOptions.find(
+    (model) => model.alias === draft.videoDefaultModelAlias,
+  );
+  const videoResolutions = selectedVideoModel?.capabilities?.supported_resolutions || [];
   const imageCandidateCount = Number(draft.imageDefaultCandidateCount || 2);
   const estimatedImageCost = selectedImageModel
     ? (Number(selectedImageModel.unit_cost_micros || 0) * imageCandidateCount) / 1_000_000
@@ -3001,6 +3251,136 @@ function ModelSettingsDialog({
             </label>
           </section>
 
+          <section className="settings-section video-generation-settings" aria-labelledby="video-generation-title">
+            <div className="settings-section-heading">
+              <div>
+                <h3 id="video-generation-title">分段视频生成</h3>
+                <p>配置国内远程 API；默认模型可在每个分镜生成前临时切换。</p>
+              </div>
+              <span className={"image-settings-state " + (draft.videoEnabled ? "enabled" : "")}>
+                {draft.videoEnabled ? "已启用" : "已停用"}
+              </span>
+            </div>
+
+            <label className="semantic-quality-toggle">
+              <input
+                checked={Boolean(draft.videoEnabled)}
+                disabled={saving}
+                onChange={(event) => onChange({ videoEnabled: event.target.checked })}
+                type="checkbox"
+              />
+              <span><Check size={14} weight="bold" /></span>
+              <div>
+                <strong>启用真实分段视频生成</strong>
+                <small>未配置对应 API Key 时仍可保存，但生成按钮会明确提示缺少配置。</small>
+              </div>
+            </label>
+
+            <div className="settings-field-grid">
+              <label className="settings-field">
+                <span>默认视频模型</span>
+                <select
+                  disabled={saving || !draft.videoEnabled}
+                  onChange={(event) => {
+                    const model = videoModelOptions.find(
+                      (item) => item.alias === event.target.value,
+                    );
+                    onChange({
+                      videoDefaultModelAlias: event.target.value,
+                      videoDefaultResolution:
+                        model?.capabilities?.supported_resolutions?.[0]
+                        || draft.videoDefaultResolution,
+                    });
+                  }}
+                  value={draft.videoDefaultModelAlias}
+                >
+                  {videoModelOptions.map((model) => (
+                    <option disabled={!model.available} key={model.alias} value={model.alias}>
+                      {model.label}{model.recommended ? "（推荐）" : ""}{!model.available ? "（待开放）" : ""}
+                    </option>
+                  ))}
+                </select>
+                <small>{selectedVideoModel?.description || "正在读取视频模型目录…"}</small>
+              </label>
+              <label className="settings-field">
+                <span>默认分辨率</span>
+                <select
+                  disabled={saving || !draft.videoEnabled}
+                  onChange={(event) => onChange({ videoDefaultResolution: event.target.value })}
+                  value={draft.videoDefaultResolution}
+                >
+                  {videoResolutions.map((resolution) => (
+                    <option key={resolution} value={resolution}>{resolution}</option>
+                  ))}
+                </select>
+                <small>分辨率直接影响计费；每次生成前会再次显示预计费用。</small>
+              </label>
+            </div>
+
+            <div className="video-provider-settings-list">
+              {(videoServerSettings.providers || []).map((provider) => (
+                <article className="image-mode-panel" key={provider.provider}>
+                  <div className="settings-section-heading compact-heading">
+                    <div>
+                      <strong>{provider.label}</strong>
+                      <p>
+                        {provider.api_key_configured
+                          ? `已保存 ${provider.api_key_hint || "API Key"} · ${provider.validation_status === "valid" ? "已校验" : "待重新校验"}`
+                          : "未配置；可留空，使用该 Provider 时再填写。"}
+                      </p>
+                    </div>
+                    <span className={"image-settings-state " + (provider.api_key_configured ? "enabled" : "")}>
+                      {provider.api_key_configured ? "已连接" : "未配置"}
+                    </span>
+                  </div>
+                  <div className="settings-field-grid">
+                    <label className="settings-field">
+                      <span>API Key</span>
+                      <input
+                        autoComplete="off"
+                        disabled={saving}
+                        onChange={(event) => onChange({
+                          videoProviderKeys: {
+                            ...(draft.videoProviderKeys || {}),
+                            [provider.provider]: event.target.value,
+                          },
+                        })}
+                        placeholder={provider.api_key_hint || "留空表示不修改"}
+                        type="password"
+                        value={draft.videoProviderKeys?.[provider.provider] || ""}
+                      />
+                      <small>仅当填写新 Key 时，保存操作才会联网校验该 Provider。</small>
+                    </label>
+                    <label className="settings-field">
+                      <span>官方服务地址</span>
+                      <input
+                        disabled={saving}
+                        onChange={(event) => onChange({
+                          videoProviderBaseUrls: {
+                            ...(draft.videoProviderBaseUrls || {}),
+                            [provider.provider]: event.target.value,
+                          },
+                        })}
+                        spellCheck="false"
+                        type="url"
+                        value={draft.videoProviderBaseUrls?.[provider.provider] || provider.base_url}
+                      />
+                      <small>只接受该 Provider 的官方 HTTPS 域名，Key 不写入项目快照。</small>
+                    </label>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="image-mode-note">
+              <ShieldCheck size={18} weight="fill" />
+              <div>
+                <strong>费用与余额保护</strong>
+                <p>生成前显示目录价；Provider 返回余额不足时会标记任务失败并提示充值，不会显示为 ¥0。</p>
+              </div>
+            </div>
+          </section>
+
           <section className="settings-section" aria-labelledby="analysis-profile-title">
             <div className="settings-section-heading">
               <div>
@@ -3103,7 +3483,17 @@ function ModelSettingsDialog({
   );
 }
 
-function Topbar({ assetMode = false, focusMode = false, onCreate, onSearch, searchValue }) {
+function Topbar({
+  assetMode = false,
+  focusMode = false,
+  hideCreate = false,
+  notificationOpen = false,
+  notificationUnreadCount = 0,
+  onCreate,
+  onSearch,
+  onToggleNotifications,
+  searchValue,
+}) {
   const primaryActionsHidden = assetMode || focusMode;
   return (
     <header className={`topbar ${assetMode ? "asset-mode" : ""} ${focusMode ? "focus-mode" : ""}`}>
@@ -3120,14 +3510,24 @@ function Topbar({ assetMode = false, focusMode = false, onCreate, onSearch, sear
         </div>
       )}
       <div className="topbar-actions">
-        <button className="icon-button" type="button" aria-label="通知">
+        <button
+          aria-expanded={notificationOpen}
+          aria-label={notificationUnreadCount ? `通知，${notificationUnreadCount} 条未读` : "通知"}
+          className={`icon-button notification-bell ${notificationOpen ? "active" : ""}`}
+          onClick={onToggleNotifications}
+          type="button"
+        >
           <Bell size={19} />
-          <span className="notification-dot" />
+          {notificationUnreadCount > 0 && (
+            <span className="notification-badge">
+              {notificationUnreadCount > 9 ? "9+" : notificationUnreadCount}
+            </span>
+          )}
         </button>
         <button className="icon-button" type="button" aria-label="帮助">
           <Question size={19} />
         </button>
-        {!primaryActionsHidden && (
+        {!primaryActionsHidden && !hideCreate && (
           <button className="primary-button compact" type="button" onClick={onCreate}>
             <Plus size={17} weight="bold" />
             新建分析
@@ -3445,7 +3845,6 @@ function ReportHeader({
   onRestart,
   analysisVersions,
   activeAnalysisId,
-  onCreateProduction,
   onVersionChange,
 }) {
   const isMediaEvidence = report.analysis_mode === "media_evidence";
@@ -3491,10 +3890,6 @@ function ReportHeader({
         </div>
       </div>
       <div className="report-actions">
-        <button className="secondary-button compact" type="button" onClick={onCreateProduction}>
-          <MagicWand size={16} />
-          创建方案
-        </button>
         {completedVersions.length > 1 && (
           <label className="analysis-version-picker">
             <ClockCounterClockwise size={16} />
