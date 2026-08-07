@@ -10,6 +10,10 @@ const workflowStyles = readFileSync(
   new URL("../src/production-workflow.css", import.meta.url),
   "utf8",
 );
+const preparationSource = readFileSync(
+  new URL("../src/VideoPreparationPanel.jsx", import.meta.url),
+  "utf8",
+);
 
 function cssRule(selector) {
   const start = workflowStyles.indexOf(`${selector} {`);
@@ -68,4 +72,26 @@ test("keeps candidate actions compact and overlays download on the video", () =>
   assert.match(downloadRule, /top:\s*9px/);
   assert.match(downloadRule, /right:\s*9px/);
   assert.match(actionRule, /flex-wrap:\s*wrap/);
+});
+
+test("requires approved videos to complete an explicit editing preparation", () => {
+  assert.match(workspaceSource, /<VideoPreparationPanel/);
+  assert.match(workspaceSource, /gate\?\.prepared_shot_count/);
+  assert.match(preparationSource, /trim_in_seconds:\s*draft\.trimIn/);
+  assert.match(preparationSource, /trim_out_seconds:\s*draft\.trimOut/);
+  assert.match(preparationSource, /cover_timestamp_seconds:\s*draft\.cover/);
+  assert.match(preparationSource, /audio_mode:\s*draft\.audioMode/);
+  assert.match(preparationSource, /className="video-preparation-audio"/);
+
+  const bodyRule = cssRule(".video-preparation-body");
+  const coverRule = cssRule(".video-preparation-cover-frame");
+  assert.match(bodyRule, /grid-template-columns:/);
+  assert.match(coverRule, /overflow:\s*hidden/);
+});
+
+test("shows duration alignment risk as a non-blocking preparation warning", () => {
+  assert.match(preparationSource, /preparation\?\.warning_messages\?\.length/);
+  assert.match(preparationSource, /可交接 · 有提示/);
+  assert.match(preparationSource, /className="video-preparation-warnings"/);
+  assert.match(workflowStyles, /\.video-preparation-warnings/);
 });

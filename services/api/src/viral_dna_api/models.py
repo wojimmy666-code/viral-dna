@@ -154,6 +154,7 @@ class ProductionChangeKind(StrEnum):
     VIDEO_APPROVED = "video_approved"
     VIDEO_APPROVAL_REVOKED = "video_approval_revoked"
     VIDEO_REJECTED = "video_rejected"
+    VIDEO_PREPARATION_CHANGED = "video_preparation_changed"
     WORKFLOW_ADVANCED = "workflow_advanced"
     BRANCH_CREATED = "branch_created"
 
@@ -247,6 +248,23 @@ class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     REVOKED = "revoked"
     REJECTED = "rejected"
+
+
+class VideoClipAudioMode(StrEnum):
+    SOURCE = "source"
+    MUTED = "muted"
+
+
+class VideoClipPreparationStatus(StrEnum):
+    READY = "ready"
+    BLOCKED = "blocked"
+    STALE = "stale"
+
+
+class VideoQualityStatus(StrEnum):
+    PASSED = "passed"
+    WARNING = "warning"
+    FAILED = "failed"
 
 
 class ModelProviderOption(BaseModel):
@@ -1581,6 +1599,78 @@ class GenerationCandidate(BaseModel):
         return _normalize_workspace_relative_path(value) if value is not None else None
 
 
+class VideoMappedTextCue(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    kind: Literal["transcript", "subtitle"]
+    text: str = Field(min_length=1, max_length=4000)
+    language: str | None = Field(default=None, max_length=20)
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(gt=0)
+    clip_start_seconds: float = Field(ge=0)
+    clip_end_seconds: float = Field(gt=0)
+    clipped: bool = False
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> VideoMappedTextCue:
+        if self.source_end_seconds <= self.source_start_seconds:
+            raise ValueError("字幕或对白源时间范围无效")
+        if self.clip_end_seconds <= self.clip_start_seconds:
+            raise ValueError("字幕或对白片段时间范围无效")
+        return self
+
+
+class VideoClipPreparation(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    revision_id: UUID
+    shot_plan_id: UUID
+    candidate_id: UUID
+    trim_in_seconds: float = Field(default=0, ge=0)
+    trim_out_seconds: float = Field(gt=0)
+    prepared_duration_seconds: float = Field(gt=0)
+    timeline_duration_seconds: float = Field(gt=0)
+    video_playback_rate: float = Field(gt=0, le=8)
+    duration_alignment: Literal["exact", "retime", "outside_safe_range"]
+    cover_timestamp_seconds: float = Field(ge=0)
+    cover_relative_path: str = Field(min_length=1, max_length=2048)
+    audio_mode: VideoClipAudioMode = VideoClipAudioMode.SOURCE
+    audio_mapping_strategy: Literal[
+        "preserve_source_timeline",
+        "muted",
+        "source_audio_unavailable",
+    ]
+    source_audio_url: str | None = Field(default=None, max_length=2048)
+    source_audio_start_seconds: float = Field(ge=0)
+    source_audio_end_seconds: float = Field(gt=0)
+    transcript_cues: list[VideoMappedTextCue] = Field(default_factory=list)
+    subtitle_cues: list[VideoMappedTextCue] = Field(default_factory=list)
+    quality_status: VideoQualityStatus
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    status: VideoClipPreparationStatus
+    blocker_messages: list[str] = Field(default_factory=list, max_length=20)
+    warning_messages: list[str] = Field(default_factory=list, max_length=20)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("cover_relative_path")
+    @classmethod
+    def validate_cover_path(cls, value: str) -> str:
+        return _normalize_workspace_relative_path(value)
+
+    @model_validator(mode="after")
+    def validate_preparation_ranges(self) -> VideoClipPreparation:
+        if self.trim_out_seconds <= self.trim_in_seconds:
+            raise ValueError("视频出点必须晚于入点")
+        if not self.trim_in_seconds <= self.cover_timestamp_seconds <= self.trim_out_seconds:
+            raise ValueError("封面帧必须位于当前视频裁剪范围内")
+        expected_duration = self.trim_out_seconds - self.trim_in_seconds
+        if abs(expected_duration - self.prepared_duration_seconds) > 0.01:
+            raise ValueError("视频裁剪时长与入点、出点不一致")
+        if self.source_audio_end_seconds <= self.source_audio_start_seconds:
+            raise ValueError("原音轨映射范围无效")
+        return self
+
+
 class ApprovalEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
@@ -1961,6 +2051,44 @@ class ShotVideoApprovalRevokeRequest(BaseModel):
     confirm_downstream_stale: bool = False
 
 
+class VideoClipPreparationUpdate(BaseModel):
+    expected_revision_id: UUID
+    trim_in_seconds: float | None = Field(default=None, ge=0, le=3600)
+    trim_out_seconds: float | None = Field(default=None, gt=0, le=3600)
+    cover_timestamp_seconds: float | None = Field(default=None, ge=0, le=3600)
+    audio_mode: VideoClipAudioMode | None = None
+
+
+class VideoClipPreparationResponse(BaseModel):
+    id: UUID
+    project_id: UUID
+    revision_id: UUID
+    shot_plan_id: UUID
+    candidate_id: UUID
+    trim_in_seconds: float
+    trim_out_seconds: float
+    prepared_duration_seconds: float
+    timeline_duration_seconds: float
+    video_playback_rate: float
+    duration_alignment: Literal["exact", "retime", "outside_safe_range"]
+    cover_timestamp_seconds: float
+    cover_url: str
+    audio_mode: VideoClipAudioMode
+    audio_mapping_strategy: str
+    source_audio_available: bool
+    source_audio_start_seconds: float
+    source_audio_end_seconds: float
+    transcript_cues: list[VideoMappedTextCue] = Field(default_factory=list)
+    subtitle_cues: list[VideoMappedTextCue] = Field(default_factory=list)
+    quality_status: VideoQualityStatus
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    status: VideoClipPreparationStatus
+    blocker_messages: list[str] = Field(default_factory=list)
+    warning_messages: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
 class GenerationCandidateResponse(BaseModel):
     id: UUID
     generation_run_id: UUID
@@ -2022,6 +2150,7 @@ class GenerationRunResponse(BaseModel):
 class ShotPlanDetailResponse(ShotPlanResponse):
     generation_runs: list[GenerationRunResponse] = Field(default_factory=list)
     approval_events: list[ApprovalEvent] = Field(default_factory=list)
+    video_preparation: VideoClipPreparationResponse | None = None
 
 
 class CandidateSelectRequest(BaseModel):
@@ -2053,6 +2182,8 @@ class ProductionGateStatus(BaseModel):
     allowed: bool
     required_shot_count: int = Field(ge=0)
     approved_shot_count: int = Field(ge=0)
+    prepared_shot_count: int = Field(default=0, ge=0)
+    quality_warning_shot_count: int = Field(default=0, ge=0)
     stale_shot_count: int = Field(ge=0)
     blocker_messages: list[str] = Field(default_factory=list)
 
@@ -2060,6 +2191,41 @@ class ProductionGateStatus(BaseModel):
 class ProductionAdvanceRequest(BaseModel):
     expected_revision_id: UUID
     target_step: ProductionStep
+
+
+class EditingHandoffClip(BaseModel):
+    shot_plan_id: UUID
+    shot_index: int = Field(ge=1)
+    candidate_id: UUID
+    candidate_content_url: str
+    cover_url: str
+    timeline_start_seconds: float = Field(ge=0)
+    timeline_end_seconds: float = Field(gt=0)
+    timeline_duration_seconds: float = Field(gt=0)
+    trim_in_seconds: float = Field(ge=0)
+    trim_out_seconds: float = Field(gt=0)
+    video_playback_rate: float = Field(gt=0)
+    audio_mode: VideoClipAudioMode
+    source_audio_start_seconds: float = Field(ge=0)
+    source_audio_end_seconds: float = Field(gt=0)
+    transcript_cues: list[VideoMappedTextCue] = Field(default_factory=list)
+    subtitle_cues: list[VideoMappedTextCue] = Field(default_factory=list)
+    quality_status: VideoQualityStatus
+    warning_messages: list[str] = Field(default_factory=list)
+
+
+class EditingHandoffManifest(BaseModel):
+    schema_version: Literal["viral-dna-editing-handoff/v1"] = (
+        "viral-dna-editing-handoff/v1"
+    )
+    project_id: UUID
+    revision_id: UUID
+    source_analysis_id: UUID
+    source_audio_url: str | None = None
+    audio_strategy: Literal["continuous_source_track", "per_shot", "muted"]
+    timeline_duration_seconds: float = Field(gt=0)
+    clips: list[EditingHandoffClip] = Field(min_length=1)
+    generated_at: datetime = Field(default_factory=utc_now)
 
 
 class WorkspacePathRequest(BaseModel):

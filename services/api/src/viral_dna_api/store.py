@@ -31,6 +31,7 @@ from .models import (
     ReplacementVersion,
     ShotPlan,
     Video,
+    VideoClipPreparation,
     VideoProviderTask,
     VideoStatus,
 )
@@ -65,6 +66,7 @@ class InMemoryStore:
         self.generation_runs: dict[UUID, GenerationRun] = {}
         self.generation_candidates: dict[UUID, GenerationCandidate] = {}
         self.video_provider_tasks: dict[UUID, VideoProviderTask] = {}
+        self.video_clip_preparations: dict[UUID, VideoClipPreparation] = {}
         self.approval_events: dict[UUID, ApprovalEvent] = {}
         self.storage_objects: dict[UUID, StorageObject] = {}
         self.object_replicas: dict[UUID, ObjectReplica] = {}
@@ -345,6 +347,7 @@ class InMemoryStore:
         remove_reference_binding_ids: list[UUID] | None = None,
         generation_runs: list[GenerationRun] | None = None,
         generation_candidates: list[GenerationCandidate] | None = None,
+        video_clip_preparations: list[VideoClipPreparation] | None = None,
         approval_events: list[ApprovalEvent] | None = None,
     ) -> tuple[ProductionProject, ProductionRevision]:
         async with self._lock:
@@ -362,6 +365,8 @@ class InMemoryStore:
                 self.generation_runs[run.id] = run
             for candidate in generation_candidates or []:
                 self.generation_candidates[candidate.id] = candidate
+            for preparation in video_clip_preparations or []:
+                self.video_clip_preparations[preparation.id] = preparation
             for event in approval_events or []:
                 self.approval_events[event.id] = event
         return project, revision
@@ -487,6 +492,40 @@ class InMemoryStore:
                 if candidate.generation_run_id in generation_run_ids
             ),
             key=lambda candidate: (candidate.created_at, candidate.ordinal),
+        )
+
+    async def save_video_clip_preparation(
+        self,
+        preparation: VideoClipPreparation,
+    ) -> VideoClipPreparation:
+        async with self._lock:
+            self.video_clip_preparations[preparation.id] = preparation
+        return preparation
+
+    async def get_video_clip_preparation(
+        self,
+        shot_plan_id: UUID,
+    ) -> VideoClipPreparation | None:
+        return next(
+            (
+                item
+                for item in self.video_clip_preparations.values()
+                if item.shot_plan_id == shot_plan_id
+            ),
+            None,
+        )
+
+    async def list_video_clip_preparations(
+        self,
+        project_id: UUID,
+    ) -> list[VideoClipPreparation]:
+        return sorted(
+            (
+                item
+                for item in self.video_clip_preparations.values()
+                if item.project_id == project_id
+            ),
+            key=lambda item: item.created_at,
         )
 
     async def save_video_provider_task(self, task: VideoProviderTask) -> VideoProviderTask:

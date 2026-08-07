@@ -32,6 +32,7 @@ from .models import (
     ReplacementVersion,
     ShotPlan,
     Video,
+    VideoClipPreparation,
     VideoProviderTask,
 )
 from .schema import WORKSPACE_SCHEMA_VERSION
@@ -66,6 +67,7 @@ _PRODUCTION_TABLES = frozenset(
         "generation_runs",
         "generation_candidates",
         "video_provider_tasks",
+        "video_clip_preparations",
         "approval_events",
     }
 )
@@ -87,6 +89,21 @@ _PRODUCTION_INDEXES = (
         "idx_video_provider_tasks_generation_run_id",
         "video_provider_tasks",
         "generation_run_id",
+    ),
+    (
+        "idx_video_clip_preparations_project_id",
+        "video_clip_preparations",
+        "project_id",
+    ),
+    (
+        "idx_video_clip_preparations_shot_plan_id",
+        "video_clip_preparations",
+        "shot_plan_id",
+    ),
+    (
+        "idx_video_clip_preparations_candidate_id",
+        "video_clip_preparations",
+        "candidate_id",
     ),
     ("idx_approval_events_project_id", "approval_events", "project_id"),
     ("idx_approval_events_shot_plan_id", "approval_events", "shot_plan_id"),
@@ -192,6 +209,11 @@ class SQLiteStore:
                 self._create_production_indexes(connection)
                 if 5 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (5)")
+
+                self._create_json_tables(connection, frozenset({"video_clip_preparations"}))
+                self._create_production_indexes(connection)
+                if 6 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (6)")
             except Exception:
                 connection.rollback()
                 raise
@@ -581,6 +603,7 @@ class SQLiteStore:
         remove_reference_binding_ids: list[UUID] | None = None,
         generation_runs: list[GenerationRun] | None = None,
         generation_candidates: list[GenerationCandidate] | None = None,
+        video_clip_preparations: list[VideoClipPreparation] | None = None,
         approval_events: list[ApprovalEvent] | None = None,
     ) -> tuple[ProductionProject, ProductionRevision]:
         entries = [
@@ -613,6 +636,10 @@ class SQLiteStore:
         entries.extend(
             ("generation_candidates", str(candidate.id), self._serialize(candidate))
             for candidate in generation_candidates or []
+        )
+        entries.extend(
+            ("video_clip_preparations", str(item.id), self._serialize(item))
+            for item in video_clip_preparations or []
         )
         entries.extend(
             ("approval_events", str(event.id), self._serialize(event))
@@ -778,6 +805,38 @@ class SQLiteStore:
                 if candidate.generation_run_id in generation_run_ids
             ),
             key=lambda candidate: (candidate.created_at, candidate.ordinal),
+        )
+
+    async def save_video_clip_preparation(
+        self,
+        preparation: VideoClipPreparation,
+    ) -> VideoClipPreparation:
+        return await self._save("video_clip_preparations", preparation.id, preparation)
+
+    async def get_video_clip_preparation(
+        self,
+        shot_plan_id: UUID,
+    ) -> VideoClipPreparation | None:
+        payloads = await asyncio.to_thread(self._read_all, "video_clip_preparations")
+        preparations = [
+            VideoClipPreparation.model_validate_json(payload) for payload in payloads
+        ]
+        return next(
+            (item for item in preparations if item.shot_plan_id == shot_plan_id),
+            None,
+        )
+
+    async def list_video_clip_preparations(
+        self,
+        project_id: UUID,
+    ) -> list[VideoClipPreparation]:
+        payloads = await asyncio.to_thread(self._read_all, "video_clip_preparations")
+        preparations = [
+            VideoClipPreparation.model_validate_json(payload) for payload in payloads
+        ]
+        return sorted(
+            (item for item in preparations if item.project_id == project_id),
+            key=lambda item: item.created_at,
         )
 
     async def save_video_provider_task(self, task: VideoProviderTask) -> VideoProviderTask:

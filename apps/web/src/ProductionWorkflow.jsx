@@ -354,10 +354,14 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
               <small>
                 {step.id === "reference_assets" && referenceCount > 0
                   ? `${referenceCount} 项资产`
-                  : ["shot_images", "shot_videos"].includes(step.id)
+                  : step.id === "shot_videos"
                     && step.id === project.active_step
                     && gate
-                    ? `${gate.approved_shot_count} / ${gate.required_shot_count} 已确认`
+                    ? `${gate.prepared_shot_count || 0} / ${gate.required_shot_count} 可交接`
+                    : step.id === "shot_images"
+                      && step.id === project.active_step
+                      && gate
+                      ? `${gate.approved_shot_count} / ${gate.required_shot_count} 已确认`
                     : step.description}
               </small>
             </span>
@@ -1773,7 +1777,45 @@ export function ProductionHub({
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("当前分镜视频已确认采用");
+      onNotice("当前分镜视频已确认采用，请继续完成剪辑准备");
+    });
+  }
+
+  async function prepareVideoClip(preparationDraft) {
+    if (!shotDetail?.plan) return;
+    await executeAction(async () => {
+      const preparation = await request(
+        `/production-shots/${shotDetail.plan.id}/video-preparation`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            ...preparationDraft,
+          }),
+        },
+      );
+      await Promise.all([
+        refreshProject(detail.project.id, shotDetail.plan.id),
+        onProjectsChanged(),
+      ]);
+      if (preparation.status === "ready") {
+        if (preparation.warning_messages?.length) {
+          onNotice({
+            type: "warning",
+            title: `分镜 ${shotDetail.plan.index} 已准备，可继续`,
+            message: preparation.warning_messages.join("；"),
+          });
+        } else {
+          onNotice(`分镜 ${shotDetail.plan.index} 已完成剪辑准备`);
+        }
+      } else {
+        onNotice({
+          type: "warning",
+          title: "剪辑准备需要调整",
+          message: preparation.blocker_messages?.join("；") || "请检查裁剪与音轨参数。",
+        });
+      }
     });
   }
 
@@ -1843,7 +1885,7 @@ export function ProductionHub({
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("分段视频阶段已完成；剪辑合成将在后续 Batch 开放");
+      onNotice("全部片段已完成准备，剪辑交接清单已生成；时间线编辑将在 Batch 4.6 开放");
     });
   }
 
@@ -2232,6 +2274,7 @@ export function ProductionHub({
                 onApprove={approveVideoCandidate}
                 onCancelRun={cancelVideoGeneration}
                 onGenerate={generateVideoCandidates}
+                onPrepare={prepareVideoClip}
                 onReject={rejectVideoCandidate}
                 onRetryRun={retryVideoGeneration}
                 onRevokeApproval={revokeVideoApproval}

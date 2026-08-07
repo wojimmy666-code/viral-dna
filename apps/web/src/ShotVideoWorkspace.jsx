@@ -22,6 +22,7 @@ import {
   workflowStatusLabel,
 } from "./production-ui.js";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
+import { VideoPreparationPanel } from "./VideoPreparationPanel.jsx";
 
 const ACTIVE_RUN_STATUSES = new Set([
   "queued",
@@ -100,6 +101,7 @@ export function ShotVideoWorkspace({
   onApprove,
   onCancelRun,
   onGenerate,
+  onPrepare,
   onReject,
   onRetryRun,
   onRevokeApproval,
@@ -268,7 +270,12 @@ export function ShotVideoWorkspace({
           <p>以已确认图片作为起始帧，逐镜头生成、播放和审核视频候选。</p>
         </div>
         <div className="shot-video-gate">
-          <span>{gate?.approved_shot_count || 0} / {gate?.required_shot_count || 0} 已确认</span>
+          <span>
+            {gate?.prepared_shot_count || 0} / {gate?.required_shot_count || 0} 可交接
+            {(gate?.approved_shot_count || 0) > (gate?.prepared_shot_count || 0)
+              ? ` · ${gate.approved_shot_count} 个已确认`
+              : ""}
+          </span>
           <button
             className="primary-button compact"
             disabled={busy || advanced || !gate?.allowed}
@@ -535,6 +542,20 @@ export function ShotVideoWorkspace({
               )}
             </footer>
           )}
+
+          {displayedCandidate
+            && plan.video_status === "approved"
+            && plan.approved_video_candidate_id === displayedCandidate.id && (
+              <VideoPreparationPanel
+                busy={busy}
+                candidate={displayedCandidate}
+                onPrepare={onPrepare}
+                preparation={shotDetail.video_preparation}
+                resolveUrl={resolveUrl}
+                shotIndex={plan.index}
+                timelineDuration={plan.duration_seconds}
+              />
+            )}
         </div>
       </div>
 

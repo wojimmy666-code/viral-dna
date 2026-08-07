@@ -34,6 +34,8 @@ from .models import (
     CandidateSelectRequest,
     ChangeImpactRequest,
     ChangeImpactResponse,
+    EditingHandoffClip,
+    EditingHandoffManifest,
     GenerationCandidate,
     GenerationCandidateResponse,
     GenerationCandidateStatus,
@@ -84,14 +86,27 @@ from .models import (
     ShotSourceKind,
     ShotVideoApprovalRevokeRequest,
     Video,
+    VideoClipAudioMode,
+    VideoClipPreparation,
+    VideoClipPreparationResponse,
+    VideoClipPreparationStatus,
+    VideoClipPreparationUpdate,
     VideoGenerationCreate,
     VideoGenerationInputMode,
     VideoProviderTask,
     VideoProviderTaskResponse,
     VideoProviderTaskStatus,
+    VideoQualityStatus,
     WorkflowItemStatus,
 )
 from .notifications import NotificationPublisher
+from .production_media import (
+    ProductionVideoInspectionError,
+    ProductionVideoInspector,
+    VideoInspectionResult,
+    map_timed_text,
+    playback_alignment,
+)
 from .video_generation import VideoGenerationGateway, VideoGenerationGatewayError
 from .workspace import WorkspaceError, WorkspaceManager
 
@@ -100,8 +115,12 @@ MAX_REFERENCE_IMAGE_DIMENSION = 16_384
 MAX_REFERENCE_IMAGE_PIXELS = 64_000_000
 MAX_REFERENCE_ASSETS_PER_PROJECT = 50
 REFERENCE_THUMBNAIL_SIZE = 480
-PRODUCTION_SNAPSHOT_SCHEMA = "production-revision-v2"
-SUPPORTED_PRODUCTION_SNAPSHOT_SCHEMAS = {"production-revision-v1", PRODUCTION_SNAPSHOT_SCHEMA}
+PRODUCTION_SNAPSHOT_SCHEMA = "production-revision-v3"
+SUPPORTED_PRODUCTION_SNAPSHOT_SCHEMAS = {
+    "production-revision-v1",
+    "production-revision-v2",
+    PRODUCTION_SNAPSHOT_SCHEMA,
+}
 
 _IMAGE_FORMATS = {
     "JPEG": (".jpg", "image/jpeg"),
@@ -117,6 +136,48 @@ _DEFAULT_ROLE_BY_REFERENCE_TYPE = {
     ReferenceAssetType.STYLE: ReferenceRole.STYLE,
     ReferenceAssetType.PROP: ReferenceRole.LAYOUT,
 }
+
+_DURATION_ALIGNMENT_WARNING_PREFIX = "裁剪后时长与原分镜差异过大"
+
+
+def _duration_alignment_warning(playback_rate: float) -> str:
+    return (
+        f"裁剪后时长与原分镜差异过大，将以 {playback_rate:.3f}× 对齐时间线；"
+        "请在剪辑阶段复核节奏"
+    )
+
+
+def _apply_video_preparation_policy(
+    preparation: VideoClipPreparation,
+) -> VideoClipPreparation:
+    """Treat unsafe retiming as an editorial warning, including legacy records."""
+    if preparation.duration_alignment != "outside_safe_range":
+        return preparation
+    blockers = [
+        message
+        for message in preparation.blocker_messages
+        if not message.startswith(_DURATION_ALIGNMENT_WARNING_PREFIX)
+    ]
+    warnings = list(preparation.warning_messages)
+    duration_warning = _duration_alignment_warning(preparation.video_playback_rate)
+    if duration_warning not in warnings:
+        warnings.append(duration_warning)
+    status = preparation.status
+    if status == VideoClipPreparationStatus.BLOCKED and not blockers:
+        status = VideoClipPreparationStatus.READY
+    if (
+        blockers == preparation.blocker_messages
+        and warnings == preparation.warning_messages
+        and status == preparation.status
+    ):
+        return preparation
+    return preparation.model_copy(
+        update={
+            "blocker_messages": blockers,
+            "warning_messages": warnings,
+            "status": status,
+        }
+    )
 
 
 def _is_simulated_image_run(run: GenerationRun) -> bool:
@@ -170,6 +231,7 @@ class ProductionRepository(Protocol):
         remove_reference_binding_ids: list[UUID] | None = None,
         generation_runs: list[GenerationRun] | None = None,
         generation_candidates: list[GenerationCandidate] | None = None,
+        video_clip_preparations: list[VideoClipPreparation] | None = None,
         approval_events: list[ApprovalEvent] | None = None,
     ) -> tuple[ProductionProject, ProductionRevision]: ...
 
@@ -236,6 +298,21 @@ class ProductionRepository(Protocol):
         self,
         generation_run_ids: set[UUID],
     ) -> list[GenerationCandidate]: ...
+
+    async def save_video_clip_preparation(
+        self,
+        preparation: VideoClipPreparation,
+    ) -> VideoClipPreparation: ...
+
+    async def get_video_clip_preparation(
+        self,
+        shot_plan_id: UUID,
+    ) -> VideoClipPreparation | None: ...
+
+    async def list_video_clip_preparations(
+        self,
+        project_id: UUID,
+    ) -> list[VideoClipPreparation]: ...
 
     async def save_video_provider_task(
         self,
@@ -318,6 +395,19 @@ class ProjectAssetBridge(Protocol):
         project: ProductionProject,
         payload: dict[str, object],
     ) -> ReferenceAsset: ...
+
+
+class VideoInspector(Protocol):
+    async def inspect(
+        self,
+        source_path: Path,
+        cover_path: Path,
+        *,
+        cover_timestamp_seconds: float,
+        expected_width: int | None,
+        expected_height: int | None,
+        expected_duration_seconds: float | None,
+    ) -> VideoInspectionResult: ...
 
 
 class ProductionServiceError(RuntimeError):
@@ -525,6 +615,7 @@ class ProductionService:
         project_assets: ProjectAssetBridge | None = None,
         video_gateway: VideoGenerationGateway | None = None,
         notification_publisher: NotificationPublisher | None = None,
+        video_inspector: VideoInspector | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
@@ -539,6 +630,9 @@ class ProductionService:
             media_processor=self.media_processor,
         )
         self.notification_publisher = notification_publisher
+        self.video_inspector = video_inspector or ProductionVideoInspector(
+            self.media_processor
+        )
         self._lock_guard = asyncio.Lock()
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -2051,6 +2145,23 @@ class ProductionService:
         if project.current_revision_id is None:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
         runs = await self.repository.list_generation_runs(project.id, plan.id)
+        preparation = await self.repository.get_video_clip_preparation(plan.id)
+        if preparation is not None:
+            preparation = _apply_video_preparation_policy(preparation)
+        if (
+            preparation is not None
+            and (
+                plan.video_status != WorkflowItemStatus.APPROVED
+                or preparation.candidate_id != plan.approved_video_candidate_id
+            )
+        ):
+            preparation = preparation.model_copy(
+                update={
+                    "status": VideoClipPreparationStatus.STALE,
+                    "blocker_messages": ["已采用视频发生变化，需要重新完成剪辑准备"],
+                    "warning_messages": [],
+                }
+            )
         return ShotPlanDetailResponse(
             plan=plan,
             reference_bindings=await self.repository.list_reference_bindings(plan.id),
@@ -2060,7 +2171,265 @@ class ProductionService:
                 project.id,
                 plan.id,
             ),
+            video_preparation=(
+                self._video_preparation_response(preparation)
+                if preparation is not None
+                else None
+            ),
         )
+
+    async def prepare_video_clip(
+        self,
+        shot_plan_id: UUID,
+        payload: VideoClipPreparationUpdate,
+    ) -> VideoClipPreparationResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            if (
+                plan.video_status != WorkflowItemStatus.APPROVED
+                or plan.approved_video_candidate_id is None
+            ):
+                raise _fail(
+                    409,
+                    "video_approval_required",
+                    "请先确认采用一个视频候选，再完成剪辑准备",
+                )
+            candidate = await self._require_candidate(plan.approved_video_candidate_id)
+            run = await self._require_run(candidate.generation_run_id)
+            if (
+                candidate.kind != GenerationKind.VIDEO
+                or run.kind != GenerationKind.VIDEO
+                or run.project_id != project.id
+                or run.shot_plan_id != plan.id
+                or candidate.status != GenerationCandidateStatus.SELECTED
+            ):
+                raise _fail(
+                    409,
+                    "approved_video_candidate_mismatch",
+                    "已采用视频与当前分镜不匹配，请重新选择候选",
+                )
+
+            existing = await self.repository.get_video_clip_preparation(plan.id)
+            same_candidate = existing is not None and existing.candidate_id == candidate.id
+            candidate_duration = float(candidate.duration_seconds or plan.duration_seconds)
+            trim_in = float(
+                payload.trim_in_seconds
+                if payload.trim_in_seconds is not None
+                else existing.trim_in_seconds if same_candidate else 0.0
+            )
+            trim_out = float(
+                payload.trim_out_seconds
+                if payload.trim_out_seconds is not None
+                else existing.trim_out_seconds if same_candidate else candidate_duration
+            )
+            if trim_out - trim_in < 0.2:
+                raise _fail(422, "video_trim_too_short", "视频裁剪后至少保留 0.2 秒")
+            if trim_in < 0 or trim_out > candidate_duration + 0.05:
+                raise _fail(
+                    422,
+                    "video_trim_out_of_range",
+                    f"视频入点和出点必须位于 0–{candidate_duration:.2f} 秒范围内",
+                )
+            requested_cover = float(
+                payload.cover_timestamp_seconds
+                if payload.cover_timestamp_seconds is not None
+                else (
+                    existing.cover_timestamp_seconds
+                    if same_candidate
+                    else trim_in + (trim_out - trim_in) / 2
+                )
+            )
+            if not trim_in <= requested_cover <= trim_out:
+                raise _fail(422, "video_cover_out_of_range", "封面帧必须位于入点和出点之间")
+
+            revision_id = uuid4()
+            cover_path = (
+                self.workspace.production_paths(project.record_id, project.id).timelines
+                / "preparations"
+                / str(plan.id)
+                / str(revision_id)
+                / "cover.webp"
+            )
+            cover_filesystem_path = _filesystem_path(cover_path.resolve())
+            source_path, _ = await self.resolve_candidate_content(candidate.id)
+            try:
+                inspection = await self.video_inspector.inspect(
+                    source_path,
+                    cover_filesystem_path,
+                    cover_timestamp_seconds=requested_cover,
+                    expected_width=candidate.width,
+                    expected_height=candidate.height,
+                    expected_duration_seconds=candidate.duration_seconds,
+                )
+            except ProductionVideoInspectionError as exc:
+                raise _fail(409, exc.code, str(exc)) from exc
+            actual_duration = float(inspection.metadata.duration_seconds)
+            if trim_out > actual_duration + 0.05:
+                raise _fail(
+                    422,
+                    "video_trim_out_of_range",
+                    f"视频实际时长为 {actual_duration:.2f} 秒，请调整出点",
+                )
+
+            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            if report is None:
+                raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+            evidence = report.evidence_timeline
+            media_evidence = report.media_evidence
+            source_audio_url = media_evidence.audio_url if media_evidence else None
+            audio_mode = (
+                payload.audio_mode
+                or (existing.audio_mode if same_candidate else None)
+                or (
+                    VideoClipAudioMode.SOURCE
+                    if source_audio_url
+                    else VideoClipAudioMode.MUTED
+                )
+            )
+            transcript_cues = (
+                map_timed_text(
+                    evidence.transcript_segments,
+                    source_start_seconds=plan.start_seconds,
+                    source_end_seconds=plan.end_seconds,
+                    kind="transcript",
+                )
+                if evidence is not None
+                else []
+            )
+            subtitle_cues = (
+                map_timed_text(
+                    evidence.subtitle_cues,
+                    source_start_seconds=plan.start_seconds,
+                    source_end_seconds=plan.end_seconds,
+                    kind="subtitle",
+                )
+                if evidence is not None
+                else []
+            )
+            prepared_duration = round(trim_out - trim_in, 3)
+            playback_rate, duration_alignment = playback_alignment(
+                prepared_duration,
+                plan.duration_seconds,
+            )
+            blockers: list[str] = []
+            warning_messages: list[str] = []
+            if duration_alignment == "outside_safe_range":
+                warning_messages.append(_duration_alignment_warning(playback_rate))
+            if audio_mode == VideoClipAudioMode.SOURCE and not source_audio_url:
+                blockers.append("基础分析没有可用原音轨，请改为静音或重新分析音频")
+            quality_status = VideoQualityStatus(inspection.quality_status)
+            if quality_status == VideoQualityStatus.FAILED:
+                blockers.append("视频技术质检未通过")
+            preparation_status = (
+                VideoClipPreparationStatus.BLOCKED
+                if blockers
+                else VideoClipPreparationStatus.READY
+            )
+            now = utc_now()
+            preparation = VideoClipPreparation(
+                id=existing.id if existing is not None else uuid4(),
+                project_id=project.id,
+                revision_id=revision_id,
+                shot_plan_id=plan.id,
+                candidate_id=candidate.id,
+                trim_in_seconds=round(trim_in, 3),
+                trim_out_seconds=round(trim_out, 3),
+                prepared_duration_seconds=prepared_duration,
+                timeline_duration_seconds=round(plan.duration_seconds, 3),
+                video_playback_rate=playback_rate,
+                duration_alignment=duration_alignment,
+                cover_timestamp_seconds=inspection.cover_timestamp_seconds,
+                cover_relative_path=self.workspace.relative(cover_path),
+                audio_mode=audio_mode,
+                audio_mapping_strategy=(
+                    "preserve_source_timeline"
+                    if audio_mode == VideoClipAudioMode.SOURCE and source_audio_url
+                    else "source_audio_unavailable"
+                    if audio_mode == VideoClipAudioMode.SOURCE
+                    else "muted"
+                ),
+                source_audio_url=source_audio_url,
+                source_audio_start_seconds=round(plan.start_seconds, 3),
+                source_audio_end_seconds=round(plan.end_seconds, 3),
+                transcript_cues=transcript_cues,
+                subtitle_cues=subtitle_cues,
+                quality_status=quality_status,
+                quality_report=inspection.quality_report,
+                status=preparation_status,
+                blocker_messages=blockers,
+                warning_messages=warning_messages,
+                created_at=existing.created_at if existing is not None else now,
+                updated_at=now,
+            )
+            updated_candidate = candidate.model_copy(
+                update={
+                    "width": inspection.metadata.width,
+                    "height": inspection.metadata.height,
+                    "duration_seconds": inspection.metadata.duration_seconds,
+                    "quality_report": inspection.quality_report,
+                }
+            )
+            updated_plan = plan.model_copy(
+                update={"revision_id": revision_id, "updated_at": now}
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            preparations = await self.repository.list_video_clip_preparations(project.id)
+            next_preparations = [
+                item for item in preparations if item.shot_plan_id != plan.id
+            ] + [preparation]
+            next_project = project.model_copy(update={"updated_at": now})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.VIDEO_PREPARATION_CHANGED,
+                f"更新分镜 {plan.index} 的剪辑准备参数",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+                video_clip_preparations=next_preparations,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=[updated_candidate],
+                video_clip_preparations=[preparation],
+            )
+            await asyncio.to_thread(
+                self._update_candidate_quality_metadata,
+                project,
+                plan,
+                run,
+                updated_candidate,
+            )
+        return self._video_preparation_response(preparation)
+
+    async def resolve_video_preparation_cover(
+        self,
+        shot_plan_id: UUID,
+    ) -> tuple[Path, str]:
+        plan = await self._require_shot(shot_plan_id)
+        project = await self._require_project(plan.project_id)
+        preparation = await self.repository.get_video_clip_preparation(plan.id)
+        if preparation is None:
+            raise _fail(404, "video_preparation_missing", "当前分镜尚未生成剪辑封面")
+        try:
+            candidate = self.workspace.resolve(preparation.cover_relative_path).resolve()
+        except WorkspaceError as exc:
+            raise _fail(409, "invalid_video_cover_path", "剪辑封面路径无效") from exc
+        root = self.workspace.production_paths(project.record_id, project.id).timelines.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise _fail(409, "invalid_video_cover_path", "剪辑封面路径无效") from exc
+        filesystem_candidate = _filesystem_path(candidate)
+        if not filesystem_candidate.is_file():
+            raise _fail(404, "video_cover_missing", "剪辑封面文件不存在")
+        return filesystem_candidate, "image/webp"
 
     async def update_shot(
         self,
@@ -3557,8 +3926,28 @@ class ProductionService:
                     "updated_at": utc_now(),
                 }
             )
+            current_preparation = await self.repository.get_video_clip_preparation(plan.id)
+            updated_preparation = (
+                current_preparation.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "status": VideoClipPreparationStatus.STALE,
+                        "blocker_messages": ["已创建新的视频候选，需要重新选择并完成剪辑准备"],
+                        "warning_messages": [],
+                        "updated_at": utc_now(),
+                    }
+                )
+                if current_preparation is not None
+                else None
+            )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            preparations = await self.repository.list_video_clip_preparations(project.id)
+            next_preparations = [
+                item for item in preparations if item.shot_plan_id != plan.id
+            ]
+            if updated_preparation is not None:
+                next_preparations.append(updated_preparation)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
@@ -3576,6 +3965,7 @@ class ProductionService:
                 f"为分镜 {plan.index} 创建 {len(candidates)} 个视频候选",
                 revision_id=revision_id,
                 shot_plans=next_plans,
+                video_clip_preparations=next_preparations,
             )
             await self.repository.save_production_bundle(
                 next_project,
@@ -3583,6 +3973,9 @@ class ProductionService:
                 shot_plans=[updated_plan],
                 generation_runs=[run],
                 generation_candidates=[*prior_candidate_updates, *candidates],
+                video_clip_preparations=(
+                    [updated_preparation] if updated_preparation is not None else None
+                ),
             )
         await self._notify_generation_run(run)
         return await self.get_generation_run(run.id)
@@ -4000,6 +4393,26 @@ class ProductionService:
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            current_preparation = await self.repository.get_video_clip_preparation(plan.id)
+            updated_preparation = (
+                current_preparation.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "status": VideoClipPreparationStatus.STALE,
+                        "blocker_messages": ["起始图片已取消采用，需要重新生成视频并完成剪辑准备"],
+                        "warning_messages": [],
+                        "updated_at": utc_now(),
+                    }
+                )
+                if current_preparation is not None and has_downstream_impact
+                else None
+            )
+            preparations = await self.repository.list_video_clip_preparations(project.id)
+            next_preparations = [
+                item for item in preparations if item.shot_plan_id != plan.id
+            ]
+            if updated_preparation is not None:
+                next_preparations.append(updated_preparation)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
@@ -4013,12 +4426,16 @@ class ProductionService:
                 f"取消采用分镜 {plan.index} 图片，重新打开图片审核",
                 revision_id=revision_id,
                 shot_plans=next_plans,
+                video_clip_preparations=next_preparations,
             )
             await self.repository.save_production_bundle(
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
                 generation_candidates=[updated_candidate],
+                video_clip_preparations=(
+                    [updated_preparation] if updated_preparation is not None else None
+                ),
                 approval_events=[event],
             )
         return CandidateActionResponse(
@@ -4120,6 +4537,26 @@ class ProductionService:
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            current_preparation = await self.repository.get_video_clip_preparation(plan.id)
+            updated_preparation = (
+                current_preparation.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "status": VideoClipPreparationStatus.STALE,
+                        "blocker_messages": ["视频已取消采用，需要重新完成剪辑准备"],
+                        "warning_messages": [],
+                        "updated_at": utc_now(),
+                    }
+                )
+                if current_preparation is not None
+                else None
+            )
+            preparations = await self.repository.list_video_clip_preparations(project.id)
+            next_preparations = [
+                item for item in preparations if item.shot_plan_id != plan.id
+            ]
+            if updated_preparation is not None:
+                next_preparations.append(updated_preparation)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
@@ -4133,12 +4570,16 @@ class ProductionService:
                 f"取消采用分镜 {plan.index} 视频，重新打开视频审核",
                 revision_id=revision_id,
                 shot_plans=next_plans,
+                video_clip_preparations=next_preparations,
             )
             await self.repository.save_production_bundle(
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
                 generation_candidates=[updated_candidate],
+                video_clip_preparations=(
+                    [updated_preparation] if updated_preparation is not None else None
+                ),
                 approval_events=[event],
             )
         return CandidateActionResponse(
@@ -4259,12 +4700,29 @@ class ProductionService:
             ProductionStep.EDITING,
             ProductionStep.EXPORT,
         }
+        prepared: list[ShotPlan] = []
+        quality_warnings: list[ShotPlan] = []
         if video_stage:
             approved = [
                 item
                 for item in required
                 if await self._has_valid_approved_video_output(project, item)
             ]
+            for item in approved:
+                preparation = await self.repository.get_video_clip_preparation(item.id)
+                if preparation is not None:
+                    preparation = _apply_video_preparation_policy(preparation)
+                if (
+                    preparation is not None
+                    and preparation.candidate_id == item.approved_video_candidate_id
+                    and preparation.status == VideoClipPreparationStatus.READY
+                ):
+                    prepared.append(item)
+                    if (
+                        preparation.quality_status == VideoQualityStatus.WARNING
+                        or preparation.warning_messages
+                    ):
+                        quality_warnings.append(item)
             stale = [
                 item for item in required
                 if item.video_status == WorkflowItemStatus.STALE
@@ -4293,6 +4751,10 @@ class ProductionService:
         pending = len(required) - len(approved)
         if pending:
             blockers.append(f"仍有 {pending} 个{pending_label}未审批")
+        if video_stage:
+            preparation_pending = len(approved) - len(prepared)
+            if preparation_pending:
+                blockers.append(f"仍有 {preparation_pending} 个已确认视频未完成剪辑准备")
         if stale:
             blockers.append(f"有 {len(stale)} 个分镜结果已过期")
         return ProductionGateStatus(
@@ -4302,8 +4764,139 @@ class ProductionService:
             allowed=bool(required) and not blockers,
             required_shot_count=len(required),
             approved_shot_count=len(approved),
+            prepared_shot_count=len(prepared),
+            quality_warning_shot_count=len(quality_warnings),
             stale_shot_count=len(stale),
             blocker_messages=blockers,
+        )
+
+    async def get_editing_handoff(self, project_id: UUID) -> EditingHandoffManifest:
+        project = await self._require_project(project_id)
+        manifest_path = (
+            self.workspace.production_paths(project.record_id, project.id).timelines
+            / "editing-handoff.json"
+        )
+        filesystem_path = _filesystem_path(manifest_path.resolve())
+        if not filesystem_path.is_file():
+            raise _fail(
+                404,
+                "editing_handoff_missing",
+                "尚未生成剪辑交接清单，请先完成全部必需视频的剪辑准备",
+            )
+        try:
+            manifest = EditingHandoffManifest.model_validate_json(
+                filesystem_path.read_text("utf-8-sig")
+            )
+        except (OSError, ValidationError) as exc:
+            raise _fail(
+                409,
+                "editing_handoff_invalid",
+                "剪辑交接清单损坏，请重新推进工作流",
+            ) from exc
+        if manifest.project_id != project.id:
+            raise _fail(409, "editing_handoff_mismatch", "剪辑交接清单与当前创作方案不匹配")
+        return manifest
+
+    async def _build_editing_handoff(
+        self,
+        project: ProductionProject,
+        revision_id: UUID,
+    ) -> EditingHandoffManifest:
+        report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+        if report is None:
+            raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+        source_audio_url = report.media_evidence.audio_url if report.media_evidence else None
+        plans = sorted(
+            (
+                item
+                for item in await self.repository.list_shot_plans(project.id)
+                if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
+            ),
+            key=lambda item: item.index,
+        )
+        clips: list[EditingHandoffClip] = []
+        preparations: list[VideoClipPreparation] = []
+        timeline_cursor = 0.0
+        for plan in plans:
+            if not await self._has_valid_approved_video_output(project, plan):
+                continue
+            preparation = await self.repository.get_video_clip_preparation(plan.id)
+            if preparation is not None:
+                preparation = _apply_video_preparation_policy(preparation)
+            if (
+                preparation is None
+                or preparation.candidate_id != plan.approved_video_candidate_id
+                or preparation.status != VideoClipPreparationStatus.READY
+            ):
+                if plan.required:
+                    raise _fail(
+                        409,
+                        "editing_handoff_incomplete",
+                        f"分镜 {plan.index} 尚未完成剪辑准备",
+                    )
+                continue
+            timeline_start = round(timeline_cursor, 3)
+            timeline_end = round(timeline_start + preparation.timeline_duration_seconds, 3)
+            clips.append(
+                EditingHandoffClip(
+                    shot_plan_id=plan.id,
+                    shot_index=plan.index,
+                    candidate_id=preparation.candidate_id,
+                    candidate_content_url=(
+                        f"/api/v1/generation-candidates/{preparation.candidate_id}/content"
+                    ),
+                    cover_url=(
+                        f"/api/v1/production-shots/{plan.id}/video-preparation/cover"
+                    ),
+                    timeline_start_seconds=timeline_start,
+                    timeline_end_seconds=timeline_end,
+                    timeline_duration_seconds=preparation.timeline_duration_seconds,
+                    trim_in_seconds=preparation.trim_in_seconds,
+                    trim_out_seconds=preparation.trim_out_seconds,
+                    video_playback_rate=preparation.video_playback_rate,
+                    audio_mode=preparation.audio_mode,
+                    source_audio_start_seconds=preparation.source_audio_start_seconds,
+                    source_audio_end_seconds=preparation.source_audio_end_seconds,
+                    transcript_cues=preparation.transcript_cues,
+                    subtitle_cues=preparation.subtitle_cues,
+                    quality_status=preparation.quality_status,
+                    warning_messages=preparation.warning_messages,
+                )
+            )
+            preparations.append(preparation)
+            timeline_cursor = timeline_end
+        if not clips:
+            raise _fail(409, "editing_handoff_empty", "没有可交给剪辑阶段的视频片段")
+
+        source_preparations = [
+            item for item in preparations if item.audio_mode == VideoClipAudioMode.SOURCE
+        ]
+        ranges_are_contiguous = all(
+            abs(left.source_audio_end_seconds - right.source_audio_start_seconds) <= 0.05
+            for left, right in zip(
+                source_preparations,
+                source_preparations[1:],
+                strict=False,
+            )
+        )
+        if (
+            source_audio_url
+            and len(source_preparations) == len(preparations)
+            and ranges_are_contiguous
+        ):
+            audio_strategy = "continuous_source_track"
+        elif source_preparations:
+            audio_strategy = "per_shot"
+        else:
+            audio_strategy = "muted"
+        return EditingHandoffManifest(
+            project_id=project.id,
+            revision_id=revision_id,
+            source_analysis_id=project.base_analysis_id,
+            source_audio_url=source_audio_url,
+            audio_strategy=audio_strategy,
+            timeline_duration_seconds=round(timeline_cursor, 3),
+            clips=clips,
         )
 
     async def advance(
@@ -4342,6 +4935,7 @@ class ProductionService:
                     "workflow_gate_blocked",
                     "；".join(gate.blocker_messages) or "当前步骤尚未满足推进条件",
                 )
+            revision_id = uuid4()
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
@@ -4357,7 +4951,26 @@ class ProductionService:
                     if payload.target_step == ProductionStep.EDITING
                     else "所有必需分镜图片已审批，推进到分段视频"
                 ),
+                revision_id=revision_id,
             )
+            if payload.target_step == ProductionStep.EDITING:
+                handoff = await self._build_editing_handoff(next_project, revision_id)
+                handoff_path = (
+                    self.workspace.production_paths(project.record_id, project.id).timelines
+                    / "editing-handoff.json"
+                )
+                try:
+                    await asyncio.to_thread(
+                        self._write_json_atomic,
+                        _filesystem_path(handoff_path.resolve()),
+                        handoff.model_dump(mode="json"),
+                    )
+                except OSError as exc:
+                    raise _fail(
+                        500,
+                        "editing_handoff_write_failed",
+                        "无法写入剪辑交接清单，请检查工作区权限后重试",
+                    ) from exc
             await self.repository.save_production_bundle(next_project, revision)
         return await self.get_project(project_id)
 
@@ -5091,6 +5704,82 @@ class ProductionService:
             created_at=candidate.created_at,
         )
 
+    @staticmethod
+    def _video_preparation_response(
+        preparation: VideoClipPreparation,
+    ) -> VideoClipPreparationResponse:
+        preparation = _apply_video_preparation_policy(preparation)
+        return VideoClipPreparationResponse(
+            id=preparation.id,
+            project_id=preparation.project_id,
+            revision_id=preparation.revision_id,
+            shot_plan_id=preparation.shot_plan_id,
+            candidate_id=preparation.candidate_id,
+            trim_in_seconds=preparation.trim_in_seconds,
+            trim_out_seconds=preparation.trim_out_seconds,
+            prepared_duration_seconds=preparation.prepared_duration_seconds,
+            timeline_duration_seconds=preparation.timeline_duration_seconds,
+            video_playback_rate=preparation.video_playback_rate,
+            duration_alignment=preparation.duration_alignment,
+            cover_timestamp_seconds=preparation.cover_timestamp_seconds,
+            cover_url=(
+                f"/api/v1/production-shots/{preparation.shot_plan_id}/"
+                "video-preparation/cover"
+            ),
+            audio_mode=preparation.audio_mode,
+            audio_mapping_strategy=preparation.audio_mapping_strategy,
+            source_audio_available=preparation.source_audio_url is not None,
+            source_audio_start_seconds=preparation.source_audio_start_seconds,
+            source_audio_end_seconds=preparation.source_audio_end_seconds,
+            transcript_cues=preparation.transcript_cues,
+            subtitle_cues=preparation.subtitle_cues,
+            quality_status=preparation.quality_status,
+            quality_report=preparation.quality_report,
+            status=preparation.status,
+            blocker_messages=preparation.blocker_messages,
+            warning_messages=preparation.warning_messages,
+            created_at=preparation.created_at,
+            updated_at=preparation.updated_at,
+        )
+
+    def _update_candidate_quality_metadata(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        run: GenerationRun,
+        candidate: GenerationCandidate,
+    ) -> None:
+        try:
+            metadata_path = self.workspace.resolve(candidate.metadata_relative_path).resolve()
+            run_root = (
+                self.workspace.production_shot_root(
+                    project.record_id,
+                    project.id,
+                    plan.id,
+                )
+                / "videos"
+                / str(run.id)
+            ).resolve()
+            metadata_path.relative_to(run_root)
+            filesystem_path = _filesystem_path(metadata_path)
+            payload: dict[str, object] = {}
+            if filesystem_path.is_file():
+                loaded = json.loads(filesystem_path.read_text("utf-8-sig"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+            payload.update(
+                {
+                    "width": candidate.width,
+                    "height": candidate.height,
+                    "duration_seconds": candidate.duration_seconds,
+                    "quality_report": candidate.quality_report,
+                }
+            )
+            self._write_json_atomic(metadata_path, payload)
+        except (OSError, ValueError, json.JSONDecodeError, WorkspaceError):
+            # The SQLite record is authoritative; metadata repair is best-effort.
+            return
+
     def _resolve_video_file(self, video: Video) -> Path:
         if video.stored_relative_path:
             try:
@@ -5466,6 +6155,7 @@ class ProductionService:
         reference_assets: list[ReferenceAsset] | None = None,
         shot_plans: list[ShotPlan] | None = None,
         reference_bindings: list[ReferenceBinding] | None = None,
+        video_clip_preparations: list[VideoClipPreparation] | None = None,
     ) -> tuple[ProductionProject, ProductionRevision]:
         revisions = await self.repository.list_production_revisions(project.id)
         revision_number = max((item.revision_number for item in revisions), default=0) + 1
@@ -5498,6 +6188,7 @@ class ProductionService:
             reference_assets=reference_assets,
             shot_plans=shot_plans,
             reference_bindings=reference_bindings,
+            video_clip_preparations=video_clip_preparations,
         )
         await asyncio.to_thread(
             self._write_revision_files,
@@ -5516,6 +6207,7 @@ class ProductionService:
         reference_assets: list[ReferenceAsset] | None,
         shot_plans: list[ShotPlan] | None,
         reference_bindings: list[ReferenceBinding] | None,
+        video_clip_preparations: list[VideoClipPreparation] | None,
     ) -> dict[str, object]:
         if report is None:
             report = await self.repository.get_report_by_analysis(project.base_analysis_id)
@@ -5548,6 +6240,11 @@ class ProductionService:
             if self.project_assets is not None
             else [item.model_dump(mode="json") for item in assets]
         )
+        preparations = (
+            list(video_clip_preparations)
+            if video_clip_preparations is not None
+            else await self.repository.list_video_clip_preparations(project.id)
+        )
         return {
             "schema_version": PRODUCTION_SNAPSHOT_SCHEMA,
             "revision": _revision_response(revision).model_dump(mode="json"),
@@ -5569,6 +6266,9 @@ class ProductionService:
                     ],
                 }
                 for plan in plans
+            ],
+            "video_clip_preparations": [
+                item.model_dump(mode="json") for item in preparations
             ],
         }
 

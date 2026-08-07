@@ -48,6 +48,7 @@ from .models import (
     CandidateSelectRequest,
     ChangeImpactRequest,
     ChangeImpactResponse,
+    EditingHandoffManifest,
     ExportArtifact,
     ExportCreate,
     ExportKind,
@@ -100,6 +101,8 @@ from .models import (
     ShotVideoApprovalRevokeRequest,
     SourceType,
     Video,
+    VideoClipPreparationResponse,
+    VideoClipPreparationUpdate,
     VideoCostEstimateRequest,
     VideoCostEstimateResponse,
     VideoGenerationCreate,
@@ -787,6 +790,37 @@ async def get_production_shot(shot_plan_id: UUID) -> ShotPlanDetailResponse:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.put(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/video-preparation",
+    response_model=VideoClipPreparationResponse,
+)
+async def prepare_production_video_clip(
+    shot_plan_id: UUID,
+    payload: VideoClipPreparationUpdate,
+) -> VideoClipPreparationResponse:
+    try:
+        return await production_service.prepare_video_clip(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/production-shots/{{shot_plan_id}}/video-preparation/cover")
+async def get_production_video_preparation_cover(shot_plan_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_video_preparation_cover(shot_plan_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.patch(
     f"{API_PREFIX}/production-shots/{{shot_plan_id}}",
     response_model=ShotPlanDetailResponse,
@@ -1167,6 +1201,17 @@ async def get_production_candidate_thumbnail(candidate_id: UUID) -> FileResponse
 async def get_production_gate_status(project_id: UUID) -> ProductionGateStatus:
     try:
         return await production_service.gate_status(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/editing-handoff",
+    response_model=EditingHandoffManifest,
+)
+async def get_production_editing_handoff(project_id: UUID) -> EditingHandoffManifest:
+    try:
+        return await production_service.get_editing_handoff(project_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

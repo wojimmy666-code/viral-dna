@@ -32,6 +32,7 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   video_approved: "确认分镜视频",
   video_approval_revoked: "取消采用分镜视频",
   video_rejected: "退回视频候选",
+  video_preparation_changed: "更新视频剪辑准备",
   workflow_advanced: "推进工作流",
   branch_created: "创建版本分支",
 });

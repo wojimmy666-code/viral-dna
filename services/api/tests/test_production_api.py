@@ -23,6 +23,7 @@ from viral_dna_api.models import (
     GenerationCandidateStatus,
     ImageExecutionMode,
     ImageGenerationCreate,
+    MediaMetadata,
     ProductionAdvanceRequest,
     ProductionChangeKind,
     ProductionProjectCreate,
@@ -33,6 +34,9 @@ from viral_dna_api.models import (
     ShotVideoApprovalRevokeRequest,
     SourceType,
     Video,
+    VideoClipAudioMode,
+    VideoClipPreparationStatus,
+    VideoClipPreparationUpdate,
     VideoGenerationCreate,
     VideoStatus,
     WorkflowItemStatus,
@@ -43,6 +47,7 @@ from viral_dna_api.production import (
     ProductionServiceError,
     inspect_reference_image,
 )
+from viral_dna_api.production_media import VideoInspectionResult
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
 from viral_dna_api.video_generation import VideoGenerationGateway
@@ -111,6 +116,55 @@ class FakeStillVideoProcessor:
             duration_seconds,
             width,
             height,
+        )
+
+
+def write_fake_video_cover(output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (360, 640), (42, 48, 68)).save(output_path, "WEBP")
+
+
+class FakeVideoInspector:
+    async def inspect(
+        self,
+        source_path: Path,
+        cover_path: Path,
+        *,
+        cover_timestamp_seconds: float,
+        expected_width: int | None,
+        expected_height: int | None,
+        expected_duration_seconds: float | None,
+    ) -> VideoInspectionResult:
+        del source_path
+        await asyncio.to_thread(write_fake_video_cover, cover_path)
+        duration = float(expected_duration_seconds or 2.5)
+        metadata = MediaMetadata(
+            duration_seconds=duration,
+            width=expected_width or 1080,
+            height=expected_height or 1920,
+            fps=24,
+            format_name="mp4",
+            video_codec="h264",
+            has_audio=False,
+            size_bytes=1,
+            sha256="a" * 64,
+            aspect_ratio="9:16",
+        )
+        return VideoInspectionResult(
+            metadata=metadata,
+            cover_timestamp_seconds=min(cover_timestamp_seconds, duration - 0.04),
+            quality_status="passed",
+            quality_report={
+                "schema_version": "viral-dna-video-quality/v2",
+                "status": "passed",
+                "summary": "测试视频基础技术质检通过。",
+                "automated_checks": {
+                    "file_integrity": {"status": "passed"},
+                    "duration": {"status": "passed"},
+                    "dimensions": {"status": "passed"},
+                },
+                "warnings": [],
+            },
         )
 
 
@@ -382,7 +436,7 @@ def test_production_http_api_revision_reference_and_branch_flow(
         revision_response = client.get(f"/api/v1/productions/{project_id}/revisions/{revision_1}")
         assert revision_response.status_code == 200
         snapshot = revision_response.json()["snapshot"]
-        assert snapshot["schema_version"] == "production-revision-v2"
+        assert snapshot["schema_version"] == "production-revision-v3"
         assert snapshot["source_analysis"]["analysis_id"] == str(analysis.id)
         assert len(snapshot["source_analysis"]["shots"]) == 5
         assert "snapshot_relative_path" not in revision_response.json()
@@ -1537,6 +1591,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             service.workspace,
             media_processor=FakeStillVideoProcessor(),
         )
+        service.video_inspector = FakeVideoInspector()
 
         with pytest.raises(ProductionServiceError) as remote:
             await service.create_video_run(
@@ -1551,12 +1606,17 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
         first_candidate_id = None
         for index, shot in enumerate(shots):
             current = await service.get_project(detail.project.id)
+            requested_duration = (
+                round(max(0.2, shot.plan.duration_seconds * 0.5), 3)
+                if index == 0
+                else shot.plan.duration_seconds
+            )
             video_run = await service.create_video_run(
                 shot.plan.id,
                 VideoGenerationCreate(
                     expected_revision_id=current.project.current_revision_id,
                     candidate_count=2 if index == 0 else 1,
-                    duration_seconds=2.5,
+                    duration_seconds=requested_duration,
                 ),
             )
             video_run = await wait_for_generation(service, video_run.id)
@@ -1600,15 +1660,57 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             assert approved.approval_event is not None
             assert approved.approval_event.target_kind == "video"
 
+            trim_in = 0.0 if index == 0 else 0.1
+            trim_out = requested_duration if index == 0 else shot.plan.duration_seconds - 0.1
+            prepared = await service.prepare_video_clip(
+                shot.plan.id,
+                VideoClipPreparationUpdate(
+                    expected_revision_id=approved.shot.current_revision_id,
+                    trim_in_seconds=trim_in,
+                    trim_out_seconds=trim_out,
+                    cover_timestamp_seconds=(trim_in + trim_out) / 2,
+                    audio_mode=VideoClipAudioMode.MUTED,
+                ),
+            )
+            assert prepared.status == VideoClipPreparationStatus.READY
+            assert prepared.cover_url.endswith("/video-preparation/cover")
+            assert prepared.prepared_duration_seconds == pytest.approx(trim_out - trim_in)
+            if index == 0:
+                assert prepared.duration_alignment == "outside_safe_range"
+                assert prepared.blocker_messages == []
+                assert len(prepared.warning_messages) == 1
+                assert "请在剪辑阶段复核节奏" in prepared.warning_messages[0]
+                stored_preparation = await repository.get_video_clip_preparation(shot.plan.id)
+                assert stored_preparation is not None
+                await repository.save_video_clip_preparation(
+                    stored_preparation.model_copy(
+                        update={
+                            "status": VideoClipPreparationStatus.BLOCKED,
+                            "blocker_messages": [
+                                "裁剪后时长与原分镜差异过大；请调整入点、出点或重新生成视频"
+                            ],
+                            "warning_messages": [],
+                        }
+                    )
+                )
+                legacy_detail = await service.get_shot(shot.plan.id)
+                assert legacy_detail.video_preparation is not None
+                assert legacy_detail.video_preparation.status == VideoClipPreparationStatus.READY
+                assert legacy_detail.video_preparation.blocker_messages == []
+                assert legacy_detail.video_preparation.warning_messages
+
             if index == 0:
                 first_candidate_id = candidate.id
                 reopened = await service.revoke_video_approval(
                     shot.plan.id,
                     ShotVideoApprovalRevokeRequest(
-                        expected_revision_id=approved.shot.current_revision_id,
+                        expected_revision_id=prepared.revision_id,
                     ),
                 )
                 assert reopened.shot.plan.video_status == WorkflowItemStatus.REVIEW_REQUIRED
+                stale_detail = await service.get_shot(shot.plan.id)
+                assert stale_detail.video_preparation is not None
+                assert stale_detail.video_preparation.status == VideoClipPreparationStatus.STALE
                 reselected = await service.select_candidate(
                     candidate.id,
                     CandidateSelectRequest(
@@ -1623,6 +1725,14 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     ),
                 )
                 assert approved.shot.plan.approved_video_candidate_id == candidate.id
+                prepared = await service.prepare_video_clip(
+                    shot.plan.id,
+                    VideoClipPreparationUpdate(
+                        expected_revision_id=approved.shot.current_revision_id,
+                        audio_mode=VideoClipAudioMode.MUTED,
+                    ),
+                )
+                assert prepared.status == VideoClipPreparationStatus.READY
 
         assert first_candidate_id is not None
         video_preview_shots = await service.list_shots(detail.project.id)
@@ -1642,6 +1752,8 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
         assert gate.next_step == ProductionStep.EDITING
         assert gate.allowed is True
         assert gate.approved_shot_count == len(shots)
+        assert gate.prepared_shot_count == len(shots)
+        assert gate.quality_warning_shot_count == 1
 
         current = await service.get_project(detail.project.id)
         editing = await service.advance(
@@ -1652,6 +1764,13 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             ),
         )
         assert editing.project.active_step == ProductionStep.EDITING
+        handoff = await service.get_editing_handoff(detail.project.id)
+        assert handoff.audio_strategy == "muted"
+        assert len(handoff.clips) == len(shots)
+        assert handoff.clips[0].trim_in_seconds == 0.0
+        assert handoff.clips[0].warning_messages
+        assert handoff.clips[0].timeline_start_seconds == 0
+        assert handoff.clips[-1].timeline_end_seconds == handoff.timeline_duration_seconds
         await service.shutdown_generation_runs()
 
     asyncio.run(scenario())
