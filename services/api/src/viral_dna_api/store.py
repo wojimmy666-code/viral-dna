@@ -217,6 +217,17 @@ class InMemoryStore:
             projects = [project for project in projects if project.record_id == record_id]
         return sorted(projects, key=lambda project: project.created_at)
 
+    async def count_production_projects_by_record(
+        self,
+        record_ids: list[UUID],
+    ) -> dict[UUID, int]:
+        selected_ids = set(record_ids)
+        counts = {record_id: 0 for record_id in selected_ids}
+        for project in self.production_projects.values():
+            if project.record_id in selected_ids:
+                counts[project.record_id] += 1
+        return counts
+
     async def save_production_revision(
         self,
         revision: ProductionRevision,

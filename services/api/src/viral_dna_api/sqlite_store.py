@@ -322,6 +322,23 @@ class SQLiteStore:
             ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def _count_production_projects_by_record(
+        self,
+        record_ids: list[UUID],
+    ) -> dict[UUID, int]:
+        if not record_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in record_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT json_extract(payload, '$.record_id') AS record_id, COUNT(*) "
+                "FROM production_projects "
+                f"WHERE json_extract(payload, '$.record_id') IN ({placeholders}) "  # noqa: S608
+                "GROUP BY record_id",
+                tuple(str(record_id) for record_id in record_ids),
+            ).fetchall()
+        return {UUID(str(row[0])): int(row[1]) for row in rows}
+
     @staticmethod
     def _serialize(model: BaseModel) -> str:
         payload = model.model_dump(mode="json")
@@ -483,6 +500,15 @@ class SQLiteStore:
         if record_id is not None:
             projects = [project for project in projects if project.record_id == record_id]
         return sorted(projects, key=lambda project: project.created_at)
+
+    async def count_production_projects_by_record(
+        self,
+        record_ids: list[UUID],
+    ) -> dict[UUID, int]:
+        return await asyncio.to_thread(
+            self._count_production_projects_by_record,
+            record_ids,
+        )
 
     async def save_production_revision(
         self,

@@ -40,6 +40,7 @@ import {
 } from "./production-ui.js";
 import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
 import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
+import { EditingTimelineWorkspace } from "./EditingTimelineWorkspace.jsx";
 import "./production-workflow.css";
 
 const EMPTY_CREATE_DRAFT = Object.freeze({
@@ -332,9 +333,7 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
   return (
     <nav aria-label="创作工作流" className="production-stepper">
       {PRODUCTION_STEPS.map((step, index) => {
-        const locked = Boolean(step.locked) || (
-          step.id === "shot_videos" && index > activeIndex
-        );
+        const locked = Boolean(step.locked) || index > activeIndex;
         const selected = active === step.id;
         const completed = index < activeIndex || (step.id === "project_setup" && project.current_revision_id);
         return (
@@ -909,7 +908,6 @@ export function ProductionHub({
   const [shotDetail, setShotDetail] = useState(null);
   const [shotDraft, setShotDraft] = useState({ ...EMPTY_SHOT_DRAFT });
   const [videoDraft, setVideoDraft] = useState({ ...EMPTY_VIDEO_DRAFT });
-  const [rejectReason, setRejectReason] = useState("");
   const [impactReview, setImpactReview] = useState(null);
   const [activeSection, setActiveSection] = useState("project_setup");
   const [contentLoading, setContentLoading] = useState(false);
@@ -999,7 +997,6 @@ export function ProductionHub({
     setShotDetail(null);
     setShotDraft({ ...EMPTY_SHOT_DRAFT });
     setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
-    setRejectReason("");
     setImpactReview(null);
     setActiveSection("project_setup");
     setCreateOpen(false);
@@ -1152,7 +1149,6 @@ export function ProductionHub({
   async function selectShot(shotPlanId) {
     setSelectedShotId(shotPlanId);
     setActionError("");
-    setRejectReason("");
     setImpactReview(null);
     setShotDetail(null);
     try {
@@ -1492,23 +1488,41 @@ export function ProductionHub({
 
   async function approveSourceKeyframe() {
     if (!shotDetail?.plan) return;
-    await executeAction(async () => {
+    const shotPlanId = shotDetail.plan.id;
+    const replacingApproved = shotDetail.plan.image_status === "approved";
+    const expectedRevisionId = detail.project.current_revision_id;
+    const apply = async (confirmDownstreamStale) => {
       await request(
-        "/production-shots/" + shotDetail.plan.id + "/source-keyframe/approval",
+        "/production-shots/" + shotPlanId + "/source-keyframe/approval",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
+            expected_revision_id: expectedRevisionId,
+            confirm_downstream_stale: confirmDownstreamStale,
           }),
         },
       );
       await Promise.all([
-        refreshProject(detail.project.id, shotDetail.plan.id),
+        refreshProject(detail.project.id, shotPlanId),
         onProjectsChanged(),
       ]);
-      onNotice("已直接使用当前关键帧，未调用图片生成模型");
-    });
+      onNotice(replacingApproved
+        ? "已改用当前关键帧，历史 AI 候选仍保留"
+        : "已直接使用当前关键帧，未调用图片生成模型");
+    };
+    if (replacingApproved) {
+      await prepareImpact(
+        {
+          changeType: "candidate_selection",
+          shotPlanIds: [shotPlanId],
+          title: "改用当前视频关键帧",
+        },
+        apply,
+      );
+    } else {
+      await executeAction(() => apply(false));
+    }
   }
 
   async function selectCandidate(candidateId) {
@@ -1529,25 +1543,46 @@ export function ProductionHub({
   }
 
   async function approveCandidate(candidateId) {
-    await executeAction(async () => {
+    if (!shotDetail?.plan) return;
+    const shotPlanId = shotDetail.plan.id;
+    const replacingApproved = (
+      shotDetail.plan.image_status === "approved"
+      && shotDetail.plan.approved_image_candidate_id !== candidateId
+    );
+    const expectedRevisionId = detail.project.current_revision_id;
+    const apply = async (confirmDownstreamStale) => {
       await request(
         `/generation-candidates/${candidateId}/approvals`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
+            expected_revision_id: expectedRevisionId,
             decision: "approved",
+            confirm_downstream_stale: confirmDownstreamStale,
           }),
         },
       );
-      setRejectReason("");
       await Promise.all([
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("当前分镜图片已确认");
-    });
+      onNotice(replacingApproved
+        ? "已改用所选历史候选，其他候选仍保留"
+        : "当前分镜图片已确认");
+    };
+    if (replacingApproved) {
+      await prepareImpact(
+        {
+          changeType: "candidate_selection",
+          shotPlanIds: [shotPlanId],
+          title: "改用所选图片候选",
+        },
+        apply,
+      );
+    } else {
+      await executeAction(() => apply(false));
+    }
   }
 
   async function revokeImageApproval() {
@@ -1555,7 +1590,7 @@ export function ProductionHub({
     const shotPlanId = shotDetail.plan.id;
     const shotIndex = shotDetail.plan.index;
     const expectedRevisionId = detail.project.current_revision_id;
-    const apply = async (confirmDownstreamStale) => {
+    await executeAction(async () => {
       await request(
         `/production-shots/${shotPlanId}/image-approval/revoke`,
         {
@@ -1564,51 +1599,15 @@ export function ProductionHub({
           body: JSON.stringify({
             expected_revision_id: expectedRevisionId,
             reason: "用户重新打开图片审核",
-            confirm_downstream_stale: confirmDownstreamStale,
+            confirm_downstream_stale: true,
           }),
         },
       );
-      setRejectReason("");
       await Promise.all([
         refreshProject(detail.project.id, shotPlanId),
         onProjectsChanged(),
       ]);
-      onNotice(`已取消采用分镜 ${shotIndex} 的图片，可重新选择或生成新候选`);
-    };
-    await prepareImpact(
-      {
-        changeType: "image_approval_revoke",
-        shotPlanIds: [shotPlanId],
-        title: "取消采用当前分镜图片",
-      },
-      apply,
-    );
-  }
-
-  async function rejectCandidate(candidateId) {
-    if (!rejectReason.trim()) {
-      setActionError("退回候选时必须填写原因");
-      return;
-    }
-    await executeAction(async () => {
-      await request(
-        `/generation-candidates/${candidateId}/approvals`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
-            decision: "rejected",
-            reason: rejectReason.trim(),
-          }),
-        },
-      );
-      setRejectReason("");
-      await Promise.all([
-        refreshProject(detail.project.id, selectedShotId),
-        onProjectsChanged(),
-      ]);
-      onNotice("候选已退回，可修改提示词后重新生成");
+      onNotice(`已取消采用分镜 ${shotIndex} 的图片；相关后续结果已标记为需要更新`);
     });
   }
 
@@ -1885,7 +1884,12 @@ export function ProductionHub({
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("全部片段已完成准备，剪辑交接清单已生成；时间线编辑将在 Batch 4.6 开放");
+      setActiveSection("editing");
+      onNotice({
+        type: "success",
+        title: "已进入剪辑合成",
+        message: "剪辑交接清单和初始时间线已准备完成。",
+      });
     });
   }
 
@@ -2238,7 +2242,6 @@ export function ProductionHub({
                 onCreateShot={createShot}
                 onDiscardShot={discardShot}
                 onGenerate={generateShotCandidates}
-                onReject={rejectCandidate}
                 onRevokeApproval={revokeImageApproval}
                 onReorderShots={reorderShots}
                 onRetryRun={retryShotGeneration}
@@ -2248,14 +2251,12 @@ export function ProductionHub({
                 onSelectKeyframe={selectSourceKeyframe}
                 onSelectShot={selectShot}
                 project={detail.project}
-                rejectReason={rejectReason}
                 resolveUrl={resolveUrl}
                 selectedShotId={selectedShotId}
                 setDraft={setShotDraft}
                 setGenerationCandidateCount={setGenerationCandidateCount}
                 setGenerationEngine={setGenerationEngine}
                 setGenerationInputMode={setGenerationInputMode}
-                setRejectReason={setRejectReason}
                 shotDetail={shotDetail}
                 shots={shots}
                 sourceVideoUrl={resolveUrl(
@@ -2289,6 +2290,15 @@ export function ProductionHub({
                 shots={shots}
                 videoDraft={videoDraft}
                 videoGenerationSettings={videoGenerationSettings}
+              />
+            )}
+            {activeSection === "editing" && (
+              <EditingTimelineWorkspace
+                onNotice={onNotice}
+                onNotificationsChanged={onNotificationsChanged}
+                project={detail.project}
+                request={request}
+                resolveUrl={resolveUrl}
               />
             )}
             {activeSection === "revisions" && <RevisionHistory busy={busy} currentRevisionId={detail.project.current_revision_id} onBranch={openBranch} onPreview={openRevisionPreview} revisions={revisions} />}

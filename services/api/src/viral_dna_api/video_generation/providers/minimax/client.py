@@ -37,6 +37,17 @@ class MiniMaxClient:
     async def get_h3_task(self, task_id: str) -> httpx.Response:
         return await self._client.get(f"{self.api_root}/v2/query/video_generation/{task_id}")
 
+    async def list_h3_tasks(
+        self,
+        *,
+        page_num: int = 1,
+        page_size: int = 1,
+    ) -> httpx.Response:
+        return await self._client.get(
+            f"{self.api_root}/v2/query/video_generation",
+            params={"page_num": page_num, "page_size": page_size},
+        )
+
     async def cancel_h3_task(self, task_id: str) -> httpx.Response:
         return await self._client.delete(f"{self.api_root}/v2/video_generation/{task_id}")
 

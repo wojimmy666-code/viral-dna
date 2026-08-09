@@ -134,6 +134,8 @@ class ProviderCredentialValidation:
     balance_known: bool = False
     balance_micros: int | None = None
     currency: str = "CNY"
+    error_code: str | None = None
+    retryable: bool = False
 
 
 @dataclass(frozen=True, slots=True)

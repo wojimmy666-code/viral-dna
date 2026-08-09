@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from viral_dna_api.models import (
@@ -34,6 +35,9 @@ from viral_dna_api.video_generation.orchestrator import RemoteVideoOrchestrator
 from viral_dna_api.video_generation.providers.bailian.error_mapper import (
     raise_bailian_error,
 )
+from viral_dna_api.video_generation.providers.minimax.adapter import (
+    MiniMaxVideoProvider,
+)
 from viral_dna_api.video_generation.providers.minimax.error_mapper import (
     raise_minimax_error,
 )
@@ -41,7 +45,11 @@ from viral_dna_api.video_generation.providers.minimax.h3_request_mapper import (
     build_minimax_h3_request,
 )
 from viral_dna_api.video_generation.registry import VideoProviderRegistry
-from viral_dna_api.video_generation.settings import VideoGenerationSettingsService
+from viral_dna_api.video_generation.settings import (
+    VideoGenerationSettingsService,
+    VideoGenerationSettingsServiceError,
+    normalize_provider_base_url,
+)
 
 
 class FakeProvider:
@@ -188,6 +196,198 @@ def test_minimax_h3_uses_the_v2_multimodal_request(tmp_path: Path) -> None:
     assert payload["resolution"] == "2K"
     assert payload["content"][1]["role"] == "first_frame"
     assert payload["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_minimax_credential_validation_uses_the_h3_task_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+
+    class StubMiniMaxClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def list_h3_tasks(self, *, page_num: int, page_size: int) -> httpx.Response:
+            calls.append((page_num, page_size))
+            return httpx.Response(
+                200,
+                json={"items": [], "total": 0},
+                request=httpx.Request(
+                    "GET",
+                    "https://api.minimaxi.com/v2/query/video_generation",
+                ),
+            )
+
+    monkeypatch.setattr(
+        "viral_dna_api.video_generation.providers.minimax.adapter.MiniMaxClient",
+        StubMiniMaxClient,
+    )
+
+    result = asyncio.run(
+        MiniMaxVideoProvider().validate_credentials(
+            "valid-key",
+            "https://api.minimaxi.com/v1",
+        )
+    )
+
+    assert calls == [(1, 1)]
+    assert result.valid is True
+    assert result.error_code is None
+
+
+@pytest.mark.parametrize(
+    ("status_code", "payload", "valid", "error_code", "retryable"),
+    [
+        (
+            401,
+            {
+                "type": "error",
+                "error": {"type": "authorized_error", "message": "login fail (1004)"},
+            },
+            False,
+            "video_provider_auth_invalid",
+            False,
+        ),
+        (
+            403,
+            {"type": "error", "error": {"message": "permission denied"}},
+            False,
+            "video_provider_permission_denied",
+            False,
+        ),
+        (
+            429,
+            {
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "rate limit (1002)"},
+            },
+            False,
+            "video_provider_rate_limited",
+            True,
+        ),
+        (
+            402,
+            {
+                "type": "error",
+                "error": {
+                    "type": "insufficient_balance_error",
+                    "message": "insufficient balance (1008)",
+                },
+            },
+            True,
+            "video_provider_balance_insufficient",
+            False,
+        ),
+    ],
+)
+def test_minimax_credential_validation_classifies_provider_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    payload: dict[str, object],
+    valid: bool,
+    error_code: str,
+    retryable: bool,
+) -> None:
+    class StubMiniMaxClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def list_h3_tasks(self, *, page_num: int, page_size: int) -> httpx.Response:
+            return httpx.Response(
+                status_code,
+                json=payload,
+                request=httpx.Request(
+                    "GET",
+                    "https://api.minimaxi.com/v2/query/video_generation",
+                ),
+            )
+
+    monkeypatch.setattr(
+        "viral_dna_api.video_generation.providers.minimax.adapter.MiniMaxClient",
+        StubMiniMaxClient,
+    )
+
+    result = asyncio.run(
+        MiniMaxVideoProvider().validate_credentials(
+            "test-key",
+            "https://api.minimaxi.com/v1",
+        )
+    )
+
+    assert result.valid is valid
+    assert result.error_code == error_code
+    assert result.retryable is retryable
+    if error_code == "video_provider_balance_insufficient":
+        assert result.balance_known is True
+        assert result.balance_micros == 0
+
+
+def test_minimax_base_urls_accept_current_official_regions() -> None:
+    assert (
+        normalize_provider_base_url("minimax", "https://api.minimaxi.com/v1")
+        == "https://api.minimaxi.com/v1"
+    )
+    assert (
+        normalize_provider_base_url("minimax", "https://api.minimax.io/v1")
+        == "https://api.minimax.io/v1"
+    )
+
+
+def test_video_settings_preserve_minimax_validation_failure_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenMiniMaxProvider(FakeProvider):
+        provider_id = "minimax"
+
+        async def validate_credentials(self, api_key: str, base_url: str):
+            self.validation_calls += 1
+            return ProviderCredentialValidation(
+                False,
+                "MiniMax API Key 已被识别，但当前账号没有 H3 视频接口权限",
+                3,
+                error_code="video_provider_permission_denied",
+            )
+
+    async def scenario() -> None:
+        env_path = tmp_path / ".env.local"
+        monkeypatch.setenv("VIRAL_DNA_ENV_FILE", str(env_path))
+        monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+        provider = ForbiddenMiniMaxProvider()
+        service = VideoGenerationSettingsService(VideoProviderRegistry([provider]))
+
+        with pytest.raises(VideoGenerationSettingsServiceError) as caught:
+            await service.update(
+                VideoGenerationSettingsUpdate(
+                    default_model_alias="bailian_wan_2_7_i2v",
+                    default_resolution="720P",
+                    providers=[
+                        VideoProviderCredentialUpdate(
+                            provider="minimax",
+                            api_key="valid-but-forbidden-key",
+                            base_url="https://api.minimaxi.com/v1",
+                        )
+                    ],
+                )
+            )
+
+        assert caught.value.status_code == 403
+        assert caught.value.code == "video_provider_permission_denied"
+        assert not env_path.exists()
+
+    asyncio.run(scenario())
 
 
 def test_settings_allow_blank_provider_keys_and_validate_nonblank_keys(

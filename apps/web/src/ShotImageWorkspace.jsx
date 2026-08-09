@@ -65,6 +65,19 @@ function generationRunStatusLabel(status) {
   }[status] || "未开始";
 }
 
+function formatCandidateBatchTime(value) {
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function MediaPreview({ src, alt, emptyLabel }) {
   const [failed, setFailed] = useState(false);
 
@@ -309,8 +322,6 @@ export function ShotImageWorkspace({
   busy,
   error,
   resolveUrl,
-  rejectReason,
-  setRejectReason,
   setGenerationCandidateCount,
   setGenerationEngine,
   setGenerationInputMode,
@@ -325,7 +336,6 @@ export function ShotImageWorkspace({
   onDiscardShot,
   onSelectCandidate,
   onApprove,
-  onReject,
   onRevokeApproval,
   onReorderShots,
   onRetryRun,
@@ -338,6 +348,7 @@ export function ShotImageWorkspace({
   const [draggedShotId, setDraggedShotId] = useState(null);
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [visualChoice, setVisualChoice] = useState("source");
+  const [candidateHistoryExpanded, setCandidateHistoryExpanded] = useState(false);
   const [mentionMenu, setMentionMenu] = useState(null);
   const promptRef = useRef(null);
   const plan = shotDetail?.plan;
@@ -355,16 +366,55 @@ export function ShotImageWorkspace({
     [shots],
   );
   const generationRuns = shotDetail?.generation_runs || [];
-  const latestRun = generationRuns.find((run) => run.kind === "image") || null;
-  const candidates = useMemo(() => {
-    if (!isAiImageGenerationRun(latestRun)) return [];
-    return (latestRun?.candidates || []).filter(
-      (candidate) => candidate.status !== "archived",
-    );
-  }, [latestRun]);
-  const hasPriorAiCandidates = generationRuns.some(
-    (run) => isAiImageGenerationRun(run) && (run.candidates || []).length > 0,
+  const imageRuns = useMemo(
+    () => generationRuns.filter((run) => run.kind === "image"),
+    [generationRuns],
   );
+  const aiImageRuns = useMemo(
+    () => imageRuns.filter((run) => isAiImageGenerationRun(run)),
+    [imageRuns],
+  );
+  const latestRun = aiImageRuns[0] || null;
+  const candidateGroups = useMemo(
+    () => aiImageRuns
+      .map((run) => ({
+        run,
+        candidates: (run.candidates || [])
+          .filter((candidate) => candidate.status !== "rejected")
+          .sort((left, right) => left.ordinal - right.ordinal)
+          .map((candidate) => ({ ...candidate, generationRun: run })),
+      }))
+      .filter((group) => group.candidates.length > 0),
+    [aiImageRuns],
+  );
+  const candidates = useMemo(
+    () => candidateGroups.flatMap((group) => group.candidates),
+    [candidateGroups],
+  );
+  const allImageCandidateEntries = useMemo(
+    () => imageRuns.flatMap((run) => (run.candidates || []).map((candidate) => ({
+      candidate,
+      run,
+    }))),
+    [imageRuns],
+  );
+  const approvedCandidateEntry = allImageCandidateEntries.find(
+    (entry) => entry.candidate.id === plan?.approved_image_candidate_id,
+  ) || null;
+  const approvedIsSource = Boolean(
+    plan?.image_status === "approved"
+    && approvedCandidateEntry?.run?.execution_mode === "source_frame",
+  );
+  const latestCandidateGroup = candidateGroups[0] || null;
+  const historicalCandidateGroups = candidateGroups.slice(1);
+  const historicalCandidateCount = historicalCandidateGroups.reduce(
+    (total, group) => total + group.candidates.length,
+    0,
+  );
+  const hasPriorAiCandidates = candidates.length > 0;
+  const candidateIdentity = candidates
+    .map((candidate) => `${candidate.id}:${candidate.status}`)
+    .join("|");
   const candidateCount = Math.min(
     4,
     Math.max(1, Math.trunc(Number(generationCandidateCount) || 1)),
@@ -429,9 +479,40 @@ export function ShotImageWorkspace({
     || candidates[0]
     || null
   );
-  const selectedForApproval = plan?.image_status === "approved"
-    ? null
-    : displayedCandidate?.status === "selected" ? displayedCandidate : null;
+  const displayedCandidateIsApproved = Boolean(
+    displayedCandidate
+    && displayedCandidate.id === plan?.approved_image_candidate_id,
+  );
+  const displayedCandidateRun = displayedCandidate?.generationRun || null;
+  const displayedCandidateModelLabel = (
+    displayedCandidateRun?.model_display_name
+    || displayedCandidateRun?.model
+    || "未记录模型"
+  );
+  const displayedCandidateBatchTime = formatCandidateBatchTime(
+    displayedCandidateRun?.completed_at || displayedCandidateRun?.created_at,
+  );
+  const displayedCandidateQualityLabel = displayedCandidate
+    ? imageQualityLabel(displayedCandidate.quality_report)
+    : "尚无候选";
+  const displayedCandidateStateLabel = displayedCandidateIsApproved
+    ? "已采用"
+    : visualChoice === "candidate"
+      ? "待采用"
+      : "仅预览";
+  const candidateReadyForApproval = displayedCandidate && (
+    plan?.image_status === "approved"
+      ? !displayedCandidateIsApproved
+      : displayedCandidate.status === "selected"
+  ) ? displayedCandidate : null;
+  const selectedChoiceIsCurrentApproval = Boolean(
+    plan?.image_status === "approved"
+    && (
+      visualChoice === "source"
+        ? approvedIsSource
+        : displayedCandidateIsApproved
+    )
+  );
   const remoteConfigured = isImageEngineConfigured(
     generationSettings,
     "remote_api",
@@ -466,7 +547,7 @@ export function ShotImageWorkspace({
     );
     setDisplayedCandidateId(preferred?.id || null);
     setVisualChoice(
-      plan?.image_status === "approved" && latestRun?.provider === "source_video"
+      approvedIsSource
         ? "source"
         : preferred && (
           preferred.status === "selected"
@@ -476,7 +557,16 @@ export function ShotImageWorkspace({
           : "source",
     );
     setMentionMenu(null);
-  }, [plan?.id, plan?.approved_image_candidate_id, latestRun?.id]);
+  }, [
+    plan?.id,
+    plan?.approved_image_candidate_id,
+    approvedIsSource,
+    candidateIdentity,
+  ]);
+
+  useEffect(() => {
+    setCandidateHistoryExpanded(false);
+  }, [plan?.id]);
 
   useEffect(() => {
     if (plan?.source_kind === "blank") setGenerationInputMode("text_to_image");
@@ -558,11 +648,92 @@ export function ShotImageWorkspace({
     onReorderShots(next);
   }
 
+  function chooseSource() {
+    if (!plan?.source_keyframe_url) return;
+    setVisualChoice("source");
+  }
+
   function chooseCandidate(candidate) {
-    if (!candidate || plan?.image_status === "approved") return;
+    if (!candidate) return;
     setDisplayedCandidateId(candidate.id);
     setVisualChoice("candidate");
-    if (candidate.status === "ready") onSelectCandidate(candidate.id);
+    if (
+      plan?.image_status !== "approved"
+      && ["ready", "archived"].includes(candidate.status)
+    ) {
+      onSelectCandidate(candidate.id);
+    }
+  }
+
+  function activateChoiceFromKeyboard(event, action) {
+    if (!["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    action();
+  }
+
+  function renderCandidateGroup(group, title, historical = false) {
+    if (!group) return null;
+    const modelLabel = group.run.model_display_name || group.run.model || "未记录模型";
+    const batchTime = formatCandidateBatchTime(
+      group.run.completed_at || group.run.created_at,
+    );
+    return (
+      <div
+        aria-label={`${title}，${group.candidates.length} 张，${modelLabel}，${batchTime}`}
+        className={`shot-candidate-strip-group${historical ? " historical" : ""}`}
+        key={group.run.id}
+        role="group"
+      >
+        <div className="shot-candidate-batch-label">
+          <strong>{title}</strong>
+          <span>{group.candidates.length} 张</span>
+          <small>{batchTime}</small>
+        </div>
+        <div className="shot-candidate-strip-items">
+          {group.candidates.map((candidate, index) => {
+            const isApproved = (
+              plan?.image_status === "approved"
+              && candidate.id === plan?.approved_image_candidate_id
+            );
+            const isPreviewing = candidate.id === displayedCandidate?.id;
+            const isChosen = isPreviewing && visualChoice === "candidate";
+            const qualityLabel = imageQualityLabel(candidate.quality_report);
+            const stateLabel = isApproved
+              ? "已采用"
+              : isChosen
+                ? "待采用"
+                : historical || candidate.status === "archived"
+                  ? "历史"
+                  : "候选";
+            return (
+              <button
+                aria-label={`${title}，第 ${index + 1} 张，共 ${group.candidates.length} 张，${stateLabel}`}
+                aria-pressed={isChosen}
+                className={[
+                  "shot-candidate-tile",
+                  isPreviewing ? "previewing" : "",
+                  isChosen ? "active" : "",
+                  isApproved ? "approved" : "",
+                ].filter(Boolean).join(" ")}
+                disabled={busy}
+                key={candidate.id}
+                onClick={() => chooseCandidate(candidate)}
+                title={`${modelLabel} · ${batchTime} · ${qualityLabel}`}
+                type="button"
+              >
+                <span className="shot-candidate-thumb">
+                  <MediaPreview
+                    alt={`${title}第 ${index + 1} 张图片候选`}
+                    emptyLabel="候选图不可用"
+                    src={resolveUrl(candidate.thumbnail_url || candidate.content_url)}
+                  />
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
   }
 
   function updatePrompt(event) {
@@ -808,11 +979,8 @@ export function ShotImageWorkspace({
               >
                 <figure
                   className={visualChoice === "source" ? "selected" : ""}
-                  onClick={() => {
-                    if (plan.source_keyframe_url && plan.image_status !== "approved") {
-                      setVisualChoice("source");
-                    }
-                  }}
+                  onClick={chooseSource}
+                  onKeyDown={(event) => activateChoiceFromKeyboard(event, chooseSource)}
                   role="button"
                   tabIndex={0}
                 >
@@ -826,7 +994,13 @@ export function ShotImageWorkspace({
                           : " · " + seconds(plan.source_keyframe_timestamp_seconds) + "s"}
                       </small>
                     </div>
-                    <span>{visualChoice === "source" ? "已选择" : "选择此图"}</span>
+                    <span>
+                      {approvedIsSource
+                        ? "已采用"
+                        : visualChoice === "source"
+                          ? "已选择"
+                          : "选择此图"}
+                    </span>
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
@@ -852,31 +1026,29 @@ export function ShotImageWorkspace({
                 <figure
                   className={visualChoice === "candidate" ? "selected" : ""}
                   onClick={() => chooseCandidate(displayedCandidate)}
+                  onKeyDown={(event) => activateChoiceFromKeyboard(
+                    event,
+                    () => chooseCandidate(displayedCandidate),
+                  )}
                   role="button"
                   tabIndex={0}
                 >
                   <figcaption>
                     <div>
                       <strong>AI 生成图</strong>
-                      <small>{displayedCandidate ? "候选 " + displayedCandidate.ordinal : "尚未生成"}</small>
+                      <small>
+                        {displayedCandidate
+                          ? `${displayedCandidate.generationRun === latestCandidateGroup?.run ? "最近批次" : "历史批次"} · 候选 ${displayedCandidate.ordinal}`
+                          : "尚未生成"}
+                      </small>
                     </div>
-                    {candidates.length > 1 ? (
-                      <select
-                        aria-label="切换图片候选"
-                        onClick={(event) => event.stopPropagation()}
-                        onChange={(event) => {
-                          const candidate = candidates.find((item) => item.id === event.target.value);
-                          chooseCandidate(candidate);
-                        }}
-                        value={displayedCandidate?.id || ""}
-                      >
-                        {candidates.map((candidate) => (
-                          <option key={candidate.id} value={candidate.id}>候选 {candidate.ordinal}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span>{visualChoice === "candidate" ? "已选择" : "选择此图"}</span>
-                    )}
+                    <span>
+                      {displayedCandidateIsApproved
+                        ? "已采用"
+                        : visualChoice === "candidate"
+                          ? "已选择"
+                          : "选择此图"}
+                    </span>
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
@@ -899,6 +1071,60 @@ export function ShotImageWorkspace({
                   )}
                 </figure>
               </div>
+
+              {latestCandidateGroup && (
+                <section className="shot-candidate-library" aria-label="AI 图片候选历史">
+                  <header className="shot-candidate-library-heading">
+                    <div>
+                      <strong>AI 图片候选</strong>
+                      <small>共 {candidates.length} 张，点击缩略图切换当前采用目标</small>
+                    </div>
+                    {historicalCandidateCount > 0 && (
+                      <button
+                        aria-expanded={candidateHistoryExpanded}
+                        className={candidateHistoryExpanded ? "expanded" : ""}
+                        onClick={() => setCandidateHistoryExpanded((value) => !value)}
+                        type="button"
+                      >
+                        历史 {historicalCandidateCount} 张
+                        <ArrowDown size={14} />
+                      </button>
+                    )}
+                  </header>
+                  <div
+                    aria-label="图片候选，可横向滚动"
+                    className="shot-candidate-strip"
+                    role="region"
+                    tabIndex={0}
+                  >
+                    {renderCandidateGroup(latestCandidateGroup, "最新")}
+                    {candidateHistoryExpanded && historicalCandidateGroups.map(
+                      (group, index) => renderCandidateGroup(
+                        group,
+                        `历史 ${index + 1}`,
+                        true,
+                      ),
+                    )}
+                  </div>
+                  {displayedCandidate && (
+                    <div className="shot-candidate-current-detail">
+                      <strong>当前预览 · 候选 {displayedCandidate.ordinal}</strong>
+                      <span>
+                        {displayedCandidateModelLabel} · {displayedCandidateBatchTime} · {displayedCandidateQualityLabel}
+                      </span>
+                      <em className={
+                        displayedCandidateIsApproved
+                          ? "approved"
+                          : visualChoice === "candidate"
+                            ? "selected"
+                            : ""
+                      }>
+                        {displayedCandidateStateLabel}
+                      </em>
+                    </div>
+                  )}
+                </section>
+              )}
 
               {latestRunTone === "failed" && !displayedCandidate && (
                 <div className="shot-candidate-empty failed">
@@ -1019,40 +1245,27 @@ export function ShotImageWorkspace({
                   disabled={
                     busy
                     || latestRunBusy
-                    || plan.image_status === "approved"
+                    || selectedChoiceIsCurrentApproval
                     || (visualChoice === "source" && !plan.source_keyframe_url)
-                    || (visualChoice === "candidate" && !selectedForApproval)
+                    || (visualChoice === "candidate" && !candidateReadyForApproval)
                   }
                   onClick={() => (
                     visualChoice === "source"
                       ? onApproveSource()
-                      : onApprove(selectedForApproval.id)
+                      : onApprove(candidateReadyForApproval.id)
                   )}
                   type="button"
                 >
                   <CheckCircle size={16} weight="fill" />
-                  {plan.image_status === "approved" ? "当前画面已采用" : "采用所选画面"}
+                  {selectedChoiceIsCurrentApproval
+                    ? "当前画面已采用"
+                    : plan.image_status === "approved"
+                      ? visualChoice === "source"
+                        ? "改用当前关键帧"
+                        : "改用此候选"
+                      : "采用所选画面"}
                 </button>
               </div>
-              {visualChoice === "candidate" && selectedForApproval && (
-                <div className="shot-reject-row">
-                  <input
-                    maxLength={1000}
-                    onChange={(event) => setRejectReason(event.target.value)}
-                    placeholder="退回时填写原因"
-                    value={rejectReason}
-                  />
-                  <button
-                    className="danger-button compact"
-                    disabled={busy || !rejectReason.trim()}
-                    onClick={() => onReject(selectedForApproval.id)}
-                    type="button"
-                  >
-                    <X size={15} />
-                    退回修改
-                  </button>
-                </div>
-              )}
             </>
           )}
         </main>

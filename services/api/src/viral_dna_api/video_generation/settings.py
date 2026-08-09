@@ -49,6 +49,16 @@ VALIDATED_ENV = {
     "minimax": "VIRAL_DNA_VIDEO_MINIMAX_VALIDATED_AT",
 }
 
+VALIDATION_ERROR_STATUS = {
+    "video_provider_auth_invalid": 401,
+    "video_provider_permission_denied": 403,
+    "video_provider_balance_insufficient": 402,
+    "video_provider_rate_limited": 429,
+    "video_provider_unavailable": 503,
+    "video_provider_response_invalid": 502,
+    "video_provider_request_failed": 502,
+}
+
 
 class VideoGenerationSettingsServiceError(RuntimeError):
     def __init__(self, status_code: int, code: str, message: str) -> None:
@@ -100,7 +110,7 @@ def normalize_provider_base_url(provider: str, value: str) -> str:
         allowed = host in {"ark.cn-beijing.volces.com", "ark.cn-shanghai.volces.com"}
         required_path = "/api/v3"
     elif provider == "minimax":
-        allowed = host in {"api.minimaxi.com", "api.minimax.chat"}
+        allowed = host in {"api.minimaxi.com", "api.minimax.io", "api.minimax.chat"}
         required_path = "/v1"
     if (
         not allowed
@@ -229,6 +239,8 @@ class VideoGenerationSettingsService:
             balance_known=result.balance_known,
             balance_micros=result.balance_micros,
             currency=result.currency,
+            error_code=result.error_code,
+            retryable=result.retryable,
         )
 
     async def update(
@@ -265,7 +277,12 @@ class VideoGenerationSettingsService:
                 VideoProviderValidationRequest(api_key=new_key, base_url=base_url),
             )
             if not result.valid:
-                raise _fail(401, "video_api_key_invalid", result.message)
+                error_code = result.error_code or "video_api_key_invalid"
+                raise _fail(
+                    VALIDATION_ERROR_STATUS.get(error_code, 502),
+                    error_code,
+                    result.message,
+                )
             updates[KEY_ENV[item.provider]] = new_key
             updates[VALIDATED_ENV[item.provider]] = datetime.now(UTC).isoformat()
         try:

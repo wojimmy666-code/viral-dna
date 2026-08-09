@@ -1,6 +1,15 @@
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ArrowClockwise,
+  Archive,
   Bell,
   BracketsCurly,
   CaretDown,
@@ -13,6 +22,7 @@ import {
   ClockCounterClockwise,
   Copy,
   DownloadSimple,
+  DotsThree,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -35,6 +45,7 @@ import {
   Swap,
   Target,
   TextT,
+  Trash,
   UploadSimple,
   VideoCamera,
   X,
@@ -53,6 +64,19 @@ import {
   shouldShowTopbarCreate,
 } from "./app-layout.js";
 import { inferVideoOrientation } from "./video-layout.js";
+import {
+  buildRecordListParams,
+  normalizeRecordLifecycle,
+  RECORD_LIFECYCLE_META,
+  RECORD_LIFECYCLES,
+  recordActionSuccessMessage,
+  recordBatchActions,
+} from "./record-lifecycle-ui.js";
+import {
+  forgetRecordThumbnailLoaded,
+  recordThumbnailInitialState,
+  rememberRecordThumbnailLoaded,
+} from "./record-thumbnail-ui.js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 const MODEL_SETTINGS_STORAGE_KEY = "viral-dna:model-settings:v1";
@@ -146,6 +170,7 @@ const DEFAULT_HISTORY_STATE = Object.freeze({
   folder: "",
   status: "",
   sort: "updated_desc",
+  lifecycle: "active",
   page: 1,
   pageSize: 20,
 });
@@ -186,6 +211,7 @@ function loadHistoryState() {
       folder: typeof saved.folder === "string" ? saved.folder : "",
       status: VALID_HISTORY_STATUSES.has(saved.status) ? saved.status : "",
       sort: VALID_HISTORY_SORTS.has(saved.sort) ? saved.sort : DEFAULT_HISTORY_STATE.sort,
+      lifecycle: normalizeRecordLifecycle(saved.lifecycle),
       page: Number.isInteger(page) && page > 0 ? page : 1,
       pageSize: HISTORY_PAGE_SIZES.includes(pageSize) ? pageSize : DEFAULT_HISTORY_STATE.pageSize,
     };
@@ -475,8 +501,15 @@ export function App() {
   const [historyFolder, setHistoryFolder] = useState(initialHistoryState.folder);
   const [historyStatus, setHistoryStatus] = useState(initialHistoryState.status);
   const [historySort, setHistorySort] = useState(initialHistoryState.sort);
+  const [historyLifecycle, setHistoryLifecycle] = useState(initialHistoryState.lifecycle);
+  const [historyLifecycleCounts, setHistoryLifecycleCounts] = useState({
+    active: 0,
+    archived: 0,
+    trashed: 0,
+  });
   const [historyPage, setHistoryPage] = useState(initialHistoryState.page);
   const [historyPageSize, setHistoryPageSize] = useState(initialHistoryState.pageSize);
+  const [historyActionBusy, setHistoryActionBusy] = useState(false);
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -587,6 +620,7 @@ export function App() {
     historyFolder,
     historyStatus,
     historySort,
+    historyLifecycle,
     historyPage,
     historyPageSize,
   ]);
@@ -597,6 +631,7 @@ export function App() {
       folder: historyFolder,
       status: historyStatus,
       sort: historySort,
+      lifecycle: historyLifecycle,
       page: historyPage,
       pageSize: historyPageSize,
     });
@@ -605,6 +640,7 @@ export function App() {
     historyFolder,
     historyStatus,
     historySort,
+    historyLifecycle,
     historyPage,
     historyPageSize,
   ]);
@@ -687,17 +723,20 @@ export function App() {
     folder = historyFolder,
     status = historyStatus,
     sort = historySort,
+    lifecycle = historyLifecycle,
   } = {}) {
     const requestId = ++historyRequestIdRef.current;
     if (!quiet) setHistoryLoading(true);
     setHistoryError("");
-    const params = new URLSearchParams();
-    if (query.trim()) params.set("q", query.trim());
-    if (folder) params.set("folder_id", folder);
-    if (status) params.set("status", status);
-    params.set("sort", sort);
-    params.set("page", String(page));
-    params.set("page_size", String(pageSize));
+    const params = buildRecordListParams({
+      query,
+      folder,
+      status,
+      sort,
+      lifecycle,
+      page,
+      pageSize,
+    });
     try {
       const [recordPayload, folderPayload] = await Promise.all([
         apiRequest(`/records?${params.toString()}`),
@@ -707,6 +746,11 @@ export function App() {
       setRecords(recordPayload.items || []);
       setHistoryTotal(recordPayload.total || 0);
       setHistoryTotalPages(recordPayload.total_pages || 0);
+      setHistoryLifecycleCounts(recordPayload.lifecycle_counts || {
+        active: 0,
+        archived: 0,
+        trashed: 0,
+      });
       if (recordPayload.page && recordPayload.page !== page) {
         setHistoryPage(recordPayload.page);
       }
@@ -753,6 +797,11 @@ export function App() {
   function changeHistorySort(value) {
     setHistoryPage(1);
     setHistorySort(value);
+  }
+
+  function changeHistoryLifecycle(value) {
+    setHistoryPage(1);
+    setHistoryLifecycle(normalizeRecordLifecycle(value));
   }
 
   function changeHistoryPageSize(value) {
@@ -881,6 +930,7 @@ export function App() {
       setHistoryFolder("");
       setHistoryStatus("");
       setHistorySort(DEFAULT_HISTORY_STATE.sort);
+      setHistoryLifecycle("active");
       setHistoryPage(1);
       await refreshHistory({
         quiet: true,
@@ -890,6 +940,7 @@ export function App() {
         folder: "",
         status: "",
         sort: DEFAULT_HISTORY_STATE.sort,
+        lifecycle: "active",
       });
       showNotice("工作区已切换，历史记录已重新加载");
     } catch (requestError) {
@@ -973,6 +1024,51 @@ export function App() {
       setHistoryError(requestError.message);
       showNotice({ type: "error", title: "无法打开分析记录", message: requestError.message });
       return null;
+    }
+  }
+
+  async function openHistoryProductions(recordId) {
+    const detail = await openHistoryRecord(recordId);
+    if (!detail) return null;
+    setRecordWorkspaceMode("production");
+    return detail;
+  }
+
+  async function mutateHistoryRecords(recordIds, action) {
+    const ids = [...new Set(recordIds)].filter(Boolean);
+    if (!ids.length || historyActionBusy) return false;
+    if (
+      action === "purge"
+      && !window.confirm(`将永久删除选中的 ${ids.length} 条记录。共享资产会保留，但记录无法恢复。是否继续？`)
+    ) {
+      return false;
+    }
+    setHistoryActionBusy(true);
+    setHistoryError("");
+    try {
+      const result = action === "purge"
+        ? await apiRequest("/records/batch", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ record_ids: ids }),
+          })
+        : await apiRequest("/records/batch/lifecycle", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ record_ids: ids, action }),
+          });
+      await refreshHistory({ quiet: true });
+      if (action === "purge") {
+        loadWorkspace().catch(() => undefined);
+      }
+      showNotice(recordActionSuccessMessage(action, Number(result.affected_count || ids.length)));
+      return true;
+    } catch (requestError) {
+      setHistoryError(requestError.message);
+      showNotice({ type: "error", title: "记录操作失败", message: requestError.message });
+      return false;
+    } finally {
+      setHistoryActionBusy(false);
     }
   }
 
@@ -1652,10 +1748,16 @@ export function App() {
     <div className="app-shell">
       <Sidebar
         activeNav={activeNav}
+        historyLifecycle={historyLifecycle}
+        historyLifecycleCounts={historyLifecycleCounts}
         onSelect={selectNav}
+        onSelectHistoryLifecycle={(value) => {
+          changeHistoryLifecycle(value);
+          setActiveNav("history");
+        }}
         onOpenSettings={openModelSettings}
         settingsOpen={settingsOpen}
-        historyCount={workspaceInfo.record_count}
+        historyCount={historyLifecycleCounts.active}
       />
 
       <div className="app-body">
@@ -1697,18 +1799,23 @@ export function App() {
               folderFilter={historyFolder}
               statusFilter={historyStatus}
               sort={historySort}
-              workspace={workspaceInfo}
+              lifecycle={historyLifecycle}
+              lifecycleCounts={historyLifecycleCounts}
+              actionBusy={historyActionBusy}
               onQueryChange={changeHistoryQuery}
               onFolderChange={changeHistoryFolder}
               onStatusChange={changeHistoryStatus}
               onSortChange={changeHistorySort}
+              onLifecycleChange={changeHistoryLifecycle}
               onPageChange={setHistoryPage}
               onPageSizeChange={changeHistoryPageSize}
               onCreateFolder={createHistoryFolder}
               onRenameFolder={renameHistoryFolder}
               onRenameRecord={renameHistoryRecord}
               onMoveRecord={(recordId, folderId) => updateHistoryRecord(recordId, { folder_id: folderId || null }, "记录目录已更新")}
+              onMutateRecords={mutateHistoryRecords}
               onOpenRecord={openHistoryRecord}
+              onOpenProductions={openHistoryProductions}
               onCreate={() => selectNav("new-analysis")}
             />
           ) : activeNav === "assets" ? (
@@ -1782,6 +1889,7 @@ export function App() {
                   analysisVersions={analysisVersions}
                   activeAnalysisId={report.analysis_id}
                   onVersionChange={openAnalysisVersion}
+                  showActions={recordWorkspaceMode === "analysis"}
                 />
                 <RecordWorkspaceTabs
                   active={recordWorkspaceMode}
@@ -1936,9 +2044,9 @@ export function App() {
 function RecordThumbnail({ record }) {
   const imageUrl = record.thumbnail_url ? resolveArtifactUrl(record.thumbnail_url) : "";
   const imageRef = useRef(null);
-  const [imageState, setImageState] = useState(imageUrl ? "loading" : "missing");
+  const [imageState, setImageState] = useState(() => recordThumbnailInitialState(imageUrl));
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!imageUrl) {
       setImageState("missing");
       return;
@@ -1950,8 +2058,30 @@ function RecordThumbnail({ record }) {
       return;
     }
 
-    setImageState(image.naturalWidth > 0 ? "loaded" : "failed");
+    if (image.naturalWidth > 0) {
+      rememberRecordThumbnailLoaded(imageUrl);
+      setImageState("loaded");
+      return;
+    }
+
+    forgetRecordThumbnailLoaded(imageUrl);
+    setImageState("failed");
   }, [imageUrl]);
+
+  function handleImageLoad(event) {
+    if (event.currentTarget.naturalWidth > 0) {
+      rememberRecordThumbnailLoaded(imageUrl);
+      setImageState("loaded");
+      return;
+    }
+    forgetRecordThumbnailLoaded(imageUrl);
+    setImageState("failed");
+  }
+
+  function handleImageError() {
+    forgetRecordThumbnailLoaded(imageUrl);
+    setImageState("failed");
+  }
 
   const loaded = imageState === "loaded";
   const showImage = Boolean(imageUrl) && imageState !== "failed";
@@ -1972,8 +2102,8 @@ function RecordThumbnail({ record }) {
             draggable="false"
             key={imageUrl}
             loading="lazy"
-            onError={() => setImageState("failed")}
-            onLoad={(event) => setImageState(event.currentTarget.naturalWidth > 0 ? "loaded" : "failed")}
+            onError={handleImageError}
+            onLoad={handleImageLoad}
             ref={imageRef}
             src={imageUrl}
           />
@@ -2001,18 +2131,23 @@ function HistoryPage({
   folderFilter,
   statusFilter,
   sort,
-  workspace,
+  lifecycle,
+  lifecycleCounts,
+  actionBusy,
   onQueryChange,
   onFolderChange,
   onStatusChange,
   onSortChange,
+  onLifecycleChange,
   onPageChange,
   onPageSizeChange,
   onCreateFolder,
   onRenameFolder,
   onRenameRecord,
   onMoveRecord,
+  onMutateRecords,
   onOpenRecord,
+  onOpenProductions,
   onCreate,
 }) {
   const sourceLabels = { upload: "本地文件", douyin: "抖音", xiaohongshu: "小红书" };
@@ -2020,7 +2155,31 @@ function HistoryPage({
   const paginationItems = buildPaginationItems(page, totalPages);
   const firstResult = total > 0 ? (page - 1) * pageSize + 1 : 0;
   const lastResult = Math.min(page * pageSize, total);
+  const filteredFolderName = folderFilter
+    ? folderFilter === "unfiled"
+      ? "未分类"
+      : folderNames.get(folderFilter)
+    : "";
   const resultHeadingRef = useRef(null);
+  const selectAllRef = useRef(null);
+  const [selectedRecordIds, setSelectedRecordIds] = useState([]);
+  const lifecycleMeta = RECORD_LIFECYCLE_META[lifecycle] || RECORD_LIFECYCLE_META.active;
+  const selectedIdSet = new Set(selectedRecordIds);
+  const visibleRecordIds = records.map((record) => record.id);
+  const allVisibleSelected = visibleRecordIds.length > 0
+    && visibleRecordIds.every((recordId) => selectedIdSet.has(recordId));
+  const someVisibleSelected = visibleRecordIds.some((recordId) => selectedIdSet.has(recordId));
+  const batchActions = recordBatchActions(lifecycle);
+
+  useEffect(() => {
+    setSelectedRecordIds((current) => current.filter((recordId) => visibleRecordIds.includes(recordId)));
+  }, [lifecycle, page, records]);
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected;
+    }
+  }, [allVisibleSelected, someVisibleSelected]);
 
   function scrollToHistoryResults() {
     window.requestAnimationFrame(() => {
@@ -2038,9 +2197,26 @@ function HistoryPage({
     scrollToHistoryResults();
   }
 
+  function toggleRecordSelection(recordId) {
+    setSelectedRecordIds((current) => (
+      current.includes(recordId)
+        ? current.filter((item) => item !== recordId)
+        : [...current, recordId]
+    ));
+  }
+
+  function toggleVisibleSelection() {
+    setSelectedRecordIds(allVisibleSelected ? [] : visibleRecordIds);
+  }
+
+  async function runRecordAction(recordIds, action) {
+    const changed = await onMutateRecords(recordIds, action);
+    if (changed) setSelectedRecordIds([]);
+  }
+
   return (
     <>
-      <main className="history-main">
+      <main aria-busy={loading} className="history-main">
         <section className="page-intro history-intro">
           <div>
             <div className="breadcrumb">
@@ -2048,16 +2224,41 @@ function HistoryPage({
               <CaretRight size={14} />
               <span className="breadcrumb-current">分析记录</span>
             </div>
-            <h1>分析记录</h1>
-            <p>重新打开已完成报告不会调用模型；只有“重新分析”才会产生新版本和费用。</p>
+            <div className="history-title-line">
+              <h1>{lifecycleMeta.title}</h1>
+              <span>{total} 条结果</span>
+              {filteredFolderName && (
+                <button
+                  aria-label={`清除目录筛选：${filteredFolderName}`}
+                  className="history-scope-filter"
+                  onClick={() => onFolderChange("")}
+                  type="button"
+                >
+                  <Folder size={13} />
+                  <span>{filteredFolderName}</span>
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+            <p>{lifecycleMeta.description}</p>
           </div>
-          <button className="primary-button compact" onClick={onCreate} type="button">
-            <Plus size={16} weight="bold" />
-            新建分析
-          </button>
         </section>
 
-        <section className="history-toolbar" aria-label="分析记录筛选">
+        <nav className="history-lifecycle-mobile" aria-label="分析记录范围">
+          {RECORD_LIFECYCLES.map((item) => (
+            <button
+              className={lifecycle === item ? "active" : ""}
+              key={item}
+              onClick={() => onLifecycleChange(item)}
+              type="button"
+            >
+              {RECORD_LIFECYCLE_META[item].label}
+              <small>{lifecycleCounts[item] || 0}</small>
+            </button>
+          ))}
+        </nav>
+
+        <section className="history-toolbar" aria-label="分析记录筛选" ref={resultHeadingRef}>
           <label className="history-search">
             <MagnifyingGlass size={18} />
             <input
@@ -2082,6 +2283,16 @@ function HistoryPage({
               <option value="failed">失败</option>
             </select>
           </label>
+          <label className="history-select history-folder-filter">
+            <span>目录</span>
+            <select value={folderFilter} onChange={(event) => onFolderChange(event.target.value)}>
+              <option value="">全部目录</option>
+              <option value="unfiled">未分类</option>
+              {folders.map((folder) => (
+                <option key={folder.id} value={folder.id}>{folder.name}</option>
+              ))}
+            </select>
+          </label>
           <label className="history-select">
             <span>排序</span>
             <select value={sort} onChange={(event) => onSortChange(event.target.value)}>
@@ -2090,23 +2301,28 @@ function HistoryPage({
               <option value="name_asc">名称 A–Z</option>
             </select>
           </label>
+          <details className="history-folder-manager">
+            <summary aria-label="管理目录"><FolderPlus size={17} />目录管理</summary>
+            <div>
+              <button className="history-create-folder" onClick={onCreateFolder} type="button">
+                <FolderPlus size={15} />新建一级目录
+              </button>
+              {folders.length > 0 ? folders.map((folder) => (
+                <span key={folder.id}>
+                  <Folder size={15} />
+                  <strong>{folder.name}</strong>
+                  <button aria-label={`重命名${folder.name}`} onClick={() => onRenameFolder(folder)} type="button">
+                    <PencilSimple size={14} />
+                  </button>
+                </span>
+              )) : <p>还没有自定义目录</p>}
+            </div>
+          </details>
         </section>
-
-        <div className="history-result-heading" ref={resultHeadingRef}>
-          <div>
-            <strong>{folderFilter ? folderFilter === "unfiled" ? "未分类" : folderNames.get(folderFilter) : "全部记录"}</strong>
-            <span>{total} 条结果</span>
-          </div>
-          {folderFilter && (
-            <button className="text-button" onClick={() => onFolderChange("")} type="button">
-              清除目录筛选
-            </button>
-          )}
-        </div>
 
         {error && <div className="inline-error"><X size={17} weight="bold" />{error}</div>}
 
-        {loading ? (
+        {loading && records.length === 0 ? (
           <div className="history-loading" role="status">
             <CircleNotch className="spin" size={20} />
             正在读取工作区记录…
@@ -2114,9 +2330,9 @@ function HistoryPage({
         ) : records.length === 0 ? (
           <section className="history-empty">
             <span><FolderOpen size={30} /></span>
-            <h2>{query || folderFilter || statusFilter ? "没有匹配的分析记录" : "工作区还没有分析记录"}</h2>
-            <p>{query || folderFilter || statusFilter ? "调整搜索或筛选条件后再试。" : "导入第一个视频后，源文件、报告和导出会自动归档到这里。"}</p>
-            {!query && !folderFilter && !statusFilter && (
+            <h2>{query || folderFilter || statusFilter ? "没有匹配的分析记录" : lifecycleMeta.emptyTitle}</h2>
+            <p>{query || folderFilter || statusFilter ? "调整搜索或筛选条件后再试。" : lifecycleMeta.emptyDescription}</p>
+            {lifecycle === "active" && !query && !folderFilter && !statusFilter && (
               <button className="primary-button compact" onClick={onCreate} type="button">
                 <Plus size={16} />新建分析
               </button>
@@ -2124,52 +2340,138 @@ function HistoryPage({
           </section>
         ) : (
           <>
-            <div className="record-grid">
-            {records.map((record) => (
-              <article className="record-card" key={record.id}>
-                <button
-                  className="record-open-area"
-                  onClick={() => onOpenRecord(record.id)}
-                  type="button"
-                >
-                  <RecordThumbnail record={record} />
-                  <span className="record-card-copy">
-                    <span className="record-title-row">
-                      <strong>{record.name}</strong>
+            <section
+              aria-busy={loading}
+              className={`record-table ${selectedRecordIds.length ? "has-selection" : ""}`}
+            >
+              <div className="record-table-head" role="row">
+                <label className="record-select-cell">
+                  <input
+                    aria-label="选择本页记录"
+                    checked={allVisibleSelected}
+                    onChange={toggleVisibleSelection}
+                    ref={selectAllRef}
+                    type="checkbox"
+                  />
+                </label>
+                <span className="record-main-head">记录</span>
+                <span className="record-status-head">状态</span>
+                <span className="record-source-head">来源</span>
+                <span className="record-folder-head">目录</span>
+                <span className="record-production-head">创作方案</span>
+                <span className="record-updated-head">更新时间</span>
+                <span className="record-actions-head">操作</span>
+              </div>
+              <div className="record-table-body">
+                {records.map((record) => {
+                  const selected = selectedIdSet.has(record.id);
+                  const duration = formatDurationBadge(record.duration_seconds);
+                  const productionCount = Number(record.production_project_count || 0);
+                  const folderLabel = record.folder_id
+                    ? folderNames.get(record.folder_id) || "未知目录"
+                    : "未分类";
+                  const folderDisabled = lifecycle === "trashed" || actionBusy;
+                  return (
+                    <article
+                      aria-selected={selected}
+                      className={`record-table-row ${selected ? "selected" : ""}`}
+                      key={record.id}
+                    >
+                      <label className="record-select-cell">
+                        <input
+                          aria-label={`选择 ${record.name}`}
+                          checked={selected}
+                          onChange={() => toggleRecordSelection(record.id)}
+                          type="checkbox"
+                        />
+                      </label>
+                      <button
+                        className="record-list-open"
+                        disabled={lifecycle === "trashed"}
+                        onClick={() => onOpenRecord(record.id)}
+                        type="button"
+                      >
+                        <RecordThumbnail record={record} />
+                        <span>
+                          <strong>{record.name}</strong>
+                          <small>
+                            {duration ? `时长 ${duration}` : "时长未知"}
+                            <i className="record-id-divider" />
+                            <span className="record-id-meta">ID: {record.id.slice(0, 8)}</span>
+                            <span className="record-production-mobile">{productionCount} 个方案</span>
+                          </small>
+                        </span>
+                      </button>
                       <span className={`record-status ${record.status}`}>
                         {recordStatusLabels[record.status] || record.status}
                       </span>
-                    </span>
-                    <span className="record-meta">
-                      {sourceLabels[record.source_type] || record.source_type}
-                      <i />
-                      {folderNames.get(record.folder_id) || "未分类"}
-                    </span>
-                    <span className="record-date">更新于 {formatRecordDate(record.updated_at)}</span>
-                  </span>
-                  <CaretRight className="record-caret" size={18} />
-                </button>
-                <div className="record-card-actions">
-                  <label>
-                    <Folder size={15} />
-                    <select
-                      aria-label={`移动 ${record.name} 到目录`}
-                      onChange={(event) => onMoveRecord(record.id, event.target.value)}
-                      value={record.folder_id || ""}
-                    >
-                      <option value="">未分类</option>
-                      {folders.map((folder) => (
-                        <option key={folder.id} value={folder.id}>{folder.name}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <button onClick={() => onRenameRecord(record)} type="button">
-                    <PencilSimple size={15} />改名
-                  </button>
-                </div>
-              </article>
-            ))}
-            </div>
+                      <span className="record-source-cell">
+                        {sourceLabels[record.source_type] || record.source_type}
+                      </span>
+                      <label className="record-folder-cell">
+                        <Folder aria-hidden="true" size={15} />
+                        <span className={`record-folder-select ${folderDisabled ? "disabled" : ""}`}>
+                          <span className="record-folder-value" title={folderLabel}>{folderLabel}</span>
+                          <CaretDown aria-hidden="true" className="record-folder-caret" size={13} />
+                          <select
+                            aria-label={`移动 ${record.name} 到目录`}
+                            disabled={folderDisabled}
+                            onChange={(event) => onMoveRecord(record.id, event.target.value)}
+                            value={record.folder_id || ""}
+                          >
+                            <option value="">未分类</option>
+                            {folders.map((folder) => (
+                              <option key={folder.id} value={folder.id}>{folder.name}</option>
+                            ))}
+                          </select>
+                        </span>
+                      </label>
+                      <button
+                        aria-label={`打开“${record.name}”的 ${productionCount} 个创作方案`}
+                        className={`record-production-cell ${productionCount === 0 ? "empty" : ""}`}
+                        disabled={lifecycle === "trashed"}
+                        onClick={() => onOpenProductions(record.id)}
+                        title={lifecycle === "trashed" ? "恢复记录后可查看创作方案" : undefined}
+                        type="button"
+                      >
+                        <span>{productionCount} 个方案</span>
+                      </button>
+                      <time className="record-updated-cell" dateTime={record.updated_at}>
+                        {formatRecordDate(record.updated_at)}
+                      </time>
+                      <details className="record-more-menu">
+                        <summary aria-label={`${record.name} 的更多操作`}><DotsThree size={20} weight="bold" /></summary>
+                        <div>
+                          {lifecycle !== "trashed" && (
+                            <button disabled={actionBusy} onClick={() => onRenameRecord(record)} type="button">
+                              <PencilSimple size={15} />改名
+                            </button>
+                          )}
+                          {batchActions.map((item) => {
+                            const ActionIcon = item.action === "archive"
+                              ? Archive
+                              : ["trash", "purge"].includes(item.action)
+                                ? Trash
+                                : ArrowClockwise;
+                            return (
+                              <button
+                                className={item.tone === "danger" ? "danger" : ""}
+                                disabled={actionBusy}
+                                key={item.action}
+                                onClick={() => runRecordAction([record.id], item.action)}
+                                type="button"
+                              >
+                                <ActionIcon size={15} />{item.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </details>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
 
             <nav className="history-pagination" aria-label="分析记录分页">
               <div className="history-page-summary">
@@ -2224,48 +2526,55 @@ function HistoryPage({
                 </button>
               </div>
             </nav>
+            {selectedRecordIds.length > 0 && (
+              <div className="history-batch-bar" role="region" aria-label="批量操作">
+                <strong>已选择 {selectedRecordIds.length} 条</strong>
+                {batchActions.map((item) => {
+                  const ActionIcon = item.action === "archive"
+                    ? Archive
+                    : ["trash", "purge"].includes(item.action)
+                      ? Trash
+                      : ArrowClockwise;
+                  return (
+                    <button
+                      className={item.tone === "danger" ? "danger" : ""}
+                      disabled={actionBusy}
+                      key={item.action}
+                      onClick={() => runRecordAction(selectedRecordIds, item.action)}
+                      type="button"
+                    >
+                      {actionBusy ? <CircleNotch className="spin" size={16} /> : <ActionIcon size={16} />}
+                      {item.label}
+                    </button>
+                  );
+                })}
+                <button
+                  className="clear-selection"
+                  disabled={actionBusy}
+                  onClick={() => setSelectedRecordIds([])}
+                  type="button"
+                >
+                  取消选择
+                </button>
+              </div>
+            )}
           </>
         )}
       </main>
-
-      <aside className="history-sidebar">
-        <section className="workspace-summary-card">
-          <span className="workspace-summary-icon"><FolderOpen size={21} weight="fill" /></span>
-          <div>
-            <span className="eyebrow">当前工作区</span>
-            <strong title={workspace.root_path}>{workspace.root_path || "正在读取…"}</strong>
-            <p>{workspace.record_count || 0} 条记录 · {workspace.folder_count || 0} 个目录</p>
-          </div>
-        </section>
-        <section className="folder-panel">
-          <div className="folder-panel-heading">
-            <div><span className="eyebrow">一级目录</span><strong>记录分类</strong></div>
-            <button aria-label="新建目录" onClick={onCreateFolder} type="button"><FolderPlus size={18} /></button>
-          </div>
-          <button className={!folderFilter ? "active" : ""} onClick={() => onFolderChange("")} type="button">
-            <FolderOpen size={17} /><span>全部记录</span><small>{workspace.record_count || 0}</small>
-          </button>
-          <button className={folderFilter === "unfiled" ? "active" : ""} onClick={() => onFolderChange("unfiled")} type="button">
-            <Folder size={17} /><span>未分类</span>
-          </button>
-          {folders.map((folder) => (
-            <div className={`folder-row ${folderFilter === folder.id ? "active" : ""}`} key={folder.id}>
-              <button onClick={() => onFolderChange(folder.id)} type="button">
-                <Folder size={17} weight={folderFilter === folder.id ? "fill" : "regular"} />
-                <span>{folder.name}</span>
-              </button>
-              <button aria-label={`重命名${folder.name}`} onClick={() => onRenameFolder(folder)} type="button">
-                <PencilSimple size={14} />
-              </button>
-            </div>
-          ))}
-        </section>
-      </aside>
     </>
   );
 }
 
-function Sidebar({ activeNav, onSelect, onOpenSettings, settingsOpen, historyCount }) {
+function Sidebar({
+  activeNav,
+  historyLifecycle,
+  historyLifecycleCounts,
+  onSelect,
+  onSelectHistoryLifecycle,
+  onOpenSettings,
+  settingsOpen,
+  historyCount,
+}) {
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -2283,16 +2592,32 @@ function Sidebar({ activeNav, onSelect, onOpenSettings, settingsOpen, historyCou
         {navItems.map((item) => {
           const Icon = item.icon;
           return (
-            <button
-              className={`nav-item ${activeNav === item.id ? "active" : ""}`}
-              key={item.id}
-              onClick={() => onSelect(item.id)}
-              type="button"
-            >
-              <Icon size={18} weight={activeNav === item.id ? "fill" : "regular"} />
-              <span>{item.label}</span>
-              {item.id === "history" && <span className="nav-count">{historyCount || 0}</span>}
-            </button>
+            <div className={`nav-group ${item.id === "history" ? "history-nav-group" : ""}`} key={item.id}>
+              <button
+                className={`nav-item ${activeNav === item.id ? "active" : ""}`}
+                onClick={() => onSelect(item.id)}
+                type="button"
+              >
+                <Icon size={18} weight={activeNav === item.id ? "fill" : "regular"} />
+                <span>{item.label}</span>
+                {item.id === "history" && <span className="nav-count">{historyCount || 0}</span>}
+              </button>
+              {item.id === "history" && activeNav === "history" && (
+                <div className="history-lifecycle-nav" aria-label="分析记录范围">
+                  {RECORD_LIFECYCLES.map((lifecycle) => (
+                    <button
+                      className={historyLifecycle === lifecycle ? "active" : ""}
+                      key={lifecycle}
+                      onClick={() => onSelectHistoryLifecycle(lifecycle)}
+                      type="button"
+                    >
+                      <span>{RECORD_LIFECYCLE_META[lifecycle].label}</span>
+                      <small>{historyLifecycleCounts[lifecycle] || 0}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           );
         })}
 
@@ -3349,7 +3674,11 @@ function ModelSettingsDialog({
                         type="password"
                         value={draft.videoProviderKeys?.[provider.provider] || ""}
                       />
-                      <small>仅当填写新 Key 时，保存操作才会联网校验该 Provider。</small>
+                      <small>
+                        {provider.provider === "minimax"
+                          ? "请使用“接口密钥”创建的按量付费 Key；Token Plan Key 与视频接口不互通。"
+                          : "仅当填写新 Key 时，保存操作才会联网校验该 Provider。"}
+                      </small>
                     </label>
                     <label className="settings-field">
                       <span>官方服务地址</span>
@@ -3365,7 +3694,11 @@ function ModelSettingsDialog({
                         type="url"
                         value={draft.videoProviderBaseUrls?.[provider.provider] || provider.base_url}
                       />
-                      <small>只接受该 Provider 的官方 HTTPS 域名，Key 不写入项目快照。</small>
+                      <small>
+                        {provider.provider === "minimax"
+                          ? "国内使用 api.minimaxi.com，国际使用 api.minimax.io；Key 不写入项目快照。"
+                          : "只接受该 Provider 的官方 HTTPS 域名，Key 不写入项目快照。"}
+                      </small>
                     </label>
                   </div>
                 </article>
@@ -3846,6 +4179,7 @@ function ReportHeader({
   analysisVersions,
   activeAnalysisId,
   onVersionChange,
+  showActions = true,
 }) {
   const isMediaEvidence = report.analysis_mode === "media_evidence";
   const isModel = report.analysis_mode === "model";
@@ -3889,41 +4223,43 @@ function ReportHeader({
           )}
         </div>
       </div>
-      <div className="report-actions">
-        {completedVersions.length > 1 && (
-          <label className="analysis-version-picker">
-            <ClockCounterClockwise size={16} />
-            <select
-              aria-label="分析版本"
-              value={activeAnalysisId}
-              onChange={(event) => onVersionChange(event.target.value)}
-            >
-              {completedVersions.map((item, index) => (
-                <option key={item.id} value={item.id}>
-                  {`版本 ${completedVersions.length - index} · ${formatRecordDate(item.created_at)}`}
-                </option>
-              ))}
-            </select>
-            <CaretDown className="analysis-version-caret" size={13} />
-          </label>
-        )}
-        <button className="secondary-button compact" type="button" onClick={onRestart}>
-          <ArrowClockwise size={16} />
-          重新分析
-        </button>
-        <button
-          className="primary-button compact"
-          type="button"
-          onClick={
-            isMediaEvidence
-              ? () => window.open(resolveArtifactUrl(report.media_evidence?.manifest_url), "_blank")
-              : onDownload
-          }
-        >
-          <DownloadSimple size={16} />
-          {isMediaEvidence ? "证据清单" : "导出"}
-        </button>
-      </div>
+      {showActions && (
+        <div className="report-actions">
+          {completedVersions.length > 1 && (
+            <label className="analysis-version-picker">
+              <ClockCounterClockwise size={16} />
+              <select
+                aria-label="分析版本"
+                value={activeAnalysisId}
+                onChange={(event) => onVersionChange(event.target.value)}
+              >
+                {completedVersions.map((item, index) => (
+                  <option key={item.id} value={item.id}>
+                    {`版本 ${completedVersions.length - index} · ${formatRecordDate(item.created_at)}`}
+                  </option>
+                ))}
+              </select>
+              <CaretDown className="analysis-version-caret" size={13} />
+            </label>
+          )}
+          <button className="secondary-button compact" type="button" onClick={onRestart}>
+            <ArrowClockwise size={16} />
+            重新分析
+          </button>
+          <button
+            className="primary-button compact"
+            type="button"
+            onClick={
+              isMediaEvidence
+                ? () => window.open(resolveArtifactUrl(report.media_evidence?.manifest_url), "_blank")
+                : onDownload
+            }
+          >
+            <DownloadSimple size={16} />
+            {isMediaEvidence ? "证据清单" : "导出"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

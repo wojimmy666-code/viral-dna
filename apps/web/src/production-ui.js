@@ -3,7 +3,7 @@ export const PRODUCTION_STEPS = Object.freeze([
   { id: "reference_assets", label: "参考资产", description: "人物、产品和场景" },
   { id: "shot_images", label: "分镜图片", description: "逐镜头生成和审核" },
   { id: "shot_videos", label: "分段视频", description: "图片转视频" },
-  { id: "editing", label: "剪辑合成", description: "排序、音轨和字幕", locked: true },
+  { id: "editing", label: "剪辑合成", description: "排序、音轨和字幕" },
   { id: "export", label: "导出成片", description: "渲染和归档", locked: true },
 ]);
 

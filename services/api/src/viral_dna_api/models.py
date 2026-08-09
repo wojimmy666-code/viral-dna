@@ -43,6 +43,19 @@ class VideoStatus(StrEnum):
     FAILED = "failed"
 
 
+class AnalysisRecordLifecycle(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    TRASHED = "trashed"
+
+
+class AnalysisRecordLifecycleAction(StrEnum):
+    ARCHIVE = "archive"
+    ACTIVATE = "activate"
+    TRASH = "trash"
+    RESTORE = "restore"
+
+
 class ExportKind(StrEnum):
     REPORT_JSON = "report_json"
     REPORT_MARKDOWN = "report_markdown"
@@ -267,6 +280,27 @@ class VideoQualityStatus(StrEnum):
     FAILED = "failed"
 
 
+class TimelineTransitionKind(StrEnum):
+    NONE = "none"
+    FADE = "fade"
+    CROSSFADE = "crossfade"
+
+
+class TimelineChangeKind(StrEnum):
+    INITIALIZED = "initialized"
+    CLIPS_UPDATED = "clips_updated"
+    TRACKS_UPDATED = "tracks_updated"
+    RESTORED = "restored"
+
+
+class TimelineRenderStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ModelProviderOption(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     label: str = Field(min_length=1, max_length=120)
@@ -424,6 +458,8 @@ class VideoProviderValidationResponse(BaseModel):
     balance_known: bool = False
     balance_micros: int | None = Field(default=None, ge=0)
     currency: str = "CNY"
+    error_code: str | None = Field(default=None, max_length=120)
+    retryable: bool = False
 
 
 class VideoCostEstimateRequest(BaseModel):
@@ -2037,6 +2073,7 @@ class ShotKeyframeSelectRequest(BaseModel):
 class ShotSourceFrameApprovalRequest(BaseModel):
     expected_revision_id: UUID
     reason: str | None = Field(default=None, max_length=1000)
+    confirm_downstream_stale: bool = False
 
 
 class ShotImageApprovalRevokeRequest(BaseModel):
@@ -2161,6 +2198,7 @@ class CandidateApprovalRequest(BaseModel):
     expected_revision_id: UUID
     decision: ApprovalDecision
     reason: str | None = Field(default=None, max_length=1000)
+    confirm_downstream_stale: bool = False
 
     @model_validator(mode="after")
     def require_candidate_rejection_reason(self) -> CandidateApprovalRequest:
@@ -2228,6 +2266,200 @@ class EditingHandoffManifest(BaseModel):
     generated_at: datetime = Field(default_factory=utc_now)
 
 
+class TimelineTransition(BaseModel):
+    kind: TimelineTransitionKind = TimelineTransitionKind.NONE
+    duration_seconds: float = Field(default=0, ge=0, le=2)
+
+    @model_validator(mode="after")
+    def validate_duration(self) -> TimelineTransition:
+        if self.kind == TimelineTransitionKind.NONE and self.duration_seconds != 0:
+            raise ValueError("无转场时转场时长必须为 0")
+        if self.kind != TimelineTransitionKind.NONE and self.duration_seconds <= 0:
+            raise ValueError("启用转场时必须设置大于 0 的转场时长")
+        return self
+
+
+class TimelineClip(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    shot_plan_id: UUID
+    shot_index: int = Field(ge=1)
+    candidate_id: UUID
+    candidate_content_url: str = Field(min_length=1, max_length=2048)
+    cover_url: str = Field(min_length=1, max_length=2048)
+    order: int = Field(ge=1)
+    enabled: bool = True
+    candidate_duration_seconds: float = Field(gt=0)
+    trim_in_seconds: float = Field(ge=0)
+    trim_out_seconds: float = Field(gt=0)
+    playback_rate: float = Field(gt=0, le=8)
+    timeline_start_seconds: float = Field(ge=0)
+    timeline_end_seconds: float = Field(gt=0)
+    timeline_duration_seconds: float = Field(gt=0)
+    audio_mode: VideoClipAudioMode = VideoClipAudioMode.SOURCE
+    audio_volume: float = Field(default=1, ge=0, le=2)
+    source_audio_start_seconds: float = Field(ge=0)
+    source_audio_end_seconds: float = Field(gt=0)
+    transition_after: TimelineTransition = Field(default_factory=TimelineTransition)
+    warning_messages: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_clip_ranges(self) -> TimelineClip:
+        if self.trim_out_seconds <= self.trim_in_seconds:
+            raise ValueError("片段出点必须晚于入点")
+        if self.trim_out_seconds > self.candidate_duration_seconds + 0.05:
+            raise ValueError("片段出点不能超过候选视频时长")
+        if self.timeline_end_seconds <= self.timeline_start_seconds:
+            raise ValueError("时间线片段结束时间必须晚于开始时间")
+        if self.source_audio_end_seconds <= self.source_audio_start_seconds:
+            raise ValueError("原音轨结束时间必须晚于开始时间")
+        return self
+
+
+class TimelineSubtitleCue(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    source_cue_id: str | None = Field(default=None, max_length=120)
+    clip_id: UUID | None = None
+    text: str = Field(min_length=1, max_length=4000)
+    language: str | None = Field(default=None, max_length=20)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    clip_start_seconds: float | None = Field(default=None, ge=0)
+    clip_end_seconds: float | None = Field(default=None, gt=0)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_cue_range(self) -> TimelineSubtitleCue:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("字幕结束时间必须晚于开始时间")
+        if (self.clip_start_seconds is None) != (self.clip_end_seconds is None):
+            raise ValueError("字幕片段相对时间必须同时设置")
+        if (
+            self.clip_start_seconds is not None
+            and self.clip_end_seconds is not None
+            and self.clip_end_seconds <= self.clip_start_seconds
+        ):
+            raise ValueError("字幕片段相对结束时间必须晚于开始时间")
+        return self
+
+
+class TimelineAudioTrack(BaseModel):
+    strategy: Literal["continuous_source_track", "per_shot", "muted"]
+    source_audio_url: str | None = Field(default=None, max_length=2048)
+    enabled: bool = True
+    volume: float = Field(default=1, ge=0, le=2)
+    normalize_loudness: bool = True
+
+    @model_validator(mode="after")
+    def validate_source(self) -> TimelineAudioTrack:
+        if self.strategy != "muted" and not self.source_audio_url:
+            raise ValueError("启用原音轨时必须存在音频来源")
+        return self
+
+
+class ProductionTimeline(BaseModel):
+    schema_version: Literal["viral-dna-timeline/v1"] = "viral-dna-timeline/v1"
+    project_id: UUID
+    source_handoff_revision_id: UUID
+    revision_id: UUID
+    revision_number: int = Field(ge=1)
+    output_aspect_ratio: str = Field(min_length=3, max_length=20)
+    output_width: int = Field(ge=256, le=8192)
+    output_height: int = Field(ge=256, le=8192)
+    fps: int = Field(default=30, ge=12, le=60)
+    duration_seconds: float = Field(gt=0)
+    clips: list[TimelineClip] = Field(min_length=1)
+    audio_track: TimelineAudioTrack
+    subtitle_cues: list[TimelineSubtitleCue] = Field(default_factory=list)
+    validation_messages: list[str] = Field(default_factory=list)
+    warning_messages: list[str] = Field(default_factory=list)
+    last_preview_job_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class TimelineClipUpdate(BaseModel):
+    clip_id: UUID
+    enabled: bool | None = None
+    trim_in_seconds: float | None = Field(default=None, ge=0)
+    trim_out_seconds: float | None = Field(default=None, gt=0)
+    timeline_duration_seconds: float | None = Field(default=None, gt=0, le=300)
+    audio_mode: VideoClipAudioMode | None = None
+    audio_volume: float | None = Field(default=None, ge=0, le=2)
+    transition_after: TimelineTransition | None = None
+
+
+class TimelineUpdateRequest(BaseModel):
+    expected_revision_id: UUID
+    clip_order: list[UUID] | None = Field(default=None, min_length=1)
+    clip_updates: list[TimelineClipUpdate] = Field(default_factory=list)
+    audio_track: TimelineAudioTrack | None = None
+    subtitle_cues: list[TimelineSubtitleCue] | None = None
+    summary: str = Field(default="更新时间线", min_length=1, max_length=240)
+
+
+class TimelineValidationResponse(BaseModel):
+    project_id: UUID
+    revision_id: UUID
+    valid: bool
+    duration_seconds: float = Field(gt=0)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TimelineRevision(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    revision_number: int = Field(ge=1)
+    change_kind: TimelineChangeKind
+    summary: str = Field(min_length=1, max_length=240)
+    snapshot_relative_path: str = Field(min_length=1, max_length=2048)
+    source_revision_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("snapshot_relative_path")
+    @classmethod
+    def validate_snapshot_path(cls, value: str) -> str:
+        return _normalize_workspace_relative_path(value)
+
+
+class TimelineRevisionList(BaseModel):
+    items: list[TimelineRevision] = Field(default_factory=list)
+
+
+class TimelineRestoreRequest(BaseModel):
+    expected_revision_id: UUID
+
+
+class TimelinePreviewCreate(BaseModel):
+    expected_revision_id: UUID
+
+
+class TimelineRenderJob(BaseModel):
+    schema_version: Literal["viral-dna-render-job/v1"] = "viral-dna-render-job/v1"
+    id: UUID = Field(default_factory=uuid4)
+    project_id: UUID
+    timeline_revision_id: UUID
+    status: TimelineRenderStatus = TimelineRenderStatus.QUEUED
+    progress_percent: int = Field(default=0, ge=0, le=100)
+    preview_width: int = Field(ge=2, le=1920)
+    preview_height: int = Field(ge=2, le=1920)
+    output_relative_path: str | None = Field(default=None, max_length=2048)
+    subtitle_relative_path: str | None = Field(default=None, max_length=2048)
+    output_url: str | None = Field(default=None, max_length=2048)
+    subtitle_url: str | None = Field(default=None, max_length=2048)
+    error_code: str | None = Field(default=None, max_length=120)
+    error_message: str | None = Field(default=None, max_length=1000)
+    cancellation_requested: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    @field_validator("output_relative_path", "subtitle_relative_path")
+    @classmethod
+    def validate_optional_relative_path(cls, value: str | None) -> str | None:
+        return _normalize_workspace_relative_path(value) if value is not None else None
+
+
 class WorkspacePathRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2048)
 
@@ -2277,6 +2509,9 @@ class AnalysisRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     last_opened_at: datetime | None = None
+    archived_at: datetime | None = None
+    trashed_at: datetime | None = None
+    purged_at: datetime | None = None
 
 
 class AnalysisRecordUpdate(BaseModel):
@@ -2284,9 +2519,47 @@ class AnalysisRecordUpdate(BaseModel):
     folder_id: UUID | None = None
 
 
+class AnalysisRecordLifecycleUpdate(BaseModel):
+    action: AnalysisRecordLifecycleAction
+
+
+class AnalysisRecordBatchLifecycleUpdate(AnalysisRecordLifecycleUpdate):
+    record_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+    @field_validator("record_ids")
+    @classmethod
+    def unique_record_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("分析记录不能重复")
+        return value
+
+
+class AnalysisRecordBatchDelete(BaseModel):
+    record_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+    @field_validator("record_ids")
+    @classmethod
+    def unique_record_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("分析记录不能重复")
+        return value
+
+
+class AnalysisRecordMutationResult(BaseModel):
+    affected_ids: list[UUID]
+    affected_count: int = Field(ge=0)
+
+
+class AnalysisRecordLifecycleCounts(BaseModel):
+    active: int = Field(default=0, ge=0)
+    archived: int = Field(default=0, ge=0)
+    trashed: int = Field(default=0, ge=0)
+
+
 class AnalysisRecordSummary(AnalysisRecord):
     thumbnail_url: str | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
+    production_project_count: int = Field(default=0, ge=0)
 
 
 class AnalysisRecordList(BaseModel):
@@ -2295,6 +2568,9 @@ class AnalysisRecordList(BaseModel):
     page: int = Field(ge=1)
     page_size: int = Field(ge=1, le=100)
     total_pages: int = Field(ge=0)
+    lifecycle_counts: AnalysisRecordLifecycleCounts = Field(
+        default_factory=AnalysisRecordLifecycleCounts
+    )
 
 
 class AnalysisRecordDetail(BaseModel):

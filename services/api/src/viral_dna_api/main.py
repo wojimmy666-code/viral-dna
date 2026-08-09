@@ -37,8 +37,15 @@ from .models import (
     AnalysisJob,
     AnalysisMode,
     AnalysisRecord,
+    AnalysisRecordBatchDelete,
+    AnalysisRecordBatchLifecycleUpdate,
     AnalysisRecordDetail,
+    AnalysisRecordLifecycle,
+    AnalysisRecordLifecycleAction,
+    AnalysisRecordLifecycleCounts,
+    AnalysisRecordLifecycleUpdate,
     AnalysisRecordList,
+    AnalysisRecordMutationResult,
     AnalysisRecordSummary,
     AnalysisRecordUpdate,
     AnalysisReport,
@@ -80,6 +87,7 @@ from .models import (
     ProductionProjectUpdate,
     ProductionRevisionDetail,
     ProductionRevisionResponse,
+    ProductionTimeline,
     ProjectAssetLinkCreate,
     RecordFolder,
     ReferenceAssetCreate,
@@ -100,6 +108,12 @@ from .models import (
     ShotSourceFrameApprovalRequest,
     ShotVideoApprovalRevokeRequest,
     SourceType,
+    TimelinePreviewCreate,
+    TimelineRenderJob,
+    TimelineRestoreRequest,
+    TimelineRevisionList,
+    TimelineUpdateRequest,
+    TimelineValidationResponse,
     Video,
     VideoClipPreparationResponse,
     VideoClipPreparationUpdate,
@@ -135,6 +149,7 @@ from .records import RecordService, resolve_video_path, write_source_metadata
 from .storage_objects import StorageManager
 from .store import store
 from .thumbnails import thumbnail_etag, thumbnail_service
+from .timeline import TimelineService, TimelineServiceError
 from .video_generation import VideoGenerationGateway
 from .video_generation.settings import (
     VideoGenerationSettingsService,
@@ -185,6 +200,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
 
 
@@ -231,6 +247,12 @@ production_service = ProductionService(
     image_generation_gateway,
     project_assets=project_asset_service,
     video_gateway=video_generation_gateway,
+    notification_publisher=notification_service,
+)
+timeline_service = TimelineService(
+    store,
+    workspace_manager,
+    production_service,
     notification_publisher=notification_service,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
@@ -408,7 +430,7 @@ async def list_workspace_storage_locations(
 
 
 async def workspace_info() -> WorkspaceInfo:
-    records = await store.list_records()
+    records = [record for record in await store.list_records() if record.purged_at is None]
     folders = await store.list_folders()
     return WorkspaceInfo(
         root_path=str(workspace_manager.root),
@@ -1216,6 +1238,151 @@ async def get_production_editing_handoff(project_id: UUID) -> EditingHandoffMani
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline",
+    response_model=ProductionTimeline,
+)
+async def get_production_timeline(project_id: UUID) -> ProductionTimeline:
+    try:
+        return await timeline_service.get_timeline(project_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline",
+    response_model=ProductionTimeline,
+)
+async def update_production_timeline(
+    project_id: UUID,
+    payload: TimelineUpdateRequest,
+) -> ProductionTimeline:
+    try:
+        return await timeline_service.update_timeline(project_id, payload)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/validation",
+    response_model=TimelineValidationResponse,
+)
+async def validate_production_timeline(project_id: UUID) -> TimelineValidationResponse:
+    try:
+        return await timeline_service.validate_current(project_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/revisions",
+    response_model=TimelineRevisionList,
+)
+async def list_production_timeline_revisions(project_id: UUID) -> TimelineRevisionList:
+    try:
+        return await timeline_service.list_revisions(project_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/revisions/{{revision_id}}",
+    response_model=ProductionTimeline,
+)
+async def get_production_timeline_revision(
+    project_id: UUID,
+    revision_id: UUID,
+) -> ProductionTimeline:
+    try:
+        return await timeline_service.get_revision(project_id, revision_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/revisions/{{revision_id}}/restore",
+    response_model=ProductionTimeline,
+)
+async def restore_production_timeline_revision(
+    project_id: UUID,
+    revision_id: UUID,
+    payload: TimelineRestoreRequest,
+) -> ProductionTimeline:
+    try:
+        return await timeline_service.restore_revision(project_id, revision_id, payload)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/preview-renders",
+    response_model=TimelineRenderJob,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_production_timeline_preview(
+    project_id: UUID,
+    payload: TimelinePreviewCreate,
+) -> TimelineRenderJob:
+    try:
+        return await timeline_service.create_preview(project_id, payload)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/render-jobs/{{job_id}}",
+    response_model=TimelineRenderJob,
+)
+async def get_production_render_job(project_id: UUID, job_id: UUID) -> TimelineRenderJob:
+    try:
+        return await timeline_service.get_render_job(project_id, job_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/render-jobs/{{job_id}}/cancel",
+    response_model=TimelineRenderJob,
+)
+async def cancel_production_render_job(project_id: UUID, job_id: UUID) -> TimelineRenderJob:
+    try:
+        return await timeline_service.cancel_render_job(project_id, job_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/render-jobs/{{job_id}}/content")
+async def get_production_render_content(project_id: UUID, job_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await timeline_service.resolve_render_content(project_id, job_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/render-jobs/{{job_id}}/subtitles")
+async def get_production_render_subtitles(project_id: UUID, job_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await timeline_service.resolve_render_content(
+            project_id,
+            job_id,
+            subtitles=True,
+        )
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
 @app.post(
     f"{API_PREFIX}/productions/{{project_id}}/advance",
     response_model=ProductionProjectDetail,
@@ -1472,11 +1639,52 @@ async def create_analysis(video_id: UUID, payload: AnalysisCreate) -> AnalysisJo
     return analysis
 
 
+def analysis_record_lifecycle(record: AnalysisRecord) -> AnalysisRecordLifecycle:
+    if record.trashed_at is not None:
+        return AnalysisRecordLifecycle.TRASHED
+    if record.archived_at is not None:
+        return AnalysisRecordLifecycle.ARCHIVED
+    return AnalysisRecordLifecycle.ACTIVE
+
+
+def apply_record_lifecycle_action(
+    record: AnalysisRecord,
+    action: AnalysisRecordLifecycleAction,
+) -> bool:
+    before = (record.archived_at, record.trashed_at)
+    now = utc_now()
+    if action == AnalysisRecordLifecycleAction.ARCHIVE:
+        record.archived_at = record.archived_at or now
+        record.trashed_at = None
+    elif action == AnalysisRecordLifecycleAction.ACTIVATE:
+        record.archived_at = None
+        record.trashed_at = None
+    elif action == AnalysisRecordLifecycleAction.TRASH:
+        record.trashed_at = record.trashed_at or now
+    elif action == AnalysisRecordLifecycleAction.RESTORE:
+        record.trashed_at = None
+    changed = before != (record.archived_at, record.trashed_at)
+    if changed:
+        record.updated_at = now
+    return changed
+
+
+async def load_mutable_records(record_ids: list[UUID]) -> list[AnalysisRecord]:
+    records: list[AnalysisRecord] = []
+    for record_id in record_ids:
+        record = await store.get_record(record_id)
+        if record is None or record.purged_at is not None:
+            raise HTTPException(status_code=404, detail=f"分析记录不存在：{record_id}")
+        records.append(record)
+    return records
+
+
 @app.get(f"{API_PREFIX}/records", response_model=AnalysisRecordList)
 async def list_records(
     q: Annotated[str | None, Query(max_length=120)] = None,
     folder_id: Annotated[str | None, Query(max_length=40)] = None,
     record_status: Annotated[VideoStatus | None, Query(alias="status")] = None,
+    lifecycle: Annotated[AnalysisRecordLifecycle, Query()] = AnalysisRecordLifecycle.ACTIVE,
     sort: Annotated[
         Literal["updated_desc", "created_desc", "name_asc"],
         Query(),
@@ -1484,7 +1692,26 @@ async def list_records(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> AnalysisRecordList:
-    records = await store.list_records()
+    records = [
+        record
+        for record in await store.list_records()
+        if record.purged_at is None
+    ]
+    lifecycle_counts = AnalysisRecordLifecycleCounts(
+        active=sum(
+            analysis_record_lifecycle(record) == AnalysisRecordLifecycle.ACTIVE
+            for record in records
+        ),
+        archived=sum(
+            analysis_record_lifecycle(record) == AnalysisRecordLifecycle.ARCHIVED
+            for record in records
+        ),
+        trashed=sum(
+            analysis_record_lifecycle(record) == AnalysisRecordLifecycle.TRASHED
+            for record in records
+        ),
+    )
+    records = [record for record in records if analysis_record_lifecycle(record) == lifecycle]
     videos = {video.id: video for video in await store.list_videos()}
     if q:
         needle = q.strip().casefold()
@@ -1528,6 +1755,9 @@ async def list_records(
     effective_page = min(page, total_pages or 1)
     page_start = (effective_page - 1) * page_size
     records = records[page_start : page_start + page_size]
+    production_project_counts = await store.count_production_projects_by_record(
+        [record.id for record in records]
+    )
 
     summaries = []
     for record in records:
@@ -1541,6 +1771,10 @@ async def list_records(
                         f"{API_PREFIX}/records/{record.id}/thumbnail?v={cache_version}"
                     ),
                     "duration_seconds": video.duration_seconds if video else None,
+                    "production_project_count": production_project_counts.get(
+                        record.id,
+                        0,
+                    ),
                 }
             )
         )
@@ -1550,13 +1784,79 @@ async def list_records(
         page=effective_page,
         page_size=page_size,
         total_pages=total_pages,
+        lifecycle_counts=lifecycle_counts,
+    )
+
+
+@app.patch(
+    f"{API_PREFIX}/records/batch/lifecycle",
+    response_model=AnalysisRecordMutationResult,
+)
+async def update_record_lifecycle_batch(
+    payload: AnalysisRecordBatchLifecycleUpdate,
+) -> AnalysisRecordMutationResult:
+    records = await load_mutable_records(payload.record_ids)
+    affected_ids: list[UUID] = []
+    for record in records:
+        if apply_record_lifecycle_action(record, payload.action):
+            await store.save_record(record)
+        affected_ids.append(record.id)
+    return AnalysisRecordMutationResult(
+        affected_ids=affected_ids,
+        affected_count=len(affected_ids),
+    )
+
+
+@app.delete(
+    f"{API_PREFIX}/records/batch",
+    response_model=AnalysisRecordMutationResult,
+)
+async def permanently_delete_records_batch(
+    payload: AnalysisRecordBatchDelete,
+) -> AnalysisRecordMutationResult:
+    records = await load_mutable_records(payload.record_ids)
+    if any(record.trashed_at is None for record in records):
+        raise HTTPException(status_code=409, detail="只有回收站中的记录可以永久删除")
+    now = utc_now()
+    for record in records:
+        record.purged_at = now
+        record.updated_at = now
+        await store.save_record(record)
+    return AnalysisRecordMutationResult(
+        affected_ids=[record.id for record in records],
+        affected_count=len(records),
+    )
+
+
+@app.patch(
+    f"{API_PREFIX}/records/{{record_id}}/lifecycle",
+    response_model=AnalysisRecord,
+)
+async def update_record_lifecycle(
+    record_id: UUID,
+    payload: AnalysisRecordLifecycleUpdate,
+) -> AnalysisRecord:
+    records = await load_mutable_records([record_id])
+    record = records[0]
+    if apply_record_lifecycle_action(record, payload.action):
+        await store.save_record(record)
+    return record
+
+
+@app.delete(
+    f"{API_PREFIX}/records/{{record_id}}",
+    response_model=AnalysisRecordMutationResult,
+)
+async def permanently_delete_record(record_id: UUID) -> AnalysisRecordMutationResult:
+    return await permanently_delete_records_batch(
+        AnalysisRecordBatchDelete(record_ids=[record_id])
     )
 
 
 @app.get(f"{API_PREFIX}/records/{{record_id}}/thumbnail")
 async def get_record_thumbnail(record_id: UUID) -> FileResponse:
     record = await store.get_record(record_id)
-    if record is None:
+    if record is None or record.purged_at is not None:
         raise HTTPException(status_code=404, detail="分析记录不存在")
     video = await store.get_video(record.video_id)
     if video is None:
@@ -1580,7 +1880,7 @@ async def get_record_thumbnail(record_id: UUID) -> FileResponse:
 @app.get(f"{API_PREFIX}/records/{{record_id}}", response_model=AnalysisRecordDetail)
 async def get_record(record_id: UUID) -> AnalysisRecordDetail:
     record = await store.get_record(record_id)
-    if record is None:
+    if record is None or record.purged_at is not None:
         raise HTTPException(status_code=404, detail="分析记录不存在")
     video = await store.get_video(record.video_id)
     if video is None:
@@ -1609,7 +1909,7 @@ async def get_record(record_id: UUID) -> AnalysisRecordDetail:
 @app.patch(f"{API_PREFIX}/records/{{record_id}}", response_model=AnalysisRecord)
 async def update_record(record_id: UUID, payload: AnalysisRecordUpdate) -> AnalysisRecord:
     record = await store.get_record(record_id)
-    if record is None:
+    if record is None or record.purged_at is not None:
         raise HTTPException(status_code=404, detail="分析记录不存在")
     if "name" in payload.model_fields_set:
         if payload.name is None:
@@ -1634,7 +1934,7 @@ async def update_record(record_id: UUID, payload: AnalysisRecordUpdate) -> Analy
 )
 async def reanalyze_record(record_id: UUID, payload: AnalysisCreate) -> AnalysisJob:
     record = await store.get_record(record_id)
-    if record is None:
+    if record is None or record.purged_at is not None:
         raise HTTPException(status_code=404, detail="分析记录不存在")
     return await create_analysis(record.video_id, payload)
 
@@ -1646,7 +1946,7 @@ async def reanalyze_record(record_id: UUID, payload: AnalysisCreate) -> Analysis
 )
 async def create_exports(record_id: UUID, payload: ExportCreate) -> list[ExportArtifact]:
     record = await store.get_record(record_id)
-    if record is None:
+    if record is None or record.purged_at is not None:
         raise HTTPException(status_code=404, detail="分析记录不存在")
     analysis_id = payload.analysis_id or record.latest_analysis_id
     if analysis_id is None:
@@ -1676,7 +1976,8 @@ async def create_exports(record_id: UUID, payload: ExportCreate) -> list[ExportA
 
 @app.get(f"{API_PREFIX}/records/{{record_id}}/exports", response_model=list[ExportArtifact])
 async def list_exports(record_id: UUID) -> list[ExportArtifact]:
-    if await store.get_record(record_id) is None:
+    record = await store.get_record(record_id)
+    if record is None or record.purged_at is not None:
         raise HTTPException(status_code=404, detail="分析记录不存在")
     artifacts = await store.list_exports(record_id)
     return sorted(artifacts, key=lambda item: item.created_at, reverse=True)

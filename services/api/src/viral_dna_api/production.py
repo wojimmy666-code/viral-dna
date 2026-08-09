@@ -2842,7 +2842,7 @@ class ProductionService:
                 raise _fail(
                     409,
                     "keyframe_change_confirmation_required",
-                    "替换关键帧会归档旧图片候选并使后续结果过期，请确认后重试",
+                    "替换关键帧会保留旧图片候选，但会使当前采用状态和后续结果过期，请确认后重试",
                 )
             timestamp = min(
                 max(timestamp, plan.start_seconds),
@@ -2884,7 +2884,7 @@ class ProductionService:
             finally:
                 filesystem_temporary.unlink(missing_ok=True)
 
-            archived_candidates = await self._archive_active_candidates(project, plan)
+            candidate_updates = await self._reset_selected_image_candidates(project, plan)
             video_status = (
                 WorkflowItemStatus.STALE
                 if plan.video_status
@@ -2935,7 +2935,7 @@ class ProductionService:
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
-                generation_candidates=archived_candidates,
+                generation_candidates=candidate_updates,
             )
         return await self.get_shot(shot_plan_id)
 
@@ -2951,11 +2951,19 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if plan.image_status == WorkflowItemStatus.APPROVED:
+            replacing_approved = (
+                plan.image_status == WorkflowItemStatus.APPROVED
+                and plan.approved_image_candidate_id is not None
+            )
+            has_downstream_impact = (
+                replacing_approved
+                and self._image_choice_has_downstream_impact(project, plan)
+            )
+            if has_downstream_impact and not payload.confirm_downstream_stale:
                 raise _fail(
                     409,
-                    "image_already_approved",
-                    "该分镜图片已经确认；如需更换，请先重新选择关键帧或修改生成输入",
+                    "downstream_stale_confirmation_required",
+                    "改用当前关键帧会使该分镜的后续视频或合成结果过期，请确认影响后重试",
                 )
             source_path = self._resolve_source_keyframe(project, plan)
             if source_path is None:
@@ -2968,7 +2976,7 @@ class ProductionService:
                 revision_id,
                 source_path,
             )
-            archived_candidates = await self._archive_active_candidates(project, plan)
+            candidate_updates = await self._reset_selected_image_candidates(project, plan)
             event = ApprovalEvent(
                 project_id=project.id,
                 revision_id=revision_id,
@@ -2992,11 +3000,38 @@ class ProductionService:
                     "revision_id": revision_id,
                     "image_status": WorkflowItemStatus.APPROVED,
                     "approved_image_candidate_id": candidate.id,
+                    "video_status": (
+                        WorkflowItemStatus.STALE
+                        if has_downstream_impact
+                        else plan.video_status
+                    ),
                     "updated_at": utc_now(),
                 }
             )
+            current_preparation = await self.repository.get_video_clip_preparation(plan.id)
+            updated_preparation = (
+                current_preparation.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "status": VideoClipPreparationStatus.STALE,
+                        "blocker_messages": ["起始图片已经更换，需要重新生成视频并完成剪辑准备"],
+                        "warning_messages": [],
+                        "updated_at": utc_now(),
+                    }
+                )
+                if current_preparation is not None and has_downstream_impact
+                else None
+            )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            preparations = await self.repository.list_video_clip_preparations(project.id)
+            next_preparations = [
+                item for item in preparations if item.shot_plan_id != plan.id
+            ]
+            if updated_preparation is not None:
+                next_preparations.append(updated_preparation)
+            elif current_preparation is not None:
+                next_preparations.append(current_preparation)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
@@ -3010,13 +3045,17 @@ class ProductionService:
                 f"直接确认分镜 {plan.index} 的源视频关键帧",
                 revision_id=revision_id,
                 shot_plans=next_plans,
+                video_clip_preparations=next_preparations,
             )
             await self.repository.save_production_bundle(
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
                 generation_runs=[run],
-                generation_candidates=[*archived_candidates, candidate],
+                generation_candidates=[*candidate_updates, candidate],
+                video_clip_preparations=(
+                    [updated_preparation] if updated_preparation is not None else None
+                ),
                 approval_events=[event],
             )
         return CandidateActionResponse(
@@ -3740,25 +3779,10 @@ class ProductionService:
                     "simulated_generation_forbidden",
                     "模拟占位图不能作为图片生成结果，请先配置真实生图引擎",
                 )
-            prior_candidate_updates: list[GenerationCandidate] = []
-            for prior_run in await self.repository.list_generation_runs(
-                project.id,
-                plan.id,
-            ):
-                for prior_candidate in await self.repository.list_generation_candidates(
-                    prior_run.id
-                ):
-                    if prior_candidate.status in {
-                        GenerationCandidateStatus.READY,
-                        GenerationCandidateStatus.SELECTED,
-                    }:
-                        prior_candidate_updates.append(
-                            prior_candidate.model_copy(
-                                update={
-                                    "status": GenerationCandidateStatus.ARCHIVED,
-                                }
-                            )
-                        )
+            prior_candidate_updates = await self._reset_selected_image_candidates(
+                project,
+                plan,
+            )
             revision_id = uuid4()
             updated_plan = plan.model_copy(
                 update={
@@ -4008,17 +4032,20 @@ class ProductionService:
                     "simulated_candidate_forbidden",
                     "模拟占位候选不能选择，请使用真实模型生成或直接采用源关键帧",
                 )
-            if candidate.status in {
-                GenerationCandidateStatus.REJECTED,
-                GenerationCandidateStatus.ARCHIVED,
-            }:
+            if (
+                candidate.status == GenerationCandidateStatus.REJECTED
+                or (
+                    candidate.status == GenerationCandidateStatus.ARCHIVED
+                    and run.kind != GenerationKind.IMAGE
+                )
+            ):
                 raise _fail(409, "candidate_unavailable", "该候选已退回或归档")
             target_status = (
                 plan.image_status
                 if run.kind == GenerationKind.IMAGE
                 else plan.video_status
             )
-            if target_status == WorkflowItemStatus.STALE:
+            if run.kind != GenerationKind.IMAGE and target_status == WorkflowItemStatus.STALE:
                 raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
             shot_runs = [
                 item
@@ -4028,7 +4055,10 @@ class ProductionService:
                 )
                 if item.kind == run.kind
             ]
-            if not shot_runs or shot_runs[-1].id != run.id:
+            if (
+                run.kind != GenerationKind.IMAGE
+                and (not shot_runs or shot_runs[-1].id != run.id)
+            ):
                 raise _fail(409, "candidate_superseded", "该候选已被较新的生成任务替代")
 
             run_candidates: list[GenerationCandidate] = []
@@ -4128,7 +4158,16 @@ class ProductionService:
                 if run.kind == GenerationKind.IMAGE
                 else plan.video_status
             )
-            if target_status == WorkflowItemStatus.APPROVED:
+            direct_image_approval = (
+                run.kind == GenerationKind.IMAGE
+                and payload.decision == ApprovalDecision.APPROVED
+            )
+            replacing_approved = (
+                direct_image_approval
+                and target_status == WorkflowItemStatus.APPROVED
+                and plan.approved_image_candidate_id != candidate.id
+            )
+            if target_status == WorkflowItemStatus.APPROVED and not replacing_approved:
                 raise _fail(
                     409,
                     (
@@ -4144,12 +4183,18 @@ class ProductionService:
                 )
             if (
                 payload.decision == ApprovalDecision.APPROVED
+                and not direct_image_approval
                 and candidate.status != GenerationCandidateStatus.SELECTED
             ):
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
-            if candidate.status == GenerationCandidateStatus.ARCHIVED:
+            if candidate.status == GenerationCandidateStatus.REJECTED:
+                raise _fail(409, "candidate_unavailable", "已退回候选不能审批")
+            if (
+                candidate.status == GenerationCandidateStatus.ARCHIVED
+                and not direct_image_approval
+            ):
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
-            if target_status == WorkflowItemStatus.STALE:
+            if target_status == WorkflowItemStatus.STALE and not direct_image_approval:
                 raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
             shot_runs = [
                 item
@@ -4159,8 +4204,22 @@ class ProductionService:
                 )
                 if item.kind == run.kind
             ]
-            if not shot_runs or shot_runs[-1].id != run.id:
+            if (
+                run.kind != GenerationKind.IMAGE
+                and (not shot_runs or shot_runs[-1].id != run.id)
+            ):
                 raise _fail(409, "candidate_superseded", "该候选已被较新的生成任务替代")
+
+            has_downstream_impact = (
+                replacing_approved
+                and self._image_choice_has_downstream_impact(project, plan)
+            )
+            if has_downstream_impact and not payload.confirm_downstream_stale:
+                raise _fail(
+                    409,
+                    "downstream_stale_confirmation_required",
+                    "改用该历史候选会使本分镜的后续视频或合成结果过期，请确认影响后重试",
+                )
 
             revision_id = uuid4()
             event = ApprovalEvent(
@@ -4189,8 +4248,32 @@ class ProductionService:
                     )
                 ),
             )
+            updated_candidate = candidate
+            candidate_updates: list[GenerationCandidate] = []
             if payload.decision == ApprovalDecision.APPROVED:
-                updated_candidate = candidate
+                if run.kind == GenerationKind.IMAGE:
+                    for shot_run in shot_runs:
+                        for item in await self.repository.list_generation_candidates(
+                            shot_run.id
+                        ):
+                            if item.id == candidate.id:
+                                updated_candidate = item.model_copy(
+                                    update={
+                                        "status": GenerationCandidateStatus.SELECTED,
+                                    }
+                                )
+                                candidate_updates.append(updated_candidate)
+                            elif item.status == GenerationCandidateStatus.SELECTED:
+                                candidate_updates.append(
+                                    item.model_copy(
+                                        update={
+                                            "status": GenerationCandidateStatus.READY,
+                                        }
+                                    )
+                                )
+                else:
+                    updated_candidate = candidate
+                    candidate_updates.append(updated_candidate)
                 next_status = WorkflowItemStatus.APPROVED
                 approved_candidate_id: UUID | None = candidate.id
                 change_kind = (
@@ -4207,6 +4290,7 @@ class ProductionService:
                 updated_candidate = candidate.model_copy(
                     update={"status": GenerationCandidateStatus.REJECTED}
                 )
+                candidate_updates.append(updated_candidate)
                 other_candidates = [
                     item
                     for item in await self.repository.list_generation_candidates(run.id)
@@ -4237,6 +4321,11 @@ class ProductionService:
                 plan_updates = {
                     "image_status": next_status,
                     "approved_image_candidate_id": approved_candidate_id,
+                    "video_status": (
+                        WorkflowItemStatus.STALE
+                        if has_downstream_impact
+                        else plan.video_status
+                    ),
                 }
                 active_step = ProductionStep.SHOT_IMAGES
             else:
@@ -4254,6 +4343,29 @@ class ProductionService:
                     "updated_at": utc_now(),
                 }
             )
+            updated_preparation: VideoClipPreparation | None = None
+            next_preparations: list[VideoClipPreparation] | None = None
+            if has_downstream_impact:
+                current_preparation = await self.repository.get_video_clip_preparation(plan.id)
+                if current_preparation is not None:
+                    updated_preparation = current_preparation.model_copy(
+                        update={
+                            "revision_id": revision_id,
+                            "status": VideoClipPreparationStatus.STALE,
+                            "blocker_messages": [
+                                "起始图片已经更换，需要重新生成视频并完成剪辑准备"
+                            ],
+                            "warning_messages": [],
+                            "updated_at": utc_now(),
+                        }
+                    )
+                    preparations = await self.repository.list_video_clip_preparations(
+                        project.id
+                    )
+                    next_preparations = [
+                        item for item in preparations if item.shot_plan_id != plan.id
+                    ]
+                    next_preparations.append(updated_preparation)
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
             next_project = project.model_copy(
@@ -4269,12 +4381,16 @@ class ProductionService:
                 summary,
                 revision_id=revision_id,
                 shot_plans=next_plans,
+                video_clip_preparations=next_preparations,
             )
             await self.repository.save_production_bundle(
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
-                generation_candidates=[updated_candidate],
+                generation_candidates=candidate_updates,
+                video_clip_preparations=(
+                    [updated_preparation] if updated_preparation is not None else None
+                ),
                 approval_events=[event],
             )
         return CandidateActionResponse(
@@ -4320,14 +4436,11 @@ class ProductionService:
                     "approved_candidate_mismatch",
                     "当前分镜的已采用图片与候选记录不匹配",
                 )
-            if candidate.status in {
-                GenerationCandidateStatus.REJECTED,
-                GenerationCandidateStatus.ARCHIVED,
-            }:
+            if candidate.status == GenerationCandidateStatus.REJECTED:
                 raise _fail(
                     409,
                     "approved_candidate_unavailable",
-                    "当前已采用图片已归档或退回，无法重新打开审核",
+                    "当前已采用图片已退回，无法重新打开审核",
                 )
 
             downstream_result_statuses = {
@@ -5815,24 +5928,49 @@ class ProductionService:
         ):
             raise _fail(422, "keyframe_dimensions_invalid", "提取出的关键帧尺寸无效")
 
-    async def _archive_active_candidates(
+    @staticmethod
+    def _image_choice_has_downstream_impact(
+        project: ProductionProject,
+        plan: ShotPlan,
+    ) -> bool:
+        return (
+            plan.video_status
+            in {
+                WorkflowItemStatus.GENERATING,
+                WorkflowItemStatus.REVIEW_REQUIRED,
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }
+            or project.active_step
+            in {
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+        )
+
+    async def _reset_selected_image_candidates(
         self,
         project: ProductionProject,
         plan: ShotPlan,
+        *,
+        keep_candidate_id: UUID | None = None,
     ) -> list[GenerationCandidate]:
-        archived: list[GenerationCandidate] = []
+        updates: list[GenerationCandidate] = []
         for run in await self.repository.list_generation_runs(project.id, plan.id):
+            if run.kind != GenerationKind.IMAGE:
+                continue
             for candidate in await self.repository.list_generation_candidates(run.id):
-                if candidate.status in {
-                    GenerationCandidateStatus.READY,
-                    GenerationCandidateStatus.SELECTED,
-                }:
-                    archived.append(
+                if (
+                    candidate.status == GenerationCandidateStatus.SELECTED
+                    and candidate.id != keep_candidate_id
+                ):
+                    updates.append(
                         candidate.model_copy(
-                            update={"status": GenerationCandidateStatus.ARCHIVED}
+                            update={"status": GenerationCandidateStatus.READY}
                         )
                     )
-        return archived
+        return updates
 
     def _create_source_frame_candidate(
         self,

@@ -48,30 +48,61 @@ class MiniMaxVideoProvider:
         started = time.perf_counter()
         try:
             async with MiniMaxClient(api_key, base_url, timeout_seconds=30) as client:
-                response = await client.get_h3_task("viral-dna-credential-probe")
-            payload = _json(response)
+                response = await client.list_h3_tasks(page_num=1, page_size=1)
             latency = round((time.perf_counter() - started) * 1000)
-            if response.status_code in {400, 404, 405}:
+            if response.status_code == 401:
+                return ProviderCredentialValidation(
+                    False,
+                    "MiniMax API Key 无效、类型不适用于视频接口，或与当前服务区域不匹配",
+                    latency,
+                    error_code="video_provider_auth_invalid",
+                )
+            if response.status_code == 403:
+                return ProviderCredentialValidation(
+                    False,
+                    "MiniMax API Key 已被识别，但当前账号没有 H3 视频接口权限",
+                    latency,
+                    error_code="video_provider_permission_denied",
+                )
+
+            payload = _json(response)
+            if response.status_code == 200 and isinstance(payload.get("items"), list):
                 return ProviderCredentialValidation(True, "MiniMax API Key 校验通过", latency)
-            if response.is_error:
-                try:
-                    raise_minimax_error(response.status_code, payload)
-                except VideoProviderError as exc:
-                    if exc.code == "video_provider_balance_insufficient":
-                        return ProviderCredentialValidation(
-                            True,
-                            "MiniMax API Key 有效，但账户余额不足",
-                            latency,
-                            balance_known=True,
-                            balance_micros=0,
-                        )
-                    return ProviderCredentialValidation(False, str(exc), latency)
-            return ProviderCredentialValidation(True, "MiniMax API Key 校验通过", latency)
+
+            try:
+                raise_minimax_error(response.status_code, payload)
+            except VideoProviderError as exc:
+                if exc.code == "video_provider_balance_insufficient":
+                    return ProviderCredentialValidation(
+                        True,
+                        "MiniMax API Key 有效，但账户余额不足",
+                        latency,
+                        balance_known=True,
+                        balance_micros=0,
+                        error_code=exc.code,
+                    )
+                return ProviderCredentialValidation(
+                    False,
+                    str(exc),
+                    latency,
+                    error_code=exc.code,
+                    retryable=exc.retryable,
+                )
+        except VideoProviderError as exc:
+            return ProviderCredentialValidation(
+                False,
+                str(exc),
+                round((time.perf_counter() - started) * 1000),
+                error_code=exc.code,
+                retryable=exc.retryable,
+            )
         except httpx.HTTPError:
             return ProviderCredentialValidation(
                 False,
-                "无法连接 MiniMax 服务",
+                "无法连接 MiniMax 服务，请稍后重试并检查服务区域",
                 round((time.perf_counter() - started) * 1000),
+                error_code="video_provider_unavailable",
+                retryable=True,
             )
 
     async def submit(
