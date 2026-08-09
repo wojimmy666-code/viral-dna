@@ -41,6 +41,7 @@ import {
 import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
 import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
 import { EditingTimelineWorkspace } from "./EditingTimelineWorkspace.jsx";
+import { ProductionExportWorkspace } from "./ProductionExportWorkspace.jsx";
 import "./production-workflow.css";
 
 const EMPTY_CREATE_DRAFT = Object.freeze({
@@ -333,7 +334,8 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
   return (
     <nav aria-label="创作工作流" className="production-stepper">
       {PRODUCTION_STEPS.map((step, index) => {
-        const locked = Boolean(step.locked) || index > activeIndex;
+        const exportReady = step.id === "export" && project.active_step === "editing";
+        const locked = Boolean(step.locked) || (index > activeIndex && !exportReady);
         const selected = active === step.id;
         const completed = index < activeIndex || (step.id === "project_setup" && project.current_revision_id);
         return (
@@ -2296,6 +2298,19 @@ export function ProductionHub({
               <EditingTimelineWorkspace
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}
+                project={detail.project}
+                request={request}
+                resolveUrl={resolveUrl}
+              />
+            )}
+            {activeSection === "export" && (
+              <ProductionExportWorkspace
+                onNotice={onNotice}
+                onNotificationsChanged={onNotificationsChanged}
+                onProjectChanged={async () => {
+                  await refreshProject(detail.project.id);
+                  await onProjectsChanged?.();
+                }}
                 project={detail.project}
                 request={request}
                 resolveUrl={resolveUrl}

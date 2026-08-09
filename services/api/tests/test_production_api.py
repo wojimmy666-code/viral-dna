@@ -832,13 +832,13 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
         replaced_detail = replaced.json()
         assert replaced_detail["plan"]["image_status"] == "ready"
         assert replaced_detail["plan"]["approved_image_candidate_id"] is None
-        archived = next(
+        historical_candidate = next(
             candidate
             for run in replaced_detail["generation_runs"]
             for candidate in run["candidates"]
             if candidate["id"] == approved_candidate_id
         )
-        assert archived["status"] == "archived"
+        assert historical_candidate["status"] == "ready"
 
         branch_response = client.post(
             f"/api/v1/productions/{project_id}/branches",
@@ -1064,8 +1064,9 @@ def test_batch41_shot_generation_approval_stale_and_gate_flow(
             f"/api/v1/generation-candidates/{first_candidate_id}/select",
             json={"expected_revision_id": current_revision_id},
         )
-        assert stale_candidate.status_code == 409
-        assert stale_candidate.json()["detail"] == "分镜输入已修改，请重新生成候选"
+        assert stale_candidate.status_code == 200, stale_candidate.text
+        assert stale_candidate.json()["candidate"]["status"] == "selected"
+        current_revision_id = stale_candidate.json()["shot"]["current_revision_id"]
 
         global_update = client.patch(
             f"/api/v1/productions/{project_id}",
@@ -1177,7 +1178,7 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
             repository.get_generation_candidate(UUID(first_candidate["id"]))
         )
         assert stored_first_candidate is not None
-        assert stored_first_candidate.status == GenerationCandidateStatus.ARCHIVED
+        assert stored_first_candidate.status == GenerationCandidateStatus.READY
 
         revision_id = client.get(
             f"/api/v1/productions/{project_id}"

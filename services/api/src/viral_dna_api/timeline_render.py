@@ -4,8 +4,9 @@ import asyncio
 import os
 import subprocess
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from .media import MediaProcessor
@@ -18,6 +19,21 @@ from .models import (
 
 ProgressCallback = Callable[[int], Awaitable[None]]
 CancellationCheck = Callable[[], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineRenderProfile:
+    width: int
+    height: int
+    video_preset: str = "veryfast"
+    video_crf: int = 30
+    audio_bitrate: str = "128k"
+    output_filename: str = "preview.mp4"
+    subtitle_filename: str = "preview.vtt"
+    subtitle_mode: Literal["burned", "embedded", "none"] = "embedded"
+    operation_label: str = "低清预览"
+    error_prefix: str = "preview"
+    timeout_seconds: int = 600
 
 
 class TimelineMediaResolver(Protocol):
@@ -71,6 +87,16 @@ def _concat_line(path: Path) -> str:
     return f"file '{escaped}'"
 
 
+def _subtitle_filter_path(path: Path) -> str:
+    return (
+        path.resolve()
+        .as_posix()
+        .replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+    )
+
+
 class TimelinePreviewRenderer:
     """Render a low-resolution review copy from an immutable timeline revision."""
 
@@ -91,6 +117,7 @@ class TimelinePreviewRenderer:
         source_audio_path: Path | None,
         progress: ProgressCallback,
         is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile | None = None,
     ) -> tuple[Path, Path | None]:
         enabled_clips = [clip for clip in timeline.clips if clip.enabled]
         if not enabled_clips:
@@ -99,10 +126,15 @@ class TimelinePreviewRenderer:
         await asyncio.to_thread(output_root.mkdir, parents=True, exist_ok=True)
         intermediate_root = output_root / "intermediate"
         await asyncio.to_thread(intermediate_root.mkdir, parents=True, exist_ok=True)
-        preview_width, preview_height = preview_dimensions(
-            timeline.output_width,
-            timeline.output_height,
-        )
+        if profile is None:
+            preview_width, preview_height = preview_dimensions(
+                timeline.output_width,
+                timeline.output_height,
+            )
+            profile = TimelineRenderProfile(
+                width=preview_width,
+                height=preview_height,
+            )
 
         await progress(4)
         clip_paths: list[Path] = []
@@ -119,8 +151,8 @@ class TimelinePreviewRenderer:
                 source_path,
                 output_path,
                 clip,
-                width=preview_width,
-                height=preview_height,
+                width=profile.width,
+                height=profile.height,
                 fps=timeline.fps,
                 fade_in_seconds=(
                     previous_transition.duration_seconds
@@ -134,6 +166,7 @@ class TimelinePreviewRenderer:
                     else 0
                 ),
                 is_cancelled=is_cancelled,
+                profile=profile,
             )
             clip_paths.append(output_path)
             await progress(8 + round(37 * (index + 1) / len(enabled_clips)))
@@ -144,6 +177,7 @@ class TimelinePreviewRenderer:
             enabled_clips,
             assembled_video,
             is_cancelled,
+            profile=profile,
         )
         await progress(55)
 
@@ -164,6 +198,7 @@ class TimelinePreviewRenderer:
                     track_volume=timeline.audio_track.volume,
                     normalize_loudness=timeline.audio_track.normalize_loudness,
                     is_cancelled=is_cancelled,
+                    profile=profile,
                 )
                 audio_segments.append(segment_path)
                 await progress(57 + round(18 * (index + 1) / len(enabled_clips)))
@@ -173,11 +208,15 @@ class TimelinePreviewRenderer:
                 enabled_clips,
                 audio_path,
                 is_cancelled,
+                profile=profile,
             )
 
-        subtitle_path = self._write_subtitles(timeline, output_root / "preview.vtt")
+        subtitle_path = self._write_subtitles(
+            timeline,
+            output_root / profile.subtitle_filename,
+        )
         await progress(82)
-        output_path = output_root / "preview.mp4"
+        output_path = output_root / profile.output_filename
         await self._mux_preview(
             assembled_video,
             output_path,
@@ -185,6 +224,7 @@ class TimelinePreviewRenderer:
             audio_path=audio_path,
             subtitle_path=subtitle_path,
             is_cancelled=is_cancelled,
+            profile=profile,
         )
         await progress(100)
         return output_path, subtitle_path
@@ -201,6 +241,7 @@ class TimelinePreviewRenderer:
         fade_in_seconds: float,
         fade_out_seconds: float,
         is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
     ) -> None:
         target_duration = clip.timeline_duration_seconds
         filters = [
@@ -245,16 +286,17 @@ class TimelinePreviewRenderer:
                 "-c:v",
                 "libx264",
                 "-preset",
-                "veryfast",
+                profile.video_preset,
                 "-crf",
-                "30",
+                str(profile.video_crf),
                 "-pix_fmt",
                 "yuv420p",
                 str(output_path),
             ],
             is_cancelled=is_cancelled,
-            code="preview_clip_failed",
-            message=f"分镜 {clip.shot_index} 的预览转码失败",
+            code=f"{profile.error_prefix}_clip_failed",
+            message=f"分镜 {clip.shot_index} 的{profile.operation_label}转码失败",
+            timeout_seconds=profile.timeout_seconds,
         )
 
     async def _assemble_video_track(
@@ -263,9 +305,11 @@ class TimelinePreviewRenderer:
         clips: list[TimelineClip],
         output_path: Path,
         is_cancelled: CancellationCheck,
+        *,
+        profile: TimelineRenderProfile,
     ) -> None:
         if len(inputs) == 1:
-            await self._copy_media(inputs[0], output_path, is_cancelled)
+            await self._copy_media(inputs[0], output_path, is_cancelled, profile=profile)
             return
         command = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
         for path in inputs:
@@ -300,9 +344,9 @@ class TimelinePreviewRenderer:
                 "-c:v",
                 "libx264",
                 "-preset",
-                "veryfast",
+                profile.video_preset,
                 "-crf",
-                "30",
+                str(profile.video_crf),
                 "-pix_fmt",
                 "yuv420p",
                 str(output_path),
@@ -311,8 +355,9 @@ class TimelinePreviewRenderer:
         await self._run(
             command,
             is_cancelled=is_cancelled,
-            code="preview_video_track_failed",
-            message="预览视频轨合成失败",
+            code=f"{profile.error_prefix}_video_track_failed",
+            message=f"{profile.operation_label}视频轨合成失败",
+            timeout_seconds=profile.timeout_seconds,
         )
 
     async def _render_audio_clip(
@@ -324,6 +369,7 @@ class TimelinePreviewRenderer:
         track_volume: float,
         normalize_loudness: bool,
         is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
     ) -> None:
         duration = clip.timeline_duration_seconds
         if clip.audio_mode == VideoClipAudioMode.MUTED:
@@ -343,7 +389,7 @@ class TimelinePreviewRenderer:
                 "-c:a",
                 "aac",
                 "-b:a",
-                "128k",
+                profile.audio_bitrate,
                 str(output_path),
             ]
         else:
@@ -375,14 +421,15 @@ class TimelinePreviewRenderer:
                 "-c:a",
                 "aac",
                 "-b:a",
-                "128k",
+                profile.audio_bitrate,
                 str(output_path),
             ]
         await self._run(
             command,
             is_cancelled=is_cancelled,
-            code="preview_audio_clip_failed",
+            code=f"{profile.error_prefix}_audio_clip_failed",
             message=f"分镜 {clip.shot_index} 的原音轨映射失败",
+            timeout_seconds=profile.timeout_seconds,
         )
 
     async def _assemble_audio_track(
@@ -391,9 +438,11 @@ class TimelinePreviewRenderer:
         clips: list[TimelineClip],
         output_path: Path,
         is_cancelled: CancellationCheck,
+        *,
+        profile: TimelineRenderProfile,
     ) -> None:
         if len(inputs) == 1:
-            await self._copy_media(inputs[0], output_path, is_cancelled)
+            await self._copy_media(inputs[0], output_path, is_cancelled, profile=profile)
             return
         command = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
         for path in inputs:
@@ -420,15 +469,16 @@ class TimelinePreviewRenderer:
                 "-c:a",
                 "aac",
                 "-b:a",
-                "128k",
+                profile.audio_bitrate,
                 str(output_path),
             ]
         )
         await self._run(
             command,
             is_cancelled=is_cancelled,
-            code="preview_audio_track_failed",
-            message="预览原音轨合成失败",
+            code=f"{profile.error_prefix}_audio_track_failed",
+            message=f"{profile.operation_label}原音轨合成失败",
+            timeout_seconds=profile.timeout_seconds,
         )
 
     async def _copy_media(
@@ -436,6 +486,8 @@ class TimelinePreviewRenderer:
         source_path: Path,
         output_path: Path,
         is_cancelled: CancellationCheck,
+        *,
+        profile: TimelineRenderProfile,
     ) -> None:
         await self._run(
             [
@@ -452,8 +504,9 @@ class TimelinePreviewRenderer:
                 str(output_path),
             ],
             is_cancelled=is_cancelled,
-            code="preview_track_copy_failed",
-            message="预览轨道准备失败",
+            code=f"{profile.error_prefix}_track_copy_failed",
+            message=f"{profile.operation_label}轨道准备失败",
+            timeout_seconds=profile.timeout_seconds,
         )
 
     def _write_subtitles(
@@ -488,6 +541,7 @@ class TimelinePreviewRenderer:
         audio_path: Path | None,
         subtitle_path: Path | None,
         is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
     ) -> None:
         command = [
             self.ffmpeg,
@@ -506,12 +560,21 @@ class TimelinePreviewRenderer:
             audio_index = next_index
             next_index += 1
             command.extend(["-i", str(audio_path)])
-        if subtitle_path is not None:
+        if subtitle_path is not None and profile.subtitle_mode == "embedded":
             subtitle_index = next_index
             command.extend(["-i", str(subtitle_path)])
         command.extend(["-map", "0:v:0"])
         if audio_index is not None:
-            command.extend(["-map", f"{audio_index}:a:0", "-c:a", "aac", "-b:a", "128k"])
+            command.extend(
+                [
+                    "-map",
+                    f"{audio_index}:a:0",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    profile.audio_bitrate,
+                ]
+            )
         if subtitle_index is not None:
             command.extend(
                 [
@@ -523,10 +586,30 @@ class TimelinePreviewRenderer:
                     "language=chi",
                 ]
             )
+        if subtitle_path is not None and profile.subtitle_mode == "burned":
+            escaped_path = await asyncio.to_thread(_subtitle_filter_path, subtitle_path)
+            command.extend(
+                [
+                    "-vf",
+                    "subtitles=filename='"
+                    + escaped_path
+                    + "':force_style='FontSize=20,PrimaryColour=&H00FFFFFF,"
+                    "OutlineColour=&H80000000,BorderStyle=1,Outline=2,Shadow=0,"
+                    "MarginV=42,Alignment=2'",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    profile.video_preset,
+                    "-crf",
+                    str(profile.video_crf),
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            )
+        else:
+            command.extend(["-c:v", "copy"])
         command.extend(
             [
-                "-c:v",
-                "copy",
                 "-t",
                 f"{duration_seconds:.6f}",
                 "-movflags",
@@ -537,8 +620,9 @@ class TimelinePreviewRenderer:
         await self._run(
             command,
             is_cancelled=is_cancelled,
-            code="preview_mux_failed",
-            message="低清预览封装失败",
+            code=f"{profile.error_prefix}_mux_failed",
+            message=f"{profile.operation_label}封装失败",
+            timeout_seconds=profile.timeout_seconds,
         )
 
     async def _run(
@@ -565,7 +649,7 @@ class TimelinePreviewRenderer:
                 if is_cancelled():
                     process.terminate()
                     await communication
-                    raise TimelineRenderError("render_cancelled", "预览渲染已取消")
+                    raise TimelineRenderError("render_cancelled", "渲染已取消")
                 if asyncio.get_running_loop().time() - started > timeout_seconds:
                     process.kill()
                     await communication
@@ -586,4 +670,4 @@ class TimelinePreviewRenderer:
     @staticmethod
     def _require_not_cancelled(is_cancelled: CancellationCheck) -> None:
         if is_cancelled():
-            raise TimelineRenderError("render_cancelled", "预览渲染已取消")
+            raise TimelineRenderError("render_cancelled", "渲染已取消")

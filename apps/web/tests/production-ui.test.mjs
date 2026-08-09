@@ -122,15 +122,15 @@ test("normalizes, deduplicates and caps reference tags", () => {
   );
 });
 
-test("exposes stable simplified-Chinese labels and locks only final export", () => {
+test("exposes stable simplified-Chinese labels and all implemented workflow steps", () => {
   assert.equal(referenceTypeLabel("wardrobe"), "服装");
   assert.equal(referenceTypeLabel("unknown"), "参考图");
   assert.equal(productionChangeLabel("branch_created"), "创建版本分支");
   assert.equal(productionChangeLabel("shot_structure_changed"), "调整分镜结构");
-  assert.equal(PRODUCTION_STEPS.filter((step) => step.locked).length, 1);
+  assert.equal(PRODUCTION_STEPS.filter((step) => step.locked).length, 0);
   assert.deepEqual(
-    PRODUCTION_STEPS.slice(0, 5).map((step) => step.id),
-    ["project_setup", "reference_assets", "shot_images", "shot_videos", "editing"],
+    PRODUCTION_STEPS.map((step) => step.id),
+    ["project_setup", "reference_assets", "shot_images", "shot_videos", "editing", "export"],
   );
 });
 

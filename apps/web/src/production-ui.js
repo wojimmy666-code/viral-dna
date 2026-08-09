@@ -4,7 +4,7 @@ export const PRODUCTION_STEPS = Object.freeze([
   { id: "shot_images", label: "分镜图片", description: "逐镜头生成和审核" },
   { id: "shot_videos", label: "分段视频", description: "图片转视频" },
   { id: "editing", label: "剪辑合成", description: "排序、音轨和字幕" },
-  { id: "export", label: "导出成片", description: "渲染和归档", locked: true },
+  { id: "export", label: "导出成片", description: "高清渲染和归档" },
 ]);
 
 export const REFERENCE_TYPE_OPTIONS = Object.freeze([

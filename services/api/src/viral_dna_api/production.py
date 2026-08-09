@@ -5087,6 +5087,41 @@ class ProductionService:
             await self.repository.save_production_bundle(next_project, revision)
         return await self.get_project(project_id)
 
+    async def mark_export_completed(
+        self,
+        project_id: UUID,
+        timeline_revision_id: UUID,
+        export_job_id: UUID,
+    ) -> None:
+        """Close the production workflow after a validated final export succeeds."""
+
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id)
+            if (
+                project.active_step == ProductionStep.EXPORT
+                and project.status == ProductionProjectStatus.COMPLETED
+            ):
+                return
+            if project.active_step != ProductionStep.EDITING:
+                raise _fail(409, "export_stage_conflict", "创作方案当前不在剪辑合成阶段")
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.COMPLETED,
+                    "active_step": ProductionStep.EXPORT,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.WORKFLOW_ADVANCED,
+                (
+                    f"时间线 {timeline_revision_id} 已生成并校验最终高清成片；"
+                    f"导出任务 {export_job_id}"
+                ),
+            )
+            await self.repository.save_production_bundle(next_project, revision)
+
     def _initial_shot_plans(
         self,
         project: ProductionProject,

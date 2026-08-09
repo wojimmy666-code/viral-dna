@@ -271,7 +271,6 @@ const navItems = [
   { id: "new-analysis", label: "新建分析", icon: Plus },
   { id: "history", label: "分析记录", icon: ClockCounterClockwise },
   { id: "assets", label: "资产库", icon: FolderOpen },
-  { id: "templates", label: "提示词模板", icon: BracketsCurly },
 ];
 
 const reportTabs = [

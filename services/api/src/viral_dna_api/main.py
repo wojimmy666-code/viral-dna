@@ -108,8 +108,10 @@ from .models import (
     ShotSourceFrameApprovalRequest,
     ShotVideoApprovalRevokeRequest,
     SourceType,
+    TimelineFinalRenderCreate,
     TimelinePreviewCreate,
     TimelineRenderJob,
+    TimelineRenderJobList,
     TimelineRestoreRequest,
     TimelineRevisionList,
     TimelineUpdateRequest,
@@ -150,6 +152,7 @@ from .storage_objects import StorageManager
 from .store import store
 from .thumbnails import thumbnail_etag, thumbnail_service
 from .timeline import TimelineService, TimelineServiceError
+from .timeline_export import TimelineExportService, TimelineExportServiceError
 from .video_generation import VideoGenerationGateway
 from .video_generation.settings import (
     VideoGenerationSettingsService,
@@ -200,6 +203,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        await timeline_export_service.shutdown()
         await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
 
@@ -254,6 +258,14 @@ timeline_service = TimelineService(
     workspace_manager,
     production_service,
     notification_publisher=notification_service,
+)
+timeline_export_service = TimelineExportService(
+    store,
+    workspace_manager,
+    timeline_service,
+    production_service,
+    notification_publisher=notification_service,
+    on_export_succeeded=production_service.mark_export_completed,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 
@@ -1380,6 +1392,113 @@ async def get_production_render_subtitles(project_id: UUID, job_id: UUID) -> Fil
         media_type=media_type,
         content_disposition_type="inline",
         headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/final-renders",
+    response_model=TimelineRenderJob,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_production_final_render(
+    project_id: UUID,
+    payload: TimelineFinalRenderCreate,
+) -> TimelineRenderJob:
+    try:
+        return await timeline_export_service.create_export(project_id, payload)
+    except TimelineExportServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/final-renders",
+    response_model=TimelineRenderJobList,
+)
+async def list_production_final_renders(project_id: UUID) -> TimelineRenderJobList:
+    try:
+        return await timeline_export_service.list_exports(project_id)
+    except TimelineExportServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}",
+    response_model=TimelineRenderJob,
+)
+async def get_production_export_job(project_id: UUID, job_id: UUID) -> TimelineRenderJob:
+    try:
+        return await timeline_export_service.get_export(project_id, job_id)
+    except TimelineExportServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}/cancel",
+    response_model=TimelineRenderJob,
+)
+async def cancel_production_export_job(project_id: UUID, job_id: UUID) -> TimelineRenderJob:
+    try:
+        return await timeline_export_service.cancel_export(project_id, job_id)
+    except TimelineExportServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+async def _production_export_artifact(
+    project_id: UUID,
+    job_id: UUID,
+    artifact: str,
+    *,
+    attachment: bool = False,
+) -> FileResponse:
+    try:
+        path, media_type, filename = await timeline_export_service.resolve_artifact(
+            project_id,
+            job_id,
+            artifact,
+        )
+    except TimelineExportServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename if attachment else None,
+        content_disposition_type="attachment" if attachment else "inline",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}/content")
+async def get_production_export_content(project_id: UUID, job_id: UUID) -> FileResponse:
+    return await _production_export_artifact(project_id, job_id, "content")
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}/download")
+async def download_production_export(project_id: UUID, job_id: UUID) -> FileResponse:
+    return await _production_export_artifact(
+        project_id,
+        job_id,
+        "content",
+        attachment=True,
+    )
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}/subtitles")
+async def get_production_export_subtitles(project_id: UUID, job_id: UUID) -> FileResponse:
+    return await _production_export_artifact(project_id, job_id, "subtitles")
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}/cover")
+async def get_production_export_cover(project_id: UUID, job_id: UUID) -> FileResponse:
+    return await _production_export_artifact(project_id, job_id, "cover")
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/export-jobs/{{job_id}}/manifest")
+async def get_production_export_manifest(project_id: UUID, job_id: UUID) -> FileResponse:
+    return await _production_export_artifact(
+        project_id,
+        job_id,
+        "manifest",
+        attachment=True,
     )
 
 

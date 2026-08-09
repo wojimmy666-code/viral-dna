@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -7,6 +8,14 @@ import {
   isRecordDetailView,
   shouldShowTopbarCreate,
 } from "../src/app-layout.js";
+
+const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+
+test("keeps the primary sidebar focused on active first-phase workflows", () => {
+  assert.match(appSource, /\{ id: "assets", label: "资产库", icon: FolderOpen \}/);
+  assert.doesNotMatch(appSource, /\{ id: "templates", label: "提示词模板"/);
+  assert.match(appSource, /\{ id: "prompts", label: "提示词", icon: TextT \}/);
+});
 
 test("uses a focused layout for analysis reports and production plans", () => {
   const report = { analysis_id: "analysis-1" };

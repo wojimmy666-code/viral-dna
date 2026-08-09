@@ -27,7 +27,7 @@ test("opens the editing step only after workflow advancement", () => {
   );
   assert.match(workflowSource, /<EditingTimelineWorkspace/);
   assert.match(workflowSource, /setActiveSection\("editing"\)/);
-  assert.match(workflowSource, /Boolean\(step\.locked\) \|\| index > activeIndex/);
+  assert.match(workflowSource, /step\.id === "export" && project\.active_step === "editing"/);
 });
 
 test("persists controlled edits with optimistic timeline revisions", () => {

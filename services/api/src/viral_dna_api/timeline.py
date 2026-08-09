@@ -242,6 +242,7 @@ class TimelineService:
                     "revision_id": uuid4(),
                     "revision_number": current.revision_number + 1,
                     "last_preview_job_id": None,
+                    "last_export_job_id": None,
                     "created_at": current.created_at,
                     "updated_at": utc_now(),
                 }
@@ -490,6 +491,7 @@ class TimelineService:
                     else current.subtitle_cues
                 ),
                 "last_preview_job_id": None,
+                "last_export_job_id": None,
                 "updated_at": utc_now(),
             }
         )

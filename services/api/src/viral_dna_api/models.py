@@ -301,6 +301,28 @@ class TimelineRenderStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class TimelineRenderKind(StrEnum):
+    PREVIEW = "preview"
+    FINAL = "final"
+
+
+class TimelineExportResolution(StrEnum):
+    PROJECT = "project"
+    P720 = "720p"
+    P1080 = "1080p"
+
+
+class TimelineExportSubtitleMode(StrEnum):
+    BURNED = "burned"
+    EMBEDDED = "embedded"
+    NONE = "none"
+
+
+class TimelineExportQuality(StrEnum):
+    STANDARD = "standard"
+    HIGH = "high"
+
+
 class ModelProviderOption(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     label: str = Field(min_length=1, max_length=120)
@@ -2373,6 +2395,7 @@ class ProductionTimeline(BaseModel):
     validation_messages: list[str] = Field(default_factory=list)
     warning_messages: list[str] = Field(default_factory=list)
     last_preview_job_id: UUID | None = None
+    last_export_job_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -2434,19 +2457,56 @@ class TimelinePreviewCreate(BaseModel):
     expected_revision_id: UUID
 
 
+class TimelineFinalRenderCreate(BaseModel):
+    expected_revision_id: UUID
+    resolution: TimelineExportResolution = TimelineExportResolution.P1080
+    subtitle_mode: TimelineExportSubtitleMode = TimelineExportSubtitleMode.BURNED
+    quality: TimelineExportQuality = TimelineExportQuality.HIGH
+
+
+class TimelineExportValidationSummary(BaseModel):
+    valid: bool
+    expected_duration_seconds: float = Field(gt=0)
+    duration_seconds: float = Field(gt=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    fps: float = Field(ge=0)
+    video_codec: str = Field(min_length=1, max_length=80)
+    audio_codec: str | None = Field(default=None, max_length=80)
+    has_audio: bool
+    has_subtitles: bool
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(min_length=64, max_length=64)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class TimelineRenderJob(BaseModel):
     schema_version: Literal["viral-dna-render-job/v1"] = "viral-dna-render-job/v1"
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     timeline_revision_id: UUID
+    kind: TimelineRenderKind = TimelineRenderKind.PREVIEW
     status: TimelineRenderStatus = TimelineRenderStatus.QUEUED
     progress_percent: int = Field(default=0, ge=0, le=100)
-    preview_width: int = Field(ge=2, le=1920)
-    preview_height: int = Field(ge=2, le=1920)
+    preview_width: int = Field(ge=2, le=8192)
+    preview_height: int = Field(ge=2, le=8192)
+    resolution: TimelineExportResolution | None = None
+    subtitle_mode: TimelineExportSubtitleMode | None = None
+    quality: TimelineExportQuality | None = None
+    request_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    output_filename: str | None = Field(default=None, max_length=240)
     output_relative_path: str | None = Field(default=None, max_length=2048)
     subtitle_relative_path: str | None = Field(default=None, max_length=2048)
+    cover_relative_path: str | None = Field(default=None, max_length=2048)
+    manifest_relative_path: str | None = Field(default=None, max_length=2048)
     output_url: str | None = Field(default=None, max_length=2048)
     subtitle_url: str | None = Field(default=None, max_length=2048)
+    cover_url: str | None = Field(default=None, max_length=2048)
+    manifest_url: str | None = Field(default=None, max_length=2048)
+    file_size_bytes: int | None = Field(default=None, gt=0)
+    sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    validation_summary: TimelineExportValidationSummary | None = None
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=1000)
     cancellation_requested: bool = False
@@ -2454,10 +2514,19 @@ class TimelineRenderJob(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
-    @field_validator("output_relative_path", "subtitle_relative_path")
+    @field_validator(
+        "output_relative_path",
+        "subtitle_relative_path",
+        "cover_relative_path",
+        "manifest_relative_path",
+    )
     @classmethod
     def validate_optional_relative_path(cls, value: str | None) -> str | None:
         return _normalize_workspace_relative_path(value) if value is not None else None
+
+
+class TimelineRenderJobList(BaseModel):
+    items: list[TimelineRenderJob] = Field(default_factory=list)
 
 
 class WorkspacePathRequest(BaseModel):

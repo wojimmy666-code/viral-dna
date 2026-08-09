@@ -19,6 +19,7 @@ from viral_dna_api.models import (
 )
 from viral_dna_api.timeline_render import (
     TimelinePreviewRenderer,
+    TimelineRenderProfile,
     atempo_filters,
     format_vtt_timestamp,
     preview_dimensions,
@@ -204,3 +205,28 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
     assert subtitles is not None
     assert subtitles.read_text("utf-8").startswith("WEBVTT")
     assert progress_values[-1] == 100
+
+    final_output, final_subtitles = await renderer.render(
+        timeline,
+        tmp_path / "final",
+        source_audio_path=audio_path,
+        progress=progress,
+        is_cancelled=lambda: False,
+        profile=TimelineRenderProfile(
+            width=320,
+            height=180,
+            video_preset="ultrafast",
+            video_crf=26,
+            audio_bitrate="128k",
+            output_filename="final.mp4",
+            subtitle_filename="subtitles.vtt",
+            subtitle_mode="burned",
+            operation_label="最终成片",
+            error_prefix="final",
+        ),
+    )
+    final_metadata = await media.probe(final_output)
+    assert final_metadata.width == 320
+    assert final_metadata.height == 180
+    assert final_metadata.has_audio is True
+    assert final_subtitles is not None
