@@ -2,10 +2,6 @@ export function isRecordDetailView(activeNav, report) {
   return activeNav === "workspace" && Boolean(report);
 }
 
-export function isProductionDetailView(activeNav, report, workspaceMode) {
-  return isRecordDetailView(activeNav, report) && workspaceMode === "production";
-}
-
 export function shouldShowTopbarCreate(activeNav, report) {
   return !["assets", "history", "platform-connections"].includes(activeNav)
     && !isRecordDetailView(activeNav, report);

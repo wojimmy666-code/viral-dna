@@ -721,6 +721,7 @@ export function ShotVideoWorkspace({
             <label>
               <span>视频提示词</span>
               <textarea
+                className="prompt-editor-textarea"
                 maxLength={8000}
                 onChange={(event) => setVideoDraft((current) => ({
                   ...current,
@@ -733,6 +734,7 @@ export function ShotVideoWorkspace({
             <label>
               <span>视频负面约束</span>
               <textarea
+                className="prompt-editor-textarea"
                 maxLength={3000}
                 onChange={(event) => setVideoDraft((current) => ({
                   ...current,

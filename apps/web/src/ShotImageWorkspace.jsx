@@ -295,7 +295,7 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate }) {
         {mode !== "duplicate" && (
           <label className="production-field shot-create-prompt">
             <span>初始图片提示词（可稍后填写）</span>
-            <textarea onChange={(event) => setImagePrompt(event.target.value)} rows={3} value={imagePrompt} />
+            <textarea className="prompt-editor-textarea" onChange={(event) => setImagePrompt(event.target.value)} rows={3} value={imagePrompt} />
           </label>
         )}
         <footer>
@@ -1505,6 +1505,7 @@ export function ShotImageWorkspace({
               <span>图片提示词</span>
               <div className="shot-prompt-editor">
                 <textarea
+                  className="prompt-editor-textarea"
                   maxLength={8000}
                   onChange={updatePrompt}
                   placeholder="描述画面；输入 @ 可关联人物、产品或场景资产"
@@ -1557,6 +1558,7 @@ export function ShotImageWorkspace({
             <label className="production-field">
               <span>负面约束</span>
               <textarea
+                className="prompt-editor-textarea"
                 maxLength={4000}
                 onChange={(event) => setDraft((state) => ({ ...state, negativeConstraints: event.target.value }))}
                 placeholder="每行一条"

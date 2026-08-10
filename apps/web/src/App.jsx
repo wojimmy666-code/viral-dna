@@ -60,7 +60,6 @@ import { notificationToastPayload } from "./notification-ui.js";
 import { ProductionHub } from "./ProductionWorkflow.jsx";
 import {
   buildRecordBreadcrumb,
-  isProductionDetailView,
   isRecordDetailView,
   shouldShowTopbarCreate,
 } from "./app-layout.js";
@@ -415,7 +414,6 @@ function supportsProductionVideoWorkflow(model) {
     && model.capabilities?.ordered_reference_images,
   );
 }
-
 function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
   const providers = server.providers?.length
     ? server.providers
@@ -1866,11 +1864,6 @@ export function App() {
   }
 
   const recordDetailMode = isRecordDetailView(activeNav, report);
-  const productionFocusMode = isProductionDetailView(
-    activeNav,
-    report,
-    recordWorkspaceMode,
-  );
   const recordBreadcrumbItems = buildRecordBreadcrumb(
     recordWorkspaceMode,
     activeProductionProjectName,
@@ -1916,7 +1909,7 @@ export function App() {
               ? "history-layout"
               : activeNav === "assets"
                 ? "asset-library-layout"
-                : `workspace-layout ${productionFocusMode ? "production-mode" : ""}`
+                : "workspace-layout"
           }
         >
           {activeNav === "platform-connections" ? (
@@ -2124,10 +2117,6 @@ export function App() {
               </>
             )}
           </main>
-
-          {!productionFocusMode && (
-            <InsightsPanel report={report} analysis={analysis} onOpenTab={setActiveReportTab} />
-          )}
           </>)}
         </div>
       </div>
@@ -5410,151 +5399,5 @@ function PromptsTab({ promptPackage, onCopy, onDownload }) {
         </button>
       </div>
     </div>
-  );
-}
-
-function InsightsPanel({ report, analysis, onOpenTab }) {
-  const progressMessage = analysis && analysis.stage !== "completed" ? analysis.message : null;
-  const isMediaEvidence = report?.analysis_mode === "media_evidence";
-  const isModel = report?.analysis_mode === "model";
-  const metadata = report?.media_evidence?.metadata;
-  return (
-    <aside className="insights-panel">
-      <div className="insights-heading">
-        <div>
-          {isMediaEvidence ? (
-            <ShieldCheck size={18} weight="fill" />
-          ) : isModel ? (
-            <Sparkle size={18} weight="fill" />
-          ) : (
-            <Sparkle size={18} weight="fill" />
-          )}
-          <strong>{isMediaEvidence ? "真实分析状态" : isModel ? "VLM 分析状态" : "AI 助手建议"}</strong>
-        </div>
-        <button className="icon-button" type="button" aria-label="刷新建议">
-          <ArrowClockwise size={17} />
-        </button>
-      </div>
-
-      {progressMessage ? (
-        <div className="assistant-progress">
-          {analysis.stage === "failed" ? (
-            <X size={24} weight="bold" />
-          ) : (
-            <CircleNotch className="spin" size={24} />
-          )}
-          <strong>{stageLabels[analysis.stage]}</strong>
-          <p>{progressMessage}</p>
-          <div className="assistant-progress-track">
-            <span style={{ width: `${analysis.progress}%` }} />
-          </div>
-        </div>
-      ) : isMediaEvidence ? (
-        <>
-          <div className="insight-card purple">
-            <span className="insight-icon"><ShieldCheck size={20} weight="fill" /></span>
-            <div>
-              <strong>媒体探测与代理文件已完成</strong>
-              <p>
-                {metadata?.width} × {metadata?.height} · {report.overview.duration_seconds.toFixed(1)} 秒 · {metadata?.video_codec?.toUpperCase()}
-              </p>
-            </div>
-          </div>
-          <div className="insight-card orange">
-            <span className="insight-icon"><FilmStrip size={20} weight="fill" /></span>
-            <div>
-              <strong>检测到 {report.shots.length} 个真实镜头</strong>
-              <p>每个时间区间都已生成代表关键帧，可回到原视频对应时间点核验。</p>
-            </div>
-          </div>
-          <div className="insight-card green">
-            <span className="insight-icon"><MagicWand size={20} weight="fill" /></span>
-            <div>
-              <strong>语义层将在下一批接入</strong>
-              <p>接入 ASR、OCR 与多模态模型后，再生成主体、场景、爆点和 Seedance 提示词。</p>
-            </div>
-          </div>
-          <button className="assistant-action" type="button" onClick={() => onOpenTab("shots")}>
-            查看真实分镜证据
-            <CaretRight size={16} />
-          </button>
-        </>
-      ) : isModel ? (
-        <>
-          <div className="insight-card purple">
-            <span className="insight-icon"><Sparkle size={20} weight="fill" /></span>
-            <div>
-              <strong>
-                已理解 {report.shots.filter((shot) => shot.evidence_kind === "model").length} / {report.shots.length} 个镜头
-              </strong>
-              <p>主体、动作、场景、摄影、灯光、色彩和复刻提示词均保留关键帧证据。</p>
-            </div>
-          </div>
-          <div className="insight-card orange">
-            <span className="insight-icon"><BracketsCurly size={20} weight="fill" /></span>
-            <div>
-              <strong>{formatCost(report.model_cost_summary?.measured_cost_micros)} 模型成本</strong>
-              <p>
-                {report.model_cost_summary?.run_count || 0} 次调用 ·
-                {report.model_cost_summary?.cached_run_count || 0} 次结果缓存
-              </p>
-            </div>
-          </div>
-          <div className="insight-card green">
-            <span className="insight-icon"><Target size={20} weight="fill" /></span>
-            <div>
-              <strong>爆点与全局实体尚未推理</strong>
-              <p>本批先固定逐镜头事实，下一阶段再归并人物、服装、场景并分析爆点。</p>
-            </div>
-          </div>
-          <button className="assistant-action" type="button" onClick={() => onOpenTab("shots")}>
-            查看 VLM 分镜事实
-            <CaretRight size={16} />
-          </button>
-        </>
-      ) : report ? (
-        <>
-          <div className="insight-card purple">
-            <span className="insight-icon"><Target size={20} weight="fill" /></span>
-            <div>
-              <strong>{report.viral_findings[0]?.title}</strong>
-              <p>{report.viral_findings[0]?.recommendation}</p>
-            </div>
-          </div>
-          <div className="insight-card orange">
-            <span className="insight-icon"><FilmStrip size={20} weight="fill" /></span>
-            <div>
-              <strong>结构可直接复用</strong>
-              <p>{report.overview.narrative_structure}</p>
-            </div>
-          </div>
-          <div className="insight-card green">
-            <span className="insight-icon"><Swap size={20} weight="fill" /></span>
-            <div>
-              <strong>{report.entities.length} 个元素可替换</strong>
-              <p>优先替换人物或场景，同时锁定动作、机位和节奏。</p>
-            </div>
-          </div>
-          <button className="assistant-action" type="button" onClick={() => onOpenTab("replace")}>
-            生成元素替换方案
-            <CaretRight size={16} />
-          </button>
-        </>
-      ) : (
-        <div className="assistant-empty">
-          <span><Sparkle size={24} /></span>
-          <strong>等待视频分析</strong>
-          <p>完成导入后，这里会汇总最值得复用的 Hook、结构和视觉元素。</p>
-        </div>
-      )}
-
-      <div className="phase-note">
-        <ShieldCheck size={17} />
-        <div>
-          <strong>一期边界</strong>
-          <p>只分析单条视频，不读取账号，不调用视频生成模型。</p>
-        </div>
-      </div>
-    </aside>
   );
 }

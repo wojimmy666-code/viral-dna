@@ -10,6 +10,10 @@ const workflowStyles = readFileSync(
   new URL("../src/production-workflow.css", import.meta.url),
   "utf8",
 );
+const baseStyles = readFileSync(
+  new URL("../src/styles.css", import.meta.url),
+  "utf8",
+);
 const preparationSource = readFileSync(
   new URL("../src/VideoPreparationPanel.jsx", import.meta.url),
   "utf8",
@@ -30,18 +34,43 @@ function cssRule(selector) {
   return workflowStyles.slice(start, end + 1);
 }
 
+test("keeps the production workspace on a readable semantic type ramp", () => {
+  const readableSection = workflowStyles.slice(
+    workflowStyles.indexOf("/* ViralDNA Typography System 1.0"),
+  );
+
+  assert.match(baseStyles, /--type-caption-size:\s*0\.75rem/);
+  assert.match(baseStyles, /--type-label-size:\s*0\.875rem/);
+  assert.match(baseStyles, /--type-body-size:\s*1rem/);
+  assert.match(readableSection, /\.production-workspace\s*\{/);
+  assert.match(readableSection, /font-size:\s*var\(--production-type-body\)/);
+  assert.match(readableSection, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-size:\s*var\(--production-type-body\)/s);
+  assert.match(readableSection, /\.video-preparation-status,/);
+  assert.match(
+    readableSection,
+    /\.production-workspace :is\([\s\S]*?\.video-preparation-status,[\s\S]*?\)\s*\{[\s\S]*?font-size:\s*var\(--production-type-caption\)/,
+  );
+  assert.doesNotMatch(readableSection, /font-size:\s*(?:7|8|9|10|11)px/);
+});
+
 test("keeps video generation fields on shared heading and control rows", () => {
   const optionsRule = cssRule(".shot-video-generation-options");
   const fieldRule = cssRule(".shot-video-generation-field");
   const durationRule = cssRule(".shot-video-duration-control");
 
-  assert.match(optionsRule, /--shot-video-control-height:\s*44px/);
-  assert.match(optionsRule, /--shot-video-heading-height:\s*22px/);
+  assert.match(optionsRule, /--shot-video-control-height:\s*48px/);
+  assert.match(optionsRule, /--shot-video-heading-height:\s*24px/);
   assert.match(optionsRule, /align-items:\s*start/);
   assert.match(fieldRule, /grid-template-rows:\s*var\(--shot-video-heading-height\) var\(--shot-video-control-height\)/);
   assert.match(fieldRule, /align-content:\s*start/);
   assert.match(fieldRule, /align-self:\s*start/);
   assert.match(durationRule, /height:\s*var\(--shot-video-control-height\)/);
+});
+
+test("uses one prompt editor role in image and video workspaces", () => {
+  assert.match(workspaceSource, /className="prompt-editor-textarea"/);
+  assert.match(imageWorkspaceSource, /className="prompt-editor-textarea"/);
+  assert.match(workflowStyles, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-weight:\s*var\(--type-weight-regular\)/s);
 });
 
 test("associates the duration label, output and help text with the range input", () => {

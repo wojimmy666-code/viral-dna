@@ -4,12 +4,12 @@ import test from "node:test";
 
 import {
   buildRecordBreadcrumb,
-  isProductionDetailView,
   isRecordDetailView,
   shouldShowTopbarCreate,
 } from "../src/app-layout.js";
 
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+const appStyles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 test("keeps the primary sidebar focused on active first-phase workflows", () => {
   assert.match(appSource, /\{ id: "assets", label: "资产库", icon: FolderOpen \}/);
@@ -26,12 +26,17 @@ test("uses a focused layout for analysis reports and production plans", () => {
   assert.equal(isRecordDetailView("workspace", null), false);
 });
 
-test("uses a full-width production view without the analysis side panel", () => {
-  const report = { analysis_id: "analysis-1" };
-
-  assert.equal(isProductionDetailView("workspace", report, "production"), true);
-  assert.equal(isProductionDetailView("workspace", report, "analysis"), false);
-  assert.equal(isProductionDetailView("history", report, "production"), false);
+test("keeps every workbench state full-width without the analysis side panel", () => {
+  assert.doesNotMatch(appSource, /InsightsPanel/);
+  assert.doesNotMatch(appStyles, /\.insights-panel/);
+  assert.match(
+    appStyles,
+    /\.workspace-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
+  );
+  assert.doesNotMatch(
+    appStyles,
+    /\.workspace-layout\s*\{[^}]*grid-template-columns:[^;}]*(?:320px|286px)/s,
+  );
 });
 
 test("keeps new-analysis in the workbench but removes it from records and details", () => {

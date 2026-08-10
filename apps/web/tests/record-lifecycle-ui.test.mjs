@@ -55,5 +55,5 @@ test("keeps the dense list count in the page title without a duplicate result he
   assert.match(appSource, /className="history-title-line"/);
   assert.match(appSource, /className="history-scope-filter"/);
   assert.doesNotMatch(appSource, /history-result-heading/);
-  assert.match(appStyles, /\.record-table-row\s*\{[\s\S]*?min-height:\s*86px/);
+  assert.match(appStyles, /\.record-table-row\s*\{[\s\S]*?min-height:\s*96px/);
 });
