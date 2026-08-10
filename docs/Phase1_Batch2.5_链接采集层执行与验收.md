@@ -60,9 +60,9 @@
 - 禁止播放列表，只处理单个视频。
 - 默认网络超时 20 秒、重试 2 次。
 - 输出模板固定在 `storage/links/{video_id}`，并校验最终文件仍位于该目录。
-- 不自动读取 Chrome 或其他浏览器 Cookie。
+- 首批交付时不自动读取 Chrome 或其他浏览器 Cookie；后续“平台连接”已增加用户授权后的本机 Profile 读取。
 
-若公开页面确实需要登录，用户可以主动导出 Netscape Cookie 文件并设置 `VIRAL_DNA_YTDLP_COOKIE_FILE`。应用不会把 Cookie 内容写入日志、数据库或报告。
+若公开页面确实需要登录，当前版本可在 GUI 中分别连接抖音、小红书，授权读取本机浏览器 Profile，或导入 Netscape Cookie 文件。`VIRAL_DNA_YTDLP_COOKIE_FILE` 仅作为旧配置迁移入口；应用不会把 Cookie 内容写入日志、数据库或报告。详见 [平台连接与本机 Cookie 凭证执行验收](./Phase1_平台连接与本机Cookie凭证执行验收.md)。
 
 ## 4. 环境变量
 
@@ -138,7 +138,7 @@ VIRAL_DNA_YTDLP_PROXY=
 | 在线播放 | 支持 HTTP Range，实测返回 `206 Partial Content` |
 | 下载 | 返回完整附件 |
 
-Cookie 文件只通过被 Git 忽略的 `.env.local` 保存路径。采集清单、数据库、报告、日志和 Git 差异均未保存 Cookie 内容或本机路径。
+该次历史验收使用 `.env.local` 保存显式路径。当前版本会将导入内容按平台过滤并用 Windows DPAPI 加密保存；采集清单、数据库、报告、日志和 Git 差异仍不保存 Cookie 内容。
 
 ## 9. 已知边界与下一步
 

@@ -4,10 +4,11 @@ import asyncio
 import ipaddress
 import json
 import os
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
@@ -35,6 +36,33 @@ class LinkIngestionError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+class LinkCredentialError(RuntimeError):
+    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+@dataclass(frozen=True, slots=True)
+class LinkCredentialSession:
+    configured: bool
+    strategy: str
+    source_label: str
+    cookie_file: Path | None = None
+    cookies_from_browser: tuple[str, str, None, None] | None = None
+
+
+class LinkCredentialResolver(Protocol):
+    def session_for(
+        self,
+        platform: SourceType,
+    ) -> AbstractAsyncContextManager[LinkCredentialSession]: ...
+
+    async def report_success(self, platform: SourceType) -> None: ...
+
+    async def report_failure(self, platform: SourceType, code: str, message: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +155,8 @@ def get_link_storage_root(video_id: UUID, record_id: UUID | None = None) -> Path
 
 
 class LinkCollector:
-    def __init__(self) -> None:
+    def __init__(self, credential_resolver: LinkCredentialResolver | None = None) -> None:
+        self.credential_resolver = credential_resolver
         self.max_download_bytes = _positive_int(
             "VIRAL_DNA_LINK_MAX_BYTES",
             DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -154,24 +183,20 @@ class LinkCollector:
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(self._remove_partial_files, target_dir)
 
-        logger = _YtDlpLogger()
-        try:
-            info = await asyncio.to_thread(
-                self._download_sync,
-                source_url,
-                target_dir,
-                logger,
-            )
-        except LinkIngestionError:
-            raise
-        except YoutubeDLError as exc:
-            raise self._translate_download_error(exc, logger) from exc
-        except OSError as exc:
-            raise LinkIngestionError(
-                "link_storage_failed",
-                "链接视频无法写入本地存储",
-                retryable=True,
-            ) from exc
+        if self.credential_resolver is None:
+            info = await self._attempt_download(source_url, target_dir, None)
+        else:
+            try:
+                async with self.credential_resolver.session_for(expected_platform) as session:
+                    info = await self._download_with_credentials(
+                        source_url,
+                        target_dir,
+                        expected_platform,
+                        session,
+                    )
+            except LinkCredentialError as exc:
+                await self._report_failure(expected_platform, exc.code, str(exc))
+                raise LinkIngestionError(exc.code, str(exc), retryable=exc.retryable) from exc
 
         resolved_url = str(info.get("webpage_url") or info.get("original_url") or source_url)
         try:
@@ -229,6 +254,7 @@ class LinkCollector:
         source_url: str,
         target_dir: Path,
         logger: _YtDlpLogger,
+        credential_session: LinkCredentialSession | None = None,
     ) -> dict[str, Any]:
         def duration_filter(info: dict[str, Any], incomplete: bool = False) -> str | None:
             if incomplete:
@@ -257,15 +283,27 @@ class LinkCollector:
             "match_filter": duration_filter,
             "cachedir": str(get_storage_root() / "temp" / "yt-dlp-cache"),
         }
-        cookie_file = os.getenv("VIRAL_DNA_YTDLP_COOKIE_FILE", "").strip()
-        if cookie_file:
-            cookie_path = Path(cookie_file).expanduser().resolve()
+        cookie_path = credential_session.cookie_file if credential_session else None
+        if cookie_path is not None:
+            cookie_path = cookie_path.expanduser().resolve()
             if not cookie_path.is_file():
                 raise LinkIngestionError(
                     "link_cookie_file_missing",
-                    "配置的 yt-dlp Cookie 文件不存在",
+                    "本机平台 Cookie 临时文件不存在，请重新配置",
                 )
             options["cookiefile"] = str(cookie_path)
+        elif credential_session and credential_session.cookies_from_browser is not None:
+            options["cookiesfrombrowser"] = credential_session.cookies_from_browser
+        elif self.credential_resolver is None:
+            cookie_file = os.getenv("VIRAL_DNA_YTDLP_COOKIE_FILE", "").strip()
+            if cookie_file:
+                legacy_cookie_path = Path(cookie_file).expanduser().resolve()
+                if not legacy_cookie_path.is_file():
+                    raise LinkIngestionError(
+                        "link_cookie_file_missing",
+                        "配置的 yt-dlp Cookie 文件不存在",
+                    )
+                options["cookiefile"] = str(legacy_cookie_path)
 
         proxy = os.getenv("VIRAL_DNA_YTDLP_PROXY", "").strip()
         if proxy:
@@ -280,6 +318,91 @@ class LinkCollector:
                 retryable=True,
             )
         return info
+
+    async def _download_with_credentials(
+        self,
+        source_url: str,
+        target_dir: Path,
+        platform: SourceType,
+        session: LinkCredentialSession,
+    ) -> dict[str, Any]:
+        use_initially = session.configured and session.strategy == "always"
+        try:
+            info = await self._attempt_download(
+                source_url,
+                target_dir,
+                session if use_initially else None,
+            )
+        except LinkIngestionError as first_error:
+            should_retry = (
+                first_error.code == "link_auth_required"
+                and session.configured
+                and session.strategy == "on_auth_required"
+            )
+            if not should_retry:
+                if use_initially or first_error.code == "link_auth_required":
+                    await self._report_failure(platform, first_error.code, str(first_error))
+                raise
+            await asyncio.to_thread(self._remove_partial_files, target_dir)
+            try:
+                info = await self._attempt_download(source_url, target_dir, session)
+            except LinkIngestionError as credential_error:
+                await self._report_failure(platform, credential_error.code, str(credential_error))
+                raise
+            await self._report_success(platform)
+            return info
+        if use_initially:
+            await self._report_success(platform)
+        return info
+
+    async def _attempt_download(
+        self,
+        source_url: str,
+        target_dir: Path,
+        credential_session: LinkCredentialSession | None,
+    ) -> dict[str, Any]:
+        logger = _YtDlpLogger()
+        try:
+            if credential_session is None:
+                return await asyncio.to_thread(
+                    self._download_sync,
+                    source_url,
+                    target_dir,
+                    logger,
+                )
+            return await asyncio.to_thread(
+                self._download_sync,
+                source_url,
+                target_dir,
+                logger,
+                credential_session,
+            )
+        except LinkIngestionError:
+            raise
+        except YoutubeDLError as exc:
+            raise self._translate_download_error(exc, logger) from exc
+        except OSError as exc:
+            raise LinkIngestionError(
+                "link_storage_failed",
+                "链接视频无法写入本地存储",
+                retryable=True,
+            ) from exc
+
+    async def _report_success(self, platform: SourceType) -> None:
+        if self.credential_resolver is None:
+            return
+        try:
+            await self.credential_resolver.report_success(platform)
+        except Exception:
+            return
+
+    async def _report_failure(self, platform: SourceType, code: str, message: str) -> None:
+        if self.credential_resolver is None:
+            return
+        try:
+            await self.credential_resolver.report_failure(platform, code, message)
+        except Exception:
+            return
 
     def _locate_downloaded_media(self, target_dir: Path, info: dict[str, Any]) -> Path:
         candidates: list[Path] = []
@@ -336,6 +459,17 @@ class LinkCollector:
                 "link_size_exceeded",
                 f"链接视频不能超过 {self.max_download_bytes // 1024 // 1024} MB",
             )
+        if "could not copy" in details or "cookie database" in details and "permission" in details:
+            return LinkIngestionError(
+                "platform_browser_cookie_locked",
+                "浏览器 Cookie 数据库正在被占用，请关闭浏览器后台进程后重试",
+                retryable=True,
+            )
+        if any(marker in details for marker in ("failed to decrypt", "dpapi", "app-bound")):
+            return LinkIngestionError(
+                "platform_browser_cookie_decryption_failed",
+                "浏览器安全保护阻止了 Cookie 解密，请改用 cookies.txt 导入",
+            )
         if any(
             marker in details
             for marker in (
@@ -348,7 +482,7 @@ class LinkCollector:
         ):
             return LinkIngestionError(
                 "link_auth_required",
-                "平台要求登录或人机验证；请改用公开视频链接或配置 Cookie 文件",
+                "平台要求登录或人机验证；请到“平台连接”更新登录状态后重试",
                 retryable=True,
             )
         if any(marker in details for marker in ("404", "private", "unavailable", "deleted")):

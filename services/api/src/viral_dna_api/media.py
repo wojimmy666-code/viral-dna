@@ -747,13 +747,49 @@ class MediaProcessor:
             for candidate in boundary_candidates or []
         }
         for index, (start, end) in enumerate(pairwise(boundaries), 1):
-            representative = round(start + (end - start) / 2, 3)
-            duration = end - start
-            offset = min(0.18, max(0.001, duration * 0.2), duration / 3)
+            incoming_candidate = candidates_by_timestamp.get(round(start, 3))
+            outgoing_candidate = candidates_by_timestamp.get(round(end, 3))
+            content_start = start
+            content_end = end
+            incoming_transition_start: float | None = None
+            incoming_transition_end: float | None = None
+            if incoming_candidate is not None and (
+                incoming_candidate.selected_by_model or incoming_candidate.hard_boundary
+            ):
+                incoming_transition_start = (
+                    incoming_candidate.transition_start_seconds
+                    if incoming_candidate.transition_start_seconds is not None
+                    else incoming_candidate.timestamp_seconds
+                )
+                incoming_transition_end = (
+                    incoming_candidate.stable_new_scene_seconds
+                    if incoming_candidate.stable_new_scene_seconds is not None
+                    else incoming_candidate.timestamp_seconds
+                )
+                content_start = max(start, incoming_transition_end)
+            if outgoing_candidate is not None and (
+                outgoing_candidate.selected_by_model or outgoing_candidate.hard_boundary
+            ):
+                content_end = min(
+                    end,
+                    outgoing_candidate.transition_start_seconds
+                    if outgoing_candidate.transition_start_seconds is not None
+                    else outgoing_candidate.timestamp_seconds,
+                )
+            if content_end - content_start < 0.05:
+                content_start = start
+                content_end = end
+            representative = round(content_start + (content_end - content_start) / 2, 3)
+            content_duration = content_end - content_start
+            offset = min(
+                0.18,
+                max(0.001, content_duration * 0.2),
+                content_duration / 3,
+            )
             samples = (
-                ("start", round(start + offset, 3)),
+                ("start", round(content_start + offset, 3)),
                 ("middle", representative),
-                ("end", round(end - offset, 3)),
+                ("end", round(content_end - offset, 3)),
             )
             frame_urls: list[str] = []
             for label, timestamp in samples:
@@ -819,9 +855,22 @@ class MediaProcessor:
                     start_seconds=round(start, 3),
                     end_seconds=round(end, 3),
                     duration_seconds=round(end - start, 3),
+                    content_start_seconds=round(content_start, 3),
+                    content_end_seconds=round(content_end, 3),
+                    incoming_transition_start_seconds=(
+                        round(incoming_transition_start, 3)
+                        if incoming_transition_start is not None
+                        else None
+                    ),
+                    incoming_transition_end_seconds=(
+                        round(incoming_transition_end, 3)
+                        if incoming_transition_end is not None
+                        else None
+                    ),
                     representative_timestamp=representative,
                     keyframe_url=keyframe_url,
                     evidence_frame_urls=frame_urls,
+                    evidence_timestamps=[timestamp for _, timestamp in samples],
                     detection_method=(
                         "hybrid_candidate_vlm"
                         if boundary_candidates is not None

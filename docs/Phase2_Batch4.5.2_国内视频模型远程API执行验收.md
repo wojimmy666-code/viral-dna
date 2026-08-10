@@ -1,8 +1,8 @@
 # Phase 2 · Batch 4.5.2 国内视频模型远程 API 执行与验收
 
-更新时间：2026-08-07
+更新时间：2026-08-10
 
-状态：4.5.2.1～4.5.2.8 已实现；百炼真实链路已通过，待用户人工验收
+状态：4.5.2.1～4.5.2.8 已实现；百炼真实链路已通过；MiniMax H3、Seedance 2.0／Fast／Mini 已开放有序多图入口，等待用户最低成本人工验收
 
 ## 1. 本批目标与边界
 
@@ -22,7 +22,7 @@
 - 每个模型冻结 Provider、Model ID、能力、分辨率、时长、候选数、Prompt 上限和价格版本。
 - 价格以整数微元保存，避免浮点金额误差。
 - 已知刊例价在提交前估算；未知价格必须显式确认，不能显示为 ¥0。
-- `Seedance 2.0`、`Seedance 2.0 Fast` 和 `Seedance 2.5` 保留稳定别名，但在官方 API 未 GA／未核验 Model ID 前标记为不可用。
+- `Seedance 2.0`、`Seedance 2.0 Fast`、`Seedance 2.0 Mini` 已使用官方 Model ID 开放；`Seedance 2.5` 在未完成当前工作流能力验收前继续标记为不可用。
 
 ### 4.5.2.2 Provider 任务持久化与幂等恢复
 
@@ -51,19 +51,19 @@
 - 720P 按 ¥0.60／秒、1080P 按 ¥1.00／秒预估和归集费用。
 - 已使用当前百炼配置完成一次真实 2 秒 720P 测试。
 
-### 4.5.2.5 Seedance 2.0／2.5 预留
+### 4.5.2.5 Seedance 2.0／Fast／Mini／2.5
 
 - 已建立独立的火山方舟 Client、请求映射、错误映射和 Adapter 文件。
-- 保留 `seedance_2_0`、`seedance_2_0_fast`、`seedance_2_5` 稳定别名和 GUI 卡位。
-- 截至 2026-08-07，官方信息仍表明 Seedance 2.0 只有体验入口、API 尚未 GA；2.5 也没有可核验的公开 Model ID。
-- 因此三个别名均显示“待开放”并禁止提交，不会把体验中心 ID 冒充正式 API。
-- 正式开放后只需更新目录和对应 Mapper，不需要改项目、任务、候选或审批状态机。
+- `seedance_2_0`、`seedance_2_0_fast`、`seedance_2_0_mini` 使用官方 Model ID，并通过火山方舟 `/contents/generations/tasks` 提交任务。
+- 每张画面以 `role=reference_image` 按图号顺序写入 `content[]`；Provider 提示词把系统“图1～图9”映射为“图片1～图片9”。
+- Seedance 2.0／Fast 当前声明最多 9 张有序参考图、4～15 秒、480P／720P／1080P；Mini 声明最多 9 张有序参考图、4～15 秒、480P／720P。费用暂以 Provider 用量为准，生成前必须确认未知费用。
+- `seedance_2_5` 官方服务已经开放，但当前有序多图请求、Model ID 与参数边界尚未完成接入验收，因此继续显示不可用。
 
 ### 4.5.2.6 MiniMax H3 与 Hailuo
 
 - Provider 共用一个 Key，但 H3 与 Hailuo 使用物理隔离的请求映射。
 - `MiniMax-H3` 使用 `/v2/video_generation` 多模态 `content[]` 协议，以及 `/v2/query/video_generation/{task_id}` 查询接口。
-- H3 支持 768P／2K、4～15 秒整数时长；当前图生视频只传首帧和文本。
+- H3 支持 768P／2K、4～15 秒整数时长；全能参考模式按 `reference_image` 顺序提交最多 9 张图片，并显式传递目标画幅。
 - H3 排队任务支持官方 DELETE 取消；运行中的任务按官方限制可能无法取消。
 - Hailuo 2.3／2.3 Fast 继续使用 `/v1/video_generation`、旧查询和文件检索流程。
 - H3 价格为 768P ¥0.50／秒、2K ¥0.80／秒；Hailuo 使用官方固定时长价格矩阵。
@@ -91,13 +91,14 @@
 
 | 模型别名 | Provider | 当前状态 | API 协议 | 价格口径 |
 |---|---|---|---|---|
-| `bailian_wan_2_7_i2v` | 百炼 | 可用，已实测 | DashScope `/api/v1` 异步任务 | 720P ¥0.60／秒；1080P ¥1.00／秒 |
-| `minimax_h3` | MiniMax | 可用，待配置 Key 实测 | MiniMax `/v2` 多模态任务 | 768P ¥0.50／秒；2K ¥0.80／秒 |
-| `minimax_hailuo_2_3` | MiniMax | 可用，待配置 Key 实测 | MiniMax `/v1` 任务＋文件检索 | 官方固定价格矩阵 |
-| `minimax_hailuo_2_3_fast` | MiniMax | 可用，待配置 Key 实测 | MiniMax `/v1` 任务＋文件检索 | 官方固定价格矩阵 |
-| `seedance_2_0` | 火山方舟 | 待开放 | Adapter 已预留 | 未启用 |
-| `seedance_2_0_fast` | 火山方舟 | 待官方 Model ID | Adapter 已预留 | 未启用 |
-| `seedance_2_5` | 火山方舟 | 待官方 Model ID | Adapter 已预留 | 未启用 |
+| `bailian_wan_2_7_r2v` | 百炼 | 可用，已实测 | DashScope `/api/v1` 异步任务 | 720P ¥0.60／秒；1080P ¥1.00／秒 |
+| `minimax_h3` | MiniMax | 可用，待付费实测 | MiniMax `/v2` 全能参考任务 | 768P ¥0.50／秒；2K ¥0.80／秒 |
+| `minimax_hailuo_2_3` | MiniMax | 不可用于当前流程 | MiniMax `/v1` 单首帧任务 | 不启用 |
+| `minimax_hailuo_2_3_fast` | MiniMax | 不可用于当前流程 | MiniMax `/v1` 单首帧任务 | 不启用 |
+| `seedance_2_0` | 火山方舟 | 可用，待付费实测 | 方舟 `/api/v3` 全能参考任务 | Provider 用量回传，生成前确认未知费用 |
+| `seedance_2_0_fast` | 火山方舟 | 可用，待付费实测 | 方舟 `/api/v3` 全能参考任务 | Provider 用量回传，生成前确认未知费用 |
+| `seedance_2_0_mini` | 火山方舟 | 可用，待付费实测 | 方舟 `/api/v3` 全能参考任务 | Provider 用量回传，生成前确认未知费用 |
+| `seedance_2_5` | 火山方舟 | 待当前工作流验收 | Adapter 已预留 | 未启用 |
 
 官方依据：
 
@@ -106,7 +107,9 @@
 - [MiniMax H3 视频生成说明](https://platform.minimaxi.com/docs/guides/video-generation)
 - [MiniMax H3 V2 创建任务](https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create)
 - [MiniMax 视频按量价格](https://platform.minimaxi.com/docs/guides/pricing-paygo)
-- [火山引擎关于 Seedance 2.0 API GA 状态的说明](https://developer.volcengine.com/articles/7610260375007756351)
+- [火山引擎 Seedance 2.0 API 全面上线说明](https://developer.volcengine.com/articles/7628567056649125942)
+- [Seedance 2.0 可信素材与 `reference_image` 请求示例](https://www.volcengine.com/docs/82379/2315856?lang=zh)
+- [Seedance 2.0／Mini 分辨率与时长说明](https://www.volcengine.com/activity/seedance2)
 
 ## 4. 主要接口
 
@@ -139,11 +142,12 @@
 ### 6.1 设置页
 
 1. 打开“模型与设置 → 分段视频生成”。
-2. 确认默认模型是“百炼 Wan 2.7 图生视频”，默认分辨率是 720P。
+2. 确认默认模型是“百炼 Wan 2.7 多图参考视频”，默认分辨率是 720P。
 3. 确认百炼显示“已连接／已校验”，Key 只显示掩码。
 4. 确认火山方舟和 MiniMax 未配置时仍可保存为空。
-5. 确认 Seedance 2.0／2.5 选项显示“待开放”且不可选择。
-6. 切换到 MiniMax H3，确认分辨率仅显示 768P／2K；不要保存为默认，除非已经配置 MiniMax Key。
+5. 确认下拉框可选择百炼 Wan 2.7、Seedance 2.0、Seedance 2.0 Fast、Seedance 2.0 Mini 与 MiniMax H3；Seedance 2.5、Hailuo 2.3／Fast 不可选。
+6. 切换到 Seedance 2.0／Fast，确认分辨率显示 480P／720P／1080P、时长只能选择 4～15 秒；切换到 Mini，确认仅显示 480P／720P、时长同样为 4～15 秒。
+7. 从 1080P 模型切换到 Mini 时，应自动回落到 720P；原时长低于 4 秒时，应自动调整到 4 秒并给出说明。
 
 ### 6.2 分镜视频页
 
@@ -162,8 +166,8 @@
 
 ## 7. 已知边界与后续工作
 
-- Seedance 2.0／2.5 尚不能从公开 API 调用；正式 GA 后再启用。
-- MiniMax H3／Hailuo 尚未使用真实 Key 冒烟，配置后建议各做一次最低成本验收。
+- MiniMax H3 与 Seedance 2.0／Fast／Mini 尚未全部执行付费冒烟；配置后建议分别只做一次最低时长、单候选验收。
+- Seedance 2.5 与 Hailuo 2.3／Fast 不满足当前有序多图工作流，仍不可选，也不会自动降级成单首帧。
 - 本批不生成对白、配音、口型或原生音频。
 - 本批不实现首尾帧、视频参考、音频参考和 H3 Context-IR；接口能力可在后续扩展。
 - 视频候选仍需人工审批；模型成功不等于人物、产品、动作和物理一致性合格。

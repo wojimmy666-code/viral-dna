@@ -41,6 +41,7 @@ test("keeps new-analysis in the workbench but removes it from records and detail
   assert.equal(shouldShowTopbarCreate("new-analysis", report), true);
   assert.equal(shouldShowTopbarCreate("history", null), false);
   assert.equal(shouldShowTopbarCreate("assets", null), false);
+  assert.equal(shouldShowTopbarCreate("platform-connections", null), false);
   assert.equal(shouldShowTopbarCreate("workspace", report), false);
 });
 

@@ -23,6 +23,7 @@ from viral_dna_api.models import (
     GenerationCandidateStatus,
     ImageExecutionMode,
     ImageGenerationCreate,
+    MediaEvidence,
     MediaMetadata,
     ProductionAdvanceRequest,
     ProductionChangeKind,
@@ -30,8 +31,12 @@ from viral_dna_api.models import (
     ProductionStep,
     ReferenceAssetCreate,
     ReferenceAssetType,
+    SceneBoundaryCandidate,
+    SegmentationMetadata,
+    ShotPlan,
     ShotPlanUpdate,
     ShotVideoApprovalRevokeRequest,
+    ShotVisualBeatCreate,
     SourceType,
     Video,
     VideoClipAudioMode,
@@ -315,6 +320,7 @@ def isolated_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     repository=None,
+    media_processor=None,
 ) -> tuple[ProductionService, object]:
     root = tmp_path / "workspace"
     monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
@@ -326,6 +332,7 @@ def isolated_service(
         repository,
         workspace,
         image_gateway=FakeRealImageGateway(workspace),
+        media_processor=media_processor,
     ), repository
 
 
@@ -348,6 +355,397 @@ def test_project_default_output_follows_source_video_ratio(
         assert detail.project.output_aspect_ratio == "16:9"
         assert detail.project.output_width == 1920
         assert detail.project.output_height == 1080
+
+    asyncio.run(scenario())
+
+
+def test_legacy_multi_scene_prompt_expands_into_ordered_visual_beats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(
+            tmp_path,
+            monkeypatch,
+            media_processor=FakeFrameProcessor(),
+        )
+        record, video, analysis, _ = await seed_completed_analysis(repository)
+        source_path = tmp_path / "legacy-multi-scene.mp4"
+        source_path.write_bytes(b"test-video")
+        await repository.save_video(
+            video.model_copy(update={"stored_path": str(source_path)})
+        )
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        original = (await service.list_shots(detail.project.id))[0].plan
+        revision_count = detail.revision_count
+        legacy = ShotPlan.model_validate(
+            {
+                **original.model_dump(mode="python"),
+                "image_prompt": (
+                    "第一部分：室内近景，女子背对镜头。"
+                    "第二部分：户外远景，少女坐在木质平台上。"
+                ),
+                "visual_beats": [],
+            }
+        )
+        assert legacy.visual_beats[0].source_origin == "legacy"
+        await repository.save_shot_plan(legacy)
+
+        migrated = (await service.list_shots(detail.project.id))[0].plan
+
+        assert [item.index for item in migrated.visual_beats] == [1, 2]
+        assert [item.title for item in migrated.visual_beats] == ["第一部分", "第二部分"]
+        assert migrated.visual_beats[0].image_prompt.startswith("室内近景")
+        assert migrated.visual_beats[1].image_prompt.startswith("户外远景")
+        assert migrated.visual_beats[0].transition_to_next_type == "model_generated"
+        assert migrated.visual_beats[1].transition_to_next_type == "cut"
+        assert (
+            migrated.visual_beats[0].source_frame_url
+            != migrated.visual_beats[1].source_frame_url
+        )
+        assert (
+            migrated.visual_beats[0].source_frame_relative_path
+            != migrated.visual_beats[1].source_frame_relative_path
+        )
+        assert all(
+            item.source_origin == "auto_extract" for item in migrated.visual_beats
+        )
+        assert all(item.source_frame_sha256 for item in migrated.visual_beats)
+        assert (
+            migrated.visual_beats[0].source_timestamp_seconds
+            < migrated.visual_beats[1].source_timestamp_seconds
+        )
+        assert (await service.get_project(detail.project.id)).revision_count == (
+            revision_count + 1
+        )
+
+    asyncio.run(scenario())
+
+
+def test_existing_duplicate_visual_beat_frames_are_repaired_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(
+            tmp_path,
+            monkeypatch,
+            media_processor=FakeFrameProcessor(),
+        )
+        record, video, analysis, _ = await seed_completed_analysis(repository)
+        source_path = tmp_path / "duplicate-visual-beats.mp4"
+        source_path.write_bytes(b"test-video")
+        await repository.save_video(
+            video.model_copy(update={"stored_path": str(source_path)})
+        )
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        original = (await service.list_shots(detail.project.id))[0].plan
+        duplicate_url = (
+            f"/api/v1/analyses/{analysis.id}/artifacts/shots/shot_001.jpg"
+        )
+        first = original.visual_beats[0].model_copy(
+            update={
+                "index": 1,
+                "title": "第一部分",
+                "start_ratio": 0,
+                "end_ratio": 0.5,
+                "source_frame_url": duplicate_url,
+                "source_timestamp_seconds": original.start_seconds + 0.25,
+                "source_origin": "analysis",
+                "image_prompt": "室内近景",
+            }
+        )
+        second = first.model_copy(
+            update={
+                "id": uuid4(),
+                "index": 2,
+                "title": "第二部分",
+                "start_ratio": 0.5,
+                "end_ratio": 1,
+                "source_timestamp_seconds": round(
+                    float(first.source_timestamp_seconds or original.start_seconds) + 0.5,
+                    3,
+                ),
+                "image_prompt": "户外远景",
+            }
+        )
+        duplicated = original.model_copy(update={"visual_beats": [first, second]})
+        await repository.save_shot_plan(duplicated)
+        before = len(await repository.list_production_revisions(detail.project.id))
+
+        repaired = (await service.list_shots(detail.project.id))[0].plan
+        after = len(await repository.list_production_revisions(detail.project.id))
+
+        assert after == before + 1
+        assert [item.source_origin for item in repaired.visual_beats] == [
+            "auto_extract",
+            "auto_extract",
+        ]
+        assert len({item.source_frame_url for item in repaired.visual_beats}) == 2
+        assert len({item.source_frame_relative_path for item in repaired.visual_beats}) == 2
+        assert len({item.source_frame_sha256 for item in repaired.visual_beats}) == 2
+        assert (
+            repaired.visual_beats[0].source_timestamp_seconds
+            < repaired.visual_beats[1].source_timestamp_seconds
+        )
+
+        await service.list_shots(detail.project.id)
+        assert len(await repository.list_production_revisions(detail.project.id)) == after
+
+    asyncio.run(scenario())
+
+
+def test_leading_visual_beat_from_previous_shot_is_removed_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, video, analysis, _ = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        responses = await service.list_shots(detail.project.id)
+        target = responses[1].plan
+        report = await repository.get_report_by_analysis(analysis.id)
+        assert report is not None
+        source_shot = next(item for item in report.shots if item.id == target.source_shot_id)
+        boundary = target.start_seconds
+        candidate = SceneBoundaryCandidate(
+            id="candidate_001",
+            timestamp_seconds=boundary,
+            score=0.09,
+            methods=["adjacent_scene_score", "temporal_window_scene_score"],
+            evidence_timestamps=[
+                round(boundary - 0.75, 3),
+                round(boundary - 0.12, 3),
+                round(boundary + 0.12, 3),
+                round(boundary + 0.75, 3),
+            ],
+            selected_by_model=True,
+            model_decision="keep",
+            semantic_group_before="产品/主体演示",
+            semantic_group_after="结果/生活方式",
+        )
+        media_evidence = MediaEvidence(
+            processor_version="test-boundary-content-v1",
+            metadata=MediaMetadata(
+                duration_seconds=report.overview.duration_seconds,
+                width=720,
+                height=1280,
+                fps=30,
+                format_name="mp4",
+                video_codec="h264",
+                has_audio=False,
+                size_bytes=100,
+                sha256="b" * 64,
+                aspect_ratio="9:16",
+            ),
+            proxy_url=f"/api/v1/analyses/{analysis.id}/artifacts/proxy.mp4",
+            manifest_url=f"/api/v1/analyses/{analysis.id}/artifacts/manifest.json",
+            shots=[],
+            segmentation=SegmentationMetadata(
+                detector_version="test-boundary-content-v1",
+                candidate_count=1,
+                candidates=[candidate],
+                selected_candidate_ids=[candidate.id],
+                final_boundaries=[0, boundary, report.overview.duration_seconds],
+                final_shot_count=2,
+                verified_by_model=True,
+            ),
+        )
+        updated_shot = source_shot.model_copy(
+            update={"source_candidate_ids": [candidate.id]}
+        )
+        await repository.save_report(
+            report.model_copy(
+                update={
+                    "shots": [
+                        updated_shot if item.id == updated_shot.id else item
+                        for item in report.shots
+                    ],
+                    "media_evidence": media_evidence,
+                }
+            )
+        )
+
+        original = target.visual_beats[0]
+        contaminated = original.model_copy(
+            update={
+                "index": 1,
+                "title": "第一部分",
+                "start_ratio": 0,
+                "end_ratio": 0.5,
+                "source_frame_url": "/test/previous-scene.jpg",
+                "source_timestamp_seconds": round(boundary + 0.18, 3),
+                "source_origin": "auto_extract",
+                "image_prompt": "室内女子背影，属于上一分镜。",
+            }
+        )
+        valid = contaminated.model_copy(
+            update={
+                "id": uuid4(),
+                "index": 2,
+                "title": "第二部分",
+                "start_ratio": 0.5,
+                "end_ratio": 1,
+                "source_frame_url": "/test/current-scene.jpg",
+                "source_timestamp_seconds": round(boundary + 0.75, 3),
+                "image_prompt": "户外稻田观景台上的少女。",
+            }
+        )
+        await repository.save_shot_plan(
+            target.model_copy(
+                update={
+                    "image_prompt": contaminated.image_prompt,
+                    "video_prompt": (
+                        f"第一部分：{contaminated.image_prompt}"
+                        f"第二部分：{valid.image_prompt}"
+                    ),
+                    "visual_beats": [contaminated, valid],
+                }
+            )
+        )
+        before = len(await repository.list_production_revisions(detail.project.id))
+
+        repaired = next(
+            item.plan
+            for item in await service.list_shots(detail.project.id)
+            if item.plan.id == target.id
+        )
+        after = len(await repository.list_production_revisions(detail.project.id))
+
+        assert after == before + 1
+        assert len(repaired.visual_beats) == 1
+        assert repaired.visual_beats[0].id == valid.id
+        assert repaired.visual_beats[0].index == 1
+        assert repaired.visual_beats[0].start_ratio == 0
+        assert repaired.visual_beats[0].end_ratio == 1
+        assert repaired.image_prompt == valid.image_prompt
+        assert "上一分镜" not in repaired.video_prompt
+        assert repaired.approved_video_candidate_id is None
+
+        await service.list_shots(detail.project.id)
+        assert len(await repository.list_production_revisions(detail.project.id)) == after
+
+    asyncio.run(scenario())
+
+
+def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        shot = (await service.list_shots(detail.project.id))[0].plan
+        second = await service.create_visual_beat(
+            shot.id,
+            ShotVisualBeatCreate(
+                expected_revision_id=detail.project.current_revision_id,
+                insert_after_visual_beat_id=shot.visual_beats[0].id,
+                title="户外画面",
+                image_prompt="少女坐在户外平台，保持人物身份一致。",
+            ),
+        )
+        beats = second.plan.visual_beats
+        assert len(beats) == 2
+
+        for beat in beats:
+            current = await service.get_project(detail.project.id)
+            queued = await service.create_image_run(
+                shot.id,
+                ImageGenerationCreate(
+                    expected_revision_id=current.project.current_revision_id,
+                    visual_beat_id=beat.id,
+                    input_mode=(
+                        "keyframe_edit" if beat.source_frame_url else "text_to_image"
+                    ),
+                    candidate_count=1,
+                ),
+            )
+            run = await wait_for_generation(service, queued.id)
+            assert run.visual_beat_id == beat.id
+            current = await service.get_project(detail.project.id)
+            selected = await service.select_candidate(
+                run.candidates[0].id,
+                CandidateSelectRequest(
+                    expected_revision_id=current.project.current_revision_id,
+                    visual_beat_id=beat.id,
+                ),
+            )
+            await service.approve_candidate(
+                run.candidates[0].id,
+                CandidateApprovalRequest(
+                    expected_revision_id=selected.shot.current_revision_id,
+                    visual_beat_id=beat.id,
+                    decision=ApprovalDecision.APPROVED,
+                ),
+            )
+
+        approved = await service.get_shot(shot.id)
+        assert approved.plan.image_status == WorkflowItemStatus.APPROVED
+        assert all(
+            item.approved_image_candidate_id is not None
+            for item in approved.plan.visual_beats
+        )
+        for other_shot in (await service.list_shots(detail.project.id))[1:]:
+            current = await service.get_project(detail.project.id)
+            await service.update_shot(
+                other_shot.plan.id,
+                ShotPlanUpdate(
+                    expected_revision_id=current.project.current_revision_id,
+                    required=False,
+                ),
+            )
+        current = await service.get_project(detail.project.id)
+        await service.advance(
+            detail.project.id,
+            ProductionAdvanceRequest(
+                expected_revision_id=current.project.current_revision_id,
+                target_step=ProductionStep.SHOT_VIDEOS,
+            ),
+        )
+        service.video_gateway = VideoGenerationGateway(
+            service.workspace,
+            media_processor=FakeStillVideoProcessor(),
+        )
+        current = await service.get_project(detail.project.id)
+        queued_video = await service.create_video_run(
+            shot.id,
+            VideoGenerationCreate(
+                expected_revision_id=current.project.current_revision_id,
+                duration_seconds=3,
+            ),
+        )
+        video_run = await wait_for_generation(service, queued_video.id)
+        assert video_run.status == "completed"
+        stored_video_run = await repository.get_generation_run(video_run.id)
+        assert stored_video_run is not None
+        snapshot_path = service.workspace.resolve(
+            stored_video_run.input_snapshot_relative_path
+        )
+        filesystem_snapshot = Path(chr(92) * 2 + "?" + chr(92) + str(snapshot_path))
+        snapshot_text = await asyncio.to_thread(
+            filesystem_snapshot.read_text,
+            encoding="utf-8",
+        )
+        snapshot = json.loads(snapshot_text)
+        assert [item["ordinal"] for item in snapshot["reference_images"]] == [1, 2]
+        assert [item["visual_beat_id"] for item in snapshot["reference_images"]] == [
+            str(item.id) for item in approved.plan.visual_beats
+        ]
 
     asyncio.run(scenario())
 
@@ -408,6 +806,31 @@ def test_production_service_rejects_incomplete_or_foreign_analysis(
     asyncio.run(scenario())
 
 
+def test_optional_reference_stage_is_normalized_for_existing_projects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        created = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        legacy = created.project.model_copy(
+            update={"active_step": ProductionStep.REFERENCE_ASSETS}
+        )
+        await repository.save_production_project(legacy)
+
+        detail = await service.get_project(legacy.id)
+        projects = await service.list_projects(record.id)
+
+        assert detail.project.active_step == ProductionStep.SHOT_IMAGES
+        assert projects[0].active_step == ProductionStep.SHOT_IMAGES
+
+    asyncio.run(scenario())
+
+
 def test_production_http_api_revision_reference_and_branch_flow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -432,11 +855,13 @@ def test_production_http_api_revision_reference_and_branch_flow(
         assert created["project"]["name"] == "人物复刻方案"
         assert created["project"]["output_width"] == 1080
         assert created["project"]["output_height"] == 1920
+        assert created["project"]["active_step"] == "shot_images"
+        assert created["reference_count"] == 0
 
         revision_response = client.get(f"/api/v1/productions/{project_id}/revisions/{revision_1}")
         assert revision_response.status_code == 200
         snapshot = revision_response.json()["snapshot"]
-        assert snapshot["schema_version"] == "production-revision-v3"
+        assert snapshot["schema_version"] == "production-revision-v4"
         assert snapshot["source_analysis"]["analysis_id"] == str(analysis.id)
         assert len(snapshot["source_analysis"]["shots"]) == 5
         assert "snapshot_relative_path" not in revision_response.json()
@@ -486,6 +911,9 @@ def test_production_http_api_revision_reference_and_branch_flow(
         assert asset["rights_note"] == "已取得授权"
         assert "relative_path" not in asset
         assert revision_3 != revision_2
+        assert client.get(f"/api/v1/productions/{project_id}").json()["project"][
+            "active_step"
+        ] == "shot_images"
 
         content_response = client.get(asset["content_url"])
         thumbnail_response = client.get(asset["thumbnail_url"])
@@ -524,6 +952,7 @@ def test_production_http_api_revision_reference_and_branch_flow(
         assert branch["project"]["name"] == "历史版本分支"
         assert branch["project"]["source_project_id"] == project_id
         assert branch["project"]["source_revision_id"] == revision_3
+        assert branch["project"]["active_step"] == "shot_images"
         assert branch["reference_count"] == 1
         branch_assets = client.get(f"/api/v1/productions/{branch_id}/references").json()
         assert len(branch_assets) == 1
@@ -759,6 +1188,8 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
         ).json()
         project_id = created["project"]["id"]
         revision_id = created["project"]["current_revision_id"]
+        assert created["project"]["active_step"] == "shot_images"
+        assert created["reference_count"] == 0
         shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
         plan = shots[0]["plan"]
         timestamp = round(
@@ -787,7 +1218,7 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
         assert selected_plan["source_keyframe_timestamp_seconds"] == timestamp
         assert selected_plan["image_status"] == "ready"
         assert selected_plan["source_keyframe_url"].startswith(
-            f"/api/v1/production-shots/{plan['id']}/source-keyframe"
+            f"/api/v1/production-shots/{plan['id']}/visual-beats/"
         )
         keyframe_response = client.get(selected_plan["source_keyframe_url"])
         assert keyframe_response.status_code == 200
@@ -1153,7 +1584,7 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
             },
         )
         assert duplicate_revoke.status_code == 409
-        assert duplicate_revoke.json()["detail"] == "当前分镜图片尚未采用，无需取消"
+        assert duplicate_revoke.json()["detail"] == "当前画面图片尚未采用，无需取消"
 
         second_queued = client.post(
             f"/api/v1/production-shots/{shot_id}/image-runs",
@@ -1626,7 +2057,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 video_run.error_message,
             )
             assert video_run.kind == "video"
-            assert video_run.input_mode == "image_to_video"
+            assert video_run.input_mode == "multi_image_to_video"
             assert video_run.execution_mode == "simulated"
             assert len(video_run.candidates) == (2 if index == 0 else 1)
             candidate = video_run.candidates[0]
@@ -1702,6 +2133,88 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
 
             if index == 0:
                 first_candidate_id = candidate.id
+                current = await service.get_project(detail.project.id)
+                alternative_run = await service.create_video_run(
+                    shot.plan.id,
+                    VideoGenerationCreate(
+                        expected_revision_id=current.project.current_revision_id,
+                        candidate_count=1,
+                        duration_seconds=requested_duration,
+                        generation_intent="new_variation",
+                        seed=20260810,
+                    ),
+                )
+                alternative_run = await wait_for_generation(
+                    service,
+                    alternative_run.id,
+                )
+                assert alternative_run.status == "completed"
+                alternative = alternative_run.candidates[0]
+
+                history_detail = await service.get_shot(shot.plan.id)
+                video_runs = [
+                    run for run in history_detail.generation_runs if run.kind == "video"
+                ]
+                assert len(video_runs) == 2
+                assert sum(len(run.candidates) for run in video_runs) == 3
+                assert history_detail.plan.video_status == WorkflowItemStatus.APPROVED
+                assert history_detail.plan.approved_video_candidate_id == candidate.id
+                assert history_detail.video_preparation is not None
+                assert history_detail.video_preparation.status == VideoClipPreparationStatus.READY
+                old_candidate = await repository.get_generation_candidate(candidate.id)
+                assert old_candidate is not None
+                assert old_candidate.status == GenerationCandidateStatus.SELECTED
+
+                await repository.save_generation_candidate(
+                    old_candidate.model_copy(
+                        update={"status": GenerationCandidateStatus.ARCHIVED}
+                    )
+                )
+                repaired_history = await service.get_shot(shot.plan.id)
+                repaired_old = next(
+                    item
+                    for run in repaired_history.generation_runs
+                    for item in run.candidates
+                    if item.id == candidate.id
+                )
+                assert repaired_old.status == GenerationCandidateStatus.SELECTED
+
+                current = await service.get_project(detail.project.id)
+                switched = await service.approve_candidate(
+                    alternative.id,
+                    CandidateApprovalRequest(
+                        expected_revision_id=current.project.current_revision_id,
+                        decision=ApprovalDecision.APPROVED,
+                    ),
+                )
+                assert switched.shot.plan.approved_video_candidate_id == alternative.id
+                switched_detail = await service.get_shot(shot.plan.id)
+                assert switched_detail.video_preparation is not None
+                assert (
+                    switched_detail.video_preparation.status
+                    == VideoClipPreparationStatus.STALE
+                )
+                old_candidate = await repository.get_generation_candidate(candidate.id)
+                assert old_candidate is not None
+                assert old_candidate.status == GenerationCandidateStatus.READY
+
+                switched_back = await service.approve_candidate(
+                    candidate.id,
+                    CandidateApprovalRequest(
+                        expected_revision_id=switched.shot.current_revision_id,
+                        decision=ApprovalDecision.APPROVED,
+                    ),
+                )
+                assert switched_back.shot.plan.approved_video_candidate_id == candidate.id
+                prepared = await service.prepare_video_clip(
+                    shot.plan.id,
+                    VideoClipPreparationUpdate(
+                        expected_revision_id=switched_back.shot.current_revision_id,
+                        audio_mode=VideoClipAudioMode.MUTED,
+                    ),
+                )
+                assert prepared.status == VideoClipPreparationStatus.READY
+
                 reopened = await service.revoke_video_approval(
                     shot.plan.id,
                     ShotVideoApprovalRevokeRequest(
@@ -1744,7 +2257,8 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             if item.video_preview is not None
         )
         first_detail = await service.get_shot(shots[0].plan.id)
-        assert [run.kind for run in first_detail.generation_runs[:2]] == [
+        assert [run.kind for run in first_detail.generation_runs[:3]] == [
+            "video",
             "video",
             "image",
         ]

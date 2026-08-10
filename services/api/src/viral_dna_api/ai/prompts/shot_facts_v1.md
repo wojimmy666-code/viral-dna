@@ -8,4 +8,6 @@
 4. replication_prompt 必须能够给视频生成模型使用，包含主体、动作、环境、摄影、光线、色彩和时序，但不要写模型名，不要声称复刻真人身份。
 5. 所有字段使用简体中文，confidence 使用 0 到 1。
 6. 如果开始帧、中间帧和结束帧明显属于两个及以上不同主体、场景或叙事任务，将 contains_multiple_scenes 设为 true，并在 multiple_scenes_reason 中说明证据；否则设为 false。
-7. 严格输出一个 JSON 对象，不要输出 Markdown、解释或额外字段。
+7. visual_beats 必须至少包含一个画面，并且每个画面必须填写当前镜头有效内容范围内的绝对 start_seconds、end_seconds、source_timestamp_seconds 和可独立用于生图的 image_prompt。单一场景只返回一个画面；确实存在多个连续画面时才返回多个。
+8. 输入已经排除了镜头边界处的转场区间。不得把上一镜头、转场残影或用户提示中的上一镜头内容写入当前镜头，也不得为了描述转场而虚构额外画面。
+9. 严格输出一个 JSON 对象，不要输出 Markdown、解释或额外字段。

@@ -18,6 +18,7 @@ from viral_dna_api.models import (
     VideoGenerationInputMode,
 )
 from viral_dna_api.video_generation import (
+    OrderedReferenceFrame,
     VideoGenerationGateway,
     VideoGenerationGatewayError,
 )
@@ -94,10 +95,42 @@ def test_video_gateway_creates_persistent_simulated_candidates(
             image_prompt="保持原始人物与构图",
             video_prompt="人物向镜头走近，镜头缓慢后退",
         )
-        image_id = uuid4()
-        image_path = workspace.root / "approved.jpg"
+        image_path = workspace.root / "approved-1.jpg"
+        second_image_path = workspace.root / "approved-2.jpg"
         image_path.parent.mkdir(parents=True, exist_ok=True)
         Image.new("RGB", (720, 1280), (96, 82, 220)).save(image_path, "JPEG")
+        Image.new("RGB", (720, 1280), (56, 170, 132)).save(
+            second_image_path,
+            "JPEG",
+        )
+        references = (
+            OrderedReferenceFrame(
+                visual_beat_id=uuid4(),
+                ordinal=1,
+                title="室内近景",
+                candidate_id=uuid4(),
+                path=image_path,
+                relative_path="approved-1.jpg",
+                sha256="a" * 64,
+                start_ratio=0,
+                end_ratio=0.45,
+                transition_to_next_type="model_generated",
+                transition_to_next_duration_seconds=0.5,
+            ),
+            OrderedReferenceFrame(
+                visual_beat_id=uuid4(),
+                ordinal=2,
+                title="户外远景",
+                candidate_id=uuid4(),
+                path=second_image_path,
+                relative_path="approved-2.jpg",
+                sha256="b" * 64,
+                start_ratio=0.45,
+                end_ratio=1,
+                transition_to_next_type="cut",
+                transition_to_next_duration_seconds=0,
+            ),
+        )
         gateway = VideoGenerationGateway(
             workspace,
             media_processor=FakeStillVideoProcessor(),
@@ -107,9 +140,7 @@ def test_video_gateway_creates_persistent_simulated_candidates(
             project,
             shot,
             revision_id,
-            image_id,
-            image_path,
-            "a" * 64,
+            references,
             candidate_count=2,
             duration_seconds=3,
             execution_mode="simulated",
@@ -117,7 +148,7 @@ def test_video_gateway_creates_persistent_simulated_candidates(
         )
 
         assert run.kind == "video"
-        assert run.input_mode == VideoGenerationInputMode.IMAGE_TO_VIDEO
+        assert run.input_mode == VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO
         assert run.execution_mode == ImageExecutionMode.SIMULATED
         assert run.status == "completed"
         assert run.cost_estimate_known is True
@@ -138,11 +169,17 @@ def test_video_gateway_creates_persistent_simulated_candidates(
         input_payload = json.loads(
             filesystem_path(workspace.resolve(run.input_snapshot_relative_path)).read_text("utf-8")
         )
-        assert input_payload["schema_version"] == "viral-dna-video-generation/v1"
-        assert input_payload["start_frame"]["candidate_id"] == str(image_id)
-        assert input_payload["start_frame"]["sha256"] == "a" * 64
+        assert input_payload["schema_version"] == "viral-dna-video-generation/v2"
+        assert [item["ordinal"] for item in input_payload["reference_images"]] == [1, 2]
+        assert input_payload["reference_images"][0]["candidate_id"] == str(
+            references[0].candidate_id
+        )
+        assert input_payload["reference_images"][1]["sha256"] == "b" * 64
         assert input_payload["output"]["native_audio"] is False
-        assert input_payload["prompt"]["positive"].startswith("以已确认分镜图片作为起始帧")
+        assert input_payload["prompt"]["positive"].startswith(
+            "使用下列有序参考图生成一段连续视频"
+        )
+        assert "图1到图2" in input_payload["prompt"]["positive"]
 
     asyncio.run(scenario())
 

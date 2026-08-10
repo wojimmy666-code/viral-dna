@@ -11,7 +11,7 @@ def build_minimax_hailuo_request(request: ProviderVideoRequest) -> dict[str, obj
     return {
         "model": request.provider_model,
         "prompt": prompt,
-        "first_frame_image": image_data_url(request.first_frame_path),
+        "first_frame_image": image_data_url(request.reference_frames[0].path),
         "duration": round(request.duration_seconds),
         "resolution": request.resolution,
         "prompt_optimizer": True,

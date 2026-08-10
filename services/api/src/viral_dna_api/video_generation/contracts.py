@@ -15,9 +15,9 @@ from ..models import (
     VideoProviderTaskStatus,
 )
 
-VIDEO_REQUEST_SCHEMA_VERSION = "viral-dna-video-generation/v1"
-VIDEO_PROMPT_VERSION = "shot-video-v1"
-VIDEO_ADAPTER_PROTOCOL_VERSION = "viral-dna-video-adapter/v1"
+VIDEO_REQUEST_SCHEMA_VERSION = "viral-dna-video-generation/v2"
+VIDEO_PROMPT_VERSION = "shot-video-multi-image-v2"
+VIDEO_ADAPTER_PROTOCOL_VERSION = "viral-dna-video-adapter/v2"
 MAX_GENERATED_VIDEO_BYTES = 500 * 1024 * 1024
 
 
@@ -29,11 +29,37 @@ class VideoGenerationError(RuntimeError):
         message: str,
         *,
         retryable: bool = False,
+        provider_code: str | None = None,
+        error_category: str | None = None,
+        user_title: str | None = None,
+        suggested_action: str | None = None,
+        technical_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.retryable = retryable
+        self.provider_code = provider_code
+        self.error_category = error_category
+        self.user_title = user_title
+        self.suggested_action = suggested_action
+        self.technical_message = technical_message
+
+
+@dataclass(frozen=True, slots=True)
+class OrderedReferenceFrame:
+    visual_beat_id: UUID
+    ordinal: int
+    title: str
+    candidate_id: UUID
+    path: Path
+    relative_path: str
+    sha256: str
+    start_ratio: float
+    end_ratio: float
+    transition_to_next_type: str
+    transition_to_next_duration_seconds: float
+    transition_to_next_prompt: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,10 +67,7 @@ class VideoGenerationRequest:
     project: ProductionProject
     shot: ShotPlan
     revision_id: UUID
-    approved_image_candidate_id: UUID
-    approved_image_path: Path
-    approved_image_relative_path: str
-    approved_image_sha256: str
+    reference_frames: tuple[OrderedReferenceFrame, ...]
     candidate_count: int
     duration_seconds: float
     execution_mode: ImageExecutionMode
@@ -60,8 +83,7 @@ class VideoAdapterRequest:
     run_root: Path
     project: ProductionProject
     shot: ShotPlan
-    approved_image_path: Path
-    approved_image_sha256: str
+    reference_frames: tuple[OrderedReferenceFrame, ...]
     candidate_count: int
     duration_seconds: float
     width: int
@@ -146,7 +168,7 @@ class ProviderVideoRequest:
     provider_model: str
     prompt: str
     negative_prompt: str
-    first_frame_path: Path
+    reference_frames: tuple[OrderedReferenceFrame, ...]
     duration_seconds: float
     resolution: str
     aspect_ratio: str
@@ -175,6 +197,11 @@ class ProviderPollResult:
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    provider_error_code: str | None = None
+    error_category: str | None = None
+    error_title: str | None = None
+    error_technical_message: str | None = None
+    error_action: str | None = None
 
 
 class VideoProviderAdapter(Protocol):

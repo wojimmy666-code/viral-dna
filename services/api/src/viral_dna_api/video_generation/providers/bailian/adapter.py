@@ -30,7 +30,7 @@ def _json(response: httpx.Response) -> dict[str, Any]:
 
 class BailianVideoProvider:
     provider_id = "bailian"
-    adapter_version = "bailian-wan27-v1"
+    adapter_version = "bailian-wan27-r2v-v2"
 
     async def validate_credentials(
         self,

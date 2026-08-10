@@ -35,6 +35,7 @@ from .contracts import (
     VIDEO_PROMPT_VERSION,
     VIDEO_REQUEST_SCHEMA_VERSION,
     GeneratedVideo,
+    OrderedReferenceFrame,
     VideoAdapterIdentity,
     VideoAdapterRequest,
     VideoAdapterResult,
@@ -116,13 +117,29 @@ def _compiled_dimensions(
     return width, height
 
 
-def _positive_prompt(shot: ShotPlan) -> str:
+def _positive_prompt(
+    shot: ShotPlan,
+    reference_frames: tuple[OrderedReferenceFrame, ...],
+) -> str:
     lines = [
-        "以已确认分镜图片作为起始帧生成单镜头视频。",
+        "使用下列有序参考图生成一段连续视频；图号顺序就是画面出现顺序。",
         f"动作与运镜要求：{shot.video_prompt.strip()}",
-        "保持起始帧中的人物身份、服装、产品结构、场景布局、画幅和光影连续。",
-        "只生成该分镜的连续画面，不添加配音、字幕、片头、片尾或额外文字。",
+        "保持各参考图之间的人物身份、服装、产品结构、动作承接、空间位置、画幅和光影连续。",
     ]
+    for frame in reference_frames:
+        lines.append(
+            f"图{frame.ordinal}（{frame.title}）位于视频进度 "
+            f"{frame.start_ratio:.0%}～{frame.end_ratio:.0%}。"
+        )
+        if frame.ordinal < len(reference_frames):
+            transition = frame.transition_to_next_prompt.strip()
+            lines.append(
+                f"图{frame.ordinal}到图{frame.ordinal + 1}采用 "
+                f"{frame.transition_to_next_type} 转场，约 "
+                f"{frame.transition_to_next_duration_seconds:g} 秒"
+                f"{f'；{transition}' if transition else '。'}"
+            )
+    lines.append("不添加配音、字幕、片头、片尾、额外文字或水印。")
     locked = "、".join(item.value for item in shot.locks)
     if locked:
         lines.append(f"必须保持的约束：{locked}。")
@@ -166,6 +183,10 @@ class SimulatedVideoAdapter:
             protocol_version=VIDEO_ADAPTER_PROTOCOL_VERSION,
             capability=VideoGenerationCapability(
                 image_to_video=True,
+                multi_image_reference=True,
+                ordered_reference_images=True,
+                minimum_reference_images=1,
+                maximum_reference_images=20,
                 start_frame=True,
                 end_frame=False,
                 max_candidates=4,
@@ -199,7 +220,7 @@ class SimulatedVideoAdapter:
             temporary = request.run_root / f".candidate_{ordinal:03d}.mp4"
             try:
                 await self.media_processor.create_still_video(
-                    request.approved_image_path,
+                    request.reference_frames[0].path,
                     _filesystem_path(temporary),
                     duration_seconds=request.duration_seconds,
                     width=request.width,
@@ -339,6 +360,15 @@ class VideoGenerationGateway:
                     str(exc),
                     retryable=exc.retryable,
                 ) from exc
+            if not (
+                resolved.identity.capability.multi_image_reference
+                and resolved.identity.capability.ordered_reference_images
+            ):
+                raise VideoGenerationGatewayError(
+                    409,
+                    "video_ordered_multi_image_required",
+                    "当前流程只允许支持有序多图参考的视频模型",
+                )
             return resolved.identity, resolved
         adapter = self.adapters.get(mode)
         if adapter is None:
@@ -346,6 +376,15 @@ class VideoGenerationGateway:
                 409,
                 "video_adapter_not_configured",
                 "当前视频生成执行器尚未配置",
+            )
+        if not (
+            adapter.identity.capability.multi_image_reference
+            and adapter.identity.capability.ordered_reference_images
+        ):
+            raise VideoGenerationGatewayError(
+                409,
+                "video_ordered_multi_image_required",
+                "当前流程只允许支持有序多图参考的视频模型",
             )
         return adapter.identity, None
 
@@ -358,10 +397,7 @@ class VideoGenerationGateway:
         project: ProductionProject,
         shot: ShotPlan,
         revision_id: UUID,
-        approved_image_candidate_id: UUID,
-        approved_image_path: Path,
-        approved_image_sha256: str,
-        approved_image_relative_path: str | None = None,
+        reference_frames: tuple[OrderedReferenceFrame, ...],
         *,
         candidate_count: int,
         duration_seconds: float,
@@ -391,11 +427,37 @@ class VideoGenerationGateway:
         )
         adapter = self.adapters.get(mode)
         capability = identity.capability
-        if not capability.image_to_video or not capability.start_frame:
+        if not (
+            capability.image_to_video
+            and capability.multi_image_reference
+            and capability.ordered_reference_images
+        ):
             raise VideoGenerationGatewayError(
                 409,
-                "video_capability_missing",
-                "当前执行器不支持以确认图片作为视频起始帧",
+                "video_ordered_multi_image_required",
+                "当前流程只允许支持有序多图参考的视频模型",
+            )
+        ordered_frames = tuple(sorted(reference_frames, key=lambda item: item.ordinal))
+        if [item.ordinal for item in ordered_frames] != list(
+            range(1, len(ordered_frames) + 1)
+        ):
+            raise VideoGenerationGatewayError(
+                422,
+                "video_reference_order_invalid",
+                "参考图序号必须连续",
+            )
+        if not (
+            capability.minimum_reference_images
+            <= len(ordered_frames)
+            <= capability.maximum_reference_images
+        ):
+            raise VideoGenerationGatewayError(
+                422,
+                "video_reference_count_unsupported",
+                (
+                    f"当前模型支持 {capability.minimum_reference_images}～"
+                    f"{capability.maximum_reference_images} 张有序参考图"
+                ),
             )
         if candidate_count < 1 or candidate_count > capability.max_candidates:
             raise VideoGenerationGatewayError(
@@ -433,18 +495,13 @@ class VideoGenerationGateway:
         _filesystem_path(run_root).mkdir(parents=True, exist_ok=True)
         selected_resolution = resolved_remote.resolution if resolved_remote else resolution
         width, height = _compiled_dimensions(project, capability, selected_resolution)
-        prompt = _positive_prompt(shot)
+        prompt = _positive_prompt(shot, ordered_frames)
         negative_prompt = _negative_prompt(shot)
         request = VideoGenerationRequest(
             project=project,
             shot=shot,
             revision_id=revision_id,
-            approved_image_candidate_id=approved_image_candidate_id,
-            approved_image_path=approved_image_path,
-            approved_image_relative_path=(
-                approved_image_relative_path or self.workspace.relative(approved_image_path)
-            ),
-            approved_image_sha256=approved_image_sha256,
+            reference_frames=ordered_frames,
             candidate_count=candidate_count,
             duration_seconds=duration_seconds,
             execution_mode=mode,
@@ -471,8 +528,7 @@ class VideoGenerationGateway:
                 run_root=run_root,
                 project=project,
                 shot=shot,
-                approved_image_path=approved_image_path,
-                approved_image_sha256=approved_image_sha256,
+                reference_frames=ordered_frames,
                 candidate_count=candidate_count,
                 duration_seconds=duration_seconds,
                 width=width,
@@ -496,7 +552,7 @@ class VideoGenerationGateway:
                     project_id=project.id,
                     shot_plan_id=shot.id,
                     run_root=run_root,
-                    first_frame_path=approved_image_path,
+                    reference_frames=ordered_frames,
                     candidate_count=candidate_count,
                     duration_seconds=duration_seconds,
                     aspect_ratio=project.output_aspect_ratio,
@@ -521,6 +577,11 @@ class VideoGenerationGateway:
                 exc.code,
                 str(exc),
                 retryable=exc.retryable,
+                provider_code=exc.provider_code,
+                error_category=exc.error_category,
+                user_title=exc.user_title,
+                suggested_action=exc.suggested_action,
+                technical_message=exc.technical_message,
             ) from exc
         if cancel_event is not None and cancel_event.is_set():
             raise VideoGenerationGatewayError(
@@ -573,7 +634,7 @@ class VideoGenerationGateway:
             shot_plan_id=shot.id,
             revision_id=revision_id,
             kind=GenerationKind.VIDEO,
-            input_mode=VideoGenerationInputMode.IMAGE_TO_VIDEO,
+            input_mode=VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO,
             provider=identity.provider,
             model=identity.model,
             model_snapshot=identity.model_snapshot,
@@ -618,7 +679,7 @@ class VideoGenerationGateway:
     ) -> dict[str, object]:
         return {
             "schema_version": VIDEO_REQUEST_SCHEMA_VERSION,
-            "input_mode": VideoGenerationInputMode.IMAGE_TO_VIDEO.value,
+            "input_mode": VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value,
             "project_id": str(request.project.id),
             "shot_plan_id": str(request.shot.id),
             "revision_id": str(request.revision_id),
@@ -652,11 +713,24 @@ class VideoGenerationGateway:
                 "version": VIDEO_PROMPT_VERSION,
             },
             "seed": request.seed,
-            "start_frame": {
-                "candidate_id": str(request.approved_image_candidate_id),
-                "relative_path": request.approved_image_relative_path,
-                "sha256": request.approved_image_sha256,
-            },
+            "reference_images": [
+                {
+                    "visual_beat_id": str(frame.visual_beat_id),
+                    "ordinal": frame.ordinal,
+                    "title": frame.title,
+                    "candidate_id": str(frame.candidate_id),
+                    "relative_path": frame.relative_path,
+                    "sha256": frame.sha256,
+                    "start_ratio": frame.start_ratio,
+                    "end_ratio": frame.end_ratio,
+                    "transition_to_next_type": frame.transition_to_next_type,
+                    "transition_to_next_duration_seconds": (
+                        frame.transition_to_next_duration_seconds
+                    ),
+                    "transition_to_next_prompt": frame.transition_to_next_prompt,
+                }
+                for frame in request.reference_frames
+            ],
             "locks": [item.value for item in request.shot.locks],
             "cost": {
                 "estimated_cost_micros": identity.estimated_cost_micros,
@@ -714,7 +788,7 @@ class VideoGenerationGateway:
         duration = generated.duration_seconds or request.duration_seconds
         sha256 = _sha256_file(resolved)
         thumbnail_path = run_root / f"candidate_{ordinal:03d}.webp"
-        self._write_thumbnail(request.approved_image_path, thumbnail_path)
+        self._write_thumbnail(request.reference_frames[0].path, thumbnail_path)
         quality_report = {
             "schema_version": "viral-dna-video-quality/v1",
             "status": "manual_review_required",

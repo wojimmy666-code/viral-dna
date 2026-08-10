@@ -244,6 +244,37 @@ def apply_model_selection(
                 reason.rstrip("。；; ")
                 + "；一致性校验：前后仍属同一粗粒度叙事组或存在连续运镜，已合并。"
             )[:800]
+        transition_start: float | None = None
+        stable_new_scene: float | None = None
+        if candidate.hard_boundary:
+            transition_start = candidate.timestamp_seconds
+            stable_new_scene = candidate.timestamp_seconds
+        elif accepted:
+            evidence_times = sorted(candidate.evidence_timestamps)
+            fallback_transition_start = (
+                evidence_times[1]
+                if len(evidence_times) >= 4
+                else candidate.timestamp_seconds
+            )
+            fallback_stable_new_scene = (
+                evidence_times[-1]
+                if evidence_times
+                else candidate.timestamp_seconds
+            )
+            transition_start = (
+                decision.transition_start_seconds
+                if decision.transition_start_seconds is not None
+                else fallback_transition_start
+            )
+            stable_new_scene = (
+                decision.stable_new_scene_seconds
+                if decision.stable_new_scene_seconds is not None
+                else fallback_stable_new_scene
+            )
+            lower = evidence_times[0] if evidence_times else candidate.timestamp_seconds
+            upper = evidence_times[-1] if evidence_times else candidate.timestamp_seconds
+            transition_start = round(min(upper, max(lower, transition_start)), 3)
+            stable_new_scene = round(min(upper, max(transition_start, stable_new_scene)), 3)
         enriched.append(
             candidate.model_copy(
                 update={
@@ -257,6 +288,8 @@ def apply_model_selection(
                     "model_consistency_adjusted": adjusted,
                     "semantic_group_before": (decision.semantic_group_before if decision else None),
                     "semantic_group_after": (decision.semantic_group_after if decision else None),
+                    "transition_start_seconds": transition_start,
+                    "stable_new_scene_seconds": stable_new_scene,
                 }
             )
         )

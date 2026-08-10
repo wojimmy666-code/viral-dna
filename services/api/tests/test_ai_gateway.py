@@ -26,6 +26,7 @@ from viral_dna_api.models import (
     ModelUsage,
     ShotEvidence,
     ShotTimelineEvidence,
+    ShotVisualBeatFact,
     SourceType,
     Video,
 )
@@ -59,6 +60,16 @@ class FakeVisionProvider:
             narrative_role="展示核心产品和使用动作",
             replication_prompt="竖屏写实中近景，人物在室内桌前拿起产品朝镜头展示。",
             confidence=0.91,
+            visual_beats=[
+                ShotVisualBeatFact(
+                    index=1,
+                    title="画面 1",
+                    start_seconds=0.2,
+                    end_seconds=1.8,
+                    source_timestamp_seconds=1,
+                    image_prompt="竖屏写实中近景，人物在室内桌前拿起产品朝镜头展示。",
+                )
+            ],
         )
         usage = ModelUsage(
             input_tokens=1000,
@@ -115,9 +126,12 @@ def _build_media_inputs(
         start_seconds=0,
         end_seconds=2,
         duration_seconds=2,
+        content_start_seconds=0.2,
+        content_end_seconds=1.8,
         representative_timestamp=1,
         keyframe_url=urls[1],
         evidence_frame_urls=urls,
+        evidence_timestamps=[0.4, 1, 1.6],
         detection_method="test",
     )
     evidence = MediaEvidence(

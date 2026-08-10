@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import warnings
 from dataclasses import dataclass
@@ -69,6 +70,9 @@ from .models import (
     ReferenceBinding,
     ReferenceBindingInput,
     ReferenceRole,
+    SceneBoundaryCandidate,
+    Shot,
+    ShotEvidence,
     ShotImageApprovalRevokeRequest,
     ShotKeyframeSelectRequest,
     ShotLifecycleStatus,
@@ -85,6 +89,11 @@ from .models import (
     ShotSourceFrameApprovalRequest,
     ShotSourceKind,
     ShotVideoApprovalRevokeRequest,
+    ShotVisualBeat,
+    ShotVisualBeatCreate,
+    ShotVisualBeatDelete,
+    ShotVisualBeatReorder,
+    ShotVisualBeatUpdate,
     Video,
     VideoClipAudioMode,
     VideoClipPreparation,
@@ -107,7 +116,12 @@ from .production_media import (
     map_timed_text,
     playback_alignment,
 )
-from .video_generation import VideoGenerationGateway, VideoGenerationGatewayError
+from .video_generation import (
+    OrderedReferenceFrame,
+    VideoGenerationGateway,
+    VideoGenerationGatewayError,
+)
+from .video_generation.errors import classify_video_provider_failure
 from .workspace import WorkspaceError, WorkspaceManager
 
 MAX_REFERENCE_IMAGE_BYTES = 15 * 1024 * 1024
@@ -115,10 +129,11 @@ MAX_REFERENCE_IMAGE_DIMENSION = 16_384
 MAX_REFERENCE_IMAGE_PIXELS = 64_000_000
 MAX_REFERENCE_ASSETS_PER_PROJECT = 50
 REFERENCE_THUMBNAIL_SIZE = 480
-PRODUCTION_SNAPSHOT_SCHEMA = "production-revision-v3"
+PRODUCTION_SNAPSHOT_SCHEMA = "production-revision-v4"
 SUPPORTED_PRODUCTION_SNAPSHOT_SCHEMAS = {
     "production-revision-v1",
     "production-revision-v2",
+    "production-revision-v3",
     PRODUCTION_SNAPSHOT_SCHEMA,
 }
 
@@ -138,6 +153,36 @@ _DEFAULT_ROLE_BY_REFERENCE_TYPE = {
 }
 
 _DURATION_ALIGNMENT_WARNING_PREFIX = "裁剪后时长与原分镜差异过大"
+_OPTIONAL_PREPARATION_STEPS = {
+    ProductionStep.PROJECT_SETUP,
+    ProductionStep.REFERENCE_ASSETS,
+}
+
+
+def _normalize_optional_preparation_step(step: ProductionStep) -> ProductionStep:
+    """Project setup and references are editable views, not workflow gates."""
+    if step in _OPTIONAL_PREPARATION_STEPS:
+        return ProductionStep.SHOT_IMAGES
+    return step
+
+
+def _normalize_optional_preparation_project(
+    project: ProductionProject,
+) -> ProductionProject:
+    normalized_step = _normalize_optional_preparation_step(project.active_step)
+    if normalized_step == project.active_step:
+        return project
+    return project.model_copy(update={"active_step": normalized_step})
+
+
+def _step_after_reference_change(
+    project: ProductionProject,
+    *,
+    affects_bound_shots: bool = False,
+) -> ProductionStep:
+    if affects_bound_shots:
+        return ProductionStep.SHOT_IMAGES
+    return _normalize_optional_preparation_step(project.active_step)
 
 
 def _duration_alignment_warning(playback_rate: float) -> str:
@@ -411,10 +456,28 @@ class VideoInspector(Protocol):
 
 
 class ProductionServiceError(RuntimeError):
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        provider_code: str | None = None,
+        error_category: str | None = None,
+        user_title: str | None = None,
+        suggested_action: str | None = None,
+        technical_message: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
+        self.retryable = retryable
+        self.provider_code = provider_code
+        self.error_category = error_category
+        self.user_title = user_title
+        self.suggested_action = suggested_action
+        self.technical_message = technical_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,8 +490,482 @@ class ReferenceImageInfo:
     thumbnail: bytes
 
 
-def _fail(status_code: int, code: str, message: str) -> ProductionServiceError:
-    return ProductionServiceError(status_code, code, message)
+@dataclass(frozen=True, slots=True)
+class VisualBeatFrameSpec:
+    """A source-frame URL/time pair plus the timestamp to materialize locally."""
+
+    source_url: str | None
+    source_timestamp_seconds: float | None
+    target_timestamp_seconds: float
+    role: str
+
+
+def _fail(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    provider_code: str | None = None,
+    error_category: str | None = None,
+    user_title: str | None = None,
+    suggested_action: str | None = None,
+    technical_message: str | None = None,
+) -> ProductionServiceError:
+    return ProductionServiceError(
+        status_code,
+        code,
+        message,
+        retryable=retryable,
+        provider_code=provider_code,
+        error_category=error_category,
+        user_title=user_title,
+        suggested_action=suggested_action,
+        technical_message=technical_message,
+    )
+
+
+def _video_gateway_failure(exc: VideoGenerationGatewayError) -> ProductionServiceError:
+    return _fail(
+        exc.status_code,
+        exc.code,
+        str(exc),
+        retryable=exc.retryable,
+        provider_code=exc.provider_code,
+        error_category=exc.error_category,
+        user_title=exc.user_title,
+        suggested_action=exc.suggested_action,
+        technical_message=exc.technical_message,
+    )
+
+
+def _visual_beat(plan: ShotPlan, visual_beat_id: UUID | None) -> ShotVisualBeat:
+    beats = sorted(plan.visual_beats, key=lambda item: item.index)
+    if not beats:
+        raise _fail(409, "visual_beat_required", "当前分镜至少需要保留一个画面")
+    if visual_beat_id is None:
+        return beats[0]
+    for beat in beats:
+        if beat.id == visual_beat_id:
+            return beat
+    raise _fail(404, "visual_beat_not_found", "指定的分镜画面不存在")
+
+
+def _visual_beat_image_status(beats: list[ShotVisualBeat]) -> WorkflowItemStatus:
+    targets = [item for item in beats if item.required] or list(beats)
+    if targets and all(
+        item.image_status == WorkflowItemStatus.APPROVED
+        and item.approved_image_candidate_id is not None
+        for item in targets
+    ):
+        return WorkflowItemStatus.APPROVED
+    for status in (
+        WorkflowItemStatus.STALE,
+        WorkflowItemStatus.GENERATING,
+        WorkflowItemStatus.REVIEW_REQUIRED,
+        WorkflowItemStatus.FAILED,
+        WorkflowItemStatus.READY,
+    ):
+        if any(item.image_status == status for item in targets):
+            return status
+    return WorkflowItemStatus.DRAFT
+
+
+def _sync_shot_visual_beats(
+    plan: ShotPlan,
+    beats: list[ShotVisualBeat],
+    *,
+    revision_id: UUID,
+    invalidate_video: bool = False,
+) -> ShotPlan:
+    ordered = sorted(beats, key=lambda item: item.index)
+    primary = ordered[0]
+    video_status = plan.video_status
+    if invalidate_video and video_status in {
+        WorkflowItemStatus.GENERATING,
+        WorkflowItemStatus.REVIEW_REQUIRED,
+        WorkflowItemStatus.APPROVED,
+        WorkflowItemStatus.STALE,
+    }:
+        video_status = WorkflowItemStatus.STALE
+    return plan.model_copy(
+        update={
+            "revision_id": revision_id,
+            "visual_beats": ordered,
+            "source_keyframe_url": primary.source_frame_url,
+            "source_keyframe_relative_path": primary.source_frame_relative_path,
+            "source_keyframe_timestamp_seconds": primary.source_timestamp_seconds,
+            "source_keyframe_origin": (
+                "analysis" if primary.source_origin == "legacy" else primary.source_origin
+            ),
+            "image_prompt": primary.image_prompt,
+            "image_prompt_mentions": primary.image_prompt_mentions,
+            "image_negative_constraints": primary.image_negative_constraints,
+            "approved_image_candidate_id": primary.approved_image_candidate_id,
+            "image_status": _visual_beat_image_status(ordered),
+            "video_status": video_status,
+            "updated_at": utc_now(),
+        }
+    )
+
+
+def _run_matches_visual_beat(
+    run: GenerationRun,
+    plan: ShotPlan,
+    visual_beat_id: UUID,
+) -> bool:
+    """Treat pre-v4 image runs as outputs of the migrated first visual beat."""
+    if run.visual_beat_id is not None:
+        return run.visual_beat_id == visual_beat_id
+    return bool(plan.visual_beats and plan.visual_beats[0].id == visual_beat_id)
+
+
+def _shot_for_visual_beat(plan: ShotPlan, beat: ShotVisualBeat) -> ShotPlan:
+    """Build the legacy image-gateway view for one beat."""
+    return plan.model_copy(
+        update={
+            "source_keyframe_url": beat.source_frame_url,
+            "source_keyframe_relative_path": beat.source_frame_relative_path,
+            "source_keyframe_timestamp_seconds": beat.source_timestamp_seconds,
+            "source_keyframe_origin": (
+                "analysis" if beat.source_origin == "legacy" else beat.source_origin
+            ),
+            "image_prompt": beat.image_prompt,
+            "image_prompt_mentions": beat.image_prompt_mentions,
+            "image_negative_constraints": beat.image_negative_constraints,
+            "required": beat.required,
+            "image_status": beat.image_status,
+            "approved_image_candidate_id": beat.approved_image_candidate_id,
+        }
+    )
+
+
+def _retime_visual_beats(beats: list[ShotVisualBeat]) -> list[ShotVisualBeat]:
+    """Preserve relative weights while producing a contiguous 0..1 timeline."""
+    if not beats:
+        return []
+    weights = [max(0.01, item.end_ratio - item.start_ratio) for item in beats]
+    total = sum(weights)
+    cursor = 0.0
+    normalized: list[ShotVisualBeat] = []
+    for index, (beat, weight) in enumerate(zip(beats, weights, strict=True), start=1):
+        end = 1.0 if index == len(beats) else cursor + weight / total
+        normalized.append(
+            beat.model_copy(
+                update={
+                    "index": index,
+                    "start_ratio": round(cursor, 6),
+                    "end_ratio": round(end, 6),
+                    "updated_at": utc_now(),
+                }
+            )
+        )
+        cursor = end
+    return normalized
+
+
+_VISUAL_PART_MARKER = re.compile(
+    r"(?P<title>(?:第[一二三四五六七八九十0-9]+部分|(?:画面|场景)[一二三四五六七八九十0-9]+))\s*[：:]"
+)
+
+
+def _split_visual_beat_prompts(prompt: str) -> list[tuple[str, str]]:
+    """Split common VLM 'first part / second part' output into visual nodes."""
+    text = prompt.strip()
+    matches = list(_VISUAL_PART_MARKER.finditer(text))
+    if len(matches) < 2:
+        return [("画面 1", text)]
+    parts: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end() : end].strip(" ；;。\n\t")
+        if body:
+            parts.append((match.group("title"), body))
+    return parts if len(parts) >= 2 else [("画面 1", text)]
+
+
+def _visual_frame_role(url: str) -> str:
+    stem = Path(unquote(url.split("?", 1)[0])).stem.lower()
+    if stem.endswith("_start"):
+        return "start"
+    if stem.endswith("_end"):
+        return "end"
+    return "middle"
+
+
+def _boundary_content_window(candidate: SceneBoundaryCandidate) -> tuple[float, float]:
+    """Return transition start and the first stable frame of the new scene."""
+
+    if candidate.hard_boundary:
+        timestamp = round(float(candidate.timestamp_seconds), 3)
+        return timestamp, timestamp
+    evidence = sorted(float(item) for item in candidate.evidence_timestamps)
+    transition_start = candidate.transition_start_seconds
+    stable_new_scene = candidate.stable_new_scene_seconds
+    if transition_start is None:
+        transition_start = evidence[1] if len(evidence) >= 4 else candidate.timestamp_seconds
+    if stable_new_scene is None:
+        stable_new_scene = evidence[-1] if evidence else candidate.timestamp_seconds
+    return (
+        round(float(transition_start), 3),
+        round(max(float(transition_start), float(stable_new_scene)), 3),
+    )
+
+
+def _report_shot_content_bounds(
+    report: AnalysisReport,
+    shot: Shot,
+    media_shot: ShotEvidence | None = None,
+) -> tuple[float, float]:
+    """Recover a clean fact-analysis interval, including for legacy reports."""
+
+    start = float(shot.start_seconds)
+    end = float(shot.end_seconds)
+    if shot.content_start_seconds is not None:
+        start = float(shot.content_start_seconds)
+    elif media_shot is not None and media_shot.content_start_seconds is not None:
+        start = float(media_shot.content_start_seconds)
+    if shot.content_end_seconds is not None:
+        end = float(shot.content_end_seconds)
+    elif media_shot is not None and media_shot.content_end_seconds is not None:
+        end = float(media_shot.content_end_seconds)
+
+    segmentation = report.media_evidence.segmentation if report.media_evidence else None
+    if segmentation is not None:
+        selected = [
+            item
+            for item in segmentation.candidates
+            if item.selected_by_model or item.hard_boundary
+        ]
+        incoming = next(
+            (
+                item
+                for item in selected
+                if item.id in shot.source_candidate_ids
+                or abs(item.timestamp_seconds - shot.start_seconds) <= 0.002
+            ),
+            None,
+        )
+        outgoing = next(
+            (
+                item
+                for item in selected
+                if abs(item.timestamp_seconds - shot.end_seconds) <= 0.002
+            ),
+            None,
+        )
+        if incoming is not None:
+            _, stable_new_scene = _boundary_content_window(incoming)
+            start = max(start, stable_new_scene)
+        if outgoing is not None:
+            transition_start, _ = _boundary_content_window(outgoing)
+            end = min(end, transition_start)
+    if end - start < 0.05:
+        return float(shot.start_seconds), float(shot.end_seconds)
+    return round(start, 3), round(end, 3)
+
+
+def _shot_frame_samples(
+    report: AnalysisReport,
+    shot: Shot,
+) -> list[VisualBeatFrameSpec]:
+    """Recover the real timestamp paired with every start/middle/end artifact."""
+
+    media_shot: ShotEvidence | None = None
+    if report.media_evidence is not None:
+        media_shot = next(
+            (item for item in report.media_evidence.shots if item.shot_id == shot.id),
+            None,
+        )
+    start, end = _report_shot_content_bounds(report, shot, media_shot)
+    duration = max(0.001, end - start)
+    offset = min(0.18, max(0.001, duration * 0.2), duration / 3)
+    representative = float(
+        media_shot.representative_timestamp
+        if media_shot is not None
+        else start + duration / 2
+    )
+    timestamps = {
+        "start": round(min(end, start + offset), 3),
+        "middle": round(min(end, max(start, representative)), 3),
+        "end": round(max(start, end - offset), 3),
+    }
+
+    evidence_urls = list(shot.evidence_frame_urls)
+    if not evidence_urls and media_shot is not None:
+        evidence_urls = list(media_shot.evidence_frame_urls)
+    role_urls: dict[str, str] = {}
+    evidence_timestamps = (
+        list(media_shot.evidence_timestamps)
+        if media_shot is not None
+        else []
+    )
+    for url in evidence_urls:
+        role_urls.setdefault(_visual_frame_role(url), url)
+    if len(evidence_timestamps) == len(evidence_urls):
+        for url, timestamp in zip(evidence_urls, evidence_timestamps, strict=True):
+            timestamps[_visual_frame_role(url)] = round(float(timestamp), 3)
+    keyframe_url = (
+        shot.keyframe_url
+        or (media_shot.keyframe_url if media_shot is not None else None)
+        or (
+            f"/api/v1/analyses/{report.analysis_id}/artifacts/"
+            f"shots/shot_{shot.index:03d}.jpg"
+        )
+    )
+    if keyframe_url:
+        role_urls["middle"] = keyframe_url
+    if evidence_urls:
+        role_urls.setdefault("start", evidence_urls[0])
+        role_urls.setdefault("end", evidence_urls[-1])
+
+    return [
+        VisualBeatFrameSpec(
+            source_url=role_urls.get(role),
+            source_timestamp_seconds=(timestamps[role] if role_urls.get(role) else None),
+            target_timestamp_seconds=timestamps[role],
+            role=role,
+        )
+        for role in ("start", "middle", "end")
+    ]
+
+
+def _visual_beat_frame_specs(
+    report: AnalysisReport,
+    shot: Shot,
+    beat_count: int,
+) -> list[VisualBeatFrameSpec]:
+    """Spread ordered visual beats over real evidence without reusing one URL."""
+
+    if beat_count <= 0:
+        return []
+    samples = _shot_frame_samples(report, shot)
+    if beat_count == 1:
+        return [samples[1]]
+
+    first_target = samples[0].target_timestamp_seconds
+    last_target = samples[-1].target_timestamp_seconds
+    used_urls: set[str] = set()
+    selected: list[VisualBeatFrameSpec] = []
+    for index in range(beat_count):
+        target = round(
+            first_target + (last_target - first_target) * index / (beat_count - 1),
+            3,
+        )
+        available = [
+            item
+            for item in samples
+            if item.source_url is not None and item.source_url not in used_urls
+        ]
+        fallback = min(
+            available,
+            key=lambda item: abs(item.target_timestamp_seconds - target),
+            default=None,
+        )
+        if fallback is not None:
+            used_urls.add(fallback.source_url or "")
+        selected.append(
+            VisualBeatFrameSpec(
+                source_url=fallback.source_url if fallback is not None else None,
+                source_timestamp_seconds=(
+                    fallback.source_timestamp_seconds if fallback is not None else None
+                ),
+                target_timestamp_seconds=target,
+                role=fallback.role if fallback is not None else "generated",
+            )
+        )
+    return selected
+
+
+def _boundary_contaminated_visual_beat_ids(
+    report: AnalysisReport,
+    plan: ShotPlan,
+) -> list[UUID]:
+    """Find leading visual beats that still belong to the previous shot."""
+
+    if plan.source_kind != ShotSourceKind.ANALYSIS or len(plan.visual_beats) <= 1:
+        return []
+    source_shot = next(
+        (item for item in report.shots if item.id == plan.source_shot_id),
+        None,
+    )
+    if source_shot is None:
+        return []
+    content_start, _ = _report_shot_content_bounds(report, source_shot)
+    if content_start - plan.start_seconds < 0.05:
+        return []
+    ordered = sorted(plan.visual_beats, key=lambda item: item.index)
+    contaminated: list[UUID] = []
+    for beat in ordered:
+        timestamp = beat.source_timestamp_seconds
+        if timestamp is None or timestamp >= content_start - 0.002:
+            break
+        contaminated.append(beat.id)
+    if not contaminated or len(contaminated) >= len(ordered):
+        return []
+    remaining = [item for item in ordered if item.id not in set(contaminated)]
+    if not any(
+        item.source_timestamp_seconds is not None
+        and item.source_timestamp_seconds >= content_start - 0.002
+        for item in remaining
+    ):
+        return []
+    return contaminated
+
+
+def _frame_sha256_and_dhash(path: Path) -> tuple[str, int]:
+    payload = path.read_bytes()
+    with Image.open(BytesIO(payload)) as source:
+        grayscale = ImageOps.grayscale(ImageOps.exif_transpose(source)).resize(
+            (9, 8),
+            Image.Resampling.LANCZOS,
+        )
+        flattened = getattr(grayscale, "get_flattened_data", None)
+        pixels = list(flattened() if flattened is not None else grayscale.getdata())
+    difference_hash = 0
+    for row in range(8):
+        row_offset = row * 9
+        for column in range(8):
+            difference_hash <<= 1
+            if pixels[row_offset + column] > pixels[row_offset + column + 1]:
+                difference_hash |= 1
+    return hashlib.sha256(payload).hexdigest(), difference_hash
+
+
+def _hash_distance(left: int, right: int) -> int:
+    return (left ^ right).bit_count()
+
+
+def _visual_beat_timestamp_candidates(
+    plan: ShotPlan,
+    beat: ShotVisualBeat,
+    target_timestamp_seconds: float,
+) -> list[float]:
+    duration = max(0.001, plan.end_seconds - plan.start_seconds)
+    beat_start = plan.start_seconds + duration * beat.start_ratio
+    beat_end = plan.start_seconds + duration * beat.end_ratio
+    beat_duration = max(0.001, beat_end - beat_start)
+    inset = min(0.18, max(0.001, beat_duration * 0.15), beat_duration / 3)
+    raw = [
+        target_timestamp_seconds,
+        beat_start + beat_duration / 2,
+        beat_start + inset,
+        beat_end - inset,
+        beat_start + beat_duration * 0.25,
+        beat_start + beat_duration * 0.75,
+    ]
+    values: list[float] = []
+    for value in raw:
+        clamped = round(
+            min(
+                max(value, plan.start_seconds),
+                max(plan.start_seconds, plan.end_seconds - 0.001),
+            ),
+            3,
+        )
+        if clamped not in values:
+            values.append(clamped)
+    return values
 
 
 def _simplified_text(
@@ -710,10 +1247,37 @@ class ProductionService:
             elif run.status in {ProductionRunStatus.FAILED, ProductionRunStatus.BLOCKED}:
                 notification_status = "failed"
                 level = "error"
-                if run.error_code == "video_provider_balance_insufficient":
-                    title = "视频生成失败：API 余额不足"
-                    message = "请充值对应 Provider 账户，或切换到其他已配置的视频模型。"
-                    action_label = "检查模型设置"
+                failure = (
+                    classify_video_provider_failure(
+                        provider=run.provider,
+                        code=run.error_code,
+                        message=run.error_technical_message or run.error_message,
+                        retryable=run.error_retryable,
+                        provider_code=run.provider_error_code,
+                    )
+                    if run.kind == GenerationKind.VIDEO
+                    else None
+                )
+                if failure and failure.suggested_action == "open_model_settings":
+                    title = (
+                        f"{model_label} 已暂停生成"
+                        if failure.category == "inference_limit"
+                        else run.error_title or failure.title
+                    )
+                    message = run.error_message or failure.message
+                    action_label = {
+                        "inference_limit": "处理模型限制",
+                        "balance": "检查账户余额",
+                        "authentication": "检查模型设置",
+                        "configuration": "完成模型配置",
+                    }.get(failure.category, "检查模型设置")
+                    action_payload.update(
+                        {
+                            "provider": run.provider,
+                            "model_alias": run.model_alias or "",
+                            "failure_category": failure.category,
+                        }
+                    )
                     await self.notification_publisher.publish(
                         category=category,
                         level=level,
@@ -726,8 +1290,16 @@ class ProductionService:
                         action_payload=action_payload,
                     )
                     return
-                title = f"分镜 {plan.index} 的{kind_label}生成失败"
-                message = "请打开对应分镜查看错误详情，调整设置后重试。"
+                title = (
+                    run.error_title
+                    or (failure.title if failure else None)
+                    or f"分镜 {plan.index} 的{kind_label}生成失败"
+                )
+                message = (
+                    run.error_message
+                    or (failure.message if failure else None)
+                    or "请打开对应分镜查看错误详情，调整设置后重试。"
+                )
                 action_label = "查看分镜"
             else:
                 notification_status = "cancelled"
@@ -800,6 +1372,13 @@ class ProductionService:
             report,
             revision_id,
         )
+        shot_plans = await self._materialize_visual_beat_source_frames(
+            project,
+            shot_plans,
+            report,
+            revision_id,
+            plan_ids={item.id for item in shot_plans if len(item.visual_beats) > 1},
+        )
         project, revision = await self._prepare_revision(
             project,
             ProductionChangeKind.PROJECT_CREATED,
@@ -826,7 +1405,10 @@ class ProductionService:
     async def list_projects(self, record_id: UUID) -> list[ProductionProject]:
         if await self.repository.get_record(record_id) is None:
             raise _fail(404, "record_not_found", "分析记录不存在")
-        projects = await self.repository.list_production_projects(record_id)
+        projects = [
+            _normalize_optional_preparation_project(project)
+            for project in await self.repository.list_production_projects(record_id)
+        ]
         return sorted(projects, key=lambda item: item.updated_at, reverse=True)
 
     async def get_project(self, project_id: UUID) -> ProductionProjectDetail:
@@ -966,7 +1548,9 @@ class ProductionService:
         source_revision = await self._require_revision(source_project, source_revision_id)
         source_snapshot = await self._read_revision_snapshot(source_project, source_revision)
         try:
-            frozen_project = ProductionProject.model_validate(source_snapshot["project"])
+            frozen_project = _normalize_optional_preparation_project(
+                ProductionProject.model_validate(source_snapshot["project"])
+            )
         except (KeyError, TypeError, ValidationError) as exc:
             raise _fail(409, "invalid_revision_snapshot", "源版本快照无法用于创建分支") from exc
 
@@ -1145,7 +1729,7 @@ class ProductionService:
                 {
                     **project.model_dump(mode="python"),
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.REFERENCE_ASSETS,
+                    "active_step": _step_after_reference_change(project),
                     "updated_at": utc_now(),
                 }
             )
@@ -1189,7 +1773,7 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.REFERENCE_ASSETS,
+                    "active_step": _step_after_reference_change(project),
                     "updated_at": utc_now(),
                 }
             )
@@ -1224,7 +1808,7 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.REFERENCE_ASSETS,
+                    "active_step": _step_after_reference_change(project),
                     "updated_at": utc_now(),
                 }
             )
@@ -1290,7 +1874,15 @@ class ProductionService:
                 impacted_ids,
                 revision_id,
             )
-            next_project = project.model_copy(update={"updated_at": utc_now()})
+            next_project = project.model_copy(
+                update={
+                    "active_step": _step_after_reference_change(
+                        project,
+                        affects_bound_shots=bool(impacted_ids),
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.REFERENCE_CHANGED,
@@ -1359,7 +1951,15 @@ class ProductionService:
                 impacted_ids,
                 revision_id,
             )
-            next_project = project.model_copy(update={"updated_at": utc_now()})
+            next_project = project.model_copy(
+                update={
+                    "active_step": _step_after_reference_change(
+                        project,
+                        affects_bound_shots=bool(impacted_ids),
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.REFERENCE_CHANGED,
@@ -1478,7 +2078,15 @@ class ProductionService:
                 impacted_ids,
                 revision_id,
             )
-            next_project = project.model_copy(update={"updated_at": utc_now()})
+            next_project = project.model_copy(
+                update={
+                    "active_step": _step_after_reference_change(
+                        project,
+                        affects_bound_shots=bool(impacted_ids),
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.REFERENCE_CHANGED,
@@ -1549,7 +2157,15 @@ class ProductionService:
                 impacted_ids,
                 revision_id,
             )
-            next_project = project.model_copy(update={"updated_at": utc_now()})
+            next_project = project.model_copy(
+                update={
+                    "active_step": _step_after_reference_change(
+                        project,
+                        affects_bound_shots=bool(impacted_ids),
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.REFERENCE_CHANGED,
@@ -1768,6 +2384,15 @@ class ProductionService:
                         f"/api/v1/production-shots/{new_plan_id}/source-keyframe"
                         f"?v={revision_id}"
                     )
+                cloned_visual_beats = await self._clone_visual_beats(
+                    source_project=project,
+                    target_project=project,
+                    source_plan=source_plan,
+                    target_shot_plan_id=new_plan_id,
+                    revision_id=revision_id,
+                    primary_source_url=source_keyframe_url,
+                    primary_source_relative_path=source_keyframe_relative_path,
+                )
                 new_plan = ShotPlan(
                     id=new_plan_id,
                     project_id=project.id,
@@ -1795,6 +2420,7 @@ class ProductionService:
                         if source_plan.image_prompt.strip()
                         else WorkflowItemStatus.DRAFT
                     ),
+                    visual_beats=cloned_visual_beats,
                     created_at=now,
                     updated_at=now,
                 )
@@ -2144,6 +2770,7 @@ class ProductionService:
         plan = await self._require_shot(shot_plan_id)
         if project.current_revision_id is None:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
+        await self._restore_legacy_archived_video_candidates(project, plan)
         runs = await self.repository.list_generation_runs(project.id, plan.id)
         preparation = await self.repository.get_video_clip_preparation(plan.id)
         if preparation is not None:
@@ -2177,6 +2804,393 @@ class ProductionService:
                 else None
             ),
         )
+
+    async def _restore_legacy_archived_video_candidates(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+    ) -> None:
+        """Restore video candidates archived by the former latest-run-only policy.
+
+        Video candidates did not previously support an explicit user archive action, so an
+        archived video without an archive reason is a safe, idempotent legacy-repair target.
+        Missing files remain archived and future explicit archives can opt out by recording
+        ``archive_reason`` in the quality report.
+        """
+
+        for run in await self.repository.list_generation_runs(project.id, plan.id):
+            if run.kind != GenerationKind.VIDEO:
+                continue
+            for candidate in await self.repository.list_generation_candidates(run.id):
+                if (
+                    candidate.status != GenerationCandidateStatus.ARCHIVED
+                    or candidate.quality_report.get("archive_reason")
+                ):
+                    continue
+                try:
+                    candidate_path = _filesystem_path(
+                        self.workspace.resolve(candidate.relative_path)
+                    )
+                except (OSError, WorkspaceError):
+                    continue
+                if not candidate_path.is_file():
+                    continue
+                restored_status = (
+                    GenerationCandidateStatus.SELECTED
+                    if candidate.id == plan.approved_video_candidate_id
+                    else GenerationCandidateStatus.READY
+                )
+                await self.repository.save_generation_candidate(
+                    candidate.model_copy(update={"status": restored_status})
+                )
+
+    async def _save_visual_beat_plan(
+        self,
+        project: ProductionProject,
+        updated_plan: ShotPlan,
+        *,
+        revision_id: UUID,
+        summary: str,
+        change_kind: ProductionChangeKind = ProductionChangeKind.SHOT_STRUCTURE_CHANGED,
+    ) -> None:
+        plans = await self.repository.list_shot_plans(project.id)
+        next_plans = [updated_plan if item.id == updated_plan.id else item for item in plans]
+        next_project = project.model_copy(
+            update={
+                "status": ProductionProjectStatus.ACTIVE,
+                "active_step": ProductionStep.SHOT_IMAGES,
+                "updated_at": utc_now(),
+            }
+        )
+        next_project, revision = await self._prepare_revision(
+            next_project,
+            change_kind,
+            summary,
+            revision_id=revision_id,
+            shot_plans=next_plans,
+        )
+        await self.repository.save_production_bundle(
+            next_project,
+            revision,
+            shot_plans=[updated_plan],
+        )
+
+    async def create_visual_beat(
+        self,
+        shot_plan_id: UUID,
+        payload: ShotVisualBeatCreate,
+    ) -> ShotPlanDetailResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            beats = sorted(plan.visual_beats, key=lambda item: item.index)
+            if len(beats) >= 20:
+                raise _fail(409, "visual_beat_limit_reached", "一个分镜最多包含 20 个画面")
+            insert_index = len(beats)
+            if payload.insert_after_visual_beat_id is not None:
+                found = next(
+                    (
+                        index
+                        for index, item in enumerate(beats)
+                        if item.id == payload.insert_after_visual_beat_id
+                    ),
+                    None,
+                )
+                if found is None:
+                    raise _fail(422, "visual_beat_insert_position_invalid", "画面插入位置不存在")
+                insert_index = found + 1
+
+            beat_id = uuid4()
+            source_path: str | None = None
+            source_url: str | None = None
+            source_sha256: str | None = None
+            source_origin = "blank"
+            timestamp = payload.source_timestamp_seconds
+            if timestamp is not None:
+                if timestamp < plan.start_seconds or timestamp > plan.end_seconds:
+                    raise _fail(
+                        422,
+                        "visual_beat_timestamp_out_of_range",
+                        "画面源帧必须位于当前分镜范围内",
+                    )
+                video = await self.repository.get_video(project.video_id)
+                if video is None:
+                    raise _fail(404, "source_video_not_found", "创作方案的源视频不存在")
+                destination = (
+                    self.workspace.production_shot_root(
+                        project.record_id,
+                        project.id,
+                        plan.id,
+                    )
+                    / "visual-beats"
+                    / str(beat_id)
+                    / "source-frame.jpg"
+                )
+                temporary = destination.parent / ".source-frame.tmp.jpg"
+                try:
+                    await self.media_processor.extract_frame(
+                        self._resolve_video_file(video),
+                        float(timestamp),
+                        _filesystem_path(temporary),
+                    )
+                    await asyncio.to_thread(self._validate_keyframe_file, temporary)
+                    _filesystem_path(destination).parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(_filesystem_path(temporary), _filesystem_path(destination))
+                except MediaProcessingError as exc:
+                    raise _fail(422, exc.code, str(exc)) from exc
+                finally:
+                    _filesystem_path(temporary).unlink(missing_ok=True)
+                source_path = self.workspace.relative(destination)
+                source_url = (
+                    f"/api/v1/production-shots/{plan.id}/visual-beats/"
+                    f"{beat_id}/source-frame"
+                )
+                source_sha256, _ = await asyncio.to_thread(
+                    _frame_sha256_and_dhash,
+                    _filesystem_path(destination),
+                )
+                source_origin = "video_selection"
+
+            prompt = _simplified_text(
+                payload.image_prompt,
+                field_name="画面图片提示词",
+                allow_empty=True,
+                max_length=8000,
+            )
+            new_beat = ShotVisualBeat(
+                id=beat_id,
+                index=insert_index + 1,
+                title=payload.title or f"画面 {insert_index + 1}",
+                start_ratio=(
+                    payload.start_ratio
+                    if payload.start_ratio is not None
+                    else insert_index / (len(beats) + 1)
+                ),
+                end_ratio=(
+                    payload.end_ratio
+                    if payload.end_ratio is not None
+                    else (insert_index + 1) / (len(beats) + 1)
+                ),
+                source_frame_url=source_url,
+                source_frame_relative_path=source_path,
+                source_timestamp_seconds=timestamp,
+                source_frame_sha256=source_sha256,
+                source_origin=source_origin,
+                image_prompt=prompt,
+                required=payload.required,
+                image_status=(
+                    WorkflowItemStatus.READY if prompt else WorkflowItemStatus.DRAFT
+                ),
+            )
+            beats.insert(insert_index, new_beat)
+            beats = _retime_visual_beats(beats)
+            revision_id = uuid4()
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                beats,
+                revision_id=revision_id,
+                invalidate_video=True,
+            )
+            await self._save_visual_beat_plan(
+                project,
+                updated_plan,
+                revision_id=revision_id,
+                summary=f"为分镜 {plan.index} 新增画面 {insert_index + 1}",
+            )
+        return await self.get_shot(plan.id)
+
+    async def update_visual_beat(
+        self,
+        shot_plan_id: UUID,
+        visual_beat_id: UUID,
+        payload: ShotVisualBeatUpdate,
+    ) -> ShotPlanDetailResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            beat = _visual_beat(plan, visual_beat_id)
+            fields = payload.model_dump(
+                exclude={"expected_revision_id", "confirm_stale"},
+                exclude_unset=True,
+            )
+            text_fields = {
+                "title": (120, False),
+                "image_prompt": (8000, True),
+                "transition_to_next_prompt": (2000, True),
+            }
+            for field, (limit, allow_empty) in text_fields.items():
+                if field in fields:
+                    fields[field] = _simplified_text(
+                        fields[field],
+                        field_name="画面字段",
+                        allow_empty=allow_empty,
+                        max_length=limit,
+                    )
+            image_inputs_changed = bool(
+                {"image_prompt", "image_prompt_mentions", "image_negative_constraints"}
+                & fields.keys()
+            )
+            structural_changed = bool(
+                {
+                    "start_ratio",
+                    "end_ratio",
+                    "transition_to_next_type",
+                    "transition_to_next_duration_seconds",
+                    "transition_to_next_prompt",
+                }
+                & fields.keys()
+            )
+            downstream = plan.video_status in {
+                WorkflowItemStatus.GENERATING,
+                WorkflowItemStatus.REVIEW_REQUIRED,
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }
+            if (
+                downstream
+                and (image_inputs_changed or structural_changed)
+                and not payload.confirm_stale
+            ):
+                raise _fail(
+                    409,
+                    "downstream_stale_confirmation_required",
+                    "修改画面会让当前分镜视频及下游结果过期，请确认后重试",
+                )
+            if image_inputs_changed:
+                next_prompt = str(fields.get("image_prompt", beat.image_prompt)).strip()
+                fields.update(
+                    {
+                        "approved_image_candidate_id": None,
+                        "image_status": (
+                            WorkflowItemStatus.READY
+                            if next_prompt
+                            else WorkflowItemStatus.DRAFT
+                        ),
+                    }
+                )
+            fields["updated_at"] = utc_now()
+            updated_beat = beat.model_copy(update=fields)
+            beats = [updated_beat if item.id == beat.id else item for item in plan.visual_beats]
+            # Validate explicit timing against adjacent beats before persisting.
+            validated = ShotPlan.model_validate(
+                plan.model_copy(update={"visual_beats": beats}).model_dump(mode="python")
+            )
+            revision_id = uuid4()
+            updated_plan = _sync_shot_visual_beats(
+                validated,
+                validated.visual_beats,
+                revision_id=revision_id,
+                invalidate_video=image_inputs_changed or structural_changed,
+            )
+            await self._save_visual_beat_plan(
+                project,
+                updated_plan,
+                revision_id=revision_id,
+                summary=f"更新分镜 {plan.index} 的画面 {beat.index}",
+                change_kind=ProductionChangeKind.SHOT_PLAN_CHANGED,
+            )
+        return await self.get_shot(plan.id)
+
+    async def reorder_visual_beats(
+        self,
+        shot_plan_id: UUID,
+        payload: ShotVisualBeatReorder,
+    ) -> ShotPlanDetailResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            by_id = {item.id: item for item in plan.visual_beats}
+            if set(payload.ordered_visual_beat_ids) != set(by_id):
+                raise _fail(422, "visual_beat_order_incomplete", "排序必须包含当前分镜的全部画面")
+            beats = _retime_visual_beats(
+                [by_id[item_id] for item_id in payload.ordered_visual_beat_ids]
+            )
+            revision_id = uuid4()
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                beats,
+                revision_id=revision_id,
+                invalidate_video=True,
+            )
+            await self._save_visual_beat_plan(
+                project,
+                updated_plan,
+                revision_id=revision_id,
+                summary=f"调整分镜 {plan.index} 的画面顺序",
+            )
+        return await self.get_shot(plan.id)
+
+    async def delete_visual_beat(
+        self,
+        shot_plan_id: UUID,
+        visual_beat_id: UUID,
+        payload: ShotVisualBeatDelete,
+    ) -> ShotPlanDetailResponse:
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            beat = _visual_beat(plan, visual_beat_id)
+            if len(plan.visual_beats) <= 1:
+                raise _fail(409, "last_visual_beat", "一个分镜至少需要保留一个画面")
+            downstream = plan.video_status in {
+                WorkflowItemStatus.GENERATING,
+                WorkflowItemStatus.REVIEW_REQUIRED,
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }
+            if downstream and not payload.confirm_stale:
+                raise _fail(
+                    409,
+                    "downstream_stale_confirmation_required",
+                    "删除画面会让当前分镜视频及下游结果过期，请确认后重试",
+                )
+            beats = _retime_visual_beats(
+                [item for item in plan.visual_beats if item.id != beat.id]
+            )
+            revision_id = uuid4()
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                beats,
+                revision_id=revision_id,
+                invalidate_video=True,
+            )
+            await self._save_visual_beat_plan(
+                project,
+                updated_plan,
+                revision_id=revision_id,
+                summary=f"删除分镜 {plan.index} 的画面 {beat.index}",
+            )
+        return await self.get_shot(plan.id)
+
+    async def resolve_visual_beat_source_frame(
+        self,
+        shot_plan_id: UUID,
+        visual_beat_id: UUID,
+    ) -> tuple[Path, str]:
+        plan = await self._require_shot(shot_plan_id)
+        project = await self._require_project(plan.project_id)
+        beat = _visual_beat(plan, visual_beat_id)
+        path = self._resolve_source_keyframe(
+            project,
+            _shot_for_visual_beat(plan, beat),
+        )
+        if path is None:
+            raise _fail(404, "visual_beat_source_frame_missing", "当前画面的源帧文件不存在")
+        return path, "image/jpeg"
 
     async def prepare_video_clip(
         self,
@@ -2819,6 +3833,7 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
+            beat = _visual_beat(plan, payload.visual_beat_id)
             timestamp = float(payload.timestamp_seconds)
             if timestamp < plan.start_seconds - 0.001 or timestamp > plan.end_seconds + 0.001:
                 raise _fail(
@@ -2830,8 +3845,8 @@ class ProductionService:
                     ),
                 )
             has_reviewed_output = (
-                plan.approved_image_candidate_id is not None
-                or plan.image_status
+                beat.approved_image_candidate_id is not None
+                or beat.image_status
                 in {
                     WorkflowItemStatus.APPROVED,
                     WorkflowItemStatus.REVIEW_REQUIRED,
@@ -2859,7 +3874,9 @@ class ProductionService:
                     project.id,
                     plan.id,
                 )
-                / "source-keyframes"
+                / "visual-beats"
+                / str(beat.id)
+                / "source-frames"
             )
             destination = keyframe_root / f"{revision_id}.jpg"
             temporary = keyframe_root / f".tmp-{revision_id}.jpg"
@@ -2883,37 +3900,41 @@ class ProductionService:
                 raise _fail(507, "keyframe_write_failed", "无法保存所选关键帧") from exc
             finally:
                 filesystem_temporary.unlink(missing_ok=True)
-
-            candidate_updates = await self._reset_selected_image_candidates(project, plan)
-            video_status = (
-                WorkflowItemStatus.STALE
-                if plan.video_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                    WorkflowItemStatus.STALE,
-                }
-                else plan.video_status
+            source_sha256, _ = await asyncio.to_thread(
+                _frame_sha256_and_dhash,
+                filesystem_destination,
             )
-            updated_plan = plan.model_copy(
+
+            candidate_updates = await self._reset_selected_image_candidates(
+                project,
+                plan,
+                visual_beat_id=beat.id,
+            )
+            updated_beat = beat.model_copy(
                 update={
-                    "revision_id": revision_id,
-                    "source_keyframe_url": (
-                        f"/api/v1/production-shots/{plan.id}/source-keyframe"
+                    "source_frame_url": (
+                        f"/api/v1/production-shots/{plan.id}/visual-beats/{beat.id}/source-frame"
                         f"?v={revision_id}"
                     ),
-                    "source_keyframe_relative_path": self.workspace.relative(destination),
-                    "source_keyframe_timestamp_seconds": round(timestamp, 3),
-                    "source_keyframe_origin": "video_selection",
+                    "source_frame_relative_path": self.workspace.relative(destination),
+                    "source_timestamp_seconds": round(timestamp, 3),
+                    "source_frame_sha256": source_sha256,
+                    "source_frame_warning": None,
+                    "source_origin": "video_selection",
                     "image_status": (
                         WorkflowItemStatus.READY
-                        if plan.image_prompt.strip()
+                        if beat.image_prompt.strip()
                         else WorkflowItemStatus.DRAFT
                     ),
-                    "video_status": video_status,
                     "approved_image_candidate_id": None,
                     "updated_at": utc_now(),
                 }
+            )
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
+                revision_id=revision_id,
+                invalidate_video=True,
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
@@ -2927,7 +3948,7 @@ class ProductionService:
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.SOURCE_KEYFRAME_CHANGED,
-                f"将分镜 {plan.index} 的关键帧切换到 {timestamp:.3f}s",
+                f"将分镜 {plan.index} 画面 {beat.index} 的关键帧切换到 {timestamp:.3f}s",
                 revision_id=revision_id,
                 shot_plans=next_plans,
             )
@@ -2951,9 +3972,10 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
+            beat = _visual_beat(plan, payload.visual_beat_id)
             replacing_approved = (
-                plan.image_status == WorkflowItemStatus.APPROVED
-                and plan.approved_image_candidate_id is not None
+                beat.image_status == WorkflowItemStatus.APPROVED
+                and beat.approved_image_candidate_id is not None
             )
             has_downstream_impact = (
                 replacing_approved
@@ -2965,18 +3987,24 @@ class ProductionService:
                     "downstream_stale_confirmation_required",
                     "改用当前关键帧会使该分镜的后续视频或合成结果过期，请确认影响后重试",
                 )
-            source_path = self._resolve_source_keyframe(project, plan)
+            gateway_plan = _shot_for_visual_beat(plan, beat)
+            source_path = self._resolve_source_keyframe(project, gateway_plan)
             if source_path is None:
                 raise _fail(409, "source_keyframe_required", "当前分镜没有可读取的关键帧")
             revision_id = uuid4()
             run, candidate = await asyncio.to_thread(
                 self._create_source_frame_candidate,
                 project,
-                plan,
+                gateway_plan,
                 revision_id,
                 source_path,
+                beat.id,
             )
-            candidate_updates = await self._reset_selected_image_candidates(project, plan)
+            candidate_updates = await self._reset_selected_image_candidates(
+                project,
+                plan,
+                visual_beat_id=beat.id,
+            )
             event = ApprovalEvent(
                 project_id=project.id,
                 revision_id=revision_id,
@@ -2995,18 +4023,18 @@ class ProductionService:
                     else "直接使用源视频关键帧，未调用图片生成模型"
                 ),
             )
-            updated_plan = plan.model_copy(
+            updated_beat = beat.model_copy(
                 update={
-                    "revision_id": revision_id,
                     "image_status": WorkflowItemStatus.APPROVED,
                     "approved_image_candidate_id": candidate.id,
-                    "video_status": (
-                        WorkflowItemStatus.STALE
-                        if has_downstream_impact
-                        else plan.video_status
-                    ),
                     "updated_at": utc_now(),
                 }
+            )
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
+                revision_id=revision_id,
+                invalidate_video=has_downstream_impact,
             )
             current_preparation = await self.repository.get_video_clip_preparation(plan.id)
             updated_preparation = (
@@ -3042,7 +4070,7 @@ class ProductionService:
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.IMAGE_APPROVED,
-                f"直接确认分镜 {plan.index} 的源视频关键帧",
+                f"直接确认分镜 {plan.index} 画面 {beat.index} 的源视频关键帧",
                 revision_id=revision_id,
                 shot_plans=next_plans,
                 video_clip_preparations=next_preparations,
@@ -3098,7 +4126,12 @@ class ProductionService:
         self._ensure_shot_active(plan)
         project = await self._require_project(plan.project_id)
         self._require_expected_revision(project, payload.expected_revision_id)
-        if project.active_step != ProductionStep.SHOT_VIDEOS:
+        allowed_video_steps = {
+            ProductionStep.SHOT_VIDEOS,
+            ProductionStep.EDITING,
+            ProductionStep.EXPORT,
+        }
+        if project.active_step not in allowed_video_steps:
             raise _fail(
                 409,
                 "video_stage_not_active",
@@ -3112,15 +4145,13 @@ class ProductionService:
                 "approved_image_required",
                 "当前分镜缺少有效的已确认图片",
             )
-        if plan.video_status == WorkflowItemStatus.APPROVED:
-            raise _fail(
-                409,
-                "video_already_approved",
-                "已确认视频需要先取消采用再生成新候选",
-            )
         if payload.generation_intent == "new_variation" and payload.seed is None:
             payload = payload.model_copy(
                 update={"seed": secrets.randbelow(2_147_483_648)}
+            )
+        if payload.input_mode != VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value:
+            payload = payload.model_copy(
+                update={"input_mode": VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value}
             )
         try:
             execution_mode = ImageExecutionMode(payload.execution_mode)
@@ -3131,7 +4162,7 @@ class ProductionService:
             try:
                 validate_mode(execution_mode)
             except VideoGenerationGatewayError as exc:
-                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+                raise _video_gateway_failure(exc) from exc
 
         duration_seconds = round(payload.duration_seconds or plan.duration_seconds, 3)
         try:
@@ -3144,7 +4175,7 @@ class ProductionService:
                 allow_unknown_cost=payload.allow_unknown_cost,
             )
         except VideoGenerationGatewayError as exc:
-            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            raise _video_gateway_failure(exc) from exc
         payload = payload.model_copy(
             update={
                 "duration_seconds": duration_seconds,
@@ -3200,7 +4231,7 @@ class ProductionService:
             shot_plan_id=plan.id,
             revision_id=payload.expected_revision_id,
             kind=GenerationKind.VIDEO,
-            input_mode=VideoGenerationInputMode.IMAGE_TO_VIDEO,
+            input_mode=VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO,
             provider=identity.provider,
             model=identity.model,
             model_snapshot=identity.model_snapshot,
@@ -3300,6 +4331,12 @@ class ProductionService:
                     ProductionRunStatus.FAILED,
                     exc.code,
                     str(exc),
+                    error_retryable=exc.retryable,
+                    provider_error_code=exc.provider_code,
+                    error_category=exc.error_category,
+                    error_title=exc.user_title,
+                    error_action=exc.suggested_action,
+                    error_technical_message=exc.technical_message,
                 )
         except Exception as exc:
             await self._mark_generation_terminal(
@@ -3326,22 +4363,30 @@ class ProductionService:
         self._ensure_shot_active(plan)
         project = await self._require_project(plan.project_id)
         self._require_expected_revision(project, payload.expected_revision_id)
+        beat = _visual_beat(plan, payload.visual_beat_id)
+        if payload.visual_beat_id != beat.id:
+            payload = payload.model_copy(update={"visual_beat_id": beat.id})
         if payload.generation_intent == "new_variation" and payload.seed is None:
             payload = payload.model_copy(
                 update={"seed": secrets.randbelow(2_147_483_648)}
             )
-        if not plan.image_prompt.strip():
+        if not beat.image_prompt.strip():
             raise _fail(409, "image_prompt_required", "请先填写图片提示词")
-        if plan.image_status == WorkflowItemStatus.APPROVED:
-            raise _fail(409, "image_already_approved", "已审批分镜需要先修改输入再重新生成")
+        if beat.image_status == WorkflowItemStatus.APPROVED:
+            raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
         active_statuses = {
             ProductionRunStatus.QUEUED,
             ProductionRunStatus.RUNNING,
             ProductionRunStatus.CANCELLATION_REQUESTED,
         }
         existing_runs = await self.repository.list_generation_runs(project.id, plan.id)
-        if any(item.status in active_statuses for item in existing_runs):
-            raise _fail(409, "generation_already_running", "该分镜已有图片生成任务在执行")
+        if any(
+            item.kind == GenerationKind.IMAGE
+            and _run_matches_visual_beat(item, plan, beat.id)
+            and item.status in active_statuses
+            for item in existing_runs
+        ):
+            raise _fail(409, "generation_already_running", "该画面已有图片生成任务在执行")
         settings_service = getattr(self.image_gateway, "settings_service", None)
         settings = settings_service.get() if settings_service is not None else None
         if settings is not None and not settings.enabled:
@@ -3390,6 +4435,7 @@ class ProductionService:
             id=run_id,
             project_id=project.id,
             shot_plan_id=plan.id,
+            visual_beat_id=beat.id,
             revision_id=payload.expected_revision_id,
             kind=GenerationKind.IMAGE,
             input_mode=payload.input_mode,
@@ -3483,6 +4529,13 @@ class ProductionService:
         status: ProductionRunStatus,
         error_code: str,
         error_message: str,
+        *,
+        error_retryable: bool = False,
+        provider_error_code: str | None = None,
+        error_category: str | None = None,
+        error_title: str | None = None,
+        error_action: str | None = None,
+        error_technical_message: str | None = None,
     ) -> GenerationRun:
         run = await self._require_run(run_id)
         if run.status in {
@@ -3493,13 +4546,63 @@ class ProductionService:
             ProductionRunStatus.CANCELLED,
         }:
             return run
+        provider_tasks = (
+            await self.repository.list_video_provider_tasks(run.id)
+            if run.kind == GenerationKind.VIDEO
+            else []
+        )
+        failed_task = next(
+            (
+                item
+                for item in provider_tasks
+                if item.error_code or item.error_message or item.error_technical_message
+            ),
+            None,
+        )
+        failure = (
+            classify_video_provider_failure(
+                provider=run.provider,
+                code=error_code or (failed_task.error_code if failed_task else None),
+                message=(
+                    error_technical_message
+                    or (failed_task.error_technical_message if failed_task else None)
+                    or error_message
+                    or (failed_task.error_message if failed_task else None)
+                ),
+                retryable=error_retryable or bool(failed_task and failed_task.retryable),
+                provider_code=(
+                    provider_error_code
+                    or (failed_task.provider_error_code if failed_task else None)
+                ),
+            )
+            if run.kind == GenerationKind.VIDEO and status == ProductionRunStatus.FAILED
+            else None
+        )
         now = utc_now()
         updated = run.model_copy(
             update={
                 "status": status,
                 "cancellation_requested": status == ProductionRunStatus.CANCELLED,
-                "error_code": error_code,
-                "error_message": error_message,
+                "provider_request_id": (
+                    run.provider_request_id
+                    or (failed_task.provider_task_id if failed_task else None)
+                ),
+                "error_code": failure.code if failure else error_code,
+                "error_message": failure.message if failure else error_message,
+                "provider_error_code": (
+                    provider_error_code
+                    or (failed_task.provider_error_code if failed_task else None)
+                    or (failure.provider_code if failure else None)
+                ),
+                "error_category": error_category or (failure.category if failure else None),
+                "error_title": error_title or (failure.title if failure else None),
+                "error_technical_message": (
+                    error_technical_message
+                    or (failed_task.error_technical_message if failed_task else None)
+                    or (failure.technical_message if failure else None)
+                ),
+                "error_retryable": error_retryable or bool(failure and failure.retryable),
+                "error_action": error_action or (failure.suggested_action if failure else None),
                 "updated_at": now,
                 "last_heartbeat_at": now,
                 "completed_at": now,
@@ -3654,6 +4757,12 @@ class ProductionService:
                                 "updated_at": utc_now(),
                                 "error_code": None,
                                 "error_message": None,
+                                "provider_error_code": None,
+                                "error_category": None,
+                                "error_title": None,
+                                "error_technical_message": None,
+                                "error_retryable": False,
+                                "error_action": None,
                             }
                         )
                         await self.repository.save_generation_run(resumed)
@@ -3698,10 +4807,15 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if not plan.image_prompt.strip():
+            beat = _visual_beat(
+                plan,
+                payload.visual_beat_id or queued_run.visual_beat_id,
+            )
+            gateway_plan = _shot_for_visual_beat(plan, beat)
+            if not beat.image_prompt.strip():
                 raise _fail(409, "image_prompt_required", "请先填写图片提示词")
-            if plan.image_status == WorkflowItemStatus.APPROVED:
-                raise _fail(409, "image_already_approved", "已审批分镜需要先修改输入再重新生成")
+            if beat.image_status == WorkflowItemStatus.APPROVED:
+                raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
 
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
             bindings = (
@@ -3726,14 +4840,14 @@ class ProductionService:
                 if not asset.rights_confirmed:
                     raise _fail(409, "reference_rights_required", "分镜参考资产尚未完成权利确认")
             source_path = (
-                self._resolve_source_keyframe(project, plan)
+                self._resolve_source_keyframe(project, gateway_plan)
                 if uses_images
                 else None
             )
             try:
                 run, candidates = await self.image_gateway.generate(
                     project,
-                    plan,
+                    gateway_plan,
                     payload.expected_revision_id,
                     bindings,
                     assets,
@@ -3752,6 +4866,7 @@ class ProductionService:
             now = utc_now()
             run = run.model_copy(
                 update={
+                    "visual_beat_id": beat.id,
                     "request_payload": queued_run.request_payload,
                     "retry_of_run_id": queued_run.retry_of_run_id,
                     "retry_count": queued_run.retry_count,
@@ -3782,11 +4897,11 @@ class ProductionService:
             prior_candidate_updates = await self._reset_selected_image_candidates(
                 project,
                 plan,
+                visual_beat_id=beat.id,
             )
             revision_id = uuid4()
-            updated_plan = plan.model_copy(
+            updated_beat = beat.model_copy(
                 update={
-                    "revision_id": revision_id,
                     "image_status": (
                         WorkflowItemStatus.REVIEW_REQUIRED
                         if candidates
@@ -3795,6 +4910,14 @@ class ProductionService:
                     "approved_image_candidate_id": None,
                     "updated_at": utc_now(),
                 }
+            )
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                [
+                    updated_beat if item.id == beat.id else item
+                    for item in plan.visual_beats
+                ],
+                revision_id=revision_id,
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
@@ -3813,9 +4936,13 @@ class ProductionService:
                 next_project,
                 ProductionChangeKind.SHOT_PLAN_CHANGED,
                 (
-                    f"为分镜 {plan.index} 创建 {len(candidates)} 个图片候选"
+                    f"为分镜 {plan.index} 画面 {beat.index} 创建 "
+                    f"{len(candidates)} 个图片候选"
                     if candidates
-                    else f"分镜 {plan.index} 图片生成失败：{run.error_code or 'unknown'}"
+                    else (
+                        f"分镜 {plan.index} 画面 {beat.index} 图片生成失败："
+                        f"{run.error_code or 'unknown'}"
+                    )
                 ),
                 revision_id=revision_id,
                 shot_plans=next_plans,
@@ -3846,7 +4973,11 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if project.active_step != ProductionStep.SHOT_VIDEOS:
+            if project.active_step not in {
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }:
                 raise _fail(
                     409,
                     "video_stage_not_active",
@@ -3860,13 +4991,49 @@ class ProductionService:
                     "approved_image_required",
                     "当前分镜缺少有效的已确认图片",
                 )
-            approved_image_id = plan.approved_image_candidate_id
-            if approved_image_id is None:
-                raise _fail(409, "approved_image_required", "当前分镜缺少已确认图片")
-            approved_image = await self._require_candidate(approved_image_id)
-            approved_image_path, _ = await self.resolve_candidate_content(
-                approved_image.id
+            target_beats = [item for item in plan.visual_beats if item.required] or list(
+                plan.visual_beats
             )
+            reference_frames: list[OrderedReferenceFrame] = []
+            for ordinal, beat in enumerate(
+                sorted(target_beats, key=lambda item: item.index),
+                start=1,
+            ):
+                if beat.approved_image_candidate_id is None:
+                    raise _fail(
+                        409,
+                        "approved_image_required",
+                        f"画面 {beat.index} 缺少已确认图片",
+                    )
+                candidate = await self._require_candidate(
+                    beat.approved_image_candidate_id
+                )
+                source_run = await self._require_run(candidate.generation_run_id)
+                if not _run_matches_visual_beat(source_run, plan, beat.id):
+                    raise _fail(
+                        409,
+                        "approved_candidate_mismatch",
+                        f"画面 {beat.index} 的已采用图片与画面记录不匹配",
+                    )
+                candidate_path, _ = await self.resolve_candidate_content(candidate.id)
+                reference_frames.append(
+                    OrderedReferenceFrame(
+                        visual_beat_id=beat.id,
+                        ordinal=ordinal,
+                        title=beat.title,
+                        candidate_id=candidate.id,
+                        path=candidate_path,
+                        relative_path=candidate.relative_path,
+                        sha256=candidate.sha256,
+                        start_ratio=beat.start_ratio,
+                        end_ratio=beat.end_ratio,
+                        transition_to_next_type=beat.transition_to_next_type,
+                        transition_to_next_duration_seconds=(
+                            beat.transition_to_next_duration_seconds
+                        ),
+                        transition_to_next_prompt=beat.transition_to_next_prompt,
+                    )
+                )
             duration_seconds = round(
                 payload.duration_seconds or plan.duration_seconds,
                 3,
@@ -3876,10 +5043,7 @@ class ProductionService:
                     project,
                     plan,
                     payload.expected_revision_id,
-                    approved_image.id,
-                    approved_image_path,
-                    approved_image.sha256,
-                    approved_image_relative_path=approved_image.relative_path,
+                    tuple(reference_frames),
                     candidate_count=payload.candidate_count,
                     duration_seconds=duration_seconds,
                     execution_mode=payload.execution_mode,
@@ -3891,7 +5055,7 @@ class ProductionService:
                     cancel_event=cancellation,
                 )
             except VideoGenerationGatewayError as exc:
-                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+                raise _video_gateway_failure(exc) from exc
 
             now = utc_now()
             run = run.model_copy(
@@ -3918,64 +5082,41 @@ class ProductionService:
                 await self.repository.save_generation_run(cancelled)
                 return await self._run_response(cancelled)
 
-            prior_candidate_updates: list[GenerationCandidate] = []
-            for prior_run in await self.repository.list_generation_runs(
-                project.id,
-                plan.id,
-            ):
-                if prior_run.kind != GenerationKind.VIDEO or prior_run.id == run.id:
-                    continue
-                for prior_candidate in await self.repository.list_generation_candidates(
-                    prior_run.id
-                ):
-                    if prior_candidate.status in {
-                        GenerationCandidateStatus.READY,
-                        GenerationCandidateStatus.SELECTED,
-                    }:
-                        prior_candidate_updates.append(
-                            prior_candidate.model_copy(
-                                update={"status": GenerationCandidateStatus.ARCHIVED}
-                            )
-                        )
             revision_id = uuid4()
+            preserve_approval = (
+                plan.video_status == WorkflowItemStatus.APPROVED
+                and plan.approved_video_candidate_id is not None
+            )
             updated_plan = plan.model_copy(
                 update={
                     "revision_id": revision_id,
                     "video_status": (
-                        WorkflowItemStatus.REVIEW_REQUIRED
-                        if candidates
-                        else WorkflowItemStatus.FAILED
+                        plan.video_status
+                        if preserve_approval
+                        else (
+                            WorkflowItemStatus.REVIEW_REQUIRED
+                            if candidates
+                            else WorkflowItemStatus.FAILED
+                        )
                     ),
-                    "approved_video_candidate_id": None,
+                    "approved_video_candidate_id": (
+                        plan.approved_video_candidate_id
+                        if preserve_approval
+                        else None
+                    ),
                     "updated_at": utc_now(),
                 }
             )
-            current_preparation = await self.repository.get_video_clip_preparation(plan.id)
-            updated_preparation = (
-                current_preparation.model_copy(
-                    update={
-                        "revision_id": revision_id,
-                        "status": VideoClipPreparationStatus.STALE,
-                        "blocker_messages": ["已创建新的视频候选，需要重新选择并完成剪辑准备"],
-                        "warning_messages": [],
-                        "updated_at": utc_now(),
-                    }
-                )
-                if current_preparation is not None
-                else None
-            )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
-            preparations = await self.repository.list_video_clip_preparations(project.id)
-            next_preparations = [
-                item for item in preparations if item.shot_plan_id != plan.id
-            ]
-            if updated_preparation is not None:
-                next_preparations.append(updated_preparation)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_VIDEOS,
+                    "active_step": (
+                        project.active_step
+                        if preserve_approval
+                        else ProductionStep.SHOT_VIDEOS
+                    ),
                     "estimated_cost_micros": (
                         project.estimated_cost_micros + run.estimated_cost_micros
                     ),
@@ -3989,17 +5130,13 @@ class ProductionService:
                 f"为分镜 {plan.index} 创建 {len(candidates)} 个视频候选",
                 revision_id=revision_id,
                 shot_plans=next_plans,
-                video_clip_preparations=next_preparations,
             )
             await self.repository.save_production_bundle(
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
                 generation_runs=[run],
-                generation_candidates=[*prior_candidate_updates, *candidates],
-                video_clip_preparations=(
-                    [updated_preparation] if updated_preparation is not None else None
-                ),
+                generation_candidates=candidates,
             )
         await self._notify_generation_run(run)
         return await self.get_generation_run(run.id)
@@ -4040,11 +5177,21 @@ class ProductionService:
                 )
             ):
                 raise _fail(409, "candidate_unavailable", "该候选已退回或归档")
-            target_status = (
-                plan.image_status
+            beat = (
+                _visual_beat(plan, run.visual_beat_id)
                 if run.kind == GenerationKind.IMAGE
-                else plan.video_status
+                else None
             )
+            target_status = beat.image_status if beat is not None else plan.video_status
+            if (
+                run.kind == GenerationKind.VIDEO
+                and target_status == WorkflowItemStatus.APPROVED
+            ):
+                raise _fail(
+                    409,
+                    "video_already_approved",
+                    "当前已有采用视频，请直接使用“改用此视频”切换候选",
+                )
             if run.kind != GenerationKind.IMAGE and target_status == WorkflowItemStatus.STALE:
                 raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
             shot_runs = [
@@ -4054,13 +5201,11 @@ class ProductionService:
                     plan.id,
                 )
                 if item.kind == run.kind
+                and (
+                    beat is None
+                    or _run_matches_visual_beat(item, plan, beat.id)
+                )
             ]
-            if (
-                run.kind != GenerationKind.IMAGE
-                and (not shot_runs or shot_runs[-1].id != run.id)
-            ):
-                raise _fail(409, "candidate_superseded", "该候选已被较新的生成任务替代")
-
             run_candidates: list[GenerationCandidate] = []
             for shot_run in shot_runs:
                 run_candidates.extend(await self.repository.list_generation_candidates(shot_run.id))
@@ -4083,12 +5228,26 @@ class ProductionService:
             selected = next(item for item in updated_candidates if item.id == candidate.id)
             revision_id = uuid4()
             if run.kind == GenerationKind.IMAGE:
-                plan_updates = {
-                    "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
-                    "approved_image_candidate_id": None,
-                }
+                assert beat is not None
                 change_kind = ProductionChangeKind.IMAGE_CANDIDATE_SELECTED
-                summary = f"选择分镜 {plan.index} 的图片候选 {candidate.ordinal}"
+                summary = (
+                    f"选择分镜 {plan.index} 画面 {beat.index} 的图片候选 {candidate.ordinal}"
+                )
+                updated_beat = beat.model_copy(
+                    update={
+                        "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                        "approved_image_candidate_id": None,
+                        "updated_at": utc_now(),
+                    }
+                )
+                updated_plan = _sync_shot_visual_beats(
+                    plan,
+                    [
+                        updated_beat if item.id == beat.id else item
+                        for item in plan.visual_beats
+                    ],
+                    revision_id=revision_id,
+                )
             else:
                 if project.active_step != ProductionStep.SHOT_VIDEOS:
                     raise _fail(409, "video_stage_not_active", "当前方案不在分段视频阶段")
@@ -4098,13 +5257,13 @@ class ProductionService:
                 }
                 change_kind = ProductionChangeKind.VIDEO_CANDIDATE_SELECTED
                 summary = f"选择分镜 {plan.index} 的视频候选 {candidate.ordinal}"
-            updated_plan = plan.model_copy(
-                update={
-                    "revision_id": revision_id,
-                    **plan_updates,
-                    "updated_at": utc_now(),
-                }
-            )
+                updated_plan = plan.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        **plan_updates,
+                        "updated_at": utc_now(),
+                    }
+                )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
             next_project = project.model_copy(update={"updated_at": utc_now()})
@@ -4153,21 +5312,41 @@ class ProductionService:
                     "simulated_candidate_forbidden",
                     "模拟占位候选不能确认，请使用真实模型生成或直接采用源关键帧",
                 )
-            target_status = (
-                plan.image_status
+            beat = (
+                _visual_beat(plan, run.visual_beat_id)
                 if run.kind == GenerationKind.IMAGE
-                else plan.video_status
+                else None
             )
+            target_status = beat.image_status if beat is not None else plan.video_status
             direct_image_approval = (
                 run.kind == GenerationKind.IMAGE
                 and payload.decision == ApprovalDecision.APPROVED
             )
-            replacing_approved = (
+            replacing_image_approval = (
                 direct_image_approval
                 and target_status == WorkflowItemStatus.APPROVED
-                and plan.approved_image_candidate_id != candidate.id
+                and beat is not None
+                and beat.approved_image_candidate_id != candidate.id
             )
-            if target_status == WorkflowItemStatus.APPROVED and not replacing_approved:
+            replacing_video_approval = (
+                run.kind == GenerationKind.VIDEO
+                and payload.decision == ApprovalDecision.APPROVED
+                and target_status == WorkflowItemStatus.APPROVED
+                and plan.approved_video_candidate_id != candidate.id
+            )
+            preserving_video_approval_on_reject = (
+                run.kind == GenerationKind.VIDEO
+                and payload.decision == ApprovalDecision.REJECTED
+                and target_status == WorkflowItemStatus.APPROVED
+                and plan.approved_video_candidate_id != candidate.id
+            )
+            replacing_approved = replacing_image_approval or replacing_video_approval
+            direct_approval = direct_image_approval or replacing_video_approval
+            if (
+                target_status == WorkflowItemStatus.APPROVED
+                and payload.decision == ApprovalDecision.APPROVED
+                and not replacing_approved
+            ):
                 raise _fail(
                     409,
                     (
@@ -4183,7 +5362,7 @@ class ProductionService:
                 )
             if (
                 payload.decision == ApprovalDecision.APPROVED
-                and not direct_image_approval
+                and not direct_approval
                 and candidate.status != GenerationCandidateStatus.SELECTED
             ):
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
@@ -4203,22 +5382,49 @@ class ProductionService:
                     plan.id,
                 )
                 if item.kind == run.kind
+                and (
+                    beat is None
+                    or _run_matches_visual_beat(item, plan, beat.id)
+                )
             ]
-            if (
-                run.kind != GenerationKind.IMAGE
-                and (not shot_runs or shot_runs[-1].id != run.id)
-            ):
-                raise _fail(409, "candidate_superseded", "该候选已被较新的生成任务替代")
-
-            has_downstream_impact = (
-                replacing_approved
+            image_downstream_impact = (
+                replacing_image_approval
                 and self._image_choice_has_downstream_impact(project, plan)
             )
-            if has_downstream_impact and not payload.confirm_downstream_stale:
+            video_downstream_impact = (
+                replacing_video_approval
+                and project.active_step
+                in {ProductionStep.EDITING, ProductionStep.EXPORT}
+            )
+            requires_downstream_confirmation = (
+                image_downstream_impact or video_downstream_impact
+            )
+            invalidate_preparation = (
+                image_downstream_impact or replacing_video_approval
+            )
+            if (
+                requires_downstream_confirmation
+                and not payload.confirm_downstream_stale
+            ):
                 raise _fail(
                     409,
                     "downstream_stale_confirmation_required",
-                    "改用该历史候选会使本分镜的后续视频或合成结果过期，请确认影响后重试",
+                    (
+                        "改用该历史视频会使本分镜的剪辑或导出结果过期，请确认影响后重试"
+                        if replacing_video_approval
+                        else "改用该历史候选会使本分镜的后续视频或合成结果过期，请确认影响后重试"
+                    ),
+                )
+            if (
+                run.kind == GenerationKind.VIDEO
+                and payload.decision == ApprovalDecision.REJECTED
+                and target_status == WorkflowItemStatus.APPROVED
+                and not preserving_video_approval_on_reject
+            ):
+                raise _fail(
+                    409,
+                    "video_already_approved",
+                    "当前采用视频不能直接退回，请先取消采用",
                 )
 
             revision_id = uuid4()
@@ -4251,29 +5457,25 @@ class ProductionService:
             updated_candidate = candidate
             candidate_updates: list[GenerationCandidate] = []
             if payload.decision == ApprovalDecision.APPROVED:
-                if run.kind == GenerationKind.IMAGE:
-                    for shot_run in shot_runs:
-                        for item in await self.repository.list_generation_candidates(
-                            shot_run.id
-                        ):
-                            if item.id == candidate.id:
-                                updated_candidate = item.model_copy(
+                for shot_run in shot_runs:
+                    for item in await self.repository.list_generation_candidates(
+                        shot_run.id
+                    ):
+                        if item.id == candidate.id:
+                            updated_candidate = item.model_copy(
+                                update={
+                                    "status": GenerationCandidateStatus.SELECTED,
+                                }
+                            )
+                            candidate_updates.append(updated_candidate)
+                        elif item.status == GenerationCandidateStatus.SELECTED:
+                            candidate_updates.append(
+                                item.model_copy(
                                     update={
-                                        "status": GenerationCandidateStatus.SELECTED,
+                                        "status": GenerationCandidateStatus.READY,
                                     }
                                 )
-                                candidate_updates.append(updated_candidate)
-                            elif item.status == GenerationCandidateStatus.SELECTED:
-                                candidate_updates.append(
-                                    item.model_copy(
-                                        update={
-                                            "status": GenerationCandidateStatus.READY,
-                                        }
-                                    )
-                                )
-                else:
-                    updated_candidate = candidate
-                    candidate_updates.append(updated_candidate)
+                            )
                 next_status = WorkflowItemStatus.APPROVED
                 approved_candidate_id: UUID | None = candidate.id
                 change_kind = (
@@ -4282,7 +5484,11 @@ class ProductionService:
                     else ProductionChangeKind.VIDEO_APPROVED
                 )
                 summary = (
-                    f"审批通过分镜 {plan.index} 图片"
+                    (
+                        f"审批通过分镜 {plan.index} 画面 {beat.index} 图片"
+                        if beat is not None
+                        else f"审批通过分镜 {plan.index} 图片"
+                    )
                     if run.kind == GenerationKind.IMAGE
                     else f"审批通过分镜 {plan.index} 视频"
                 )
@@ -4291,61 +5497,93 @@ class ProductionService:
                     update={"status": GenerationCandidateStatus.REJECTED}
                 )
                 candidate_updates.append(updated_candidate)
-                other_candidates = [
-                    item
-                    for item in await self.repository.list_generation_candidates(run.id)
-                    if item.id != candidate.id
-                    and item.status
-                    in {
-                        GenerationCandidateStatus.READY,
-                        GenerationCandidateStatus.SELECTED,
-                    }
-                ]
+                other_candidates: list[GenerationCandidate] = []
+                for shot_run in shot_runs:
+                    other_candidates.extend(
+                        item
+                        for item in await self.repository.list_generation_candidates(
+                            shot_run.id
+                        )
+                        if item.id != candidate.id
+                        and item.status
+                        in {
+                            GenerationCandidateStatus.READY,
+                            GenerationCandidateStatus.SELECTED,
+                        }
+                    )
                 next_status = (
-                    WorkflowItemStatus.REVIEW_REQUIRED
-                    if other_candidates
-                    else WorkflowItemStatus.READY
+                    WorkflowItemStatus.APPROVED
+                    if preserving_video_approval_on_reject
+                    else (
+                        WorkflowItemStatus.REVIEW_REQUIRED
+                        if other_candidates
+                        else WorkflowItemStatus.READY
+                    )
                 )
-                approved_candidate_id = None
+                approved_candidate_id = (
+                    plan.approved_video_candidate_id
+                    if preserving_video_approval_on_reject
+                    else None
+                )
                 change_kind = (
                     ProductionChangeKind.IMAGE_REJECTED
                     if run.kind == GenerationKind.IMAGE
                     else ProductionChangeKind.VIDEO_REJECTED
                 )
                 summary = (
-                    f"退回分镜 {plan.index} 图片候选"
+                    (
+                        f"退回分镜 {plan.index} 画面 {beat.index} 图片候选"
+                        if beat is not None
+                        else f"退回分镜 {plan.index} 图片候选"
+                    )
                     if run.kind == GenerationKind.IMAGE
                     else f"退回分镜 {plan.index} 视频候选"
                 )
             if run.kind == GenerationKind.IMAGE:
-                plan_updates = {
-                    "image_status": next_status,
-                    "approved_image_candidate_id": approved_candidate_id,
-                    "video_status": (
-                        WorkflowItemStatus.STALE
-                        if has_downstream_impact
-                        else plan.video_status
-                    ),
-                }
+                assert beat is not None
                 active_step = ProductionStep.SHOT_IMAGES
+                updated_beat = beat.model_copy(
+                    update={
+                        "image_status": next_status,
+                        "approved_image_candidate_id": approved_candidate_id,
+                        "updated_at": utc_now(),
+                    }
+                )
+                updated_plan = _sync_shot_visual_beats(
+                    plan,
+                    [
+                        updated_beat if item.id == beat.id else item
+                        for item in plan.visual_beats
+                    ],
+                    revision_id=revision_id,
+                    invalidate_video=image_downstream_impact,
+                )
             else:
-                if project.active_step != ProductionStep.SHOT_VIDEOS:
+                if project.active_step not in {
+                    ProductionStep.SHOT_VIDEOS,
+                    ProductionStep.EDITING,
+                    ProductionStep.EXPORT,
+                }:
                     raise _fail(409, "video_stage_not_active", "当前方案不在分段视频阶段")
                 plan_updates = {
                     "video_status": next_status,
                     "approved_video_candidate_id": approved_candidate_id,
                 }
-                active_step = ProductionStep.SHOT_VIDEOS
-            updated_plan = plan.model_copy(
-                update={
-                    "revision_id": revision_id,
-                    **plan_updates,
-                    "updated_at": utc_now(),
-                }
-            )
+                active_step = (
+                    project.active_step
+                    if preserving_video_approval_on_reject
+                    else ProductionStep.SHOT_VIDEOS
+                )
+                updated_plan = plan.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        **plan_updates,
+                        "updated_at": utc_now(),
+                    }
+                )
             updated_preparation: VideoClipPreparation | None = None
             next_preparations: list[VideoClipPreparation] | None = None
-            if has_downstream_impact:
+            if invalidate_preparation:
                 current_preparation = await self.repository.get_video_clip_preparation(plan.id)
                 if current_preparation is not None:
                     updated_preparation = current_preparation.model_copy(
@@ -4353,7 +5591,11 @@ class ProductionService:
                             "revision_id": revision_id,
                             "status": VideoClipPreparationStatus.STALE,
                             "blocker_messages": [
-                                "起始图片已经更换，需要重新生成视频并完成剪辑准备"
+                                (
+                                    "已改用其他视频候选，需要重新完成剪辑准备"
+                                    if replacing_video_approval
+                                    else "起始图片已经更换，需要重新生成视频并完成剪辑准备"
+                                )
                             ],
                             "warning_messages": [],
                             "updated_at": utc_now(),
@@ -4415,21 +5657,23 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
-            if plan.image_status != WorkflowItemStatus.APPROVED:
-                raise _fail(409, "image_not_approved", "当前分镜图片尚未采用，无需取消")
-            if plan.approved_image_candidate_id is None:
+            beat = _visual_beat(plan, payload.visual_beat_id)
+            if beat.image_status != WorkflowItemStatus.APPROVED:
+                raise _fail(409, "image_not_approved", "当前画面图片尚未采用，无需取消")
+            if beat.approved_image_candidate_id is None:
                 raise _fail(
                     409,
                     "approved_candidate_missing",
-                    "当前分镜的已采用图片记录不完整，请重新打开方案后重试",
+                    "当前画面的已采用图片记录不完整，请重新打开方案后重试",
                 )
 
-            candidate = await self._require_candidate(plan.approved_image_candidate_id)
+            candidate = await self._require_candidate(beat.approved_image_candidate_id)
             run = await self._require_run(candidate.generation_run_id)
             if (
                 candidate.kind != GenerationKind.IMAGE
                 or run.project_id != project.id
                 or run.shot_plan_id != plan.id
+                or not _run_matches_visual_beat(run, plan, beat.id)
             ):
                 raise _fail(
                     409,
@@ -4491,18 +5735,18 @@ class ProductionService:
                     update={"status": GenerationCandidateStatus.SELECTED}
                 )
             )
-            updated_plan = plan.model_copy(
+            updated_beat = beat.model_copy(
                 update={
-                    "revision_id": revision_id,
                     "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
-                    "video_status": (
-                        WorkflowItemStatus.STALE
-                        if plan.video_status in downstream_result_statuses
-                        else plan.video_status
-                    ),
                     "approved_image_candidate_id": None,
                     "updated_at": utc_now(),
                 }
+            )
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
+                revision_id=revision_id,
+                invalidate_video=has_downstream_impact,
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
@@ -4536,7 +5780,7 @@ class ProductionService:
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.IMAGE_APPROVAL_REVOKED,
-                f"取消采用分镜 {plan.index} 图片，重新打开图片审核",
+                f"取消采用分镜 {plan.index} 画面 {beat.index} 图片，重新打开图片审核",
                 revision_id=revision_id,
                 shot_plans=next_plans,
                 video_clip_preparations=next_preparations,
@@ -4751,25 +5995,39 @@ class ProductionService:
         project: ProductionProject,
         plan: ShotPlan,
     ) -> bool:
-        candidate_id = plan.approved_image_candidate_id
-        if plan.image_status != WorkflowItemStatus.APPROVED or candidate_id is None:
-            return False
-        candidate = await self.repository.get_generation_candidate(candidate_id)
-        if (
-            candidate is None
-            or candidate.kind != GenerationKind.IMAGE
-            or candidate.status != GenerationCandidateStatus.SELECTED
-        ):
-            return False
-        run = await self.repository.get_generation_run(candidate.generation_run_id)
-        return bool(
-            run is not None
-            and run.project_id == project.id
-            and run.shot_plan_id == plan.id
-            and run.kind == GenerationKind.IMAGE
-            and run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
-            and not _is_simulated_image_run(run)
+        targets = [item for item in plan.visual_beats if item.required] or list(
+            plan.visual_beats
         )
+        if not targets:
+            return False
+        for beat in targets:
+            candidate_id = beat.approved_image_candidate_id
+            if beat.image_status != WorkflowItemStatus.APPROVED or candidate_id is None:
+                return False
+            candidate = await self.repository.get_generation_candidate(candidate_id)
+            if (
+                candidate is None
+                or candidate.kind != GenerationKind.IMAGE
+                or candidate.status != GenerationCandidateStatus.SELECTED
+            ):
+                return False
+            run = await self.repository.get_generation_run(candidate.generation_run_id)
+            if not (
+                run is not None
+                and run.project_id == project.id
+                and run.shot_plan_id == plan.id
+                and run.kind == GenerationKind.IMAGE
+                and _run_matches_visual_beat(run, plan, beat.id)
+                and run.status
+                in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+                and not _is_simulated_image_run(run)
+            ):
+                return False
+            try:
+                await self.resolve_candidate_content(candidate.id)
+            except ProductionServiceError:
+                return False
+        return True
 
     async def _has_valid_approved_video_output(
         self,
@@ -5122,6 +6380,546 @@ class ProductionService:
             )
             await self.repository.save_production_bundle(next_project, revision)
 
+    async def _extract_visual_beat_source_frame(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        beat: ShotVisualBeat,
+        source_video: Path,
+        revision_id: UUID,
+        target_timestamp_seconds: float,
+        prior_hashes: list[int],
+    ) -> tuple[str, str, float, str, int, str | None] | None:
+        frame_root = (
+            self.workspace.production_shot_root(
+                project.record_id,
+                project.id,
+                plan.id,
+            )
+            / "visual-beats"
+            / str(beat.id)
+            / "source-frames"
+        )
+        destination = frame_root / f"{revision_id}.jpg"
+        temporary_paths: list[Path] = []
+        best: tuple[int, Path, float, str, int] | None = None
+        for timestamp in _visual_beat_timestamp_candidates(
+            plan,
+            beat,
+            target_timestamp_seconds,
+        ):
+            temporary = frame_root / f".candidate-{uuid4().hex[:8]}.jpg"
+            temporary_paths.append(temporary)
+            try:
+                await self.media_processor.extract_frame(
+                    source_video,
+                    timestamp,
+                    _filesystem_path(temporary),
+                )
+                await asyncio.to_thread(self._validate_keyframe_file, temporary)
+                sha256, difference_hash = await asyncio.to_thread(
+                    _frame_sha256_and_dhash,
+                    _filesystem_path(temporary),
+                )
+            except (MediaProcessingError, OSError, ProductionServiceError):
+                _filesystem_path(temporary).unlink(missing_ok=True)
+                continue
+            distance = (
+                min(_hash_distance(difference_hash, item) for item in prior_hashes)
+                if prior_hashes
+                else 64
+            )
+            candidate = (distance, temporary, timestamp, sha256, difference_hash)
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+            if not prior_hashes or distance > 4:
+                break
+
+        if best is None:
+            for temporary in temporary_paths:
+                _filesystem_path(temporary).unlink(missing_ok=True)
+            return None
+        _, best_path, timestamp, sha256, difference_hash = best
+        try:
+            _filesystem_path(destination).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(_filesystem_path(best_path), _filesystem_path(destination))
+        except OSError:
+            for temporary in temporary_paths:
+                _filesystem_path(temporary).unlink(missing_ok=True)
+            return None
+        finally:
+            for temporary in temporary_paths:
+                if temporary != best_path:
+                    _filesystem_path(temporary).unlink(missing_ok=True)
+        warning = "duplicate_frame" if prior_hashes and best[0] <= 4 else None
+        relative_path = self.workspace.relative(destination)
+        source_url = (
+            f"/api/v1/production-shots/{plan.id}/visual-beats/{beat.id}/source-frame"
+            f"?v={revision_id}"
+        )
+        return (
+            source_url,
+            relative_path,
+            round(timestamp, 3),
+            sha256,
+            difference_hash,
+            warning,
+        )
+
+    async def _materialize_visual_beat_source_frames(
+        self,
+        project: ProductionProject,
+        plans: list[ShotPlan],
+        report: AnalysisReport,
+        revision_id: UUID,
+        *,
+        plan_ids: set[UUID],
+    ) -> list[ShotPlan]:
+        report_shots = {item.id: item for item in report.shots}
+        source_video: Path | None = None
+        video = await self.repository.get_video(project.video_id)
+        if video is not None:
+            try:
+                source_video = self._resolve_video_file(video)
+            except ProductionServiceError:
+                source_video = None
+
+        materialized: list[ShotPlan] = []
+        for plan in plans:
+            if (
+                plan.id not in plan_ids
+                or plan.source_kind != ShotSourceKind.ANALYSIS
+                or len(plan.visual_beats) <= 1
+            ):
+                materialized.append(plan)
+                continue
+            source_shot = report_shots.get(plan.source_shot_id)
+            if source_shot is None:
+                materialized.append(plan)
+                continue
+            beats = sorted(plan.visual_beats, key=lambda item: item.index)
+            specs = _visual_beat_frame_specs(report, source_shot, len(beats))
+            prior_frames: list[tuple[int, str]] = []
+            next_beats: list[ShotVisualBeat] = []
+            for beat, spec in zip(beats, specs, strict=True):
+                if beat.source_origin in {"video_selection", "duplicate"}:
+                    preserved_hash = beat.source_frame_sha256
+                    preserved_dhash: int | None = None
+                    preserved_path = self._resolve_source_keyframe(
+                        project,
+                        _shot_for_visual_beat(plan, beat),
+                    )
+                    if preserved_path is not None:
+                        try:
+                            preserved_hash, preserved_dhash = await asyncio.to_thread(
+                                _frame_sha256_and_dhash,
+                                preserved_path,
+                            )
+                        except OSError:
+                            preserved_dhash = None
+                    next_beat = beat.model_copy(
+                        update={"source_frame_sha256": preserved_hash}
+                    )
+                    if preserved_dhash is not None:
+                        prior_frames.append((preserved_dhash, beat.image_prompt.strip()))
+                    next_beats.append(next_beat)
+                    continue
+
+                prior_hashes = [
+                    item_hash
+                    for item_hash, prior_prompt in prior_frames
+                    if prior_prompt != beat.image_prompt.strip()
+                ]
+                extracted = None
+                if source_video is not None:
+                    target_timestamp = (
+                        beat.source_timestamp_seconds
+                        if beat.source_timestamp_seconds is not None
+                        else spec.target_timestamp_seconds
+                    )
+                    extracted = await self._extract_visual_beat_source_frame(
+                        project,
+                        plan,
+                        beat,
+                        source_video,
+                        revision_id,
+                        target_timestamp,
+                        prior_hashes,
+                    )
+
+                if extracted is not None:
+                    (
+                        source_url,
+                        source_relative_path,
+                        source_timestamp,
+                        source_sha256,
+                        source_dhash,
+                        source_warning,
+                    ) = extracted
+                    source_origin = "auto_extract"
+                else:
+                    source_url = spec.source_url
+                    source_relative_path = None
+                    source_timestamp = spec.source_timestamp_seconds
+                    source_sha256 = None
+                    source_dhash = None
+                    source_warning = "frame_extract_failed" if source_video is not None else None
+                    source_origin = "analysis" if source_url else "blank"
+                    fallback = beat.model_copy(
+                        update={
+                            "source_frame_url": source_url,
+                            "source_frame_relative_path": None,
+                            "source_timestamp_seconds": source_timestamp,
+                        }
+                    )
+                    fallback_path = self._resolve_source_keyframe(
+                        project,
+                        _shot_for_visual_beat(plan, fallback),
+                    )
+                    if fallback_path is not None:
+                        try:
+                            source_sha256, source_dhash = await asyncio.to_thread(
+                                _frame_sha256_and_dhash,
+                                fallback_path,
+                            )
+                        except OSError:
+                            source_dhash = None
+
+                if source_dhash is not None:
+                    if prior_hashes and min(
+                        _hash_distance(source_dhash, item) for item in prior_hashes
+                    ) <= 4:
+                        source_warning = "duplicate_frame"
+                    prior_frames.append((source_dhash, beat.image_prompt.strip()))
+                elif source_url and any(item.source_frame_url == source_url for item in next_beats):
+                    source_warning = "duplicate_frame"
+                next_beats.append(
+                    beat.model_copy(
+                        update={
+                            "source_frame_url": source_url,
+                            "source_frame_relative_path": source_relative_path,
+                            "source_timestamp_seconds": source_timestamp,
+                            "source_frame_sha256": source_sha256,
+                            "source_frame_warning": source_warning,
+                            "source_origin": source_origin,
+                            "updated_at": utc_now(),
+                        }
+                    )
+                )
+            materialized.append(
+                _sync_shot_visual_beats(
+                    plan,
+                    next_beats,
+                    revision_id=revision_id,
+                    invalidate_video=False,
+                )
+            )
+        return materialized
+
+    @staticmethod
+    def _visual_beat_frame_mapping_repair_needed(
+        report: AnalysisReport,
+        plan: ShotPlan,
+    ) -> bool:
+        if (
+            plan.source_kind != ShotSourceKind.ANALYSIS
+            or len(plan.visual_beats) <= 1
+            or any(
+                beat.image_status == WorkflowItemStatus.GENERATING
+                for beat in plan.visual_beats
+            )
+        ):
+            return False
+        source_shot = next(
+            (item for item in report.shots if item.id == plan.source_shot_id),
+            None,
+        )
+        if source_shot is None:
+            return False
+        beats = sorted(plan.visual_beats, key=lambda item: item.index)
+        eligible = [
+            item
+            for item in beats
+            if item.source_origin in {"analysis", "legacy", "blank"}
+        ]
+        urls = [item.source_frame_url for item in eligible if item.source_frame_url]
+        if len(urls) != len(set(urls)):
+            return True
+        specs = _visual_beat_frame_specs(report, source_shot, len(beats))
+        for beat, spec in zip(beats, specs, strict=True):
+            if beat.source_origin not in {"analysis", "legacy", "blank"}:
+                continue
+            if beat.source_frame_url != spec.source_url:
+                return True
+            if beat.source_frame_url and (
+                beat.source_timestamp_seconds is None
+                or spec.source_timestamp_seconds is None
+                or abs(beat.source_timestamp_seconds - spec.source_timestamp_seconds) > 0.002
+            ):
+                return True
+        return False
+
+    async def _repair_visual_beat_frame_mappings(
+        self,
+        project: ProductionProject,
+        plans: list[ShotPlan],
+    ) -> tuple[ProductionProject, list[ShotPlan]]:
+        report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+        if report is None or report.video_id != project.video_id:
+            return project, plans
+        affected_ids = {
+            plan.id
+            for plan in plans
+            if self._visual_beat_frame_mapping_repair_needed(report, plan)
+        }
+        if not affected_ids:
+            return project, plans
+
+        lock = await self._project_lock(project.id)
+        async with lock:
+            project = await self._require_project(project.id)
+            plans = await self.repository.list_shot_plans(project.id)
+            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            if report is None or report.video_id != project.video_id:
+                return project, plans
+            affected_ids = {
+                plan.id
+                for plan in plans
+                if self._visual_beat_frame_mapping_repair_needed(report, plan)
+            }
+            if not affected_ids:
+                return project, plans
+
+            revision_id = uuid4()
+            materialized = await self._materialize_visual_beat_source_frames(
+                project,
+                plans,
+                report,
+                revision_id,
+                plan_ids=affected_ids,
+            )
+            old_by_id = {item.id: item for item in plans}
+            changed_plans: list[ShotPlan] = []
+            next_plans: list[ShotPlan] = []
+            candidate_updates_by_id: dict[UUID, GenerationCandidate] = {}
+            source_fields = (
+                "source_frame_url",
+                "source_frame_relative_path",
+                "source_timestamp_seconds",
+                "source_frame_sha256",
+                "source_frame_warning",
+                "source_origin",
+            )
+            for materialized_plan in materialized:
+                original_plan = old_by_id[materialized_plan.id]
+                if materialized_plan.id not in affected_ids:
+                    next_plans.append(original_plan)
+                    continue
+                old_beats = {item.id: item for item in original_plan.visual_beats}
+                next_beats: list[ShotVisualBeat] = []
+                changed_beat_ids: list[UUID] = []
+                for beat in materialized_plan.visual_beats:
+                    old_beat = old_beats[beat.id]
+                    changed = any(
+                        getattr(old_beat, field) != getattr(beat, field)
+                        for field in source_fields
+                    )
+                    if not changed:
+                        next_beats.append(old_beat)
+                        continue
+                    changed_beat_ids.append(beat.id)
+                    reviewed = (
+                        old_beat.approved_image_candidate_id is not None
+                        or old_beat.image_status
+                        in {
+                            WorkflowItemStatus.REVIEW_REQUIRED,
+                            WorkflowItemStatus.APPROVED,
+                            WorkflowItemStatus.STALE,
+                        }
+                    )
+                    next_beats.append(
+                        beat.model_copy(
+                            update={
+                                "approved_image_candidate_id": None,
+                                "image_status": (
+                                    WorkflowItemStatus.STALE
+                                    if reviewed
+                                    else (
+                                        WorkflowItemStatus.READY
+                                        if beat.image_prompt.strip()
+                                        else WorkflowItemStatus.DRAFT
+                                    )
+                                ),
+                                "updated_at": utc_now(),
+                            }
+                        )
+                    )
+                if not changed_beat_ids:
+                    next_plans.append(original_plan)
+                    continue
+                for beat_id in changed_beat_ids:
+                    for candidate in await self._reset_selected_image_candidates(
+                        project,
+                        original_plan,
+                        visual_beat_id=beat_id,
+                    ):
+                        candidate_updates_by_id[candidate.id] = candidate
+                updated_plan = _sync_shot_visual_beats(
+                    original_plan,
+                    next_beats,
+                    revision_id=revision_id,
+                    invalidate_video=True,
+                )
+                changed_plans.append(updated_plan)
+                next_plans.append(updated_plan)
+
+            if not changed_plans:
+                return project, plans
+            downstream_steps = {
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": (
+                        ProductionStep.SHOT_IMAGES
+                        if project.active_step in downstream_steps
+                        else project.active_step
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.SOURCE_KEYFRAME_CHANGED,
+                f"修复 {len(changed_plans)} 个分镜的多画面源帧映射",
+                revision_id=revision_id,
+                report=report,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=changed_plans,
+                generation_candidates=list(candidate_updates_by_id.values()),
+            )
+        return next_project, next_plans
+
+    async def _repair_boundary_contaminated_visual_beats(
+        self,
+        project: ProductionProject,
+        plans: list[ShotPlan],
+    ) -> tuple[ProductionProject, list[ShotPlan]]:
+        """Remove legacy leading beats sourced from the previous shot transition."""
+
+        report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+        if report is None or report.video_id != project.video_id:
+            return project, plans
+        affected = {
+            plan.id: _boundary_contaminated_visual_beat_ids(report, plan)
+            for plan in plans
+        }
+        affected = {plan_id: beat_ids for plan_id, beat_ids in affected.items() if beat_ids}
+        if not affected:
+            return project, plans
+
+        lock = await self._project_lock(project.id)
+        async with lock:
+            project = await self._require_project(project.id)
+            plans = await self.repository.list_shot_plans(project.id)
+            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            if report is None or report.video_id != project.video_id:
+                return project, plans
+            affected = {
+                plan.id: _boundary_contaminated_visual_beat_ids(report, plan)
+                for plan in plans
+            }
+            affected = {
+                plan_id: beat_ids for plan_id, beat_ids in affected.items() if beat_ids
+            }
+            if not affected:
+                return project, plans
+
+            revision_id = uuid4()
+            changed_plans: list[ShotPlan] = []
+            next_plans: list[ShotPlan] = []
+            candidate_updates_by_id: dict[UUID, GenerationCandidate] = {}
+            for plan in plans:
+                removed_ids = set(affected.get(plan.id, []))
+                if not removed_ids:
+                    next_plans.append(plan)
+                    continue
+                retained = _retime_visual_beats(
+                    [item for item in plan.visual_beats if item.id not in removed_ids]
+                )
+                if len(retained) == 1:
+                    retained = [
+                        retained[0].model_copy(
+                            update={"index": 1, "title": "画面 1", "updated_at": utc_now()}
+                        )
+                    ]
+                for beat_id in removed_ids:
+                    for candidate in await self._reset_selected_image_candidates(
+                        project,
+                        plan,
+                        visual_beat_id=beat_id,
+                    ):
+                        candidate_updates_by_id[candidate.id] = candidate
+                updated = _sync_shot_visual_beats(
+                    plan,
+                    retained,
+                    revision_id=revision_id,
+                    invalidate_video=True,
+                )
+                primary = retained[0]
+                updated = updated.model_copy(
+                    update={
+                        "video_prompt": (
+                            f"{primary.image_prompt}；持续 {plan.duration_seconds:.2f} 秒。"
+                        ),
+                        "approved_video_candidate_id": None,
+                        "updated_at": utc_now(),
+                    }
+                )
+                changed_plans.append(updated)
+                next_plans.append(updated)
+
+            if not changed_plans:
+                return project, plans
+            downstream_steps = {
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": (
+                        ProductionStep.SHOT_IMAGES
+                        if project.active_step in downstream_steps
+                        else project.active_step
+                    ),
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.SHOT_STRUCTURE_CHANGED,
+                f"移除 {len(changed_plans)} 个分镜中被上一分镜污染的开头画面",
+                revision_id=revision_id,
+                report=report,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=changed_plans,
+                generation_candidates=list(candidate_updates_by_id.values()),
+            )
+        return next_project, next_plans
+
     def _initial_shot_plans(
         self,
         project: ProductionProject,
@@ -5133,14 +6931,6 @@ class ProductionService:
         for shot in sorted(report.shots, key=lambda item: item.index):
             prompt_shot = prompt_shots.get(shot.id)
             duration = max(0.01, shot.end_seconds - shot.start_seconds)
-            keyframe_url = (
-                shot.keyframe_url
-                or next(iter(shot.evidence_frame_urls), None)
-                or (
-                    f"/api/v1/analyses/{report.analysis_id}/artifacts/"
-                    f"shots/shot_{shot.index:03d}.jpg"
-                )
-            )
             image_prompt = prompt_shot.prompt if prompt_shot is not None else shot.prompt
             negative_constraints = (
                 prompt_shot.negative_constraints
@@ -5151,23 +6941,111 @@ class ProductionService:
                 f"{shot.prompt}；动作过程：{shot.action}；"
                 f"运镜：{shot.camera}；持续 {duration:.2f} 秒。"
             )
+            structured_beats = sorted(
+                shot.visual_beats,
+                key=lambda item: (item.start_seconds, item.index),
+            )
+            visual_prompt_parts = (
+                [(item.title, item.image_prompt) for item in structured_beats]
+                if structured_beats
+                else _split_visual_beat_prompts(image_prompt)
+            )
+            beat_count = len(visual_prompt_parts)
+            if structured_beats:
+                samples = _shot_frame_samples(report, shot)
+                frame_specs = []
+                for item in structured_beats:
+                    target = round(item.source_timestamp_seconds, 3)
+                    closest = min(
+                        samples,
+                        key=lambda sample: abs(sample.target_timestamp_seconds - target),
+                    )
+                    frame_specs.append(
+                        VisualBeatFrameSpec(
+                            source_url=closest.source_url,
+                            source_timestamp_seconds=closest.source_timestamp_seconds,
+                            target_timestamp_seconds=target,
+                            role=closest.role,
+                        )
+                    )
+            else:
+                frame_specs = _visual_beat_frame_specs(report, shot, beat_count)
+            content_start, content_end = _report_shot_content_bounds(report, shot)
+            content_duration = max(0.001, content_end - content_start)
+            visual_beats: list[ShotVisualBeat] = []
+            for beat_index, ((title, beat_prompt), frame_spec) in enumerate(
+                zip(visual_prompt_parts, frame_specs, strict=True),
+                start=1,
+            ):
+                source_url = frame_spec.source_url
+                if structured_beats:
+                    source_fact = structured_beats[beat_index - 1]
+                    start_ratio = max(
+                        0.0,
+                        min(1.0, (source_fact.start_seconds - content_start) / content_duration),
+                    )
+                    end_ratio = max(
+                        start_ratio + 0.000001,
+                        min(1.0, (source_fact.end_seconds - content_start) / content_duration),
+                    )
+                else:
+                    start_ratio = (beat_index - 1) / beat_count
+                    end_ratio = beat_index / beat_count
+                visual_beats.append(
+                    ShotVisualBeat(
+                        index=beat_index,
+                        title=title,
+                        start_ratio=start_ratio,
+                        end_ratio=end_ratio,
+                        source_frame_url=source_url,
+                        source_timestamp_seconds=frame_spec.source_timestamp_seconds,
+                        source_origin="analysis" if source_url else "blank",
+                        image_prompt=_simplified_text(
+                            beat_prompt,
+                            field_name="画面图片提示词",
+                            allow_empty=True,
+                            max_length=8000,
+                        ),
+                        image_negative_constraints=[
+                            _simplified_text(
+                                item,
+                                field_name="图片负面约束",
+                                max_length=500,
+                            )
+                            for item in negative_constraints
+                        ],
+                        image_status=(
+                            WorkflowItemStatus.READY
+                            if beat_prompt.strip()
+                            else WorkflowItemStatus.DRAFT
+                        ),
+                        transition_to_next_type=(
+                            "model_generated"
+                            if beat_index < beat_count
+                            else "cut"
+                        ),
+                        transition_to_next_duration_seconds=(
+                            0.5 if beat_index < beat_count else 0
+                        ),
+                    )
+                )
+            primary_beat = visual_beats[0]
             plans.append(
                 ShotPlan(
                     project_id=project.id,
                     revision_id=revision_id,
                     source_shot_id=shot.id,
                     index=shot.index,
-                    source_keyframe_url=keyframe_url,
-                    source_keyframe_timestamp_seconds=round(
-                        shot.start_seconds + duration / 2,
-                        3,
+                    source_keyframe_url=primary_beat.source_frame_url,
+                    source_keyframe_timestamp_seconds=(
+                        primary_beat.source_timestamp_seconds
                     ),
                     source_keyframe_origin="analysis",
                     start_seconds=shot.start_seconds,
                     end_seconds=shot.end_seconds,
                     duration_seconds=duration,
                     image_prompt=_simplified_text(
-                        image_prompt,
+                        primary_beat.image_prompt,
                         field_name="图片提示词",
                         allow_empty=True,
                         max_length=8000,
@@ -5196,9 +7074,10 @@ class ProductionService:
                     ],
                     image_status=(
                         WorkflowItemStatus.READY
-                        if image_prompt.strip()
+                        if primary_beat.image_prompt.strip()
                         else WorkflowItemStatus.DRAFT
                     ),
+                    visual_beats=visual_beats,
                 )
             )
         return plans
@@ -5210,7 +7089,19 @@ class ProductionService:
         plans = await self.repository.list_shot_plans(project.id)
         if plans:
             current_project = await self._require_project(project.id)
-            return await self._repair_legacy_simulated_outputs(
+            current_project, plans = await self._repair_legacy_simulated_outputs(
+                current_project,
+                plans,
+            )
+            current_project, plans = await self._expand_legacy_visual_beats(
+                current_project,
+                plans,
+            )
+            current_project, plans = await self._repair_visual_beat_frame_mappings(
+                current_project,
+                plans,
+            )
+            return await self._repair_boundary_contaminated_visual_beats(
                 current_project,
                 plans,
             )
@@ -5225,6 +7116,13 @@ class ProductionService:
                 raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
             revision_id = uuid4()
             plans = self._initial_shot_plans(project, report, revision_id)
+            plans = await self._materialize_visual_beat_source_frames(
+                project,
+                plans,
+                report,
+                revision_id,
+                plan_ids={item.id for item in plans if len(item.visual_beats) > 1},
+            )
             project, revision = await self._prepare_revision(
                 project,
                 ProductionChangeKind.SHOT_PLAN_CHANGED,
@@ -5238,7 +7136,228 @@ class ProductionService:
                 revision,
                 shot_plans=plans,
             )
-        return await self._repair_legacy_simulated_outputs(project, plans)
+        project, plans = await self._repair_legacy_simulated_outputs(project, plans)
+        project, plans = await self._expand_legacy_visual_beats(project, plans)
+        project, plans = await self._repair_visual_beat_frame_mappings(project, plans)
+        return await self._repair_boundary_contaminated_visual_beats(project, plans)
+
+    @staticmethod
+    def _legacy_visual_beat_expansion_needed(plans: list[ShotPlan]) -> bool:
+        return any(
+            plan.source_kind == ShotSourceKind.ANALYSIS
+            and len(plan.visual_beats) == 1
+            and plan.visual_beats[0].source_origin == "legacy"
+            and len(_split_visual_beat_prompts(plan.visual_beats[0].image_prompt)) > 1
+            for plan in plans
+        )
+
+    async def _expand_legacy_visual_beats(
+        self,
+        project: ProductionProject,
+        plans: list[ShotPlan],
+    ) -> tuple[ProductionProject, list[ShotPlan]]:
+        """Upgrade pre-v4 multi-scene prompts into ordered visual beats once."""
+        if not self._legacy_visual_beat_expansion_needed(plans):
+            return project, plans
+
+        lock = await self._project_lock(project.id)
+        async with lock:
+            project = await self._require_project(project.id)
+            plans = await self.repository.list_shot_plans(project.id)
+            if not self._legacy_visual_beat_expansion_needed(plans):
+                return project, plans
+
+            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            report_shots = (
+                {item.id: item for item in report.shots}
+                if report is not None and report.video_id == project.video_id
+                else {}
+            )
+            revision_id = uuid4()
+            now = utc_now()
+            changed: list[ShotPlan] = []
+            next_plans: list[ShotPlan] = []
+            candidate_updates_by_id: dict[UUID, GenerationCandidate] = {}
+
+            for plan in plans:
+                if not (
+                    plan.source_kind == ShotSourceKind.ANALYSIS
+                    and len(plan.visual_beats) == 1
+                    and plan.visual_beats[0].source_origin == "legacy"
+                ):
+                    next_plans.append(plan)
+                    continue
+                original = plan.visual_beats[0]
+                prompt_parts = _split_visual_beat_prompts(original.image_prompt)
+                if len(prompt_parts) <= 1:
+                    next_plans.append(plan)
+                    continue
+
+                source_shot = report_shots.get(plan.source_shot_id)
+                existing_result = (
+                    original.approved_image_candidate_id is not None
+                    or original.image_status
+                    in {
+                        WorkflowItemStatus.GENERATING,
+                        WorkflowItemStatus.REVIEW_REQUIRED,
+                        WorkflowItemStatus.APPROVED,
+                        WorkflowItemStatus.STALE,
+                    }
+                )
+                beat_count = len(prompt_parts)
+                frame_specs = (
+                    _visual_beat_frame_specs(report, source_shot, beat_count)
+                    if report is not None and source_shot is not None
+                    else [
+                        VisualBeatFrameSpec(
+                            source_url=(original.source_frame_url if index == 0 else None),
+                            source_timestamp_seconds=(
+                                original.source_timestamp_seconds if index == 0 else None
+                            ),
+                            target_timestamp_seconds=round(
+                                plan.start_seconds
+                                + plan.duration_seconds * index / max(1, beat_count - 1),
+                                3,
+                            ),
+                            role="legacy" if index == 0 else "generated",
+                        )
+                        for index in range(beat_count)
+                    ]
+                )
+                expanded: list[ShotVisualBeat] = []
+                for beat_index, ((title, beat_prompt), frame_spec) in enumerate(
+                    zip(prompt_parts, frame_specs, strict=True),
+                    start=1,
+                ):
+                    start_ratio = (beat_index - 1) / beat_count
+                    end_ratio = beat_index / beat_count
+                    source_url = frame_spec.source_url
+                    source_relative_path = None
+                    source_timestamp = frame_spec.source_timestamp_seconds
+                    source_origin = "analysis" if source_url else "blank"
+                    if beat_index == 1:
+                        approved_candidate_id = None
+                        image_status = (
+                            WorkflowItemStatus.STALE
+                            if existing_result
+                            else (
+                                WorkflowItemStatus.READY
+                                if beat_prompt.strip()
+                                else WorkflowItemStatus.DRAFT
+                            )
+                        )
+                        beat_id = original.id
+                        created_at = original.created_at
+                    else:
+                        approved_candidate_id = None
+                        image_status = (
+                            WorkflowItemStatus.READY
+                            if beat_prompt.strip()
+                            else WorkflowItemStatus.DRAFT
+                        )
+                        beat_id = uuid4()
+                        created_at = now
+                    expanded.append(
+                        ShotVisualBeat(
+                            id=beat_id,
+                            index=beat_index,
+                            title=_simplified_text(
+                                title,
+                                field_name="画面名称",
+                                max_length=120,
+                            ),
+                            start_ratio=start_ratio,
+                            end_ratio=end_ratio,
+                            source_frame_url=source_url,
+                            source_frame_relative_path=source_relative_path,
+                            source_timestamp_seconds=source_timestamp,
+                            source_origin=source_origin,
+                            image_prompt=_simplified_text(
+                                beat_prompt,
+                                field_name="画面图片提示词",
+                                allow_empty=True,
+                                max_length=8000,
+                            ),
+                            image_prompt_mentions=original.image_prompt_mentions,
+                            image_negative_constraints=(
+                                original.image_negative_constraints
+                            ),
+                            required=original.required,
+                            image_status=image_status,
+                            approved_image_candidate_id=approved_candidate_id,
+                            transition_to_next_type=(
+                                "model_generated"
+                                if beat_index < beat_count
+                                else "cut"
+                            ),
+                            transition_to_next_duration_seconds=(
+                                0.5 if beat_index < beat_count else 0
+                            ),
+                            created_at=created_at,
+                            updated_at=now,
+                        )
+                    )
+
+                updated = _sync_shot_visual_beats(
+                    plan,
+                    expanded,
+                    revision_id=revision_id,
+                    invalidate_video=True,
+                )
+                changed.append(updated)
+                next_plans.append(updated)
+                if existing_result:
+                    for candidate in await self._reset_selected_image_candidates(
+                        project,
+                        plan,
+                        visual_beat_id=original.id,
+                    ):
+                        candidate_updates_by_id[candidate.id] = candidate
+
+            if not changed:
+                return project, plans
+            if report is not None:
+                changed_ids = {item.id for item in changed}
+                next_plans = await self._materialize_visual_beat_source_frames(
+                    project,
+                    next_plans,
+                    report,
+                    revision_id,
+                    plan_ids=changed_ids,
+                )
+                changed = [item for item in next_plans if item.id in changed_ids]
+
+            downstream_steps = {
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": (
+                        ProductionStep.SHOT_IMAGES
+                        if project.active_step in downstream_steps
+                        else project.active_step
+                    ),
+                    "updated_at": now,
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.SHOT_STRUCTURE_CHANGED,
+                f"将 {len(changed)} 个历史多场景提示词拆分为有序画面",
+                revision_id=revision_id,
+                report=report,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=changed,
+                generation_candidates=list(candidate_updates_by_id.values()),
+            )
+        return next_project, next_plans
 
     async def _legacy_simulation_repair_needed(
         self,
@@ -5634,7 +7753,34 @@ class ProductionService:
             )
             if not has_prior_result:
                 updates["approved_video_candidate_id"] = None
-        return ShotPlan.model_validate({**plan.model_dump(mode="python"), **updates})
+        updated_plan = ShotPlan.model_validate(
+            {**plan.model_dump(mode="python"), **updates}
+        )
+        if image_changed and updated_plan.visual_beats:
+            primary = updated_plan.visual_beats[0]
+            beat_updates: dict[str, object] = {
+                "image_status": updated_plan.image_status,
+                "approved_image_candidate_id": updated_plan.approved_image_candidate_id,
+                "updated_at": utc_now(),
+            }
+            for field_name in (
+                "image_prompt",
+                "image_prompt_mentions",
+                "image_negative_constraints",
+            ):
+                if field_name in fields:
+                    beat_updates[field_name] = getattr(updated_plan, field_name)
+            updated_primary = primary.model_copy(update=beat_updates)
+            return _sync_shot_visual_beats(
+                updated_plan,
+                [
+                    updated_primary if item.id == primary.id else item
+                    for item in updated_plan.visual_beats
+                ],
+                revision_id=revision_id,
+                invalidate_video=True,
+            )
+        return updated_plan
 
     async def _validate_prompt_mentions(
         self,
@@ -5765,10 +7911,46 @@ class ProductionService:
             if run.kind == GenerationKind.VIDEO
             else []
         )
+        failed_task = next(
+            (
+                item
+                for item in provider_tasks
+                if item.error_code or item.error_message or item.error_technical_message
+            ),
+            None,
+        )
+        failure = (
+            classify_video_provider_failure(
+                provider=run.provider,
+                code=run.error_code or (failed_task.error_code if failed_task else None),
+                message=(
+                    run.error_technical_message
+                    or (failed_task.error_technical_message if failed_task else None)
+                    or run.error_message
+                    or (failed_task.error_message if failed_task else None)
+                ),
+                retryable=run.error_retryable or bool(failed_task and failed_task.retryable),
+                provider_code=(
+                    run.provider_error_code
+                    or (failed_task.provider_error_code if failed_task else None)
+                    or (
+                        failed_task.error_code
+                        if failed_task
+                        and failed_task.error_code
+                        and not failed_task.error_code.startswith("video_")
+                        else None
+                    )
+                ),
+            )
+            if run.kind == GenerationKind.VIDEO
+            and run.status in {ProductionRunStatus.FAILED, ProductionRunStatus.BLOCKED}
+            else None
+        )
         return GenerationRunResponse(
             id=run.id,
             project_id=run.project_id,
             shot_plan_id=run.shot_plan_id,
+            visual_beat_id=run.visual_beat_id,
             revision_id=run.revision_id,
             kind=run.kind,
             input_mode=run.input_mode,
@@ -5781,7 +7963,10 @@ class ProductionService:
             adapter_id=run.adapter_id,
             adapter_version=run.adapter_version,
             protocol_version=run.protocol_version,
-            provider_request_id=run.provider_request_id,
+            provider_request_id=(
+                run.provider_request_id
+                or (failed_task.provider_task_id if failed_task else None)
+            ),
             capability_snapshot=run.capability_snapshot,
             cost_source=run.cost_source,
             cost_estimate_known=run.cost_estimate_known,
@@ -5796,8 +7981,22 @@ class ProductionService:
             retry_count=run.retry_count,
             retry_of_run_id=run.retry_of_run_id,
             cancellation_requested=run.cancellation_requested,
-            error_code=run.error_code,
-            error_message=run.error_message,
+            error_code=failure.code if failure else run.error_code,
+            error_message=failure.message if failure else run.error_message,
+            provider_error_code=(
+                run.provider_error_code
+                or (failed_task.provider_error_code if failed_task else None)
+                or (failure.provider_code if failure else None)
+            ),
+            error_category=run.error_category or (failure.category if failure else None),
+            error_title=run.error_title or (failure.title if failure else None),
+            error_technical_message=(
+                run.error_technical_message
+                or (failed_task.error_technical_message if failed_task else None)
+                or (failure.technical_message if failure else None)
+            ),
+            error_retryable=run.error_retryable or bool(failure and failure.retryable),
+            error_action=run.error_action or (failure.suggested_action if failure else None),
             created_at=run.created_at,
             started_at=run.started_at,
             updated_at=run.updated_at,
@@ -5822,6 +8021,11 @@ class ProductionService:
                             "error_code",
                             "error_message",
                             "retryable",
+                            "provider_error_code",
+                            "error_category",
+                            "error_title",
+                            "error_technical_message",
+                            "error_action",
                             "submitted_at",
                             "last_polled_at",
                             "completed_at",
@@ -5989,11 +8193,15 @@ class ProductionService:
         project: ProductionProject,
         plan: ShotPlan,
         *,
+        visual_beat_id: UUID,
         keep_candidate_id: UUID | None = None,
     ) -> list[GenerationCandidate]:
         updates: list[GenerationCandidate] = []
         for run in await self.repository.list_generation_runs(project.id, plan.id):
-            if run.kind != GenerationKind.IMAGE:
+            if (
+                run.kind != GenerationKind.IMAGE
+                or not _run_matches_visual_beat(run, plan, visual_beat_id)
+            ):
                 continue
             for candidate in await self.repository.list_generation_candidates(run.id):
                 if (
@@ -6013,6 +8221,7 @@ class ProductionService:
         plan: ShotPlan,
         revision_id: UUID,
         source_path: Path,
+        visual_beat_id: UUID,
     ) -> tuple[GenerationRun, GenerationCandidate]:
         started = datetime.now(UTC)
         source_payload = _filesystem_path(source_path).read_bytes()
@@ -6051,6 +8260,7 @@ class ProductionService:
             "schema_version": "viral-dna-source-frame/v1",
             "project_id": str(project.id),
             "shot_plan_id": str(plan.id),
+            "visual_beat_id": str(visual_beat_id),
             "revision_id": str(revision_id),
             "input_mode": ImageGenerationInputMode.KEYFRAME_EDIT.value,
             "source": {
@@ -6137,6 +8347,7 @@ class ProductionService:
             id=run_id,
             project_id=project.id,
             shot_plan_id=plan.id,
+            visual_beat_id=visual_beat_id,
             revision_id=revision_id,
             kind=GenerationKind.IMAGE,
             input_mode=ImageGenerationInputMode.KEYFRAME_EDIT,
@@ -6268,7 +8479,7 @@ class ProductionService:
         project = await self.repository.get_production_project(project_id)
         if project is None:
             raise _fail(404, "production_not_found", "创作方案不存在")
-        return project
+        return _normalize_optional_preparation_project(project)
 
     async def _require_revision(
         self,
@@ -6639,6 +8850,105 @@ class ProductionService:
             id_map[source_asset.id] = cloned_asset.id
         return cloned, id_map
 
+    async def _clone_visual_beats(
+        self,
+        *,
+        source_project: ProductionProject,
+        target_project: ProductionProject,
+        source_plan: ShotPlan,
+        target_shot_plan_id: UUID,
+        revision_id: UUID,
+        primary_source_url: str | None,
+        primary_source_relative_path: str | None,
+        asset_ids: dict[UUID, UUID] | None = None,
+    ) -> list[ShotVisualBeat]:
+        """Clone visual structure while deliberately dropping generated approvals."""
+        cloned: list[ShotVisualBeat] = []
+        now = utc_now()
+        for position, beat in enumerate(
+            sorted(source_plan.visual_beats, key=lambda item: item.index),
+            start=1,
+        ):
+            cloned_id = uuid4()
+            if position == 1:
+                source_url = primary_source_url
+                source_relative_path = primary_source_relative_path
+                source_timestamp = beat.source_timestamp_seconds
+                source_origin = "duplicate" if source_relative_path else beat.source_origin
+            else:
+                source_url = beat.source_frame_url
+                source_relative_path = None
+                source_timestamp = beat.source_timestamp_seconds
+                source_origin = beat.source_origin
+                if beat.source_frame_relative_path is not None:
+                    source_path = self._resolve_source_keyframe(
+                        source_project,
+                        _shot_for_visual_beat(source_plan, beat),
+                    )
+                    if source_path is None:
+                        raise _fail(
+                            409,
+                            "visual_beat_source_frame_missing",
+                            f"源分镜画面 {beat.index} 的关键帧文件不存在",
+                        )
+                    destination = (
+                        self.workspace.production_shot_root(
+                            target_project.record_id,
+                            target_project.id,
+                            target_shot_plan_id,
+                        )
+                        / "visual-beats"
+                        / str(cloned_id)
+                        / "source-frames"
+                        / f"{revision_id}.jpg"
+                    )
+                    payload = await asyncio.to_thread(source_path.read_bytes)
+                    await asyncio.to_thread(self._write_atomic, destination, payload)
+                    source_relative_path = self.workspace.relative(destination)
+                    source_url = (
+                        f"/api/v1/production-shots/{target_shot_plan_id}/visual-beats/"
+                        f"{cloned_id}/source-frame?v={revision_id}"
+                    )
+                    source_origin = "duplicate"
+                elif (source_url or "").startswith("/api/v1/production-shots/"):
+                    source_url = None
+                    source_timestamp = None
+                    source_origin = "blank"
+
+            mentions = beat.image_prompt_mentions
+            if asset_ids is not None:
+                mentions = [
+                    mention.model_copy(
+                        update={
+                            "reference_asset_id": asset_ids[mention.reference_asset_id],
+                        }
+                    )
+                    for mention in beat.image_prompt_mentions
+                    if mention.reference_asset_id in asset_ids
+                ]
+            cloned.append(
+                beat.model_copy(
+                    update={
+                        "id": cloned_id,
+                        "index": position,
+                        "source_frame_url": source_url,
+                        "source_frame_relative_path": source_relative_path,
+                        "source_timestamp_seconds": source_timestamp,
+                        "source_origin": source_origin,
+                        "image_prompt_mentions": mentions,
+                        "image_status": (
+                            WorkflowItemStatus.READY
+                            if beat.image_prompt.strip()
+                            else WorkflowItemStatus.DRAFT
+                        ),
+                        "approved_image_candidate_id": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+            )
+        return cloned
+
     async def _clone_snapshot_shots(
         self,
         source_project: ProductionProject,
@@ -6713,6 +9023,16 @@ class ProductionService:
                     f"/api/v1/production-shots/{cloned_plan_id}/source-keyframe"
                     f"?v={revision_id}"
                 )
+            cloned_visual_beats = await self._clone_visual_beats(
+                source_project=source_project,
+                target_project=branch,
+                source_plan=source_plan,
+                target_shot_plan_id=cloned_plan_id,
+                revision_id=revision_id,
+                primary_source_url=source_keyframe_url,
+                primary_source_relative_path=source_keyframe_relative_path,
+                asset_ids=asset_ids,
+            )
             cloned_plan = ShotPlan.model_validate(
                 {
                     **source_plan.model_dump(mode="python"),
@@ -6721,14 +9041,18 @@ class ProductionService:
                     "revision_id": revision_id,
                     "source_keyframe_url": source_keyframe_url,
                     "source_keyframe_relative_path": source_keyframe_relative_path,
+                    "image_prompt": cloned_visual_beats[0].image_prompt,
+                    "image_prompt_mentions": (
+                        cloned_visual_beats[0].image_prompt_mentions
+                    ),
+                    "image_negative_constraints": (
+                        cloned_visual_beats[0].image_negative_constraints
+                    ),
                     "approved_image_candidate_id": None,
                     "approved_video_candidate_id": None,
-                    "image_status": (
-                        WorkflowItemStatus.READY
-                        if source_plan.image_prompt.strip()
-                        else WorkflowItemStatus.DRAFT
-                    ),
+                    "image_status": _visual_beat_image_status(cloned_visual_beats),
                     "video_status": WorkflowItemStatus.DRAFT,
+                    "visual_beats": cloned_visual_beats,
                     "created_at": utc_now(),
                     "updated_at": utc_now(),
                 }

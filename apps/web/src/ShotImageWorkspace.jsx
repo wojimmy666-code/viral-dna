@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowCounterClockwise,
   ArrowDown,
+  ArrowLeft,
   ArrowRight,
   ArrowUp,
   CheckCircle,
@@ -20,6 +21,7 @@ import {
 import {
   REFERENCE_ROLE_OPTIONS,
   SHOT_LOCK_OPTIONS,
+  duplicateVisualBeatSourceIds,
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
   imageGenerationModeLabel,
@@ -309,6 +311,7 @@ export function ShotImageWorkspace({
   shots,
   shotDetail,
   selectedShotId,
+  selectedVisualBeatId,
   draft,
   setDraft,
   assets,
@@ -333,13 +336,18 @@ export function ShotImageWorkspace({
   onSelectKeyframe,
   onApproveSource,
   onCreateShot,
+  onCreateVisualBeat,
+  onDeleteVisualBeat,
   onDiscardShot,
   onSelectCandidate,
   onApprove,
   onRevokeApproval,
   onReorderShots,
+  onReorderVisualBeats,
   onRetryRun,
   onRestoreShot,
+  onSelectVisualBeat,
+  onUpdateVisualBeat,
   onAdvance,
 }) {
   const [keyframePickerOpen, setKeyframePickerOpen] = useState(false);
@@ -351,7 +359,36 @@ export function ShotImageWorkspace({
   const [candidateHistoryExpanded, setCandidateHistoryExpanded] = useState(false);
   const [mentionMenu, setMentionMenu] = useState(null);
   const promptRef = useRef(null);
-  const plan = shotDetail?.plan;
+  const shotPlan = shotDetail?.plan;
+  const visualBeats = useMemo(
+    () => [...(shotPlan?.visual_beats || [])].sort((left, right) => left.index - right.index),
+    [shotPlan?.visual_beats],
+  );
+  const duplicateSourceBeatIds = useMemo(
+    () => new Set(duplicateVisualBeatSourceIds(visualBeats)),
+    [visualBeats],
+  );
+  const activeVisualBeat = (
+    visualBeats.find((item) => item.id === selectedVisualBeatId)
+    || visualBeats[0]
+    || null
+  );
+  const plan = shotPlan && activeVisualBeat
+    ? {
+      ...shotPlan,
+      source_keyframe_url: activeVisualBeat.source_frame_url,
+      source_keyframe_relative_path: activeVisualBeat.source_frame_relative_path,
+      source_keyframe_timestamp_seconds: activeVisualBeat.source_timestamp_seconds,
+      source_keyframe_origin: activeVisualBeat.source_origin,
+      image_prompt: activeVisualBeat.image_prompt,
+      image_prompt_mentions: activeVisualBeat.image_prompt_mentions,
+      image_negative_constraints: activeVisualBeat.image_negative_constraints,
+      image_status: activeVisualBeat.image_status,
+      approved_image_candidate_id: activeVisualBeat.approved_image_candidate_id,
+      required: activeVisualBeat.required,
+      source_kind: activeVisualBeat.source_frame_url ? shotPlan.source_kind : "blank",
+    }
+    : shotPlan;
   const previewLayout = productionPreviewLayout(project);
   const previewCanvasStyle = {
     "--shot-preview-aspect-ratio": previewLayout.aspectRatio,
@@ -366,9 +403,39 @@ export function ShotImageWorkspace({
     [shots],
   );
   const generationRuns = shotDetail?.generation_runs || [];
+  const visualBeatPreviews = useMemo(() => {
+    const previews = new Map();
+    for (const beat of visualBeats) {
+      const beatRuns = generationRuns.filter((run) => (
+        run.kind === "image"
+        && (
+          run.visual_beat_id === beat.id
+          || (!run.visual_beat_id && beat.id === visualBeats[0]?.id)
+        )
+      ));
+      const candidatesForBeat = beatRuns.flatMap((run) => run.candidates || []);
+      const approved = candidatesForBeat.find(
+        (candidate) => candidate.id === beat.approved_image_candidate_id,
+      );
+      const recent = approved || candidatesForBeat.find(
+        (candidate) => !["rejected", "archived"].includes(candidate.status),
+      );
+      previews.set(
+        beat.id,
+        recent?.thumbnail_url || recent?.content_url || beat.source_frame_url || "",
+      );
+    }
+    return previews;
+  }, [generationRuns, visualBeats]);
   const imageRuns = useMemo(
-    () => generationRuns.filter((run) => run.kind === "image"),
-    [generationRuns],
+    () => generationRuns.filter((run) => (
+      run.kind === "image"
+      && (
+        run.visual_beat_id === activeVisualBeat?.id
+        || (!run.visual_beat_id && activeVisualBeat?.id === visualBeats[0]?.id)
+      )
+    )),
+    [activeVisualBeat?.id, generationRuns, visualBeats],
   );
   const aiImageRuns = useMemo(
     () => imageRuns.filter((run) => isAiImageGenerationRun(run)),
@@ -566,7 +633,7 @@ export function ShotImageWorkspace({
 
   useEffect(() => {
     setCandidateHistoryExpanded(false);
-  }, [plan?.id]);
+  }, [activeVisualBeat?.id, plan?.id]);
 
   useEffect(() => {
     if (plan?.source_kind === "blank") setGenerationInputMode("text_to_image");
@@ -651,6 +718,16 @@ export function ShotImageWorkspace({
   function chooseSource() {
     if (!plan?.source_keyframe_url) return;
     setVisualChoice("source");
+  }
+
+  function moveVisualBeat(visualBeatId, offset) {
+    const currentIndex = visualBeats.findIndex((item) => item.id === visualBeatId);
+    const targetIndex = currentIndex + offset;
+    if (currentIndex < 0 || targetIndex < 0 || targetIndex >= visualBeats.length) return;
+    const next = visualBeats.map((item) => item.id);
+    const [moved] = next.splice(currentIndex, 1);
+    next.splice(targetIndex, 0, moved);
+    onReorderVisualBeats(next);
   }
 
   function chooseCandidate(candidate) {
@@ -961,12 +1038,154 @@ export function ShotImageWorkspace({
               <div className="shot-canvas-heading">
                 <div>
                   <small>分镜 {plan.index}</small>
-                  <strong>{seconds(plan.start_seconds)}s — {seconds(plan.end_seconds)}s</strong>
+                  <strong>
+                    {seconds(plan.start_seconds)}s — {seconds(plan.end_seconds)}s
+                    {activeVisualBeat ? ` · 画面 ${activeVisualBeat.index}` : ""}
+                  </strong>
                 </div>
                 <span className={"workflow-pill " + workflowStatusClass(plan.image_status)}>
                   {workflowStatusLabel(plan.image_status)}
                 </span>
               </div>
+              {activeVisualBeat && (
+                <section className="visual-beat-editor" aria-label="分镜内画面顺序">
+                  <header>
+                    <div>
+                      <strong>画面轨道</strong>
+                      <small>{visualBeats.length} 张有序参考图 · 图号按此顺序传给视频模型</small>
+                    </div>
+                    <button
+                      className="secondary-button compact"
+                      disabled={busy || visualBeats.length >= 20}
+                      onClick={onCreateVisualBeat}
+                      type="button"
+                    >
+                      <Plus size={14} />新增画面
+                    </button>
+                  </header>
+                  <div className="visual-beat-rail">
+                    {visualBeats.map((beat, beatIndex) => {
+                      const previewUrl = visualBeatPreviews.get(beat.id);
+                      const active = beat.id === activeVisualBeat.id;
+                      const duplicateSource = duplicateSourceBeatIds.has(beat.id);
+                      return (
+                        <article
+                          className={`${active ? "active" : ""} ${duplicateSource ? "duplicate-source" : ""}`}
+                          key={beat.id}
+                        >
+                          <button
+                            className="visual-beat-select"
+                            onClick={() => onSelectVisualBeat(beat.id)}
+                            type="button"
+                          >
+                            <span className="visual-beat-index">图{beat.index}</span>
+                            <span className="visual-beat-thumb">
+                              {previewUrl
+                                ? <img alt="" src={resolveUrl(previewUrl)} />
+                                : <ImageSquare size={22} />}
+                            </span>
+                            <span className="visual-beat-copy">
+                              <strong>{beat.title}</strong>
+                              <small>
+                                {Math.round(beat.start_ratio * 100)}%–{Math.round(beat.end_ratio * 100)}%
+                                {Number.isFinite(Number(beat.source_timestamp_seconds))
+                                  ? ` · 源 ${Number(beat.source_timestamp_seconds).toFixed(2)}s`
+                                  : ""}
+                              </small>
+                            </span>
+                            {duplicateSource ? (
+                              <span
+                                className="visual-beat-source-warning"
+                                title="该画面与其他画面使用了相同源帧，请自动修复或从视频重选"
+                              >
+                                <WarningCircle size={13} weight="fill" />源帧重复
+                              </span>
+                            ) : (
+                              <span className={"shot-status-badge " + workflowStatusClass(beat.image_status)}>
+                                {workflowStatusLabel(beat.image_status)}
+                              </span>
+                            )}
+                          </button>
+                          <div className="visual-beat-actions">
+                            <button
+                              aria-label="前移画面"
+                              disabled={busy || beatIndex === 0}
+                              onClick={() => moveVisualBeat(beat.id, -1)}
+                              type="button"
+                            ><ArrowLeft size={13} /></button>
+                            <button
+                              aria-label="后移画面"
+                              disabled={busy || beatIndex === visualBeats.length - 1}
+                              onClick={() => moveVisualBeat(beat.id, 1)}
+                              type="button"
+                            ><ArrowRight size={13} /></button>
+                            <button
+                              aria-label="删除画面"
+                              disabled={busy || visualBeats.length <= 1}
+                              onClick={() => onDeleteVisualBeat(beat.id)}
+                              type="button"
+                            ><Trash size={13} /></button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                  <div className="visual-beat-fields">
+                    <label>
+                      <span>画面名称</span>
+                      <input
+                        defaultValue={activeVisualBeat.title}
+                        disabled={busy}
+                        key={activeVisualBeat.id}
+                        onBlur={(event) => {
+                          const title = event.target.value.trim();
+                          if (title && title !== activeVisualBeat.title) {
+                            onUpdateVisualBeat(activeVisualBeat.id, { title });
+                          }
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span>到下一画面</span>
+                      <select
+                        disabled={busy || activeVisualBeat.index === visualBeats.length}
+                        onChange={(event) => onUpdateVisualBeat(activeVisualBeat.id, {
+                          transition_to_next_type: event.target.value,
+                        })}
+                        value={activeVisualBeat.transition_to_next_type}
+                      >
+                        <option value="model_generated">模型连续转场</option>
+                        <option value="match_action">动作匹配</option>
+                        <option value="dissolve">叠化</option>
+                        <option value="cut">直接切换</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>转场秒数</span>
+                      <input
+                        defaultValue={activeVisualBeat.transition_to_next_duration_seconds}
+                        disabled={busy || activeVisualBeat.index === visualBeats.length}
+                        key={`${activeVisualBeat.id}-transition-duration`}
+                        max="5"
+                        min="0"
+                        onBlur={(event) => {
+                          const duration = Number(event.target.value);
+                          if (
+                            Number.isFinite(duration)
+                            && duration !== activeVisualBeat.transition_to_next_duration_seconds
+                          ) {
+                            onUpdateVisualBeat(activeVisualBeat.id, {
+                              transition_to_next_duration_seconds: duration,
+                            });
+                          }
+                        }}
+                        step="0.1"
+                        type="number"
+                      />
+                    </label>
+                  </div>
+                </section>
+              )}
               {plan.image_status === "stale" && (
                 <div className="shot-stale-warning">
                   <WarningCircle size={17} weight="fill" />

@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any, Literal
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
 
@@ -218,6 +218,7 @@ class ImageGenerationInputMode(StrEnum):
 
 class VideoGenerationInputMode(StrEnum):
     IMAGE_TO_VIDEO = "image_to_video"
+    MULTI_IMAGE_TO_VIDEO = "multi_image_to_video"
 
 
 class GenerationCostSource(StrEnum):
@@ -376,6 +377,10 @@ class ImageGenerationCapability(BaseModel):
 
 class VideoGenerationCapability(BaseModel):
     image_to_video: bool = True
+    multi_image_reference: bool = False
+    ordered_reference_images: bool = False
+    minimum_reference_images: int = Field(default=1, ge=1, le=20)
+    maximum_reference_images: int = Field(default=1, ge=1, le=20)
     start_frame: bool = True
     end_frame: bool = False
     max_candidates: int = Field(default=4, ge=1, le=20)
@@ -393,6 +398,16 @@ class VideoGenerationCapability(BaseModel):
     supported_resolutions: list[str] = Field(default_factory=list, max_length=20)
     supported_aspect_ratios: list[str] = Field(default_factory=list, max_length=20)
     maximum_prompt_characters: int = Field(default=2000, ge=1, le=100_000)
+
+    @model_validator(mode="after")
+    def validate_reference_image_limits(self) -> VideoGenerationCapability:
+        if self.maximum_reference_images < self.minimum_reference_images:
+            raise ValueError("最大参考图数量不能小于最小参考图数量")
+        if self.multi_image_reference and self.maximum_reference_images < 2:
+            raise ValueError("多图参考模型必须至少支持两张参考图")
+        if self.ordered_reference_images and not self.multi_image_reference:
+            raise ValueError("有序参考图能力依赖多图参考能力")
+        return self
 
 
 class VideoGenerationModelOption(BaseModel):
@@ -419,7 +434,7 @@ class VideoProviderCredentialUpdate(BaseModel):
 class VideoGenerationSettingsUpdate(BaseModel):
     enabled: bool = True
     default_model_alias: str = Field(
-        default="bailian_wan_2_7_i2v",
+        default="bailian_wan_2_7_r2v",
         min_length=1,
         max_length=80,
         pattern=r"^[a-zA-Z0-9_.-]+$",
@@ -840,11 +855,32 @@ class AnalysisJob(BaseModel):
     completed_at: datetime | None = None
 
 
+class ShotVisualBeatFact(BaseModel):
+    """A time-bound visual fact that belongs only to the current shot content."""
+
+    index: int = Field(ge=1, le=20)
+    title: str = Field(default="画面", min_length=1, max_length=120)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    source_timestamp_seconds: float = Field(ge=0)
+    image_prompt: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> ShotVisualBeatFact:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("画面结束时间必须晚于开始时间")
+        if not self.start_seconds <= self.source_timestamp_seconds <= self.end_seconds:
+            raise ValueError("画面来源时间必须位于画面时间范围内")
+        return self
+
+
 class Shot(BaseModel):
     id: str
     index: int
     start_seconds: float
     end_seconds: float
+    content_start_seconds: float | None = Field(default=None, ge=0)
+    content_end_seconds: float | None = Field(default=None, gt=0)
     title: str
     subjects: list[str]
     action: str
@@ -869,6 +905,25 @@ class Shot(BaseModel):
     boundary_confidence: float | None = Field(default=None, ge=0, le=1)
     source_candidate_ids: list[str] = Field(default_factory=list)
     semantic_group: str | None = Field(default=None, max_length=120)
+    visual_beats: list[ShotVisualBeatFact] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_content_range(self) -> Shot:
+        content_start = (
+            self.content_start_seconds
+            if self.content_start_seconds is not None
+            else self.start_seconds
+        )
+        content_end = (
+            self.content_end_seconds
+            if self.content_end_seconds is not None
+            else self.end_seconds
+        )
+        if content_start < self.start_seconds or content_end > self.end_seconds:
+            raise ValueError("分镜有效内容必须位于剪辑时间范围内")
+        if content_end <= content_start:
+            raise ValueError("分镜有效内容结束时间必须晚于开始时间")
+        return self
 
 
 class ShotVisualFacts(BaseModel):
@@ -886,6 +941,7 @@ class ShotVisualFacts(BaseModel):
     confidence: float = Field(ge=0, le=1)
     contains_multiple_scenes: bool = False
     multiple_scenes_reason: str | None = Field(default=None, max_length=800)
+    visual_beats: list[ShotVisualBeatFact] = Field(min_length=1, max_length=20)
 
 
 SemanticShotGroup = Literal[
@@ -912,6 +968,18 @@ class ShotBoundaryDecision(BaseModel):
     semantic_group_before: SemanticShotGroup
     semantic_group_after: SemanticShotGroup
     progressive_motion: bool
+    transition_start_seconds: float | None = Field(default=None, ge=0)
+    stable_new_scene_seconds: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_transition_window(self) -> ShotBoundaryDecision:
+        if (
+            self.transition_start_seconds is not None
+            and self.stable_new_scene_seconds is not None
+            and self.stable_new_scene_seconds < self.transition_start_seconds
+        ):
+            raise ValueError("新场景稳定时间不能早于转场开始时间")
+        return self
 
 
 class ShotSegmentationSelection(BaseModel):
@@ -1007,15 +1075,43 @@ class ShotEvidence(BaseModel):
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
     duration_seconds: float = Field(gt=0)
+    content_start_seconds: float | None = Field(default=None, ge=0)
+    content_end_seconds: float | None = Field(default=None, gt=0)
+    incoming_transition_start_seconds: float | None = Field(default=None, ge=0)
+    incoming_transition_end_seconds: float | None = Field(default=None, ge=0)
     representative_timestamp: float = Field(ge=0)
     keyframe_url: str
     evidence_frame_urls: list[str] = Field(default_factory=list)
+    evidence_timestamps: list[float] = Field(default_factory=list, max_length=20)
     detection_method: str
 
     boundary_method: str | None = Field(default=None, max_length=80)
     boundary_confidence: float | None = Field(default=None, ge=0, le=1)
     source_candidate_ids: list[str] = Field(default_factory=list)
     semantic_group: str | None = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_content_range(self) -> ShotEvidence:
+        content_start = (
+            self.content_start_seconds
+            if self.content_start_seconds is not None
+            else self.start_seconds
+        )
+        content_end = (
+            self.content_end_seconds
+            if self.content_end_seconds is not None
+            else self.end_seconds
+        )
+        if content_start < self.start_seconds or content_end > self.end_seconds:
+            raise ValueError("镜头证据有效内容必须位于剪辑时间范围内")
+        if content_end <= content_start:
+            raise ValueError("镜头证据有效内容结束时间必须晚于开始时间")
+        if self.evidence_timestamps and any(
+            timestamp < content_start or timestamp > content_end
+            for timestamp in self.evidence_timestamps
+        ):
+            raise ValueError("镜头证据帧必须位于有效内容范围内")
+        return self
 
 
 class SceneBoundaryCandidate(BaseModel):
@@ -1037,6 +1133,18 @@ class SceneBoundaryCandidate(BaseModel):
     model_consistency_adjusted: bool = False
     semantic_group_before: str | None = Field(default=None, max_length=120)
     semantic_group_after: str | None = Field(default=None, max_length=120)
+    transition_start_seconds: float | None = Field(default=None, ge=0)
+    stable_new_scene_seconds: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_transition_window(self) -> SceneBoundaryCandidate:
+        if (
+            self.transition_start_seconds is not None
+            and self.stable_new_scene_seconds is not None
+            and self.stable_new_scene_seconds < self.transition_start_seconds
+        ):
+            raise ValueError("候选新场景稳定时间不能早于转场开始时间")
+        return self
 
 
 class SegmentationMetadata(BaseModel):
@@ -1309,7 +1417,7 @@ class ProductionProject(BaseModel):
     source_revision_id: UUID | None = None
     name: str = Field(min_length=1, max_length=120)
     status: ProductionProjectStatus = ProductionProjectStatus.DRAFT
-    active_step: ProductionStep = ProductionStep.PROJECT_SETUP
+    active_step: ProductionStep = ProductionStep.SHOT_IMAGES
     current_revision_id: UUID | None = None
     output_aspect_ratio: str = Field(
         default="9:16",
@@ -1424,6 +1532,86 @@ class PromptAssetMention(BaseModel):
         return normalized
 
 
+class ShotVisualBeat(BaseModel):
+    """Ordered visual node inside one model-generated shot video."""
+
+    id: UUID = Field(default_factory=uuid4)
+    index: int = Field(ge=1, le=20)
+    title: str = Field(default="画面", min_length=1, max_length=120)
+    start_ratio: float = Field(default=0, ge=0, le=1)
+    end_ratio: float = Field(default=1, ge=0, le=1)
+    source_frame_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    source_frame_relative_path: str | None = Field(default=None, max_length=2048)
+    source_timestamp_seconds: float | None = Field(default=None, ge=0)
+    source_frame_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    source_frame_warning: Literal[
+        "duplicate_frame",
+        "frame_extract_failed",
+        "timestamp_mismatch",
+    ] | None = None
+    source_origin: Literal[
+        "analysis",
+        "auto_extract",
+        "video_selection",
+        "duplicate",
+        "blank",
+        "legacy",
+    ] = "analysis"
+    image_prompt: str = Field(default="", max_length=8000)
+    image_prompt_mentions: list[PromptAssetMention] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+    image_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    required: bool = True
+    image_status: WorkflowItemStatus = WorkflowItemStatus.DRAFT
+    approved_image_candidate_id: UUID | None = None
+    transition_to_next_type: Literal[
+        "cut",
+        "dissolve",
+        "match_action",
+        "model_generated",
+    ] = "model_generated"
+    transition_to_next_duration_seconds: float = Field(default=0.5, ge=0, le=5)
+    transition_to_next_prompt: str = Field(default="", max_length=2000)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("source_frame_relative_path")
+    @classmethod
+    def validate_source_frame_path(cls, value: str | None) -> str | None:
+        return _normalize_workspace_relative_path(value) if value is not None else None
+
+    @field_validator("image_prompt_mentions")
+    @classmethod
+    def require_unique_mentions(
+        cls,
+        values: list[PromptAssetMention],
+    ) -> list[PromptAssetMention]:
+        ids = [item.reference_asset_id for item in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一参考资产不能在一个画面提示词中重复关联")
+        return values
+
+    @field_validator("image_negative_constraints")
+    @classmethod
+    def require_unique_constraints(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("画面负面约束不能重复")
+        return values
+
+    @model_validator(mode="after")
+    def validate_ratio_range(self) -> ShotVisualBeat:
+        if self.end_ratio <= self.start_ratio:
+            raise ValueError("画面结束位置必须晚于开始位置")
+        return self
+
+
 class ShotPlan(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
@@ -1437,6 +1625,7 @@ class ShotPlan(BaseModel):
     source_keyframe_timestamp_seconds: float | None = Field(default=None, ge=0)
     source_keyframe_origin: Literal[
         "analysis",
+        "auto_extract",
         "video_selection",
         "duplicate",
         "blank",
@@ -1466,6 +1655,7 @@ class ShotPlan(BaseModel):
     video_status: WorkflowItemStatus = WorkflowItemStatus.DRAFT
     approved_image_candidate_id: UUID | None = None
     approved_video_candidate_id: UUID | None = None
+    visual_beats: list[ShotVisualBeat] = Field(default_factory=list, max_length=20)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -1505,6 +1695,47 @@ class ShotPlan(BaseModel):
             and not self.start_seconds <= self.source_keyframe_timestamp_seconds <= self.end_seconds
         ):
             raise ValueError("分镜关键帧时间必须位于当前分镜范围内")
+        if not self.visual_beats:
+            self.visual_beats = [
+                ShotVisualBeat(
+                    id=uuid5(NAMESPACE_URL, f"viral-dna:shot:{self.id}:visual-beat:1"),
+                    index=1,
+                    title="画面 1",
+                    start_ratio=0,
+                    end_ratio=1,
+                    source_frame_url=self.source_keyframe_url,
+                    source_frame_relative_path=self.source_keyframe_relative_path,
+                    source_timestamp_seconds=self.source_keyframe_timestamp_seconds,
+                    source_origin=(
+                        "legacy"
+                        if self.source_keyframe_origin == "analysis"
+                        else self.source_keyframe_origin
+                    ),
+                    image_prompt=self.image_prompt,
+                    image_prompt_mentions=self.image_prompt_mentions,
+                    image_negative_constraints=self.image_negative_constraints,
+                    required=self.required,
+                    image_status=self.image_status,
+                    approved_image_candidate_id=self.approved_image_candidate_id,
+                    created_at=self.created_at,
+                    updated_at=self.updated_at,
+                )
+            ]
+        ordered = sorted(self.visual_beats, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("分镜画面序号必须从 1 开始且连续")
+        if len({item.id for item in ordered}) != len(ordered):
+            raise ValueError("分镜画面不能包含重复 ID")
+        previous_end = 0.0
+        for beat in ordered:
+            if beat.start_ratio + 0.0001 < previous_end:
+                raise ValueError("分镜画面时间范围不能重叠")
+            if (
+                beat.source_timestamp_seconds is not None
+                and not self.start_seconds <= beat.source_timestamp_seconds <= self.end_seconds
+            ):
+                raise ValueError("画面源帧时间必须位于当前分镜范围内")
+            previous_end = beat.end_ratio
         return self
 
 
@@ -1512,6 +1743,7 @@ class GenerationRun(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     shot_plan_id: UUID
+    visual_beat_id: UUID | None = None
     revision_id: UUID
     kind: GenerationKind
     input_mode: ImageGenerationInputMode | VideoGenerationInputMode = (
@@ -1555,6 +1787,12 @@ class GenerationRun(BaseModel):
     retry_count: int = Field(default=0, ge=0)
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=2000)
+    provider_error_code: str | None = Field(default=None, max_length=120)
+    error_category: str | None = Field(default=None, max_length=80)
+    error_title: str | None = Field(default=None, max_length=160)
+    error_technical_message: str | None = Field(default=None, max_length=4000)
+    error_retryable: bool = False
+    error_action: str | None = Field(default=None, max_length=80)
     created_at: datetime = Field(default_factory=utc_now)
     started_at: datetime | None = None
     updated_at: datetime = Field(default_factory=utc_now)
@@ -1599,6 +1837,11 @@ class VideoProviderTask(BaseModel):
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=2000)
     retryable: bool = False
+    provider_error_code: str | None = Field(default=None, max_length=120)
+    error_category: str | None = Field(default=None, max_length=80)
+    error_title: str | None = Field(default=None, max_length=160)
+    error_technical_message: str | None = Field(default=None, max_length=4000)
+    error_action: str | None = Field(default=None, max_length=80)
     submitted_at: datetime | None = None
     last_polled_at: datetime | None = None
     completed_at: datetime | None = None
@@ -1626,6 +1869,11 @@ class VideoProviderTaskResponse(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    provider_error_code: str | None = None
+    error_category: str | None = None
+    error_title: str | None = None
+    error_technical_message: str | None = None
+    error_action: str | None = None
     submitted_at: datetime | None = None
     last_polled_at: datetime | None = None
     completed_at: datetime | None = None
@@ -1880,6 +2128,80 @@ class ReferenceBindingInput(BaseModel):
     notes: str | None = Field(default=None, max_length=500)
 
 
+class ShotVisualBeatCreate(BaseModel):
+    expected_revision_id: UUID
+    insert_after_visual_beat_id: UUID | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    start_ratio: float | None = Field(default=None, ge=0, le=1)
+    end_ratio: float | None = Field(default=None, ge=0, le=1)
+    source_timestamp_seconds: float | None = Field(default=None, ge=0)
+    image_prompt: str = Field(default="", max_length=8000)
+    required: bool = True
+
+    @model_validator(mode="after")
+    def validate_optional_ratio_range(self) -> ShotVisualBeatCreate:
+        if (
+            self.start_ratio is not None
+            and self.end_ratio is not None
+            and self.end_ratio <= self.start_ratio
+        ):
+            raise ValueError("画面结束位置必须晚于开始位置")
+        return self
+
+
+class ShotVisualBeatUpdate(BaseModel):
+    expected_revision_id: UUID
+    confirm_stale: bool = False
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    start_ratio: float | None = Field(default=None, ge=0, le=1)
+    end_ratio: float | None = Field(default=None, ge=0, le=1)
+    image_prompt: str | None = Field(default=None, max_length=8000)
+    image_prompt_mentions: list[PromptAssetMention] | None = Field(
+        default=None,
+        max_length=20,
+    )
+    image_negative_constraints: list[str] | None = Field(default=None, max_length=40)
+    required: bool | None = None
+    transition_to_next_type: Literal[
+        "cut",
+        "dissolve",
+        "match_action",
+        "model_generated",
+    ] | None = None
+    transition_to_next_duration_seconds: float | None = Field(default=None, ge=0, le=5)
+    transition_to_next_prompt: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_visual_beat_change(self) -> ShotVisualBeatUpdate:
+        changed = self.model_fields_set - {"expected_revision_id", "confirm_stale"}
+        if not changed:
+            raise ValueError("至少需要提供一个要修改的画面字段")
+        if (
+            self.start_ratio is not None
+            and self.end_ratio is not None
+            and self.end_ratio <= self.start_ratio
+        ):
+            raise ValueError("画面结束位置必须晚于开始位置")
+        return self
+
+
+class ShotVisualBeatReorder(BaseModel):
+    expected_revision_id: UUID
+    ordered_visual_beat_ids: list[UUID] = Field(min_length=1, max_length=20)
+
+    @field_validator("ordered_visual_beat_ids")
+    @classmethod
+    def require_unique_visual_beats(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("画面排序不能包含重复项")
+        return values
+
+
+class ShotVisualBeatDelete(BaseModel):
+    expected_revision_id: UUID
+    confirm_stale: bool = False
+
+
 class ShotPlanFieldsUpdate(BaseModel):
     image_prompt: str | None = Field(default=None, max_length=8000)
     image_prompt_mentions: list[PromptAssetMention] | None = Field(
@@ -2061,6 +2383,7 @@ class ChangeImpactResponse(BaseModel):
 
 class ImageGenerationCreate(BaseModel):
     expected_revision_id: UUID
+    visual_beat_id: UUID | None = None
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT
     execution_mode: Literal["remote_api", "local_tool"] | None = None
@@ -2072,7 +2395,9 @@ class ImageGenerationCreate(BaseModel):
 class VideoGenerationCreate(BaseModel):
     expected_revision_id: UUID
     candidate_count: int = Field(default=1, ge=1, le=4)
-    input_mode: Literal["image_to_video"] = "image_to_video"
+    input_mode: Literal["multi_image_to_video", "image_to_video"] = (
+        "multi_image_to_video"
+    )
     execution_mode: Literal["simulated", "remote_api"] = "simulated"
     model_alias: str | None = Field(
         default=None,
@@ -2088,18 +2413,21 @@ class VideoGenerationCreate(BaseModel):
 
 class ShotKeyframeSelectRequest(BaseModel):
     expected_revision_id: UUID
+    visual_beat_id: UUID | None = None
     timestamp_seconds: float = Field(ge=0)
     confirm_stale: bool = False
 
 
 class ShotSourceFrameApprovalRequest(BaseModel):
     expected_revision_id: UUID
+    visual_beat_id: UUID | None = None
     reason: str | None = Field(default=None, max_length=1000)
     confirm_downstream_stale: bool = False
 
 
 class ShotImageApprovalRevokeRequest(BaseModel):
     expected_revision_id: UUID
+    visual_beat_id: UUID | None = None
     reason: str | None = Field(default=None, max_length=1000)
     confirm_downstream_stale: bool = False
 
@@ -2168,6 +2496,7 @@ class GenerationRunResponse(BaseModel):
     id: UUID
     project_id: UUID
     shot_plan_id: UUID
+    visual_beat_id: UUID | None = None
     revision_id: UUID
     kind: GenerationKind
     input_mode: ImageGenerationInputMode | VideoGenerationInputMode
@@ -2197,6 +2526,12 @@ class GenerationRunResponse(BaseModel):
     cancellation_requested: bool = False
     error_code: str | None = None
     error_message: str | None = None
+    provider_error_code: str | None = None
+    error_category: str | None = None
+    error_title: str | None = None
+    error_technical_message: str | None = None
+    error_retryable: bool = False
+    error_action: str | None = None
     created_at: datetime
     started_at: datetime | None = None
     updated_at: datetime

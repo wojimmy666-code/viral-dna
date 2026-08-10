@@ -24,6 +24,8 @@ from .models import (
 )
 from .workspace import WorkspaceError, workspace_manager
 
+DEFAULT_LINK_RECORD_NAMES = frozenset({"抖音链接视频", "小红书链接视频"})
+
 
 class RecordRepository(Protocol):
     async def list_videos(self) -> list[Video]: ...
@@ -47,6 +49,25 @@ class RecordRepository(Protocol):
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def normalize_record_name(value: str | None, *, fallback: str = "未命名视频") -> str:
+    normalized = " ".join((to_simplified(value) or "").split()).strip()
+    return normalized[:120] or fallback
+
+
+def resolve_record_name_from_video(current_name: str, video_title: str | None) -> str:
+    """Replace only a generated link placeholder; never overwrite a user name."""
+
+    normalized_current = normalize_record_name(current_name)
+    normalized_video = normalize_record_name(video_title, fallback="")
+    if (
+        normalized_current in DEFAULT_LINK_RECORD_NAMES
+        and normalized_video
+        and normalized_video not in DEFAULT_LINK_RECORD_NAMES
+    ):
+        return normalized_video
+    return normalized_current
 
 
 def _stable_record_id(video_id: UUID) -> UUID:
@@ -126,7 +147,7 @@ class RecordService:
                     record_id = video.record_id or _stable_record_id(video.id)
                     record = AnalysisRecord(
                         id=record_id,
-                        name=to_simplified(video.title) or "未命名视频",
+                        name=normalize_record_name(video.title),
                         video_id=video.id,
                         source_type=video.source_type,
                         source_url=video.source_url,
@@ -137,9 +158,9 @@ class RecordService:
                     record_changed = True
                     by_video[video.id] = record
                 else:
-                    simplified_name = to_simplified(record.name) or "未命名视频"
-                    if simplified_name != record.name:
-                        record.name = simplified_name
+                    resolved_name = resolve_record_name_from_video(record.name, video.title)
+                    if resolved_name != record.name:
+                        record.name = resolved_name
                         record_changed = True
 
                 video.record_id = record.id

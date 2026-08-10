@@ -22,7 +22,10 @@ from .catalog import (
 from .costing import estimate_video_cost
 from .registry import VideoProviderRegistry, VideoProviderRegistryError
 
-DEFAULT_VIDEO_MODEL_ALIAS = "bailian_wan_2_7_i2v"
+DEFAULT_VIDEO_MODEL_ALIAS = "bailian_wan_2_7_r2v"
+LEGACY_VIDEO_MODEL_ALIASES = {
+    "bailian_wan_2_7_i2v": DEFAULT_VIDEO_MODEL_ALIAS,
+}
 DEFAULT_BASE_URLS = {
     "bailian": "https://dashscope.aliyuncs.com/api/v1",
     "volc_ark": "https://ark.cn-beijing.volces.com/api/v3",
@@ -153,6 +156,7 @@ class VideoGenerationSettingsService:
         alias = get_config_value(
             "VIRAL_DNA_VIDEO_DEFAULT_MODEL_ALIAS", DEFAULT_VIDEO_MODEL_ALIAS
         ).strip()
+        alias = LEGACY_VIDEO_MODEL_ALIASES.get(alias, alias)
         try:
             selected = catalog.option(alias)
         except VideoModelCatalogError:
@@ -160,7 +164,11 @@ class VideoGenerationSettingsService:
             selected = catalog.option(alias)
         resolution = get_config_value("VIRAL_DNA_VIDEO_DEFAULT_RESOLUTION", "720P").strip().upper()
         if resolution not in selected.capability.supported_resolutions:
-            resolution = selected.capability.supported_resolutions[0]
+            resolution = (
+                "720P"
+                if "720P" in selected.capability.supported_resolutions
+                else selected.capability.supported_resolutions[0]
+            )
         try:
             poll_interval = float(get_config_value("VIRAL_DNA_VIDEO_POLL_INTERVAL_SECONDS", "5"))
         except ValueError:
@@ -251,6 +259,15 @@ class VideoGenerationSettingsService:
             selected = catalog.option(payload.default_model_alias)
         except VideoModelCatalogError as exc:
             raise _fail(422, "video_model_invalid", str(exc)) from exc
+        if not (
+            selected.capability.multi_image_reference
+            and selected.capability.ordered_reference_images
+        ):
+            raise _fail(
+                422,
+                "video_model_capability_unsupported",
+                "当前创作流程只允许支持有序多图参考的视频模型",
+            )
         if payload.default_resolution not in selected.capability.supported_resolutions:
             raise _fail(422, "video_resolution_unsupported", "默认分辨率不受所选视频模型支持")
         updates = {

@@ -8,7 +8,12 @@ import pytest
 from viral_dna_api.ai.catalog import load_model_plan
 from viral_dna_api.ai.contracts import ModelProviderError, ModelRequest
 from viral_dna_api.ai.providers.dashscope import DashScopeProvider
-from viral_dna_api.models import AnalysisProfile, ModelTask, ShotVisualFacts
+from viral_dna_api.models import (
+    AnalysisProfile,
+    ModelTask,
+    ShotVisualBeatFact,
+    ShotVisualFacts,
+)
 
 
 @pytest.mark.asyncio
@@ -39,6 +44,16 @@ async def test_dashscope_adapter_normalizes_json_and_usage(
         narrative_role="展示细节",
         replication_prompt="竖屏产品特写，暖色柔和侧光。",
         confidence=0.9,
+        visual_beats=[
+            ShotVisualBeatFact(
+                index=1,
+                title="画面 1",
+                start_seconds=0,
+                end_seconds=3,
+                source_timestamp_seconds=1.5,
+                image_prompt="竖屏产品特写，暖色柔和侧光。",
+            )
+        ],
     )
 
     class FakeClient:

@@ -13,8 +13,20 @@ from viral_dna_api.link_ingestion import LinkIngestionResult
 from viral_dna_api.main import app
 from viral_dna_api.media import MediaProcessor
 from viral_dna_api.models import SourceType
+from viral_dna_api.records import resolve_record_name_from_video
 
 FFMPEG = shutil.which("ffmpeg")
+
+
+def test_platform_title_replaces_only_generated_record_placeholder() -> None:
+    source_title = "春天会抵达 所有未完成的约定 #转场 #歌曲"
+
+    assert resolve_record_name_from_video("抖音链接视频", source_title) == source_title
+    assert resolve_record_name_from_video("小红书链接视频", source_title) == source_title
+    assert (
+        resolve_record_name_from_video("人工命名的活动素材", source_title)
+        == "人工命名的活动素材"
+    )
 
 
 def create_two_scene_video(output_path: Path) -> None:
@@ -241,6 +253,9 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("VIRAL_DNA_ANALYZER_MODE", "hybrid")
 
     class FakeLinkCollector:
+        def __init__(self, _credential_resolver=None) -> None:
+            pass
+
         async def collect(self, video) -> LinkIngestionResult:
             target_dir = storage_root / "links" / str(video.id)
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +284,9 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             },
         )
         assert video_response.status_code == 201
-        video_id = video_response.json()["id"]
+        video_payload = video_response.json()
+        video_id = video_payload["id"]
+        record_id = video_payload["record_id"]
 
         analysis_response = client.post(
             f"/api/v1/videos/{video_id}/analyses",
@@ -301,6 +318,9 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         assert processed_video["ingested_at"] is not None
         assert processed_video["width"] == 320
         assert processed_video["height"] == 240
+        record_detail = client.get(f"/api/v1/records/{record_id}")
+        assert record_detail.status_code == 200
+        assert record_detail.json()["record"]["name"] == "真实链接采集测试"
 
         report_response = client.get(f"/api/v1/videos/{video_id}/report")
         assert report_response.status_code == 200

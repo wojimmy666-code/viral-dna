@@ -8,6 +8,7 @@ import {
   closestProductionAspectRatio,
   constraintsFromText,
   dimensionsForRatio,
+  duplicateVisualBeatSourceIds,
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
   imageGenerationIntentForShot,
@@ -20,19 +21,74 @@ import {
   latestRunByKind,
   normalizeReferenceTags,
   normalizedImageCandidateCount,
+  preferredVideoResolution,
   productionDefaultsForSource,
   productionChangeLabel,
   productionPreviewLayout,
+  productionUnlockedStepIndex,
+  referenceAssetsContinueLabel,
   referenceTypeLabel,
   resolveImageExecutionMode,
   formatVideoDuration,
   normalizeVideoDuration,
   videoDurationConstraintLabel,
   videoDurationOptions,
+  videoGenerationDiagnosticText,
+  videoGenerationFailureDetails,
   videoGenerationRunLabel,
   workflowStatusClass,
   workflowStatusLabel,
 } from "../src/production-ui.js";
+
+test("keeps a compatible video resolution and otherwise prefers 720P", () => {
+  const flagship = {
+    capabilities: { supported_resolutions: ["480P", "720P", "1080P"] },
+  };
+  const mini = {
+    capabilities: { supported_resolutions: ["480P", "720P"] },
+  };
+
+  assert.equal(preferredVideoResolution(flagship, "1080P"), "1080P");
+  assert.equal(preferredVideoResolution(flagship, "720p"), "720P");
+  assert.equal(preferredVideoResolution(mini, "1080P"), "720P");
+  assert.equal(
+    preferredVideoResolution({ capabilities: { supported_resolutions: ["2K"] } }, "1080P"),
+    "2K",
+  );
+});
+
+test("maps legacy Seedance limit failures to safe actionable details", () => {
+  const details = videoGenerationFailureDetails({
+    status: "failed",
+    provider: "volc_ark",
+    model_display_name: "Seedance 2.0 Fast",
+    error_code: "SetLimitExceeded",
+    error_message: "Your account [2102003413] reached the Safe Experience Mode limit",
+    provider_tasks: [{
+      provider_task_id: "task-123",
+      error_code: "SetLimitExceeded",
+      error_message: "Your account [2102003413] reached the Safe Experience Mode limit",
+      retryable: false,
+    }],
+  });
+
+  assert.equal(details.category, "inference_limit");
+  assert.equal(details.title, "Seedance 2.0 Fast 已暂停生成");
+  assert.equal(details.retryable, false);
+  assert.equal(details.action, "open_model_settings");
+  assert.doesNotMatch(details.message, /2102003413|Your account/i);
+  assert.match(videoGenerationDiagnosticText(details), /任务编号：task-123/);
+});
+
+test("only recommends direct retry for retryable video failures", () => {
+  const details = videoGenerationFailureDetails({
+    status: "failed",
+    error_code: "video_provider_rate_limited",
+    error_retryable: true,
+  });
+  assert.equal(details.retryable, true);
+  assert.equal(details.action, "retry");
+});
 
 test("maps supported ratios to their default output dimensions", () => {
   assert.deepEqual(dimensionsForRatio("9:16"), { width: 1080, height: 1920 });
@@ -132,6 +188,16 @@ test("exposes stable simplified-Chinese labels and all implemented workflow step
     PRODUCTION_STEPS.map((step) => step.id),
     ["project_setup", "reference_assets", "shot_images", "shot_videos", "editing", "export"],
   );
+  assert.equal(PRODUCTION_STEPS[1].label, "参考资产（可选）");
+});
+
+test("keeps optional preparation views from locking the shot-image workspace", () => {
+  assert.equal(productionUnlockedStepIndex("project_setup"), 2);
+  assert.equal(productionUnlockedStepIndex("reference_assets"), 2);
+  assert.equal(productionUnlockedStepIndex("shot_images"), 2);
+  assert.equal(productionUnlockedStepIndex("shot_videos"), 3);
+  assert.equal(referenceAssetsContinueLabel(0), "跳过，进入分镜图片");
+  assert.equal(referenceAssetsContinueLabel(2), "继续到分镜图片");
 });
 
 test("normalizes shot constraints and exposes approval status labels", () => {
@@ -144,6 +210,18 @@ test("normalizes shot constraints and exposes approval status labels", () => {
   assert.equal(workflowStatusClass("approved"), "positive");
   assert.equal(workflowStatusClass("stale"), "warning");
   assert.equal(productionChangeLabel("image_approval_revoked"), "取消采用分镜图片");
+});
+
+test("flags duplicate visual-beat source frames by hash or explicit warning", () => {
+  assert.deepEqual(
+    duplicateVisualBeatSourceIds([
+      { id: "beat-1", source_frame_sha256: "a".repeat(64) },
+      { id: "beat-2", source_frame_sha256: "b".repeat(64) },
+      { id: "beat-3", source_frame_sha256: "a".repeat(64) },
+      { id: "beat-4", source_frame_warning: "duplicate_frame" },
+    ]).sort(),
+    ["beat-1", "beat-3", "beat-4"],
+  );
 });
 
 test("requests a fresh variation only after a real AI candidate exists", () => {

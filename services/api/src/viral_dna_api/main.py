@@ -107,6 +107,10 @@ from .models import (
     ShotPlanUpdate,
     ShotSourceFrameApprovalRequest,
     ShotVideoApprovalRevokeRequest,
+    ShotVisualBeatCreate,
+    ShotVisualBeatDelete,
+    ShotVisualBeatReorder,
+    ShotVisualBeatUpdate,
     SourceType,
     TimelineFinalRenderCreate,
     TimelinePreviewCreate,
@@ -140,6 +144,20 @@ from .notifications import (
     create_notification_service,
 )
 from .pipeline import create_replacement_version
+from .platform_connections import (
+    BrowserDiscoveryResponse,
+    PlatformBrowserConnectionUpdate,
+    PlatformConnectionListResponse,
+    PlatformConnectionServiceError,
+    PlatformConnectionStrategyUpdate,
+    PlatformConnectionSummary,
+    PlatformConnectionValidationRequest,
+    PlatformConnectionValidationResponse,
+    PlatformKind,
+    PlatformUsageStrategy,
+    create_platform_connection_service,
+)
+from .platform_connections.cookies import MAX_COOKIE_FILE_BYTES
 from .production import (
     MAX_REFERENCE_IMAGE_BYTES,
     ProductionService,
@@ -196,6 +214,7 @@ def parse_cors_origins() -> list[str]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await account_context_service.ensure_current()
+    await platform_connection_service.initialize()
     await notification_service.initialize()
     await project_asset_service.bootstrap_legacy_references()
     await record_service.bootstrap(recover_interrupted=True)
@@ -222,7 +241,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-pipeline = HybridAnalysisPipeline(store)
 model_settings_service = ModelSettingsService()
 image_generation_settings_service = ImageGenerationSettingsService()
 video_generation_settings_service = VideoGenerationSettingsService()
@@ -239,6 +257,8 @@ video_generation_gateway = VideoGenerationGateway(
     repository=store,
 )
 account_context_service = create_account_context_service(workspace_manager)
+platform_connection_service = create_platform_connection_service(account_context_service)
+pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
 notification_service = create_notification_service(account_context_service)
 storage_manager = StorageManager(store, workspace_manager)
 asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
@@ -379,6 +399,113 @@ async def get_current_account() -> Account:
         return await account_context_service.current_account()
     except AccountCatalogError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+def platform_connection_http_error(error: PlatformConnectionServiceError) -> HTTPException:
+    return HTTPException(
+        status_code=error.status_code,
+        detail={
+            "code": error.code,
+            "message": str(error),
+            "retryable": error.retryable,
+            "platform": error.platform.value if error.platform else None,
+        },
+    )
+
+
+@app.get(
+    f"{API_PREFIX}/settings/platform-connections",
+    response_model=PlatformConnectionListResponse,
+)
+async def list_platform_connections() -> PlatformConnectionListResponse:
+    try:
+        return await platform_connection_service.list_connections()
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/settings/platform-connections/browsers",
+    response_model=BrowserDiscoveryResponse,
+)
+async def discover_platform_browsers() -> BrowserDiscoveryResponse:
+    try:
+        return await platform_connection_service.discover_browsers()
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/settings/platform-connections/{{platform}}/browser",
+    response_model=PlatformConnectionSummary,
+)
+async def configure_platform_browser(
+    platform: PlatformKind,
+    payload: PlatformBrowserConnectionUpdate,
+) -> PlatformConnectionSummary:
+    try:
+        return await platform_connection_service.configure_browser(platform, payload)
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/platform-connections/{{platform}}/cookies",
+    response_model=PlatformConnectionSummary,
+)
+async def import_platform_cookies(
+    platform: PlatformKind,
+    file: Annotated[UploadFile, File()],
+    usage_strategy: Annotated[PlatformUsageStrategy, Form()] = (
+        PlatformUsageStrategy.ON_AUTH_REQUIRED
+    ),
+) -> PlatformConnectionSummary:
+    payload = await file.read(MAX_COOKIE_FILE_BYTES + 1)
+    try:
+        return await platform_connection_service.import_cookie_file(
+            platform,
+            payload,
+            usage_strategy=usage_strategy,
+        )
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
+
+
+@app.patch(
+    f"{API_PREFIX}/settings/platform-connections/{{platform}}/strategy",
+    response_model=PlatformConnectionSummary,
+)
+async def update_platform_connection_strategy(
+    platform: PlatformKind,
+    payload: PlatformConnectionStrategyUpdate,
+) -> PlatformConnectionSummary:
+    try:
+        return await platform_connection_service.update_strategy(platform, payload)
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/settings/platform-connections/{{platform}}/validate",
+    response_model=PlatformConnectionValidationResponse,
+)
+async def validate_platform_connection(
+    platform: PlatformKind,
+    payload: PlatformConnectionValidationRequest,
+) -> PlatformConnectionValidationResponse:
+    try:
+        return await platform_connection_service.validate(platform, test_url=payload.test_url)
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
+
+
+@app.delete(f"{API_PREFIX}/settings/platform-connections/{{platform}}")
+async def disconnect_platform(platform: PlatformKind) -> dict[str, str]:
+    try:
+        await platform_connection_service.disconnect(platform)
+        return {"status": "disconnected", "platform": platform.value}
+    except PlatformConnectionServiceError as exc:
+        raise platform_connection_http_error(exc) from exc
 
 
 @app.get(f"{API_PREFIX}/workspaces", response_model=list[WorkspaceListItem])
@@ -822,6 +949,99 @@ async def get_production_shot(shot_plan_id: UUID) -> ShotPlanDetailResponse:
         return await production_service.get_shot(shot_plan_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats",
+    response_model=ShotPlanDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_production_visual_beat(
+    shot_plan_id: UUID,
+    payload: ShotVisualBeatCreate,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.create_visual_beat(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.patch(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats/{{visual_beat_id}}",
+    response_model=ShotPlanDetailResponse,
+)
+async def update_production_visual_beat(
+    shot_plan_id: UUID,
+    visual_beat_id: UUID,
+    payload: ShotVisualBeatUpdate,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.update_visual_beat(
+            shot_plan_id,
+            visual_beat_id,
+            payload,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats/order",
+    response_model=ShotPlanDetailResponse,
+)
+async def reorder_production_visual_beats(
+    shot_plan_id: UUID,
+    payload: ShotVisualBeatReorder,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.reorder_visual_beats(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.delete(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats/{{visual_beat_id}}",
+    response_model=ShotPlanDetailResponse,
+)
+async def delete_production_visual_beat(
+    shot_plan_id: UUID,
+    visual_beat_id: UUID,
+    payload: ShotVisualBeatDelete,
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.delete_visual_beat(
+            shot_plan_id,
+            visual_beat_id,
+            payload,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats/"
+    "{visual_beat_id}/source-frame"
+)
+async def get_production_visual_beat_source_frame(
+    shot_plan_id: UUID,
+    visual_beat_id: UUID,
+) -> FileResponse:
+    try:
+        path, media_type = await production_service.resolve_visual_beat_source_frame(
+            shot_plan_id,
+            visual_beat_id,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.put(

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
+from viral_dna_api import media as media_module
 from viral_dna_api.ai.catalog import load_model_plan
 from viral_dna_api.ai.contracts import ModelRequest, ProviderResult
 from viral_dna_api.ai.router import ModelRouter
@@ -12,6 +14,7 @@ from viral_dna_api.ai.shot_segmentation import (
     apply_model_selection,
 )
 from viral_dna_api.media import (
+    MediaProcessor,
     RawSceneScore,
     boundaries_from_candidates,
     boundary_evidence_timestamps,
@@ -151,6 +154,12 @@ def _build_inputs(
                 methods=["adjacent_scene_score"],
                 hard_boundary=hard,
                 evidence_frame_urls=[url],
+                evidence_timestamps=[
+                    round(timestamp - 0.75, 3),
+                    round(timestamp - 0.12, 3),
+                    round(timestamp + 0.12, 3),
+                    round(timestamp + 0.75, 3),
+                ],
                 comparison_image_url=url,
             )
         )
@@ -226,6 +235,52 @@ def test_boundary_evidence_uses_near_and_far_frames_with_safe_clamping() -> None
         6.387,
         7.017,
     )
+
+
+@pytest.mark.asyncio
+async def test_keyframe_extraction_excludes_transition_from_shot_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    async def fake_run_command(
+        args: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> tuple[str, str]:
+        del timeout_seconds
+        commands.append(args)
+        return "", ""
+
+    monkeypatch.setattr(media_module, "_run_command", fake_run_command)
+    candidate = SceneBoundaryCandidate(
+        id="candidate_001",
+        timestamp_seconds=3.167,
+        score=0.084,
+        methods=["adjacent_scene_score"],
+        evidence_timestamps=[2.417, 3.047, 3.287, 3.917],
+        selected_by_model=True,
+        model_decision="keep",
+        transition_start_seconds=3.047,
+        stable_new_scene_seconds=3.917,
+    )
+
+    shots = await MediaProcessor().extract_keyframes(
+        tmp_path / "proxy.mp4",
+        [0, 3.167, 9.2],
+        tmp_path / "shots",
+        UUID("00000000-0000-0000-0000-000000000001"),
+        boundary_candidates=[candidate],
+    )
+
+    assert shots[0].content_end_seconds == pytest.approx(3.047)
+    assert shots[1].content_start_seconds == pytest.approx(3.917)
+    assert shots[1].incoming_transition_start_seconds == pytest.approx(3.047)
+    assert shots[1].incoming_transition_end_seconds == pytest.approx(3.917)
+    assert shots[1].evidence_timestamps[0] > 3.917
+    assert all(value >= 3.917 for value in shots[1].evidence_timestamps)
+    assert len(commands) == 6
     assert boundary_evidence_timestamps(0.45, 1.0) == (
         0.001,
         0.33,
@@ -265,6 +320,12 @@ async def test_segmentation_selection_is_metered_cached_and_keeps_hard_boundarie
         18.342,
     ]
     assert first.segmentation.final_shot_count == 4
+    accepted = first.segmentation.candidates[0]
+    assert accepted.transition_start_seconds == pytest.approx(3.48)
+    assert accepted.stable_new_scene_seconds == pytest.approx(4.35)
+    hard = first.segmentation.candidates[-1]
+    assert hard.transition_start_seconds == pytest.approx(15.35)
+    assert hard.stable_new_scene_seconds == pytest.approx(15.35)
     rejected = first.segmentation.candidates[1]
     assert rejected.selected_by_model is False
     assert rejected.model_confidence == pytest.approx(0.93)

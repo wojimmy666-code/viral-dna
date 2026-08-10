@@ -14,7 +14,7 @@ from ...contracts import (
 )
 from ...errors import VideoProviderError
 from .client import SeedanceClient
-from .error_mapper import raise_seedance_error
+from .error_mapper import map_seedance_error, raise_seedance_error
 from .request_mapper import build_seedance_request
 
 
@@ -30,7 +30,7 @@ def _json(response: httpx.Response) -> dict[str, Any]:
 
 class SeedanceVideoProvider:
     provider_id = "volc_ark"
-    adapter_version = "seedance-content-task-v1"
+    adapter_version = "seedance-content-task-v2"
 
     async def validate_credentials(
         self, api_key: str, base_url: str
@@ -115,6 +115,15 @@ class SeedanceVideoProvider:
         usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
         video_url = content.get("video_url") or output.get("video_url") or body.get("video_url")
         error = body.get("error") if isinstance(body.get("error"), dict) else {}
+        raw_error_code = str(error.get("code") or "").strip() or None
+        raw_error_message = str(error.get("message") or "").strip() or None
+        failure = None
+        if status == VideoProviderTaskStatus.FAILED:
+            _, failure = map_seedance_error(
+                response.status_code,
+                raw_code=raw_error_code,
+                message=raw_error_message,
+            )
         return ProviderPollResult(
             status=status,
             raw=body,
@@ -123,9 +132,14 @@ class SeedanceVideoProvider:
             width=int(output.get("width") or 0) or None,
             height=int(output.get("height") or 0) or None,
             duration_seconds=float(output.get("duration") or 0) or None,
-            error_code=str(error.get("code") or "").strip() or None,
-            error_message=str(error.get("message") or "").strip() or None,
-            retryable=False,
+            error_code=failure.code if failure else raw_error_code,
+            error_message=failure.message if failure else raw_error_message,
+            retryable=failure.retryable if failure else False,
+            provider_error_code=failure.provider_code if failure else raw_error_code,
+            error_category=failure.category if failure else None,
+            error_title=failure.title if failure else None,
+            error_technical_message=failure.technical_message if failure else None,
+            error_action=failure.suggested_action if failure else None,
         )
 
     async def cancel(

@@ -51,6 +51,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
+import { PlatformConnections } from "./PlatformConnections.jsx";
 import {
   NotificationDrawer,
   ToastViewport,
@@ -77,8 +78,21 @@ import {
   recordThumbnailInitialState,
   rememberRecordThumbnailLoaded,
 } from "./record-thumbnail-ui.js";
+import {
+  connectionHealthMeta,
+  detectPlatformFromUrl,
+  findPlatformConnection,
+  isCredentialAnalysisError,
+  platformLabel,
+} from "./platform-connection-ui.js";
+import { preferredVideoResolution } from "./production-ui.js";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
+const DEFAULT_PLATFORM_CONNECTIONS = Object.freeze({
+  local_only: true,
+  device_name: "当前设备",
+  items: [],
+});
 const MODEL_SETTINGS_STORAGE_KEY = "viral-dna:model-settings:v1";
 const DEFAULT_MODEL_SETTINGS = Object.freeze({
   targetModel: "seedance",
@@ -133,7 +147,7 @@ const DEFAULT_IMAGE_GENERATION_SETTINGS = Object.freeze({
 });
 const DEFAULT_VIDEO_GENERATION_SETTINGS = Object.freeze({
   enabled: true,
-  default_model_alias: "bailian_wan_2_7_i2v",
+  default_model_alias: "bailian_wan_2_7_r2v",
   default_resolution: "720P",
   poll_interval_seconds: 5,
   task_timeout_seconds: 900,
@@ -294,7 +308,14 @@ async function apiRequest(path, options = {}) {
           : typeof payload?.message === "string"
             ? payload.message
             : "请求失败，请稍后重试";
-    throw new Error(message);
+    const requestError = new Error(message);
+    if (detail && typeof detail === "object") {
+      requestError.code = detail.code || null;
+      requestError.platform = detail.platform || null;
+      requestError.retryable = Boolean(detail.retryable);
+    }
+    requestError.status = response.status;
+    throw requestError;
   }
   return payload;
 }
@@ -387,16 +408,37 @@ function localProxySourceLabel(value) {
   }[value] || "未检测到代理";
 }
 
+function supportsProductionVideoWorkflow(model) {
+  return Boolean(
+    model?.available
+    && model.capabilities?.multi_image_reference
+    && model.capabilities?.ordered_reference_images,
+  );
+}
+
 function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
   const providers = server.providers?.length
     ? server.providers
     : DEFAULT_VIDEO_GENERATION_SETTINGS.providers;
+  const models = server.models || [];
+  const preferredAlias = (
+    server.default_model_alias
+    || DEFAULT_VIDEO_GENERATION_SETTINGS.default_model_alias
+  );
+  const selectedModel = models.find(
+    (model) => model.alias === preferredAlias && supportsProductionVideoWorkflow(model),
+  ) || models.find(supportsProductionVideoWorkflow);
+  const preferredResolution = (
+    server.default_resolution
+    || DEFAULT_VIDEO_GENERATION_SETTINGS.default_resolution
+  );
   return {
     videoEnabled: server.enabled !== false,
-    videoDefaultModelAlias:
-      server.default_model_alias || DEFAULT_VIDEO_GENERATION_SETTINGS.default_model_alias,
-    videoDefaultResolution:
-      server.default_resolution || DEFAULT_VIDEO_GENERATION_SETTINGS.default_resolution,
+    videoDefaultModelAlias: selectedModel?.alias || preferredAlias,
+    videoDefaultResolution: preferredVideoResolution(
+      selectedModel,
+      preferredResolution,
+    ),
     videoPollIntervalSeconds: Number(server.poll_interval_seconds || 5),
     videoTaskTimeoutSeconds: Number(server.task_timeout_seconds || 900),
     videoProviderKeys: Object.fromEntries(providers.map((item) => [item.provider, ""])),
@@ -509,9 +551,17 @@ export function App() {
   const [historyPage, setHistoryPage] = useState(initialHistoryState.page);
   const [historyPageSize, setHistoryPageSize] = useState(initialHistoryState.pageSize);
   const [historyActionBusy, setHistoryActionBusy] = useState(false);
+  const [platformConnections, setPlatformConnections] = useState(
+    DEFAULT_PLATFORM_CONNECTIONS,
+  );
+  const [platformConnectionsLoading, setPlatformConnectionsLoading] = useState(false);
+  const [platformConnectionsError, setPlatformConnectionsError] = useState("");
+  const [platformConnectionTarget, setPlatformConnectionTarget] = useState("");
   const [rightsConfirmed, setRightsConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [analysisErrorCode, setAnalysisErrorCode] = useState("");
+  const [analysisErrorPlatform, setAnalysisErrorPlatform] = useState("");
   const [video, setVideo] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [analysisVersions, setAnalysisVersions] = useState([]);
@@ -564,6 +614,22 @@ export function App() {
     setToasts((current) => [...current.slice(-2), { id, ...normalized }]);
   }, []);
 
+  const loadPlatformConnections = useCallback(async ({ quiet = false } = {}) => {
+    if (!quiet) setPlatformConnectionsLoading(true);
+    setPlatformConnectionsError("");
+    try {
+      const payload = await apiRequest("/settings/platform-connections");
+      setPlatformConnections(payload || DEFAULT_PLATFORM_CONNECTIONS);
+      return payload;
+    } catch (requestError) {
+      setPlatformConnectionsError(requestError.message);
+      if (!quiet) throw requestError;
+      return null;
+    } finally {
+      if (!quiet) setPlatformConnectionsLoading(false);
+    }
+  }, []);
+
   const refreshNotifications = useCallback(async ({ announce = true } = {}) => {
     try {
       const feed = await apiRequest("/me/notifications?limit=100");
@@ -597,7 +663,13 @@ export function App() {
     loadWorkspace().catch(() => undefined);
     loadGenerationSettings().catch(() => undefined);
     refreshHistory({ quiet: true }).catch(() => undefined);
+    loadPlatformConnections({ quiet: true }).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (activeNav !== "platform-connections") return;
+    loadPlatformConnections().catch(() => undefined);
+  }, [activeNav, loadPlatformConnections]);
 
   useEffect(() => {
     refreshNotifications({ announce: false }).catch(() => undefined);
@@ -772,6 +844,7 @@ export function App() {
 
   function selectNav(id) {
     setSettingsOpen(false);
+    setPlatformConnectionTarget("");
     setActiveNav(id);
     if (id === "new-analysis") {
       importSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -796,6 +869,12 @@ export function App() {
   function changeHistorySort(value) {
     setHistoryPage(1);
     setHistorySort(value);
+  }
+
+  function openPlatformConnections(platform = "") {
+    setSettingsOpen(false);
+    setPlatformConnectionTarget(platform);
+    setActiveNav("platform-connections");
   }
 
   function changeHistoryLifecycle(value) {
@@ -1298,11 +1377,15 @@ export function App() {
       const next = await apiRequest(`/analyses/${analysisId}`);
       rememberAnalysis(next);
       if (next.stage === "completed") {
+        setAnalysisErrorCode("");
+        setAnalysisErrorPlatform("");
         await loadReport(next.video_id);
         return;
       }
       if (next.stage === "failed") {
         setError(next.error?.message || next.message || "分析失败");
+        setAnalysisErrorCode(next.error?.code || "");
+        setAnalysisErrorPlatform(detectPlatformFromUrl(video?.source_url || url) || "");
         return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 700));
@@ -1318,11 +1401,15 @@ export function App() {
       const next = JSON.parse(event.data);
       rememberAnalysis(next);
       if (next.stage === "completed") {
+        setAnalysisErrorCode("");
+        setAnalysisErrorPlatform("");
         source.close();
         await loadReport(next.video_id);
       }
       if (next.stage === "failed") {
         setError(next.error?.message || next.message || "分析失败");
+        setAnalysisErrorCode(next.error?.code || "");
+        setAnalysisErrorPlatform(detectPlatformFromUrl(video?.source_url || url) || "");
         source.close();
       }
     });
@@ -1339,6 +1426,8 @@ export function App() {
     ]);
     setReport(nextReport);
     setVideo(processedVideo);
+    setAnalysisErrorCode("");
+    setAnalysisErrorPlatform("");
     setActiveNav("workspace");
     setActiveShotId(nextReport.shots[0]?.id || null);
     setActiveReportTab("overview");
@@ -1351,8 +1440,27 @@ export function App() {
     }, 120);
   }
 
+  async function createAnalysisForVideo(createdVideo) {
+    const createdAnalysis = await apiRequest(`/videos/${createdVideo.id}/analyses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        granularity: "fine",
+        include_audio: true,
+        include_ocr: true,
+        analysis_profile: analysisProfile,
+        max_cost_cny: maxCostCny ? Number(maxCostCny) : null,
+      }),
+    });
+    rememberAnalysis(createdAnalysis);
+    connectToProgress(createdAnalysis.id);
+    return createdAnalysis;
+  }
+
   async function startAnalysis() {
     setError("");
+    setAnalysisErrorCode("");
+    setAnalysisErrorPlatform("");
     showNotice("");
     if (!rightsConfirmed) {
       setError("请先确认拥有视频分析和使用权限");
@@ -1397,21 +1505,46 @@ export function App() {
       setVideo(createdVideo);
       loadWorkspace().catch(() => undefined);
       refreshHistory({ quiet: true }).catch(() => undefined);
-      const createdAnalysis = await apiRequest(`/videos/${createdVideo.id}/analyses`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          granularity: "fine",
-          include_audio: true,
-          include_ocr: true,
-          analysis_profile: analysisProfile,
-          max_cost_cny: maxCostCny ? Number(maxCostCny) : null,
-        }),
-      });
-      rememberAnalysis(createdAnalysis);
-      connectToProgress(createdAnalysis.id);
+      await createAnalysisForVideo(createdVideo);
     } catch (requestError) {
       setError(requestError.message);
+      setAnalysisErrorCode(requestError.code || "");
+      setAnalysisErrorPlatform(
+        requestError.platform || detectPlatformFromUrl(url) || "",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function retryCurrentLinkAnalysis() {
+    const normalizedUrl = url.trim();
+    const canReuseVideo = sourceMode === "link"
+      && video?.id
+      && video.source_url === normalizedUrl;
+    if (!canReuseVideo) {
+      await startAnalysis();
+      return;
+    }
+
+    setSubmitting(true);
+    setError("");
+    setAnalysisErrorCode("");
+    setAnalysisErrorPlatform("");
+    setReport(null);
+    setReplacementVersion(null);
+    setAnalysis(null);
+    resetProductionWorkspace();
+    try {
+      await loadPlatformConnections({ quiet: true });
+      await createAnalysisForVideo(video);
+      showNotice({ type: "success", message: "已使用更新后的平台连接重试原任务" });
+    } catch (requestError) {
+      setError(requestError.message);
+      setAnalysisErrorCode(requestError.code || "");
+      setAnalysisErrorPlatform(
+        requestError.platform || detectPlatformFromUrl(normalizedUrl) || "",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -1761,7 +1894,7 @@ export function App() {
 
       <div className="app-body">
         <Topbar
-          assetMode={activeNav === "assets"}
+          assetMode={["assets", "platform-connections"].includes(activeNav)}
           focusMode={recordDetailMode}
           hideCreate={!shouldShowTopbarCreate(activeNav, report)}
           notificationOpen={notificationOpen}
@@ -1777,14 +1910,27 @@ export function App() {
 
         <div
           className={
-            activeNav === "history"
+            activeNav === "platform-connections"
+              ? "platform-connections-layout"
+              : activeNav === "history"
               ? "history-layout"
               : activeNav === "assets"
                 ? "asset-library-layout"
                 : `workspace-layout ${productionFocusMode ? "production-mode" : ""}`
           }
         >
-          {activeNav === "history" ? (
+          {activeNav === "platform-connections" ? (
+            <PlatformConnections
+              data={platformConnections}
+              error={platformConnectionsError}
+              initialPlatform={platformConnectionTarget}
+              loading={platformConnectionsLoading}
+              onBack={() => selectNav("new-analysis")}
+              onNotice={showNotice}
+              onRefresh={() => loadPlatformConnections()}
+              request={apiRequest}
+            />
+          ) : activeNav === "history" ? (
             <HistoryPage
               records={records}
               folders={folders}
@@ -1849,7 +1995,12 @@ export function App() {
                 sourceMode={sourceMode}
                 setSourceMode={setSourceMode}
                 url={url}
-                setUrl={setUrl}
+                setUrl={(value) => {
+                  setUrl(value);
+                  setError("");
+                  setAnalysisErrorCode("");
+                  setAnalysisErrorPlatform("");
+                }}
                 file={file}
                 setFile={setFile}
                 targetModel={targetModel}
@@ -1862,6 +2013,11 @@ export function App() {
                 setRightsConfirmed={setRightsConfirmed}
                 submitting={submitting}
                 error={error}
+                errorCode={analysisErrorCode}
+                errorPlatform={analysisErrorPlatform}
+                platformConnections={platformConnections}
+                onConfigurePlatform={openPlatformConnections}
+                onRetry={retryCurrentLinkAnalysis}
                 onStart={startAnalysis}
               />
             )}
@@ -1948,6 +2104,7 @@ export function App() {
                     onNavigationChange={setActiveProductionProjectName}
                     onNotificationsChanged={refreshNotifications}
                     onNotice={showNotice}
+                    onOpenModelSettings={openModelSettings}
                     onProjectsChanged={() => loadProductions(video.record_id, { quiet: true })}
                     projects={productionProjects}
                     recordId={video.record_id}
@@ -2623,6 +2780,17 @@ function Sidebar({
         <div className="nav-divider" />
         <p className="nav-section-label">系统</p>
         <button
+          className={`nav-item ${activeNav === "platform-connections" ? "active" : ""}`}
+          onClick={() => onSelect("platform-connections")}
+          type="button"
+        >
+          <LinkSimple
+            size={18}
+            weight={activeNav === "platform-connections" ? "bold" : "regular"}
+          />
+          <span>平台连接</span>
+        </button>
+        <button
           aria-expanded={settingsOpen}
           aria-haspopup="dialog"
           className={`nav-item ${settingsOpen ? "active" : ""}`}
@@ -2698,8 +2866,14 @@ function ModelSettingsDialog({
     || imageServerSettings.selected_capabilities
     || selectedImageModel?.capabilities;
   const videoModelOptions = videoServerSettings.models || [];
-  const selectedVideoModel = videoModelOptions.find(
+  const selectableVideoModelOptions = videoModelOptions.filter(
+    supportsProductionVideoWorkflow,
+  );
+  const selectedVideoModel = selectableVideoModelOptions.find(
     (model) => model.alias === draft.videoDefaultModelAlias,
+  );
+  const unavailableVideoModelCount = (
+    videoModelOptions.length - selectableVideoModelOptions.length
   );
   const videoResolutions = selectedVideoModel?.capabilities?.supported_resolutions || [];
   const imageCandidateCount = Number(draft.imageDefaultCandidateCount || 2);
@@ -3611,20 +3785,29 @@ function ModelSettingsDialog({
                     );
                     onChange({
                       videoDefaultModelAlias: event.target.value,
-                      videoDefaultResolution:
-                        model?.capabilities?.supported_resolutions?.[0]
-                        || draft.videoDefaultResolution,
+                      videoDefaultResolution: preferredVideoResolution(
+                        model,
+                        draft.videoDefaultResolution,
+                      ),
                     });
                   }}
                   value={draft.videoDefaultModelAlias}
                 >
-                  {videoModelOptions.map((model) => (
-                    <option disabled={!model.available} key={model.alias} value={model.alias}>
-                      {model.label}{model.recommended ? "（推荐）" : ""}{!model.available ? "（待开放）" : ""}
+                  {selectableVideoModelOptions.length === 0 && (
+                    <option value="">暂无支持有序多图的视频模型</option>
+                  )}
+                  {selectableVideoModelOptions.map((model) => (
+                    <option key={model.alias} value={model.alias}>
+                      {model.label}{model.recommended ? "（推荐）" : ""}
                     </option>
                   ))}
                 </select>
-                <small>{selectedVideoModel?.description || "正在读取视频模型目录…"}</small>
+                <small>
+                  {selectedVideoModel?.description || "正在读取视频模型目录…"}
+                  {unavailableVideoModelCount > 0
+                    ? `；另有 ${unavailableVideoModelCount} 个模型因未验证有序多图能力而不可选`
+                    : ""}
+                </small>
               </label>
               <label className="settings-field">
                 <span>默认分辨率</span>
@@ -3887,8 +4070,22 @@ const ImportPanel = forwardRef(function ImportPanel({
   setRightsConfirmed,
   submitting,
   error,
+  errorCode,
+  errorPlatform,
+  platformConnections,
+  onConfigurePlatform,
+  onRetry,
   onStart,
 }, ref) {
+  const detectedPlatform = sourceMode === "link" ? detectPlatformFromUrl(url) : null;
+  const activePlatform = errorPlatform || detectedPlatform;
+  const connection = findPlatformConnection(platformConnections, detectedPlatform);
+  const health = connectionHealthMeta(connection);
+  const connectionEnabled = connection?.configured
+    && connection.usage_strategy !== "disabled"
+    && health.usable;
+  const credentialError = Boolean(error && isCredentialAnalysisError(errorCode));
+
   return (
     <section className="import-card" id="new-analysis" ref={ref}>
       <div className="card-heading">
@@ -3943,6 +4140,26 @@ const ImportPanel = forwardRef(function ImportPanel({
             <DownloadSimple size={15} />
             系统会采集公开源视频并进入真实分镜流程；平台验证、私密或失效链接会明确报错。
           </p>
+          {detectedPlatform && (
+            <div className={`link-platform-status ${connectionEnabled ? "ready" : "attention"}`}>
+              <span className="link-platform-mark" aria-hidden="true">
+                {detectedPlatform === "douyin" ? "抖" : "红"}
+              </span>
+              <span>
+                <strong>{platformLabel(detectedPlatform)}</strong>
+                <small>
+                  {connectionEnabled
+                    ? `${health.label} · 平台要求登录时自动使用`
+                    : connection?.configured
+                      ? `${health.label} · 请更新登录状态`
+                      : "未配置登录状态；公开链接仍会先匿名采集"}
+                </small>
+              </span>
+              <button onClick={() => onConfigurePlatform(detectedPlatform)} type="button">
+                {connection?.configured ? "更新连接" : "配置平台"}
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <label className={`upload-dropzone ${file ? "has-file" : ""}`}>
@@ -4021,7 +4238,28 @@ const ImportPanel = forwardRef(function ImportPanel({
         </label>
       </div>
 
-      {error && (
+      {credentialError ? (
+        <div className="credential-action-error" role="alert">
+          <span className="credential-error-icon"><LinkSimple size={18} /></span>
+          <div>
+            <strong>{activePlatform ? `${platformLabel(activePlatform)}需要更新登录状态` : "平台需要登录状态"}</strong>
+            <p>{error}</p>
+          </div>
+          <div className="credential-error-actions">
+            <button
+              className="secondary-button compact"
+              onClick={() => onConfigurePlatform(activePlatform)}
+              type="button"
+            >
+              配置{activePlatform ? platformLabel(activePlatform) : "平台"}
+            </button>
+            <button className="primary-button compact" disabled={submitting} onClick={onRetry} type="button">
+              {submitting ? <CircleNotch className="spin" size={16} /> : <ArrowClockwise size={16} />}
+              更新后重试
+            </button>
+          </div>
+        </div>
+      ) : error && (
         <div className="inline-error" role="alert">
           <X size={17} weight="bold" />
           {error}

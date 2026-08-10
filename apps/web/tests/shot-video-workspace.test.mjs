@@ -14,6 +14,14 @@ const preparationSource = readFileSync(
   new URL("../src/VideoPreparationPanel.jsx", import.meta.url),
   "utf8",
 );
+const imageWorkspaceSource = readFileSync(
+  new URL("../src/ShotImageWorkspace.jsx", import.meta.url),
+  "utf8",
+);
+const appSource = readFileSync(
+  new URL("../src/App.jsx", import.meta.url),
+  "utf8",
+);
 
 function cssRule(selector) {
   const start = workflowStyles.indexOf(`${selector} {`);
@@ -74,6 +82,41 @@ test("keeps candidate actions compact and overlays download on the video", () =>
   assert.match(actionRule, /flex-wrap:\s*wrap/);
 });
 
+test("shows actionable provider failures and hides unsafe direct retry", () => {
+  assert.match(workspaceSource, /videoGenerationFailureDetails\(latestRun\)/);
+  assert.match(workspaceSource, /className="shot-video-generation-error" role="alert"/);
+  assert.match(workspaceSource, /打开模型设置/);
+  assert.match(workspaceSource, /技术详情/);
+  assert.match(workspaceSource, /复制诊断信息/);
+  assert.match(workspaceSource, /latestFailure\.retryable/);
+  assert.match(workspaceSource, /latestRun\?\.status === "cancelled"/);
+  assert.match(workflowStyles, /\.shot-video-generation-error\s*\{/);
+});
+
+test("keeps video candidates from every generation batch selectable", () => {
+  assert.match(workspaceSource, /const videoRuns = useMemo/);
+  assert.match(workspaceSource, /const candidateGroups = useMemo/);
+  assert.match(workspaceSource, /historicalCandidateGroups/);
+  assert.match(workspaceSource, /className="shot-candidate-library shot-video-candidate-library"/);
+  assert.match(workspaceSource, /历史 \{historicalCandidateCount\} 个/);
+  assert.match(workspaceSource, /改用此视频/);
+  assert.match(workspaceSource, /displayedCandidateRun\?\.model_display_name/);
+  assert.doesNotMatch(
+    workspaceSource,
+    /\(latestRun\?\.candidates \|\| \[\]\)\.filter/,
+  );
+  assert.doesNotMatch(
+    workspaceSource,
+    /plan\.video_status === "approved" \|\| Boolean\(generationBlockedReason\)/,
+  );
+
+  const libraryRule = cssRule(".shot-video-candidate-library");
+  const thumbRule = cssRule(".shot-video-candidate-library .shot-candidate-thumb");
+  assert.match(libraryRule, /margin-top:\s*10px/);
+  assert.match(thumbRule, /position:\s*relative/);
+  assert.match(thumbRule, /background:\s*#19191e/);
+});
+
 test("requires approved videos to complete an explicit editing preparation", () => {
   assert.match(workspaceSource, /<VideoPreparationPanel/);
   assert.match(workspaceSource, /gate\?\.prepared_shot_count/);
@@ -94,4 +137,64 @@ test("shows duration alignment risk as a non-blocking preparation warning", () =
   assert.match(preparationSource, /可交接 · 有提示/);
   assert.match(preparationSource, /className="video-preparation-warnings"/);
   assert.match(workflowStyles, /\.video-preparation-warnings/);
+});
+
+test("submits approved visual beats as an explicit ordered storyboard", () => {
+  assert.match(workspaceSource, /function approvedVisualBeatFrames/);
+  assert.match(workspaceSource, /className="shot-video-preview-stack"/);
+  assert.match(workspaceSource, /className="shot-video-storyboard"/);
+  assert.match(workspaceSource, /图\{beat\.index\}/);
+  assert.match(workspaceSource, /\{approvedReferenceCount\}\/\{referenceFrames\.length\}/);
+  assert.match(workspaceSource, /!allReferencesApproved/);
+  assert.doesNotMatch(workspaceSource, /function approvedImageCandidate/);
+  assert.doesNotMatch(workspaceSource, /className="shot-video-preview-grid"/);
+
+  const previewStackRule = cssRule(".shot-video-preview-stack");
+  const storyboardRule = cssRule(".shot-video-storyboard");
+  const figureRule = cssRule(".shot-video-storyboard figure");
+  const imageRule = cssRule(".shot-video-storyboard-image");
+  const transitionRule = cssRule(".shot-video-storyboard-transition");
+
+  assert.match(previewStackRule, /grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.match(previewStackRule, /align-items:\s*start/);
+  assert.match(previewStackRule, /gap:\s*16px/);
+  assert.match(storyboardRule, /display:\s*flex/);
+  assert.match(storyboardRule, /height:\s*auto/);
+  assert.match(storyboardRule, /align-items:\s*flex-start/);
+  assert.match(storyboardRule, /overflow-x:\s*auto/);
+  assert.match(storyboardRule, /scroll-snap-type:\s*x proximity/);
+  assert.match(figureRule, /width:\s*clamp\(108px, 11vw, 144px\)/);
+  assert.match(imageRule, /height:\s*clamp\(128px, 14vw, 168px\)/);
+  assert.match(transitionRule, /width:\s*32px/);
+  assert.doesNotMatch(workflowStyles, /height:\s*min\(58vh, 360px\)/);
+});
+
+test("offers only models that declare ordered multi-image capability", () => {
+  assert.match(workspaceSource, /capability\?\.multi_image_reference/);
+  assert.match(workspaceSource, /capability\?\.ordered_reference_images/);
+  assert.match(workspaceSource, /videoModels\.filter\(supportsOrderedMultiImage\)/);
+  assert.match(workspaceSource, /compatibleVideoModels\.map/);
+  assert.doesNotMatch(workspaceSource, /\{videoModels\.map\(/);
+  assert.match(workspaceSource, /preferredVideoResolution\(model, current\.resolution\)/);
+});
+
+test("uses the same ordered multi-image gate in model settings", () => {
+  assert.match(appSource, /function supportsProductionVideoWorkflow/);
+  assert.match(appSource, /model\.capabilities\?\.multi_image_reference/);
+  assert.match(appSource, /model\.capabilities\?\.ordered_reference_images/);
+  assert.match(appSource, /videoModelOptions\.filter\(/);
+  assert.match(appSource, /selectableVideoModelOptions\.map/);
+});
+
+test("keeps visual beats compact, ordered and independently editable", () => {
+  assert.match(imageWorkspaceSource, /className="visual-beat-rail"/);
+  assert.match(imageWorkspaceSource, /onReorderVisualBeats/);
+  assert.match(imageWorkspaceSource, /onCreateVisualBeat/);
+  assert.match(imageWorkspaceSource, /onDeleteVisualBeat/);
+  assert.match(imageWorkspaceSource, /transition_to_next_type/);
+  assert.match(imageWorkspaceSource, /transition_to_next_duration_seconds/);
+
+  const railRule = cssRule(".visual-beat-rail");
+  assert.match(railRule, /display:\s*flex/);
+  assert.match(railRule, /overflow-x:\s*auto/);
 });

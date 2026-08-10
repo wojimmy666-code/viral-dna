@@ -12,13 +12,17 @@ def build_minimax_h3_request(request: ProviderVideoRequest) -> dict[str, object]
         "model": request.provider_model,
         "content": [
             {"type": "text", "text": prompt[:7000]},
-            {
-                "type": "image_url",
-                "image_url": {"url": image_data_url(request.first_frame_path)},
-                "role": "first_frame",
-            },
+            *[
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_data_url(frame.path)},
+                    "role": "reference_image",
+                }
+                for frame in request.reference_frames
+            ],
         ],
         "duration": round(request.duration_seconds),
         "resolution": request.resolution,
+        "ratio": request.aspect_ratio,
         "aigc_watermark": False,
     }

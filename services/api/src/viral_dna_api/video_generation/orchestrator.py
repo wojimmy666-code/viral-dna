@@ -25,13 +25,14 @@ from .catalog import (
 )
 from .contracts import (
     GeneratedVideo,
+    OrderedReferenceFrame,
     ProviderVideoRequest,
     VideoAdapterIdentity,
     VideoAdapterResult,
     VideoProviderAdapter,
 )
 from .costing import estimate_video_cost
-from .errors import VideoProviderError
+from .errors import VideoProviderError, classify_video_provider_failure
 from .media_transport import download_provider_video
 from .registry import VideoProviderRegistry
 from .settings import VideoGenerationSettingsService
@@ -177,7 +178,7 @@ class RemoteVideoOrchestrator:
         project_id: UUID,
         shot_plan_id: UUID,
         run_root: Path,
-        first_frame_path: Path,
+        reference_frames: tuple[OrderedReferenceFrame, ...],
         candidate_count: int,
         duration_seconds: float,
         aspect_ratio: str,
@@ -215,6 +216,17 @@ class RemoteVideoOrchestrator:
                 "prompt": positive_prompt,
                 "negative_prompt": negative_prompt,
                 "seed": seed,
+                "reference_images": [
+                    {
+                        "visual_beat_id": str(frame.visual_beat_id),
+                        "ordinal": frame.ordinal,
+                        "candidate_id": str(frame.candidate_id),
+                        "sha256": frame.sha256,
+                        "start_ratio": frame.start_ratio,
+                        "end_ratio": frame.end_ratio,
+                    }
+                    for frame in reference_frames
+                ],
             }
             submission_fingerprint = _fingerprint(request_snapshot)
             if task is not None and task.submission_fingerprint != submission_fingerprint:
@@ -253,7 +265,7 @@ class RemoteVideoOrchestrator:
                             provider_model=execution.spec.model or "",
                             prompt=positive_prompt,
                             negative_prompt=negative_prompt,
-                            first_frame_path=first_frame_path,
+                            reference_frames=reference_frames,
                             duration_seconds=duration_seconds,
                             resolution=execution.resolution,
                             aspect_ratio=aspect_ratio,
@@ -276,6 +288,11 @@ class RemoteVideoOrchestrator:
                             "error_code": exc.code,
                             "error_message": str(exc),
                             "retryable": exc.retryable,
+                            "provider_error_code": exc.provider_code,
+                            "error_category": exc.error_category,
+                            "error_title": exc.user_title,
+                            "error_technical_message": exc.technical_message,
+                            "error_action": exc.suggested_action,
                             "updated_at": now,
                             "completed_at": None if exc.retryable else now,
                         }
@@ -389,6 +406,19 @@ class RemoteVideoOrchestrator:
                 error_code,
                 error_message,
                 retryable=bool(first and first.retryable),
+                raw_code=first.provider_error_code if first else None,
+                provider=first.provider if first else execution.spec.provider,
+                failure=(
+                    classify_video_provider_failure(
+                        provider=first.provider,
+                        code=first.error_code,
+                        message=first.error_technical_message or first.error_message,
+                        retryable=first.retryable,
+                        provider_code=first.provider_error_code,
+                    )
+                    if first
+                    else None
+                ),
             )
         usage = {
             "requested_candidate_count": candidate_count,
@@ -453,6 +483,15 @@ class RemoteVideoOrchestrator:
                 usage["height"] = result.height
             if result.duration_seconds:
                 usage["output_video_duration"] = result.duration_seconds
+            failure = None
+            if result.status == VideoProviderTaskStatus.FAILED:
+                failure = classify_video_provider_failure(
+                    provider=task.provider,
+                    code=result.error_code,
+                    message=result.error_technical_message or result.error_message,
+                    retryable=result.retryable,
+                    provider_code=result.provider_error_code,
+                )
             task = task.model_copy(
                 update={
                     "status": result.status,
@@ -461,9 +500,22 @@ class RemoteVideoOrchestrator:
                     "output_url": result.output_url,
                     "actual_cost_micros": result.actual_cost_micros,
                     "cost_known": result.cost_known,
-                    "error_code": result.error_code,
-                    "error_message": result.error_message,
-                    "retryable": result.retryable,
+                    "error_code": failure.code if failure else result.error_code,
+                    "error_message": failure.message if failure else result.error_message,
+                    "retryable": failure.retryable if failure else result.retryable,
+                    "provider_error_code": (
+                        failure.provider_code if failure else result.provider_error_code
+                    ),
+                    "error_category": failure.category if failure else result.error_category,
+                    "error_title": failure.title if failure else result.error_title,
+                    "error_technical_message": (
+                        failure.technical_message
+                        if failure
+                        else result.error_technical_message
+                    ),
+                    "error_action": (
+                        failure.suggested_action if failure else result.error_action
+                    ),
                     "last_polled_at": now,
                     "updated_at": now,
                     "completed_at": (
@@ -486,12 +538,22 @@ class RemoteVideoOrchestrator:
             }:
                 return task
             await asyncio.sleep(execution.poll_interval_seconds)
+        timeout_failure = classify_video_provider_failure(
+            provider=task.provider,
+            code="video_provider_task_timeout",
+            message="等待 Provider 视频任务超时；可在重启后继续轮询，不会重新提交",
+            retryable=True,
+        )
         timed_out = task.model_copy(
             update={
                 "status": VideoProviderTaskStatus.UNKNOWN,
-                "error_code": "video_provider_task_timeout",
-                "error_message": "等待 Provider 视频任务超时；可在重启后继续轮询，不会重新提交",
-                "retryable": True,
+                "error_code": timeout_failure.code,
+                "error_message": timeout_failure.message,
+                "retryable": timeout_failure.retryable,
+                "error_category": timeout_failure.category,
+                "error_title": timeout_failure.title,
+                "error_technical_message": timeout_failure.technical_message,
+                "error_action": timeout_failure.suggested_action,
                 "updated_at": datetime.now(UTC),
             }
         )

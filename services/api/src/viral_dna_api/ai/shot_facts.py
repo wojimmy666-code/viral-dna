@@ -26,6 +26,7 @@ from ..models import (
     PriceSnapshot,
     ShotEvidence,
     ShotTimelineEvidence,
+    ShotVisualBeatFact,
     ShotVisualFacts,
     Video,
 )
@@ -156,25 +157,93 @@ async def _request_fingerprint(
 def _user_prompt(
     shot: ShotEvidence,
     timeline: ShotTimelineEvidence,
-    previous: ShotVisualFacts | None,
 ) -> str:
     schema = json.dumps(ShotVisualFacts.model_json_schema(), ensure_ascii=False)
-    previous_text = (
-        f"上一镜头：{previous.title}；场景：{previous.scene}；动作：{previous.action}"
-        if previous
-        else "这是第一个镜头，没有上一镜头。"
+    content_start = (
+        shot.content_start_seconds
+        if shot.content_start_seconds is not None
+        else shot.start_seconds
     )
+    content_end = (
+        shot.content_end_seconds
+        if shot.content_end_seconds is not None
+        else shot.end_seconds
+    )
+    evidence_timestamps = ", ".join(
+        f"{value:.3f}s" for value in shot.evidence_timestamps
+    ) or "未记录"
     return (
-        "请分析当前短视频镜头。输入图片按时间顺序排列，通常为开始帧、中间帧、结束帧。\n"
+        "请只分析当前短视频镜头的有效内容，不得引用、补写或延续上一镜头的画面事实。"
+        "输入图片按时间顺序排列，通常为有效内容开始帧、中间帧、结束帧。\n"
         f"镜头编号：{shot.shot_id}\n"
-        f"时间范围：{shot.start_seconds:.3f}s - {shot.end_seconds:.3f}s\n"
+        f"剪辑时间范围：{shot.start_seconds:.3f}s - {shot.end_seconds:.3f}s\n"
+        f"有效内容范围：{content_start:.3f}s - {content_end:.3f}s\n"
+        f"输入图片绝对时间：{evidence_timestamps}\n"
         f"镜头持续：{shot.duration_seconds:.3f}s\n"
         f"ASR 对白：{_clip(timeline.transcript_text, 4000)}\n"
         f"独立字幕：{_clip(timeline.subtitle_text, 4000)}\n"
         f"画面 OCR：{_clip(timeline.ocr_text, 6000)}\n"
-        f"{previous_text}\n"
         "请严格输出符合以下 JSON Schema 的 JSON 对象，不要输出其他内容：\n"
         f"{schema}"
+    )
+
+
+def _normalize_visual_beats(
+    shot: ShotEvidence,
+    facts: ShotVisualFacts,
+) -> ShotVisualFacts:
+    """Keep structured visual facts inside the clean content interval."""
+
+    content_start = float(
+        shot.content_start_seconds
+        if shot.content_start_seconds is not None
+        else shot.start_seconds
+    )
+    content_end = float(
+        shot.content_end_seconds
+        if shot.content_end_seconds is not None
+        else shot.end_seconds
+    )
+    normalized: list[ShotVisualBeatFact] = []
+    for beat in sorted(facts.visual_beats, key=lambda item: (item.start_seconds, item.index)):
+        start = max(content_start, float(beat.start_seconds))
+        end = min(content_end, float(beat.end_seconds))
+        if end - start < 0.01:
+            continue
+        source_timestamp = min(end, max(start, float(beat.source_timestamp_seconds)))
+        normalized.append(
+            beat.model_copy(
+                update={
+                    "index": len(normalized) + 1,
+                    "start_seconds": round(start, 3),
+                    "end_seconds": round(end, 3),
+                    "source_timestamp_seconds": round(source_timestamp, 3),
+                }
+            )
+        )
+    if not normalized:
+        source_timestamp = min(
+            content_end,
+            max(content_start, float(shot.representative_timestamp)),
+        )
+        normalized = [
+            ShotVisualBeatFact(
+                index=1,
+                title="画面 1",
+                start_seconds=round(content_start, 3),
+                end_seconds=round(content_end, 3),
+                source_timestamp_seconds=round(source_timestamp, 3),
+                image_prompt=facts.replication_prompt,
+            )
+        ]
+    return facts.model_copy(
+        update={
+            "visual_beats": normalized,
+            "contains_multiple_scenes": len(normalized) > 1,
+            "multiple_scenes_reason": (
+                facts.multiple_scenes_reason if len(normalized) > 1 else None
+            ),
+        }
     )
 
 
@@ -217,7 +286,6 @@ class ShotFactsService:
         timeline_by_shot = {shot.shot_id: shot for shot in timeline.shots}
         facts: dict[str, ShotVisualFacts] = {}
         warnings: list[str] = []
-        previous: ShotVisualFacts | None = None
         budget_exhausted = False
 
         for position, shot in enumerate(evidence.shots, 1):
@@ -236,7 +304,7 @@ class ShotFactsService:
             estimated_frame_height = round(
                 evidence.metadata.height * estimated_frame_width / evidence.metadata.width
             )
-            user_prompt = _user_prompt(shot, shot_timeline, previous)
+            user_prompt = _user_prompt(shot, shot_timeline)
 
             shot_result: ShotVisualFacts | None = None
             previous_run_id: UUID | None = None
@@ -486,11 +554,11 @@ class ShotFactsService:
                 if not budget_exhausted:
                     warnings.append(f"{shot.shot_id} 的 VLM 分析失败，已保留媒体证据结果")
                 continue
+            shot_result = _normalize_visual_beats(shot, shot_result)
             facts[shot.shot_id] = shot_result
             if shot_result.contains_multiple_scenes:
                 reason = shot_result.multiple_scenes_reason or "关键帧存在跨场景迹象"
                 warnings.append(f"{shot.shot_id} 仍可能包含多个语义场景：{reason}")
-            previous = shot_result
 
         return await self._outcome(analysis, facts, list(dict.fromkeys(warnings)))
 

@@ -672,6 +672,75 @@ button:disabled {
   color: var(--purple);
 }
 
+.link-platform-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid #dedfe8;
+  border-radius: 11px;
+  background: #fafafd;
+}
+
+.link-platform-status.ready {
+  border-color: #cae8d5;
+  background: #f5fbf7;
+}
+
+.link-platform-status.attention {
+  border-color: #eadfbd;
+  background: #fffaf0;
+}
+
+.link-platform-mark {
+  width: 31px;
+  height: 31px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #fff;
+  background: #25252e;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.link-platform-status > span:nth-child(2) {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.link-platform-status strong {
+  font-size: 12px;
+}
+
+.link-platform-status small {
+  overflow: hidden;
+  color: #757581;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-platform-status > button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid #d5d3ea;
+  border-radius: 9px;
+  color: var(--purple-dark);
+  background: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.link-platform-status > button:hover {
+  border-color: #aaa3ff;
+  background: #f8f7ff;
+}
+
 .upload-dropzone {
   min-height: 118px;
   display: flex;
@@ -5065,6 +5134,49 @@ button:disabled {
   font-size: 12px;
 }
 
+.credential-action-error {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid #edc8ce;
+  border-radius: 11px;
+  color: #923945;
+  background: #fff6f7;
+}
+
+.credential-error-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #b74250;
+  background: #ffe8eb;
+}
+
+.credential-action-error strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #54252c;
+  font-size: 13px;
+}
+
+.credential-action-error p {
+  margin: 0;
+  color: #8d5960;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.credential-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .app-toast p {
   margin: 0;
   color: #737380;
@@ -5631,6 +5743,25 @@ button:disabled {
   .import-actions {
     align-items: stretch;
     flex-direction: column-reverse;
+  }
+
+  .link-platform-status,
+  .credential-action-error {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .link-platform-status > button,
+  .credential-error-actions {
+    grid-column: 1 / -1;
+  }
+
+  .link-platform-status > button {
+    width: 100%;
+  }
+
+  .credential-error-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .shot-facts-grid,

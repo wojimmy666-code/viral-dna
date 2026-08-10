@@ -7,7 +7,7 @@ export function isProductionDetailView(activeNav, report, workspaceMode) {
 }
 
 export function shouldShowTopbarCreate(activeNav, report) {
-  return !["assets", "history"].includes(activeNav)
+  return !["assets", "history", "platform-connections"].includes(activeNav)
     && !isRecordDetailView(activeNav, report);
 }
 

@@ -40,7 +40,7 @@ def _is_h3(provider_model: str | None) -> bool:
 
 class MiniMaxVideoProvider:
     provider_id = "minimax"
-    adapter_version = "minimax-video-v2"
+    adapter_version = "minimax-video-v3"
 
     async def validate_credentials(
         self, api_key: str, base_url: str

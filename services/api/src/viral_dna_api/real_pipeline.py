@@ -8,12 +8,18 @@ from uuid import UUID
 from .ai.shot_facts import ShotFactsOutcome, ShotFactsService
 from .ai.shot_segmentation import SegmentationOutcome, ShotSegmentationService
 from .evidence import EvidenceTimelineBuilder
-from .link_ingestion import LinkCollector, LinkIngestionError, LinkIngestionResult
+from .link_ingestion import (
+    LinkCollector,
+    LinkCredentialResolver,
+    LinkIngestionError,
+    LinkIngestionResult,
+)
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
     AnalysisError,
     AnalysisJob,
     AnalysisMode,
+    AnalysisRecord,
     AnalysisReport,
     AnalysisStage,
     EvidenceProviderStatus,
@@ -31,7 +37,13 @@ from .models import (
     VideoStatus,
 )
 from .pipeline import SimulatedAnalysisPipeline
-from .records import resolve_video_path, write_source_metadata
+from .records import (
+    DEFAULT_LINK_RECORD_NAMES,
+    normalize_record_name,
+    resolve_record_name_from_video,
+    resolve_video_path,
+    write_source_metadata,
+)
 from .thumbnails import thumbnail_service
 from .workspace import workspace_manager
 
@@ -49,6 +61,10 @@ class AnalysisRepository(Protocol):
 
     async def save_video(self, video: Video) -> Video: ...
 
+    async def get_record(self, record_id: UUID) -> AnalysisRecord | None: ...
+
+    async def save_record(self, record: AnalysisRecord) -> AnalysisRecord: ...
+
     async def save_report(self, report: AnalysisReport) -> AnalysisReport: ...
 
     async def save_model_run(self, run: ModelRun) -> ModelRun: ...
@@ -63,8 +79,13 @@ class AnalysisRepository(Protocol):
 class HybridAnalysisPipeline:
     """Collects uploads and platform links before building real FFmpeg evidence."""
 
-    def __init__(self, repository: AnalysisRepository) -> None:
+    def __init__(
+        self,
+        repository: AnalysisRepository,
+        credential_resolver: LinkCredentialResolver | None = None,
+    ) -> None:
         self.repository = repository
+        self.credential_resolver = credential_resolver
         self.simulated = SimulatedAnalysisPipeline(repository)  # type: ignore[arg-type]
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -99,8 +120,9 @@ class HybridAnalysisPipeline:
             is_link = video.source_type in {SourceType.DOUYIN, SourceType.XIAOHONGSHU}
             if is_link and not (video.stored_path or video.stored_relative_path):
                 await progress(AnalysisStage.INGESTING, 3, "正在校验平台链接并读取视频信息")
-                collected = await LinkCollector().collect(video)
+                collected = await LinkCollector(self.credential_resolver).collect(video)
                 self._apply_ingestion(video, collected)
+                await self._sync_ingested_record_name(video)
                 await self.repository.save_video(video)
                 await write_source_metadata(video)
                 await thumbnail_service.ensure(video)
@@ -245,6 +267,19 @@ class HybridAnalysisPipeline:
         video.status = VideoStatus.FAILED
         await self.repository.save_video(video)
 
+    async def _sync_ingested_record_name(self, video: Video) -> None:
+        if video.record_id is None:
+            return
+        record = await self.repository.get_record(video.record_id)
+        if record is None:
+            return
+        resolved_name = resolve_record_name_from_video(record.name, video.title)
+        video.title = resolved_name
+        if resolved_name != record.name:
+            record.name = resolved_name
+            record.updated_at = utc_now()
+            await self.repository.save_record(record)
+
     @staticmethod
     def _apply_ingestion(video: Video, result: LinkIngestionResult) -> None:
         video.stored_path = str(result.path)
@@ -257,8 +292,8 @@ class HybridAnalysisPipeline:
         video.ingested_at = utc_now()
         if result.duration_seconds is not None:
             video.duration_seconds = result.duration_seconds
-        if result.title and video.title in {"抖音链接视频", "小红书链接视频"}:
-            video.title = result.title[:120]
+        if result.title and normalize_record_name(video.title) in DEFAULT_LINK_RECORD_NAMES:
+            video.title = normalize_record_name(result.title, fallback=video.title)
 
     @staticmethod
     def _apply_metadata(video: Video, evidence: MediaEvidence) -> None:
@@ -293,6 +328,8 @@ def build_media_evidence_report(
                 index=shot.index,
                 start_seconds=shot.start_seconds,
                 end_seconds=shot.end_seconds,
+                content_start_seconds=shot.content_start_seconds,
+                content_end_seconds=shot.content_end_seconds,
                 title=facts.title if facts else f"镜头 {shot.index:02d}",
                 subjects=facts.subjects if facts else [],
                 action=facts.action if facts else "待多模态模型识别",
@@ -332,6 +369,7 @@ def build_media_evidence_report(
                 boundary_confidence=shot.boundary_confidence,
                 source_candidate_ids=shot.source_candidate_ids,
                 semantic_group=shot.semantic_group,
+                visual_beats=facts.visual_beats if facts else [],
             )
         )
 

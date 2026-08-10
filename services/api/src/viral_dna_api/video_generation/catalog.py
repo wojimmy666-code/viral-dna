@@ -6,8 +6,8 @@ from typing import Any
 
 from ..models import VideoGenerationCapability, VideoGenerationModelOption
 
-CATALOG_VERSION = "video-model-catalog-2026-08-07.2"
-PRICING_VERSION = "video-pricing-cn-2026-08-07"
+CATALOG_VERSION = "video-model-catalog-2026-08-10.5"
+PRICING_VERSION = "video-pricing-cn-2026-08-10"
 
 
 class VideoModelCatalogError(ValueError):
@@ -25,10 +25,7 @@ def video_duration_is_supported(
     ):
         return False
     if capability.supported_durations:
-        return any(
-            abs(duration_seconds - item) < 0.001
-            for item in capability.supported_durations
-        )
+        return any(abs(duration_seconds - item) < 0.001 for item in capability.supported_durations)
     steps = (
         duration_seconds - capability.minimum_duration_seconds
     ) / capability.duration_step_seconds
@@ -87,9 +84,15 @@ def _capability(
     maximum_height: int = 1920,
     prompt_characters: int = 2000,
     seed: bool = True,
+    ordered_multi_image: bool = False,
+    maximum_reference_images: int = 1,
 ) -> VideoGenerationCapability:
     return VideoGenerationCapability(
         image_to_video=True,
+        multi_image_reference=ordered_multi_image,
+        ordered_reference_images=ordered_multi_image,
+        minimum_reference_images=1,
+        maximum_reference_images=maximum_reference_images,
         start_frame=True,
         end_frame=False,
         max_candidates=4,
@@ -116,11 +119,11 @@ def _capability(
 
 _MODELS = (
     VideoModelSpec(
-        alias="bailian_wan_2_7_i2v",
+        alias="bailian_wan_2_7_r2v",
         provider="bailian",
-        model="wan2.7-i2v-2026-04-25",
-        label="百炼 Wan 2.7 图生视频",
-        description="百炼华北 2（北京）异步图生视频；支持 720P/1080P、2～15 秒。",
+        model="wan2.7-r2v-2026-06-12",
+        label="百炼 Wan 2.7 多图参考视频",
+        description="按图1、图2等稳定顺序引用 1～5 张画面图，生成连续分镜视频。",
         capability=_capability(
             minimum=2,
             maximum=15,
@@ -128,12 +131,15 @@ _MODELS = (
             resolutions=["720P", "1080P"],
             default_duration=5,
             prompt_characters=5000,
+            ordered_multi_image=True,
+            maximum_reference_images=5,
         ),
         pricing={
             "kind": "per_second_by_resolution",
             "currency": "CNY",
             "rates_micros": {"720P": 600_000, "1080P": 1_000_000},
             "source": "阿里云百炼公开刊例价",
+            "source_url": "https://help.aliyun.com/zh/model-studio/wan2-7-r2v",
         },
         recommended=True,
     ),
@@ -142,49 +148,71 @@ _MODELS = (
         provider="volc_ark",
         model="doubao-seedance-2-0-260128",
         label="Seedance 2.0",
-        description="已保留体验模型别名；待火山方舟正式开放 API 后启用。",
+        description="通过火山方舟全能参考 API 按图片1～图片9的顺序生成连续分镜视频。",
         capability=_capability(
-            minimum=2,
-            maximum=12,
-            durations=[float(value) for value in range(2, 13)],
-            resolutions=["720P", "1080P"],
+            minimum=4,
+            maximum=15,
+            durations=[float(value) for value in range(4, 16)],
+            resolutions=["480P", "720P", "1080P"],
             default_duration=5,
+            ordered_multi_image=True,
+            maximum_reference_images=9,
         ),
         pricing={
             "kind": "provider_usage_tokens",
             "currency": "CNY",
             "source": "火山方舟任务 usage",
         },
-        available=False,
-        availability_note="火山方舟 Seedance 2.0 API 尚未 GA，目前只有体验入口",
     ),
     VideoModelSpec(
         alias="seedance_2_0_fast",
         provider="volc_ark",
         model="doubao-seedance-2-0-fast-260128",
         label="Seedance 2.0 Fast",
-        description="已保留快速版稳定别名；待官方 Model ID 与 API 文档发布后启用。",
+        description="Seedance 2.0 快速版；通过火山方舟全能参考 API 接收最多 9 张有序参考图。",
         capability=_capability(
-            minimum=2,
-            maximum=12,
-            durations=[float(value) for value in range(2, 13)],
-            resolutions=["720P", "1080P"],
+            minimum=4,
+            maximum=15,
+            durations=[float(value) for value in range(4, 16)],
+            resolutions=["480P", "720P", "1080P"],
             default_duration=5,
+            ordered_multi_image=True,
+            maximum_reference_images=9,
         ),
         pricing={
             "kind": "provider_usage_tokens",
             "currency": "CNY",
             "source": "火山方舟任务 usage",
         },
-        available=False,
-        availability_note="尚未核验到可公开调用的 Seedance 2.0 Fast API Model ID",
+    ),
+    VideoModelSpec(
+        alias="seedance_2_0_mini",
+        provider="volc_ark",
+        model="doubao-seedance-2-0-mini-260615",
+        label="Seedance 2.0 Mini",
+        description="Seedance 2.0 高性价比版本；支持音视图文参考，适合高频迭代和批量生成。",
+        capability=_capability(
+            minimum=4,
+            maximum=15,
+            durations=[float(value) for value in range(4, 16)],
+            resolutions=["480P", "720P"],
+            default_duration=5,
+            ordered_multi_image=True,
+            maximum_reference_images=9,
+        ),
+        pricing={
+            "kind": "provider_usage_tokens",
+            "currency": "CNY",
+            "source": "火山方舟任务 usage",
+            "source_url": "https://www.volcengine.com/activity/seedance2",
+        },
     ),
     VideoModelSpec(
         alias="seedance_2_5",
         provider="volc_ark",
         model=None,
-        label="Seedance 2.5（待官方 API ID）",
-        description="已保留稳定别名；取得官方 Model ID 与参数文档后无需改业务层即可启用。",
+        label="Seedance 2.5（待工作流验收）",
+        description="官方服务已开放；当前有序多图请求、Model ID 与参数边界尚未完成接入验收。",
         capability=_capability(
             minimum=2,
             maximum=15,
@@ -194,14 +222,14 @@ _MODELS = (
         ),
         pricing={"kind": "unknown", "currency": "CNY"},
         available=False,
-        availability_note="尚未在火山方舟官方接口文档中核验到可调用的 2.5 Model ID",
+        availability_note="尚未完成 Model ID、有序多图参考和参数边界验收，不能用于当前流程",
     ),
     VideoModelSpec(
         alias="minimax_h3",
         provider="minimax",
         model="MiniMax-H3",
         label="MiniMax H3",
-        description="MiniMax 当前 H3 视频模型；图片输入 5 张以内免费，输出按秒计费。",
+        description="通过 MiniMax H3 全能参考模式按图号接收最多 9 张有序参考图。",
         capability=_capability(
             minimum=4,
             maximum=15,
@@ -212,12 +240,15 @@ _MODELS = (
             maximum_height=2560,
             prompt_characters=7000,
             seed=False,
+            ordered_multi_image=True,
+            maximum_reference_images=9,
         ),
         pricing={
             "kind": "per_second_by_resolution",
             "currency": "CNY",
             "rates_micros": {"768P": 500_000, "2K": 800_000},
             "source": "MiniMax 开放平台公开刊例价",
+            "source_url": "https://platform.minimaxi.com/docs/guides/pricing-paygo",
         },
     ),
     VideoModelSpec(
@@ -243,6 +274,8 @@ _MODELS = (
             },
             "source": "MiniMax 开放平台历史模型刊例价",
         },
+        available=False,
+        availability_note="当前公开 API 不支持任意有序多图分镜参考，已按流程要求禁用",
     ),
     VideoModelSpec(
         alias="minimax_hailuo_2_3_fast",
@@ -267,6 +300,8 @@ _MODELS = (
             },
             "source": "MiniMax 开放平台历史模型刊例价",
         },
+        available=False,
+        availability_note="当前公开 API 不支持任意有序多图分镜参考，已按流程要求禁用",
     ),
 )
 
@@ -284,6 +319,10 @@ class VideoModelCatalog:
             raise VideoModelCatalogError(f"未知的视频模型别名：{alias}") from exc
         if require_available and (not item.available or not item.model):
             raise VideoModelCatalogError(item.availability_note or "该视频模型暂不可调用")
+        if require_available and not (
+            item.capability.multi_image_reference and item.capability.ordered_reference_images
+        ):
+            raise VideoModelCatalogError("该模型不支持有序多图参考，不能用于当前流程")
         return item
 
     def options(self) -> list[VideoGenerationModelOption]:

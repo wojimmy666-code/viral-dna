@@ -1,11 +1,26 @@
 export const PRODUCTION_STEPS = Object.freeze([
   { id: "project_setup", label: "创作方案", description: "画幅、尺寸和预算" },
-  { id: "reference_assets", label: "参考资产", description: "人物、产品和场景" },
+  { id: "reference_assets", label: "参考资产（可选）", description: "可跳过 · 人物、产品和场景" },
   { id: "shot_images", label: "分镜图片", description: "逐镜头生成和审核" },
   { id: "shot_videos", label: "分段视频", description: "图片转视频" },
   { id: "editing", label: "剪辑合成", description: "排序、音轨和字幕" },
   { id: "export", label: "导出成片", description: "高清渲染和归档" },
 ]);
+
+const SHOT_IMAGE_STEP_INDEX = PRODUCTION_STEPS.findIndex(
+  (step) => step.id === "shot_images",
+);
+
+export function productionUnlockedStepIndex(activeStep) {
+  const activeIndex = PRODUCTION_STEPS.findIndex((step) => step.id === activeStep);
+  return Math.max(SHOT_IMAGE_STEP_INDEX, activeIndex);
+}
+
+export function referenceAssetsContinueLabel(referenceCount) {
+  return Number(referenceCount || 0) > 0
+    ? "继续到分镜图片"
+    : "跳过，进入分镜图片";
+}
 
 export const REFERENCE_TYPE_OPTIONS = Object.freeze([
   { id: "person", label: "人物" },
@@ -74,6 +89,24 @@ export function workflowStatusClass(value) {
   return "neutral";
 }
 
+export function duplicateVisualBeatSourceIds(beats = []) {
+  const firstByFingerprint = new Map();
+  const duplicates = new Set();
+  for (const beat of beats) {
+    if (beat?.source_frame_warning === "duplicate_frame") duplicates.add(beat.id);
+    const fingerprint = beat?.source_frame_sha256 || beat?.source_frame_url || "";
+    if (!fingerprint) continue;
+    const firstId = firstByFingerprint.get(fingerprint);
+    if (firstId) {
+      duplicates.add(firstId);
+      duplicates.add(beat.id);
+    } else {
+      firstByFingerprint.set(fingerprint, beat.id);
+    }
+  }
+  return [...duplicates];
+}
+
 export function normalizedImageCandidateCount(settings) {
   const value = Number(settings?.default_candidate_count ?? 1);
   if (!Number.isFinite(value)) return 1;
@@ -119,6 +152,136 @@ export function videoGenerationRunLabel(run) {
   return run.provider || "视频生成任务";
 }
 
+const VIDEO_FAILURE_PRESENTATIONS = Object.freeze({
+  video_provider_inference_limit: {
+    category: "inference_limit",
+    title: "视频模型已暂停生成",
+    message: "该模型已达到 Provider 设置的推理上限。请调整模型额度后再试，或切换其他视频模型。",
+    action: "open_model_settings",
+    retryable: false,
+  },
+  video_provider_balance_insufficient: {
+    category: "balance",
+    title: "Provider 余额或配额不足",
+    message: "请充值对应 Provider 账户，或切换其他已配置的视频模型。",
+    action: "open_model_settings",
+    retryable: false,
+  },
+  video_provider_auth_invalid: {
+    category: "authentication",
+    title: "视频模型认证失败",
+    message: "当前 API Key 无效、已失效或与所选区域不匹配。请重新配置并校验。",
+    action: "open_model_settings",
+    retryable: false,
+  },
+  video_provider_rate_limited: {
+    category: "rate_limit",
+    title: "Provider 请求过于频繁",
+    message: "Provider 暂时限制了请求频率。请稍后重试。",
+    action: "retry",
+    retryable: true,
+  },
+  video_provider_task_timeout: {
+    category: "timeout",
+    title: "等待视频生成结果超时",
+    message: "上游任务可能仍在运行。稍后重试查询不会重新提交，也不会重复计费。",
+    action: "retry",
+    retryable: true,
+  },
+  video_provider_content_rejected: {
+    category: "content_policy",
+    title: "提示词或参考画面未通过审核",
+    message: "请调整可能涉及敏感内容的提示词或参考图片后重新生成。",
+    action: "edit_prompt",
+    retryable: false,
+  },
+});
+
+function legacyVideoFailureCode(run, task) {
+  const code = String(run?.error_code || task?.error_code || "");
+  const message = String(
+    run?.error_technical_message
+    || task?.error_technical_message
+    || run?.error_message
+    || task?.error_message
+    || "",
+  );
+  const evidence = `${code} ${message}`.toLowerCase();
+  if (evidence.includes("setlimitexceeded") || evidence.includes("safe experience mode")) {
+    return "video_provider_inference_limit";
+  }
+  if (/insufficient balance|accountoverdue|arrearage|quotaexhausted/.test(evidence)) {
+    return "video_provider_balance_insufficient";
+  }
+  if (/invalid api key|unauthorized|authentication/.test(evidence)) {
+    return "video_provider_auth_invalid";
+  }
+  if (/rate.?limit|too many requests/.test(evidence)) {
+    return "video_provider_rate_limited";
+  }
+  if (/timeout|超时/.test(evidence)) return "video_provider_task_timeout";
+  return code;
+}
+
+export function videoGenerationFailureDetails(run) {
+  if (!run || !["failed", "blocked"].includes(run.status)) return null;
+  const task = (run.provider_tasks || []).find(
+    (item) => item.error_code || item.error_message || item.error_technical_message,
+  ) || null;
+  const code = legacyVideoFailureCode(run, task) || "video_provider_request_failed";
+  const sourceCode = String(run.error_code || task?.error_code || "");
+  const mappedLegacyFailure = Boolean(sourceCode && sourceCode !== code);
+  const fallback = VIDEO_FAILURE_PRESENTATIONS[code] || {
+    category: "unknown",
+    title: "视频生成未完成",
+    message: "Provider 没有完成本次生成。请查看技术详情，调整设置后再试。",
+    action: "inspect_details",
+    retryable: false,
+  };
+  const modelLabel = run.model_display_name || run.model_alias || run.model || "视频模型";
+  const category = run.error_category || task?.error_category || fallback.category;
+  const title = category === "inference_limit"
+    ? `${modelLabel} 已暂停生成`
+    : run.error_title || task?.error_title || fallback.title;
+  return {
+    code,
+    category,
+    title,
+    message: mappedLegacyFailure
+      ? fallback.message
+      : run.error_message || task?.error_message || fallback.message,
+    action: run.error_action || task?.error_action || fallback.action,
+    retryable: Boolean(
+      run.error_retryable
+      || task?.retryable
+      || fallback.retryable,
+    ),
+    providerCode: run.provider_error_code
+      || task?.provider_error_code
+      || (String(task?.error_code || "").startsWith("video_") ? "" : task?.error_code)
+      || "",
+    providerRequestId: run.provider_request_id || task?.provider_task_id || "",
+    provider: run.provider || task?.provider || "",
+    modelLabel,
+    technicalMessage: run.error_technical_message || task?.error_technical_message || "",
+    occurredAt: run.completed_at || run.updated_at || task?.completed_at || "",
+  };
+}
+
+export function videoGenerationDiagnosticText(details) {
+  if (!details) return "";
+  return [
+    `错误：${details.title}`,
+    `错误码：${details.code}`,
+    details.providerCode ? `Provider 错误码：${details.providerCode}` : "",
+    details.provider ? `Provider：${details.provider}` : "",
+    details.modelLabel ? `模型：${details.modelLabel}` : "",
+    details.providerRequestId ? `任务编号：${details.providerRequestId}` : "",
+    details.occurredAt ? `发生时间：${details.occurredAt}` : "",
+    details.technicalMessage ? `技术信息：${details.technicalMessage}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 const FALLBACK_VIDEO_DURATIONS = Object.freeze(
   Array.from({ length: 13 }, (_, index) => index + 3),
 );
@@ -130,6 +293,19 @@ function normalizedDurationNumber(value) {
 
 function roundedDuration(value) {
   return Number(Number(value).toFixed(6));
+}
+
+export function preferredVideoResolution(model, currentResolution = "720P") {
+  const capabilities = model?.capabilities || model || {};
+  const supported = capabilities.supported_resolutions || [];
+  const current = String(currentResolution || "").trim().toUpperCase();
+  if (supported.includes(current)) return current;
+  const declaredDefault = String(
+    capabilities.default_resolution || "",
+  ).trim().toUpperCase();
+  if (supported.includes(declaredDefault)) return declaredDefault;
+  if (supported.includes("720P")) return "720P";
+  return supported[0] || current || "720P";
 }
 
 export function videoDurationOptions(model) {
