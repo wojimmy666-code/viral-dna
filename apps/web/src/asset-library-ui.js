@@ -23,6 +23,23 @@ export const STORAGE_STATE_LABELS = {
   unavailable: "不可用",
 };
 
+export function assetLibraryView({
+  folderId = "",
+  type = "",
+  query = "",
+  storageState = "",
+  includeArchived = false,
+} = {}) {
+  if (folderId === "unfiled") return "unfiled";
+  if (folderId) return "folder";
+  if (query.trim() || type || storageState || includeArchived) return "search";
+  return "home";
+}
+
+export function assetListFolderForView(filters = {}) {
+  return assetLibraryView(filters) === "home" ? "unfiled" : filters.folderId || "";
+}
+
 export function buildAssetListQuery({
   page = 1,
   pageSize = 20,

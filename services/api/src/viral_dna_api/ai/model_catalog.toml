@@ -1,9 +1,9 @@
-catalog_version = "phase2-model-catalog-2026-08-06-r6"
+catalog_version = "phase2-model-catalog-2026-08-11-r7"
 pricing_version = "cn-list-price-2026-08-02"
 
 [prompts]
 shot_segmentation = "shot-segmentation-v5"
-shot_facts = "shot-facts-v1"
+shot_facts = "shot-facts-v2"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-reasoning-v1"
 prompt_generation = "seedance-prompt-v1"
@@ -11,7 +11,7 @@ image_quality_qa = "image-semantic-quality-v1"
 
 [schemas]
 shot_segmentation = "shot-segmentation-selection-v4"
-shot_facts = "shot-visual-facts-v1"
+shot_facts = "shot-visual-motion-facts-v2"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-findings-v1"
 prompt_generation = "prompt-ir-v1"

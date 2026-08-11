@@ -42,9 +42,10 @@ import {
 } from "./production-ui.js";
 import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
 import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
-import { EditingTimelineWorkspace } from "./EditingTimelineWorkspace.jsx";
+import { VideoEditorWorkspace } from "./video-editor/index.js";
 import { ProductionExportWorkspace } from "./ProductionExportWorkspace.jsx";
 import "./production-workflow.css";
+import "./video-candidate-library.css";
 
 const EMPTY_CREATE_DRAFT = Object.freeze({
   name: "",
@@ -372,7 +373,7 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
                   : step.id === "shot_videos"
                     && step.id === project.active_step
                     && gate
-                    ? `${gate.prepared_shot_count || 0} / ${gate.required_shot_count} 可交接`
+                    ? `${gate.approved_shot_count || 0} / ${gate.required_shot_count} 已采用`
                     : step.id === "shot_images"
                       && step.id === project.active_step
                       && gate
@@ -384,6 +385,180 @@ function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
         );
       })}
     </nav>
+  );
+}
+
+function promptDecisionKey(shotPlanId, fieldKey) {
+  return `${shotPlanId}:${fieldKey}`;
+}
+
+function AnalysisUpdateBanner({ preview, open, onOpen }) {
+  if (!preview?.update_available) return null;
+  return (
+    <section className="analysis-update-banner" aria-label="基础分析更新提醒">
+      <span className="analysis-update-banner-icon"><WarningCircle size={20} weight="fill" /></span>
+      <div>
+        <strong>基础分析已有更新</strong>
+        <p>
+          {preview.changed_field_count > 0 ? (
+            <>
+              检测到 {preview.changed_field_count} 处提示词差异
+              {preview.conflict_field_count > 0 ? `，其中 ${preview.conflict_field_count} 处包含手动修改` : ""}。
+            </>
+          ) : (
+            <>新分析仍有分镜或画面结构变化待处理。</>
+          )}
+          当前候选、参考资产和采用结果不会被覆盖。
+        </p>
+      </div>
+      <button className="secondary-button compact" onClick={onOpen} type="button">
+        {open ? "收起差异" : "查看差异"}
+        <ArrowRight size={15} />
+      </button>
+    </section>
+  );
+}
+
+function AnalysisUpdatePanel({
+  preview,
+  decisions,
+  busy,
+  error,
+  onChangeDecision,
+  onClose,
+  onSync,
+}) {
+  if (!preview) return null;
+  return (
+    <section className="analysis-update-panel" aria-label="分析提示词差异预览">
+      <header className="analysis-update-header">
+        <div>
+          <span className="analysis-update-eyebrow">仅同步提示词</span>
+          <h3>比较当前方案与新分析</h3>
+          <p>
+            新分析生成于 {formatProductionDate(preview.target_generated_at)}。应用后会创建新 Revision，
+            不改分镜结构、参考资产、图片/视频候选或采用状态。
+          </p>
+        </div>
+        <button aria-label="关闭差异预览" className="production-icon-button" onClick={onClose} type="button">
+          <X size={18} />
+        </button>
+      </header>
+
+      <div className="analysis-update-summary" aria-label="差异统计">
+        <span><strong>{preview.changed_field_count}</strong> 处差异</span>
+        <span><strong>{preview.automatic_field_count}</strong> 处建议更新</span>
+        <span className={preview.conflict_field_count > 0 ? "attention" : ""}>
+          <strong>{preview.conflict_field_count}</strong> 处手动修改
+        </span>
+      </div>
+
+      {preview.structural_change_detected && (
+        <div className="analysis-update-structural-warning" role="alert">
+          <WarningCircle size={19} weight="fill" />
+          <div>
+            <strong>
+              {preview.compatible
+                ? "检测到额外结构变化，本轮只同步安全提示词"
+                : "结构变化待后续处理"}
+            </strong>
+            <ul>
+              {preview.structural_change_messages.map((message) => <li key={message}>{message}</li>)}
+            </ul>
+            <p>
+              当前版本只处理一一对应的提示词，分镜增删和画面拆合不会被覆盖，
+              将在后续结构同步中单独处理。
+            </p>
+          </div>
+        </div>
+      )}
+
+      {error && <div className="production-inline-error" role="alert"><WarningCircle size={17} />{error}</div>}
+
+      {preview.shots.length > 0 ? (
+        <div className="analysis-update-shot-list">
+          {preview.shots.map((shot) => (
+            <article className="analysis-update-shot" key={shot.shot_plan_id}>
+              <header>
+                <span className="analysis-update-shot-index">{String(shot.index).padStart(2, "0")}</span>
+                <div><strong>分镜 {shot.index}</strong><p>{shot.title}</p></div>
+                <small>{shot.fields.length} 处差异</small>
+              </header>
+              <div className="analysis-update-field-list">
+                {shot.fields.map((field) => {
+                  const key = promptDecisionKey(shot.shot_plan_id, field.field_key);
+                  const choice = decisions[key] || field.suggested_choice;
+                  return (
+                    <section className="analysis-update-field" key={field.field_key}>
+                      <div className="analysis-update-field-heading">
+                        <strong>{field.label}</strong>
+                        {field.manually_edited && <span>当前方案已手动修改</span>}
+                      </div>
+                      <div className="analysis-update-diff-grid">
+                        <div>
+                          <small>当前方案</small>
+                          <p>{field.current_value || "（空）"}</p>
+                        </div>
+                        <div className="latest">
+                          <small>新分析</small>
+                          <p>{field.latest_value || "（空）"}</p>
+                        </div>
+                      </div>
+                      <fieldset className="analysis-update-choice">
+                        <legend>此字段采用</legend>
+                        <label className={choice === "use_latest" ? "selected" : ""}>
+                          <input
+                            checked={choice === "use_latest"}
+                            name={key}
+                            onChange={() => onChangeDecision(key, "use_latest")}
+                            type="radio"
+                          />
+                          使用新分析
+                          {!field.manually_edited && <small>建议</small>}
+                        </label>
+                        <label className={choice === "keep_current" ? "selected" : ""}>
+                          <input
+                            checked={choice === "keep_current"}
+                            name={key}
+                            onChange={() => onChangeDecision(key, "keep_current")}
+                            type="radio"
+                          />
+                          保留当前
+                          {field.manually_edited && <small>建议</small>}
+                        </label>
+                      </fieldset>
+                    </section>
+                  );
+                })}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        !preview.structural_change_detected && (
+          <div className="production-empty-state analysis-update-empty">
+            <CheckCircle size={24} weight="fill" />
+            <div><h4>提示词没有差异</h4><p>当前方案无需同步。</p></div>
+          </div>
+        )
+      )}
+
+      <footer className="analysis-update-footer">
+        <p>同步后仍可从版本记录查看旧 Revision；历史候选继续保留并可重新选择。</p>
+        <div>
+          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">稍后处理</button>
+          <button
+            className="primary-button compact"
+            disabled={busy || !preview.compatible || preview.changed_field_count === 0}
+            onClick={onSync}
+            type="button"
+          >
+            {busy ? <CircleNotch className="spin" size={16} /> : <Check size={16} weight="bold" />}
+            同步所选提示词并创建 Revision
+          </button>
+        </div>
+      </footer>
+    </section>
   );
 }
 
@@ -933,6 +1108,10 @@ export function ProductionHub({
   );
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [analysisUpdatePreview, setAnalysisUpdatePreview] = useState(null);
+  const [analysisUpdateOpen, setAnalysisUpdateOpen] = useState(false);
+  const [analysisUpdateDecisions, setAnalysisUpdateDecisions] = useState({});
+  const [analysisUpdateError, setAnalysisUpdateError] = useState("");
   const [assets, setAssets] = useState([]);
   const [revisions, setRevisions] = useState([]);
   const [shots, setShots] = useState([]);
@@ -1004,6 +1183,10 @@ export function ProductionHub({
     if (!listSignal) return;
     setSelectedProjectId(null);
     setDetail(null);
+    setAnalysisUpdatePreview(null);
+    setAnalysisUpdateOpen(false);
+    setAnalysisUpdateDecisions({});
+    setAnalysisUpdateError("");
     setContentError("");
     setActionError("");
     setActiveSection("project_setup");
@@ -1023,6 +1206,10 @@ export function ProductionHub({
   useEffect(() => {
     setSelectedProjectId(null);
     setDetail(null);
+    setAnalysisUpdatePreview(null);
+    setAnalysisUpdateOpen(false);
+    setAnalysisUpdateDecisions({});
+    setAnalysisUpdateError("");
     setAssets([]);
     setRevisions([]);
     setShots([]);
@@ -1166,7 +1353,32 @@ export function ProductionHub({
       setShotDraft({ ...EMPTY_SHOT_DRAFT });
       setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
     }
+    await refreshAnalysisUpdate(projectId);
     return nextDetail;
+  }
+
+  async function refreshAnalysisUpdate(projectId = selectedProjectId) {
+    if (!projectId) return null;
+    try {
+      const preview = await request(`/productions/${projectId}/analysis-update`);
+      setAnalysisUpdatePreview(preview);
+      setAnalysisUpdateError("");
+      const defaults = {};
+      for (const shot of preview.shots || []) {
+        for (const field of shot.fields || []) {
+          defaults[promptDecisionKey(shot.shot_plan_id, field.field_key)] = field.suggested_choice;
+        }
+      }
+      setAnalysisUpdateDecisions(defaults);
+      if (!preview.update_available) setAnalysisUpdateOpen(false);
+      return preview;
+    } catch (requestError) {
+      setAnalysisUpdatePreview(null);
+      setAnalysisUpdateOpen(false);
+      setAnalysisUpdateDecisions({});
+      setAnalysisUpdateError(requestError.message);
+      return null;
+    }
   }
 
   async function openProject(
@@ -1183,6 +1395,10 @@ export function ProductionHub({
     setShotDetail(null);
     setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
     setImpactReview(null);
+    setAnalysisUpdatePreview(null);
+    setAnalysisUpdateOpen(false);
+    setAnalysisUpdateDecisions({});
+    setAnalysisUpdateError("");
     try {
       await refreshProject(projectId, shotPlanId);
     } catch (requestError) {
@@ -1661,6 +1877,50 @@ export function ProductionHub({
     }
   }
 
+  async function syncAnalysisPrompts() {
+    if (!detail?.project || !analysisUpdatePreview) return;
+    setBusy(true);
+    setAnalysisUpdateError("");
+    try {
+      const decisions = (analysisUpdatePreview.shots || []).flatMap((shot) => (
+        (shot.fields || []).map((field) => ({
+          shot_plan_id: shot.shot_plan_id,
+          field_key: field.field_key,
+          choice: analysisUpdateDecisions[
+            promptDecisionKey(shot.shot_plan_id, field.field_key)
+          ] || field.suggested_choice,
+        }))
+      ));
+      await request(
+        `/productions/${detail.project.id}/analysis-update/sync-prompts`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            target_analysis_id: analysisUpdatePreview.target_analysis_id,
+            decisions,
+          }),
+        },
+      );
+      setAnalysisUpdateOpen(false);
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId, selectedVisualBeatId),
+        onProjectsChanged(),
+      ]);
+      onNotice("已同步所选提示词，并创建新的 Revision");
+    } catch (requestError) {
+      setAnalysisUpdateError(requestError.message);
+      onNotice({
+        type: "error",
+        title: "提示词同步失败",
+        message: requestError.message,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function selectVisualBeat(visualBeatId) {
     const beat = visualBeatFromDetail(shotDetail, visualBeatId);
     if (!beat) return;
@@ -1946,6 +2206,52 @@ export function ProductionHub({
     });
   }
 
+  async function archiveVideoCandidates(candidateIds) {
+    if (!candidateIds?.length) return false;
+    let succeeded = false;
+    await executeAction(async () => {
+      await request("/generation-candidates/batch-archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          candidate_ids: candidateIds,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+        onNotificationsChanged?.(),
+      ]);
+      onNotice(`已将 ${candidateIds.length} 个视频候选移入回收站`);
+      succeeded = true;
+    });
+    return succeeded;
+  }
+
+  async function restoreVideoCandidates(candidateIds) {
+    if (!candidateIds?.length) return false;
+    let succeeded = false;
+    await executeAction(async () => {
+      await request("/generation-candidates/batch-restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          candidate_ids: candidateIds,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+        onNotificationsChanged?.(),
+      ]);
+      onNotice(`已恢复 ${candidateIds.length} 个视频候选`);
+      succeeded = true;
+    });
+    return succeeded;
+  }
+
   async function selectVideoCandidate(candidateId) {
     await executeAction(async () => {
       await request(`/generation-candidates/${candidateId}/select`, {
@@ -1995,45 +2301,7 @@ export function ProductionHub({
       ]);
       onNotice(replacingApproved
         ? "已改用所选视频，历史候选仍然保留"
-        : "当前分镜视频已确认采用，请继续完成剪辑准备");
-    });
-  }
-
-  async function prepareVideoClip(preparationDraft) {
-    if (!shotDetail?.plan) return;
-    await executeAction(async () => {
-      const preparation = await request(
-        `/production-shots/${shotDetail.plan.id}/video-preparation`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
-            ...preparationDraft,
-          }),
-        },
-      );
-      await Promise.all([
-        refreshProject(detail.project.id, shotDetail.plan.id),
-        onProjectsChanged(),
-      ]);
-      if (preparation.status === "ready") {
-        if (preparation.warning_messages?.length) {
-          onNotice({
-            type: "warning",
-            title: `分镜 ${shotDetail.plan.index} 已准备，可继续`,
-            message: preparation.warning_messages.join("；"),
-          });
-        } else {
-          onNotice(`分镜 ${shotDetail.plan.index} 已完成剪辑准备`);
-        }
-      } else {
-        onNotice({
-          type: "warning",
-          title: "剪辑准备需要调整",
-          message: preparation.blocker_messages?.join("；") || "请检查裁剪与音轨参数。",
-        });
-      }
+        : "当前分镜视频已确认采用");
     });
   }
 
@@ -2106,8 +2374,8 @@ export function ProductionHub({
       setActiveSection("editing");
       onNotice({
         type: "success",
-        title: "已进入剪辑合成",
-        message: "剪辑交接清单和初始时间线已准备完成。",
+        title: "已进入视频剪辑",
+        message: "已采用的视频已加入初始时间线，可继续裁剪和调整轨道。",
       });
     });
   }
@@ -2437,6 +2705,30 @@ export function ProductionHub({
       {!contentLoading && !contentError && detail && (
         <>
           <ProductionSteps active={activeSection} gate={gate} onChange={(section) => { setActionError(""); setActiveSection(section); }} project={detail.project} referenceCount={assets.length} />
+          <AnalysisUpdateBanner
+            onOpen={() => {
+              setAnalysisUpdateError("");
+              setAnalysisUpdateOpen((value) => !value);
+            }}
+            open={analysisUpdateOpen}
+            preview={analysisUpdatePreview}
+          />
+          {analysisUpdateOpen && analysisUpdatePreview && (
+            <AnalysisUpdatePanel
+              busy={busy}
+              decisions={analysisUpdateDecisions}
+              error={analysisUpdateError}
+              onChangeDecision={(key, choice) => {
+                setAnalysisUpdateDecisions((current) => ({ ...current, [key]: choice }));
+              }}
+              onClose={() => {
+                setAnalysisUpdateError("");
+                setAnalysisUpdateOpen(false);
+              }}
+              onSync={syncAnalysisPrompts}
+              preview={analysisUpdatePreview}
+            />
+          )}
           <div className="production-stage-content">
             {activeSection === "project_setup" && <ProjectSettings busy={busy} detail={detail} draft={settingsDraft} error={actionError} onOpenReferences={() => setActiveSection("reference_assets")} onSave={submitSettings} setDraft={setSettingsDraft} />}
             {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onContinue={() => { setActionError(""); setActiveSection("shot_images"); }} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
@@ -2497,12 +2789,13 @@ export function ProductionHub({
                 initialCandidateId={focusedCandidateId}
                 onAdvance={advanceToEditing}
                 onApprove={approveVideoCandidate}
+                onArchiveCandidates={archiveVideoCandidates}
                 onCancelRun={cancelVideoGeneration}
                 onGenerate={generateVideoCandidates}
                 onOpenModelSettings={onOpenModelSettings}
-                onPrepare={prepareVideoClip}
                 onReject={rejectVideoCandidate}
                 onRetryRun={retryVideoGeneration}
+                onRestoreCandidates={restoreVideoCandidates}
                 onRevokeApproval={revokeVideoApproval}
                 onSave={saveVideoPrompt}
                 onSelectCandidate={selectVideoCandidate}
@@ -2519,7 +2812,7 @@ export function ProductionHub({
               />
             )}
             {activeSection === "editing" && (
-              <EditingTimelineWorkspace
+              <VideoEditorWorkspace
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}
                 project={detail.project}

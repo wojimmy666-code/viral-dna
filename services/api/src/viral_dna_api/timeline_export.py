@@ -168,7 +168,7 @@ class TimelineExportValidator:
 
         expects_audio = (
             timeline.audio_track.enabled and timeline.audio_track.strategy != "muted"
-        )
+        ) or timeline.background_audio_track.enabled
         if expects_audio and not metadata.has_audio:
             errors.append("时间线启用了原音轨，但成片中没有音频流")
         if not expects_audio and metadata.has_audio:
@@ -419,6 +419,7 @@ class TimelineExportService:
                 / str(job.id)
             )
             source_audio_path = self._source_audio_path(project, timeline)
+            background_audio_path = self._background_audio_path(project, timeline)
             if (
                 timeline.audio_track.enabled
                 and timeline.audio_track.strategy != "muted"
@@ -427,6 +428,11 @@ class TimelineExportService:
                 raise TimelineRenderError(
                     "source_audio_missing",
                     "原视频音轨文件不存在，请切换为静音或重新分析源视频",
+                )
+            if timeline.background_audio_track.enabled and background_audio_path is None:
+                raise TimelineRenderError(
+                    "background_audio_missing",
+                    "附加音轨文件不存在，请重新上传或关闭该轨道",
                 )
             profile = export_profile(
                 job.preview_width,
@@ -438,6 +444,7 @@ class TimelineExportService:
                 timeline,
                 output_root,
                 source_audio_path=source_audio_path,
+                background_audio_path=background_audio_path,
                 progress=update_progress,
                 is_cancelled=lambda: job.id in self._cancellations,
                 profile=profile,
@@ -624,7 +631,7 @@ class TimelineExportService:
         if project is None:
             raise _fail(404, "production_missing", "创作方案不存在")
         if project.active_step not in {ProductionStep.EDITING, ProductionStep.EXPORT}:
-            raise _fail(409, "export_not_available", "请先完成剪辑合成")
+            raise _fail(409, "export_not_available", "请先完成视频剪辑")
         return project
 
     def _source_audio_path(
@@ -638,6 +645,25 @@ class TimelineExportService:
             self.workspace.analysis_root(project.record_id, project.base_analysis_id)
             / "audio.wav"
         )
+        return path if path.is_file() else None
+
+    def _background_audio_path(
+        self,
+        project: ProductionProject,
+        timeline: ProductionTimeline,
+    ) -> Path | None:
+        relative_path = timeline.background_audio_track.source_relative_path
+        if not relative_path:
+            return None
+        try:
+            path = self.workspace.resolve(relative_path).resolve()
+            timeline_root = self.workspace.production_paths(
+                project.record_id,
+                project.id,
+            ).timelines.resolve()
+            path.relative_to(timeline_root)
+        except (WorkspaceError, ValueError):
+            return None
         return path if path.is_file() else None
 
     def _request_fingerprint(

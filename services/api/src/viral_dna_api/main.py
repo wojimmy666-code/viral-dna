@@ -52,6 +52,8 @@ from .models import (
     AnalysisStage,
     CandidateActionResponse,
     CandidateApprovalRequest,
+    CandidateBatchLifecycleRequest,
+    CandidateBatchLifecycleResponse,
     CandidateSelectRequest,
     ChangeImpactRequest,
     ChangeImpactResponse,
@@ -79,12 +81,14 @@ from .models import (
     ModelSettingsResponse,
     ModelSettingsUpdate,
     ProductionAdvanceRequest,
+    ProductionAnalysisUpdatePreview,
     ProductionBranchCreate,
     ProductionGateStatus,
     ProductionProject,
     ProductionProjectCreate,
     ProductionProjectDetail,
     ProductionProjectUpdate,
+    ProductionPromptSyncRequest,
     ProductionRevisionDetail,
     ProductionRevisionResponse,
     ProductionTimeline,
@@ -112,6 +116,7 @@ from .models import (
     ShotVisualBeatReorder,
     ShotVisualBeatUpdate,
     SourceType,
+    TimelineClipInspectionRequest,
     TimelineFinalRenderCreate,
     TimelinePreviewCreate,
     TimelineRenderJob,
@@ -951,6 +956,37 @@ async def get_production_shot(shot_plan_id: UUID) -> ShotPlanDetailResponse:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/analysis-update",
+    response_model=ProductionAnalysisUpdatePreview,
+)
+async def preview_production_analysis_update(
+    project_id: UUID,
+    target_analysis_id: Annotated[UUID | None, Query()] = None,
+) -> ProductionAnalysisUpdatePreview:
+    try:
+        return await production_service.preview_analysis_update(
+            project_id,
+            target_analysis_id,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/analysis-update/sync-prompts",
+    response_model=ProductionProjectDetail,
+)
+async def sync_production_analysis_prompts(
+    project_id: UUID,
+    payload: ProductionPromptSyncRequest,
+) -> ProductionProjectDetail:
+    try:
+        return await production_service.sync_analysis_prompts(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.post(
     f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats",
     response_model=ShotPlanDetailResponse,
@@ -1384,6 +1420,36 @@ async def retry_production_generation_run(run_id: UUID) -> GenerationRunResponse
 
 
 @app.post(
+    f"{API_PREFIX}/generation-candidates/batch-archive",
+    response_model=CandidateBatchLifecycleResponse,
+)
+async def archive_production_video_candidates(
+    payload: CandidateBatchLifecycleRequest,
+) -> CandidateBatchLifecycleResponse:
+    try:
+        context = await account_context_service.ensure_current()
+        return await production_service.archive_video_candidates(
+            payload,
+            actor_account_id=context.account.id,
+        )
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/generation-candidates/batch-restore",
+    response_model=CandidateBatchLifecycleResponse,
+)
+async def restore_production_video_candidates(
+    payload: CandidateBatchLifecycleRequest,
+) -> CandidateBatchLifecycleResponse:
+    try:
+        return await production_service.restore_video_candidates(payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
     f"{API_PREFIX}/generation-candidates/{{candidate_id}}/select",
     response_model=CandidateActionResponse,
 )
@@ -1493,6 +1559,87 @@ async def update_production_timeline(
         return await timeline_service.update_timeline(project_id, payload)
     except TimelineServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/clips/{{clip_id}}/inspect",
+    response_model=ProductionTimeline,
+)
+async def inspect_production_timeline_clip(
+    project_id: UUID,
+    clip_id: UUID,
+    payload: TimelineClipInspectionRequest,
+) -> ProductionTimeline:
+    try:
+        return await timeline_service.inspect_clip(project_id, clip_id, payload)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/clips/{{clip_id}}/cover",
+)
+async def get_production_timeline_clip_cover(
+    project_id: UUID,
+    clip_id: UUID,
+) -> FileResponse:
+    try:
+        path, media_type = await timeline_service.resolve_clip_cover(project_id, clip_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/background-audio",
+    response_model=ProductionTimeline,
+)
+async def upload_production_timeline_background_audio(
+    project_id: UUID,
+    expected_revision_id: Annotated[UUID, Form()],
+    file: Annotated[UploadFile, File()],
+) -> ProductionTimeline:
+    try:
+        content = await file.read(100 * 1024 * 1024 + 1)
+        return await timeline_service.set_background_audio(
+            project_id,
+            expected_revision_id,
+            filename=file.filename or "background-audio",
+            content_type=file.content_type,
+            content=content,
+        )
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    finally:
+        await file.close()
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/background-audio",
+)
+async def get_production_timeline_background_audio(project_id: UUID) -> FileResponse:
+    try:
+        path, media_type = await timeline_service.resolve_background_audio(project_id)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    guessed_type = mimetypes.guess_type(path.name)[0] or media_type
+    return FileResponse(
+        path,
+        media_type=guessed_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get(

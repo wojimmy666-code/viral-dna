@@ -15,52 +15,15 @@ import {
   Subtitles,
   WarningCircle,
 } from "@phosphor-icons/react";
+import {
+  ACTIVE_RENDER_STATUSES,
+  editableTimelineSnapshot,
+  formatEditorSeconds,
+  revisionChangeLabel,
+} from "./editor-state.js";
+import "./video-editor.css";
 
-const ACTIVE_RENDER_STATUSES = new Set(["queued", "running"]);
 const PREVIEW_MAX_HEIGHT_PX = 600;
-
-function formatSeconds(value) {
-  const seconds = Math.max(0, Number(value) || 0);
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds - minutes * 60;
-  return `${minutes}:${remainder.toFixed(1).padStart(4, "0")}`;
-}
-
-function transitionLabel(value) {
-  return {
-    none: "直接切换",
-    fade: "淡入淡出",
-    crossfade: "叠化",
-  }[value] || value;
-}
-
-function revisionChangeLabel(value) {
-  return {
-    initialized: "创建初始时间线",
-    clips_updated: "调整片段",
-    tracks_updated: "调整轨道",
-    restored: "恢复历史版本",
-  }[value] || value;
-}
-
-function editableSnapshot(timeline) {
-  if (!timeline) return "";
-  return JSON.stringify({
-    clipOrder: timeline.clips.map((clip) => clip.id),
-    clips: timeline.clips.map((clip) => ({
-      id: clip.id,
-      enabled: clip.enabled,
-      trimIn: Number(clip.trim_in_seconds),
-      trimOut: Number(clip.trim_out_seconds),
-      duration: Number(clip.timeline_duration_seconds),
-      audioMode: clip.audio_mode,
-      audioVolume: Number(clip.audio_volume),
-      transition: clip.transition_after,
-    })),
-    audio: timeline.audio_track,
-    subtitles: timeline.subtitle_cues,
-  });
-}
 
 function TimelineSkeleton() {
   return (
@@ -217,7 +180,7 @@ function TimelinePreviewPlayer({
             value={Math.min(currentTime, duration || 0)}
           />
           <output className="timeline-player-time" aria-live="off">
-            {formatSeconds(currentTime)} / {formatSeconds(duration)}
+            {formatEditorSeconds(currentTime)} / {formatEditorSeconds(duration)}
           </output>
           <button
             aria-label={muted || volume === 0 ? "取消静音" : "静音"}
@@ -255,7 +218,7 @@ function TimelineTrack({ timeline, selectedClipId, onSelect, resolveUrl }) {
   return (
     <div className="timeline-tracks" role="region" aria-label="受控时间线轨道">
       <div className="timeline-track-row video-track-row">
-        <span className="timeline-track-label"><FilmSlate size={17} />视频</span>
+        <span className="timeline-track-label"><FilmSlate size={17} />V1 视频</span>
         <div className="timeline-track-scroll">
           {timeline.clips.map((clip) => (
             <button
@@ -269,7 +232,7 @@ function TimelineTrack({ timeline, selectedClipId, onSelect, resolveUrl }) {
               <img alt="" src={resolveUrl(clip.cover_url)} />
               <span>
                 <strong>分镜 {clip.shot_index}</strong>
-                <small>{formatSeconds(clip.timeline_start_seconds)}–{formatSeconds(clip.timeline_end_seconds)}</small>
+                <small>{formatEditorSeconds(clip.timeline_start_seconds)}–{formatEditorSeconds(clip.timeline_end_seconds)}</small>
               </span>
               {!clip.enabled && <em>已停用</em>}
             </button>
@@ -279,14 +242,27 @@ function TimelineTrack({ timeline, selectedClipId, onSelect, resolveUrl }) {
       <div className="timeline-track-row audio-track-row">
         <span className="timeline-track-label">
           {timeline.audio_track.enabled ? <SpeakerHigh size={17} /> : <SpeakerSlash size={17} />}
-          原音轨
+          A1 原音
         </span>
         <div className={`timeline-audio-strip ${timeline.audio_track.enabled ? "" : "muted"}`}>
           {timeline.audio_track.enabled ? "映射源视频音频" : "全局静音"}
         </div>
       </div>
+      <div className="timeline-track-row audio-track-row secondary-audio-track-row">
+        <span className="timeline-track-label">
+          {timeline.background_audio_track.enabled ? <SpeakerHigh size={17} /> : <SpeakerSlash size={17} />}
+          A2 附加
+        </span>
+        <div className={`timeline-audio-strip secondary ${timeline.background_audio_track.enabled ? "" : "muted"}`}>
+          {timeline.background_audio_track.enabled
+            ? timeline.background_audio_track.name || "附加背景音频"
+            : timeline.background_audio_track.source_url
+              ? "附加音轨已关闭"
+              : "尚未添加音频"}
+        </div>
+      </div>
       <div className="timeline-track-row subtitle-track-row">
-        <span className="timeline-track-label"><Subtitles size={17} />字幕</span>
+        <span className="timeline-track-label"><Subtitles size={17} />T1 字幕</span>
         <div className="timeline-subtitle-strip">
           {timeline.subtitle_cues.filter(
             (cue) => cue.enabled && (cue.clip_id === null || enabledClipIds.has(cue.clip_id)),
@@ -300,7 +276,7 @@ function TimelineTrack({ timeline, selectedClipId, onSelect, resolveUrl }) {
   );
 }
 
-function ClipInspector({ clip, clips, onChange, onMove }) {
+function ClipInspector({ clip, clips, dirty, inspecting, onChange, onInspect, onMove }) {
   if (!clip) {
     return <div className="timeline-inspector-empty">选择一个片段后调整裁剪、节奏和转场。</div>;
   }
@@ -308,6 +284,11 @@ function ClipInspector({ clip, clips, onChange, onMove }) {
   const enabled = clips.filter((item) => item.enabled);
   const lastEnabled = enabled.at(-1)?.id === clip.id;
   const maxTransition = Math.max(0.1, Math.min(2, clip.timeline_duration_seconds / 2));
+  const qualityLabel = clip.quality_status === "passed"
+    ? "质检通过"
+    : clip.quality_status === "failed"
+      ? "存在阻断"
+      : "需要复核";
   return (
     <div className="timeline-inspector-form">
       <div className="timeline-inspector-heading">
@@ -398,11 +379,44 @@ function ClipInspector({ clip, clips, onChange, onMove }) {
           </div>
         </label>
       </div>
+      <section className={`timeline-quality-summary ${clip.quality_status || "warning"}`}>
+        <div>
+          {clip.quality_status === "passed"
+            ? <CheckCircle size={17} weight="fill" />
+            : <WarningCircle size={17} weight="fill" />}
+          <strong>{qualityLabel}</strong>
+        </div>
+        {(clip.blocker_messages || []).map((message) => (
+          <p className="blocking" key={message}>{message}</p>
+        ))}
+        {(clip.warning_messages || []).map((message) => <p key={message}>{message}</p>)}
+        {!clip.quality_report?.schema_version && (
+          <p>尚未在视频剪辑阶段执行基础技术质检。</p>
+        )}
+        <button
+          className="secondary-button compact"
+          disabled={dirty || inspecting}
+          onClick={onInspect}
+          title={dirty ? "请先保存时间线修改" : "检查文件、时长、画幅和帧率"}
+          type="button"
+        >
+          {inspecting ? <CircleNotch className="spin" size={15} /> : <CheckCircle size={15} />}
+          {inspecting ? "正在质检" : "重新质检"}
+        </button>
+      </section>
     </div>
   );
 }
 
-function AudioInspector({ audio, onChange }) {
+function AudioInspector({
+  audio,
+  background,
+  busy,
+  dirty,
+  onBackgroundChange,
+  onChange,
+  onUploadBackground,
+}) {
   return (
     <div className="timeline-inspector-form">
       <div className="timeline-inspector-heading">
@@ -434,6 +448,58 @@ function AudioInspector({ audio, onChange }) {
         <input checked={audio.normalize_loudness} disabled={!audio.enabled} onChange={(event) => onChange({ normalize_loudness: event.target.checked })} type="checkbox" />
         <span>预览时执行响度标准化</span>
       </label>
+      <div className="timeline-inspector-divider" />
+      <div className="timeline-inspector-heading">
+        <div><small>A2 轻量轨道</small><h4>附加音频</h4></div>
+        <label className="timeline-toggle">
+          <input
+            checked={background.enabled}
+            disabled={!background.source_url}
+            onChange={(event) => onBackgroundChange({ enabled: event.target.checked })}
+            type="checkbox"
+          />
+          <span>{background.enabled ? "已启用" : "已关闭"}</span>
+        </label>
+      </div>
+      <label className="timeline-audio-upload secondary-button compact">
+        <input
+          accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,.mp3,.wav,.m4a,.aac,.ogg,.flac"
+          disabled={busy || dirty}
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) onUploadBackground(file);
+            event.target.value = "";
+          }}
+          type="file"
+        />
+        {busy ? <CircleNotch className="spin" size={15} /> : <SpeakerHigh size={15} />}
+        {background.source_url ? "替换附加音频" : "添加附加音频"}
+      </label>
+      <small className="timeline-audio-file-name">
+        {background.name || "支持 MP3、WAV、M4A、AAC、OGG、FLAC，最大 100 MB"}
+      </small>
+      <label className="timeline-field">
+        <span>附加音量 · {Math.round(background.volume * 100)}%</span>
+        <input
+          disabled={!background.enabled}
+          max="2"
+          min="0"
+          onChange={(event) => onBackgroundChange({ volume: Number(event.target.value) })}
+          step="0.05"
+          type="range"
+          value={background.volume}
+        />
+      </label>
+      <label className="timeline-toggle standalone">
+        <input
+          checked={background.loop}
+          disabled={!background.source_url}
+          onChange={(event) => onBackgroundChange({ loop: event.target.checked })}
+          type="checkbox"
+        />
+        <span>音频不足成片时循环播放</span>
+      </label>
+      {dirty && <em className="timeline-audio-help">请先保存当前修改，再上传或替换音频。</em>}
     </div>
   );
 }
@@ -450,7 +516,7 @@ function SubtitleInspector({ cues, onChange }) {
         <label className={`timeline-subtitle-item ${cue.enabled ? "" : "disabled"}`} key={cue.id}>
           <input checked={cue.enabled} onChange={(event) => onChange(cue.id, { enabled: event.target.checked })} type="checkbox" />
           <span>
-            <small>{formatSeconds(cue.start_seconds)}–{formatSeconds(cue.end_seconds)}</small>
+            <small>{formatEditorSeconds(cue.start_seconds)}–{formatEditorSeconds(cue.end_seconds)}</small>
             <textarea rows="2" value={cue.text} onChange={(event) => onChange(cue.id, { text: event.target.value })} />
           </span>
         </label>
@@ -459,7 +525,7 @@ function SubtitleInspector({ cues, onChange }) {
   );
 }
 
-export function EditingTimelineWorkspace({
+export function VideoEditorWorkspace({
   project,
   request,
   resolveUrl,
@@ -477,7 +543,7 @@ export function EditingTimelineWorkspace({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const dirty = Boolean(timeline && editableSnapshot(timeline) !== savedSnapshot);
+  const dirty = Boolean(timeline && editableTimelineSnapshot(timeline) !== savedSnapshot);
   const selectedClip = useMemo(
     () => timeline?.clips.find((clip) => clip.id === selectedClipId) || timeline?.clips[0] || null,
     [selectedClipId, timeline],
@@ -499,7 +565,7 @@ export function EditingTimelineWorkspace({
         request(`/productions/${project.id}/timeline/validation`),
       ]);
       setTimeline(nextTimeline);
-      setSavedSnapshot(editableSnapshot(nextTimeline));
+      setSavedSnapshot(editableTimelineSnapshot(nextTimeline));
       setSelectedClipId((current) => (
         nextTimeline.clips.some((clip) => clip.id === current)
           ? current
@@ -581,6 +647,13 @@ export function EditingTimelineWorkspace({
     }));
   }
 
+  function updateBackgroundAudio(values) {
+    setTimeline((current) => ({
+      ...current,
+      background_audio_track: { ...current.background_audio_track, ...values },
+    }));
+  }
+
   function updateSubtitle(cueId, values) {
     setTimeline((current) => ({
       ...current,
@@ -607,6 +680,9 @@ export function EditingTimelineWorkspace({
             enabled: clip.enabled,
             trim_in_seconds: Number(clip.trim_in_seconds),
             trim_out_seconds: Number(clip.trim_out_seconds),
+            cover_timestamp_seconds: clip.cover_timestamp_seconds == null
+              ? null
+              : Number(clip.cover_timestamp_seconds),
             timeline_duration_seconds: Number(clip.timeline_duration_seconds),
             audio_mode: clip.audio_mode,
             audio_volume: Number(clip.audio_volume),
@@ -615,6 +691,7 @@ export function EditingTimelineWorkspace({
               : clip.transition_after,
           })),
           audio_track: timeline.audio_track,
+          background_audio_track: timeline.background_audio_track,
           subtitle_cues: timeline.subtitle_cues,
           summary: "从剪辑工作台更新时间线",
         }),
@@ -624,7 +701,7 @@ export function EditingTimelineWorkspace({
         request(`/productions/${project.id}/timeline/revisions`),
       ]);
       setTimeline(saved);
-      setSavedSnapshot(editableSnapshot(saved));
+      setSavedSnapshot(editableTimelineSnapshot(saved));
       setValidation(nextValidation);
       setRevisions(nextRevisions.items || []);
       setRenderJob(null);
@@ -632,6 +709,68 @@ export function EditingTimelineWorkspace({
     } catch (requestError) {
       setError(requestError.message);
       onNotice({ type: "error", title: "时间线保存失败", message: requestError.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadBackgroundAudio(file) {
+    if (!timeline || dirty || !file) return;
+    setBusy(true);
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("expected_revision_id", timeline.revision_id);
+      form.append("file", file);
+      const updated = await request(
+        `/productions/${project.id}/timeline/background-audio`,
+        { method: "POST", body: form },
+      );
+      const nextRevisions = await request(`/productions/${project.id}/timeline/revisions`);
+      setTimeline(updated);
+      setSavedSnapshot(editableTimelineSnapshot(updated));
+      setRevisions(nextRevisions.items || []);
+      setRenderJob(null);
+      onNotice({ type: "success", title: "附加音轨已添加", message: file.name });
+    } catch (requestError) {
+      setError(requestError.message);
+      onNotice({ type: "error", title: "附加音轨上传失败", message: requestError.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inspectSelectedClip() {
+    if (!timeline || !selectedClip || dirty) return;
+    setBusy(true);
+    setError("");
+    try {
+      const inspected = await request(
+        `/productions/${project.id}/timeline/clips/${selectedClip.id}/inspect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ expected_revision_id: timeline.revision_id }),
+        },
+      );
+      const [nextValidation, nextRevisions] = await Promise.all([
+        request(`/productions/${project.id}/timeline/validation`),
+        request(`/productions/${project.id}/timeline/revisions`),
+      ]);
+      setTimeline(inspected);
+      setSavedSnapshot(editableTimelineSnapshot(inspected));
+      setValidation(nextValidation);
+      setRevisions(nextRevisions.items || []);
+      setRenderJob(null);
+      const inspectedClip = inspected.clips.find((item) => item.id === selectedClip.id);
+      onNotice({
+        type: inspectedClip?.quality_status === "passed" ? "success" : "warning",
+        title: `分镜 ${selectedClip.shot_index} 已完成基础质检`,
+        message: inspectedClip?.warning_messages?.[0] || "技术信息已更新。",
+      });
+    } catch (requestError) {
+      setError(requestError.message);
+      onNotice({ type: "error", title: "片段质检失败", message: requestError.message });
     } finally {
       setBusy(false);
     }
@@ -679,7 +818,7 @@ export function EditingTimelineWorkspace({
         body: JSON.stringify({ expected_revision_id: timeline.revision_id }),
       });
       setTimeline(restored);
-      setSavedSnapshot(editableSnapshot(restored));
+      setSavedSnapshot(editableTimelineSnapshot(restored));
       setSelectedClipId(restored.clips[0]?.id || "");
       setHistoryOpen(false);
       setRenderJob(null);
@@ -703,9 +842,9 @@ export function EditingTimelineWorkspace({
     <section className="editing-timeline-workspace">
       <header className="timeline-workspace-toolbar">
         <div>
-          <span className="timeline-eyebrow">Batch 4.6 · 受控时间线</span>
-          <h3>剪辑合成工作台</h3>
-          <p>{timeline.clips.filter((clip) => clip.enabled).length} 个片段 · {formatSeconds(timeline.duration_seconds)} · {timeline.output_aspect_ratio}</p>
+          <span className="timeline-eyebrow">独立模块 · 受控时间线</span>
+          <h3>视频剪辑工作台</h3>
+          <p>{timeline.clips.filter((clip) => clip.enabled).length} 个片段 · {formatEditorSeconds(timeline.duration_seconds)} · {timeline.output_aspect_ratio}</p>
         </div>
         <div className="timeline-toolbar-actions">
           {renderJob && ACTIVE_RENDER_STATUSES.has(renderJob.status) && (
@@ -722,7 +861,7 @@ export function EditingTimelineWorkspace({
             {busy && dirty ? <CircleNotch className="spin" size={16} /> : <FloppyDisk size={16} />}保存时间线
           </button>
           <button className="primary-button compact" disabled={dirty || busy || ACTIVE_RENDER_STATUSES.has(renderJob?.status)} onClick={generatePreview} type="button">
-            <Play size={16} weight="fill" />{renderJob?.status === "succeeded" ? "重新生成预览" : "生成低清预览"}
+            <Play size={16} weight="fill" />{renderJob?.status === "succeeded" ? "重新生成合成预览" : "生成合成预览"}
           </button>
         </div>
       </header>
@@ -766,7 +905,9 @@ export function EditingTimelineWorkspace({
               subtitleUrl={previewSubtitleUrl}
             />
           </div>
-          <TimelineTrack timeline={timeline} selectedClipId={selectedClip?.id} onSelect={(clipId) => { setSelectedClipId(clipId); setInspectorTab("clip"); }} resolveUrl={resolveUrl} />
+          <div className="timeline-track-zone">
+            <TimelineTrack timeline={timeline} selectedClipId={selectedClip?.id} onSelect={(clipId) => { setSelectedClipId(clipId); setInspectorTab("clip"); }} resolveUrl={resolveUrl} />
+          </div>
         </div>
 
         <aside className="timeline-inspector">
@@ -775,8 +916,28 @@ export function EditingTimelineWorkspace({
             <button className={inspectorTab === "audio" ? "active" : ""} onClick={() => setInspectorTab("audio")} type="button">音轨</button>
             <button className={inspectorTab === "subtitles" ? "active" : ""} onClick={() => setInspectorTab("subtitles")} type="button">字幕</button>
           </nav>
-          {inspectorTab === "clip" && <ClipInspector clip={selectedClip} clips={timeline.clips} onChange={updateClip} onMove={moveSelectedClip} />}
-          {inspectorTab === "audio" && <AudioInspector audio={timeline.audio_track} onChange={updateAudio} />}
+          {inspectorTab === "clip" && (
+            <ClipInspector
+              clip={selectedClip}
+              clips={timeline.clips}
+              dirty={dirty}
+              inspecting={busy}
+              onChange={updateClip}
+              onInspect={inspectSelectedClip}
+              onMove={moveSelectedClip}
+            />
+          )}
+          {inspectorTab === "audio" && (
+            <AudioInspector
+              audio={timeline.audio_track}
+              background={timeline.background_audio_track}
+              busy={busy}
+              dirty={dirty}
+              onBackgroundChange={updateBackgroundAudio}
+              onChange={updateAudio}
+              onUploadBackground={uploadBackgroundAudio}
+            />
+          )}
           {inspectorTab === "subtitles" && <SubtitleInspector cues={timeline.subtitle_cues} onChange={updateSubtitle} />}
         </aside>
       </div>

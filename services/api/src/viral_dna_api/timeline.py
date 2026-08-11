@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -11,13 +12,16 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from .models import (
+    EditingHandoffClip,
     EditingHandoffManifest,
     ProductionProject,
     ProductionStep,
     ProductionTimeline,
     TimelineAudioTrack,
+    TimelineBackgroundAudioTrack,
     TimelineChangeKind,
     TimelineClip,
+    TimelineClipInspectionRequest,
     TimelinePreviewCreate,
     TimelineRenderJob,
     TimelineRenderStatus,
@@ -31,6 +35,7 @@ from .models import (
     utc_now,
 )
 from .notifications import NotificationPublisher
+from .production_media import ProductionVideoInspectionError, ProductionVideoInspector
 from .timeline_render import TimelinePreviewRenderer, TimelineRenderError, preview_dimensions
 from .workspace import WorkspaceError, WorkspaceManager
 
@@ -62,6 +67,7 @@ class PreviewRenderer(Protocol):
         output_root: Path,
         *,
         source_audio_path: Path | None,
+        background_audio_path: Path | None,
         progress: Callable[[int], Awaitable[None]],
         is_cancelled: Callable[[], bool],
     ) -> tuple[Path, Path | None]: ...
@@ -86,12 +92,14 @@ class TimelineService:
         handoff_provider: EditingHandoffProvider,
         *,
         renderer: PreviewRenderer | None = None,
+        video_inspector: ProductionVideoInspector | None = None,
         notification_publisher: NotificationPublisher | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
         self.handoff_provider = handoff_provider
         self.renderer = renderer or TimelinePreviewRenderer(handoff_provider)
+        self.video_inspector = video_inspector or ProductionVideoInspector()
         self.notification_publisher = notification_publisher
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._render_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -111,7 +119,7 @@ class TimelineService:
         async with lock:
             timeline = await asyncio.to_thread(self._read_current_timeline, project)
             if timeline is not None:
-                return timeline
+                return await self._synchronize_timeline_with_handoff(project, timeline)
             return await self._initialize_timeline(project)
 
     async def update_timeline(
@@ -147,6 +155,198 @@ class TimelineService:
         timeline = await self.get_timeline(project_id)
         return self.validate_timeline(timeline)
 
+    async def inspect_clip(
+        self,
+        project_id: UUID,
+        clip_id: UUID,
+        payload: TimelineClipInspectionRequest,
+    ) -> ProductionTimeline:
+        project = await self._require_project(project_id)
+        lock = self._project_locks.setdefault(project_id, asyncio.Lock())
+        async with lock:
+            current = await self._require_current_timeline(project)
+            self._require_revision(current, payload.expected_revision_id)
+            source_clip = next((item for item in current.clips if item.id == clip_id), None)
+            if source_clip is None:
+                raise _fail(404, "timeline_clip_missing", "要质检的时间线片段不存在")
+
+            candidate = await self.repository.get_generation_candidate(source_clip.candidate_id)
+            source_path, _ = await self.handoff_provider.resolve_candidate_content(
+                source_clip.candidate_id
+            )
+            revision_id = uuid4()
+            cover_path = (
+                self._timeline_root(project)
+                / "covers"
+                / str(source_clip.id)
+                / str(revision_id)
+                / "cover.webp"
+            )
+            cover_timestamp = (
+                source_clip.cover_timestamp_seconds
+                if source_clip.cover_timestamp_seconds is not None
+                else source_clip.trim_in_seconds
+                + (source_clip.trim_out_seconds - source_clip.trim_in_seconds) / 2
+            )
+            try:
+                inspection = await self.video_inspector.inspect(
+                    source_path,
+                    cover_path,
+                    cover_timestamp_seconds=cover_timestamp,
+                    expected_width=getattr(candidate, "width", None),
+                    expected_height=getattr(candidate, "height", None),
+                    expected_duration_seconds=getattr(candidate, "duration_seconds", None),
+                )
+            except ProductionVideoInspectionError as exc:
+                raise _fail(409, exc.code, str(exc)) from exc
+
+            warnings = [
+                str(item)
+                for item in inspection.quality_report.get("warnings", [])
+                if str(item).strip()
+            ]
+            next_clips = [
+                item.model_copy(
+                    update={
+                        "cover_url": (
+                            f"/api/v1/productions/{project.id}/timeline/clips/"
+                            f"{item.id}/cover?v={revision_id}"
+                        ),
+                        "cover_relative_path": self.workspace.relative(cover_path),
+                        "cover_timestamp_seconds": inspection.cover_timestamp_seconds,
+                        "quality_status": inspection.quality_status,
+                        "quality_report": inspection.quality_report,
+                        "blocker_messages": [],
+                        "warning_messages": warnings,
+                    }
+                )
+                if item.id == source_clip.id
+                else item
+                for item in current.clips
+            ]
+            next_timeline = current.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "revision_number": current.revision_number + 1,
+                    "clips": next_clips,
+                    "last_preview_job_id": None,
+                    "last_export_job_id": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            validation = self.validate_timeline(next_timeline)
+            next_timeline = next_timeline.model_copy(
+                update={
+                    "validation_messages": validation.errors,
+                    "warning_messages": validation.warnings,
+                }
+            )
+            return await asyncio.to_thread(
+                self._save_revision,
+                project,
+                next_timeline,
+                TimelineChangeKind.CLIPS_UPDATED,
+                f"更新分镜 {source_clip.shot_index} 的封面与基础质检",
+                current.revision_id,
+            )
+
+    async def resolve_clip_cover(
+        self,
+        project_id: UUID,
+        clip_id: UUID,
+    ) -> tuple[Path, str]:
+        project = await self._require_project(project_id)
+        timeline = await self.get_timeline(project_id)
+        clip = next((item for item in timeline.clips if item.id == clip_id), None)
+        if clip is None or not clip.cover_relative_path:
+            raise _fail(404, "timeline_clip_cover_missing", "当前片段尚未生成剪辑封面")
+        try:
+            path = self.workspace.resolve(clip.cover_relative_path).resolve()
+            path.relative_to(self._timeline_root(project).resolve())
+        except (WorkspaceError, ValueError) as exc:
+            raise _fail(409, "timeline_clip_cover_invalid", "片段封面路径无效") from exc
+        if not path.is_file():
+            raise _fail(404, "timeline_clip_cover_missing", "片段封面文件不存在")
+        return path, "image/webp"
+
+    async def set_background_audio(
+        self,
+        project_id: UUID,
+        expected_revision_id: UUID,
+        *,
+        filename: str,
+        content_type: str | None,
+        content: bytes,
+    ) -> ProductionTimeline:
+        project = await self._require_project(project_id)
+        suffix = Path(filename or "background-audio").suffix.lower()
+        allowed_suffixes = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+        if suffix not in allowed_suffixes:
+            raise _fail(
+                415,
+                "background_audio_type_invalid",
+                "仅支持 MP3、WAV、M4A、AAC、OGG 或 FLAC 音频",
+            )
+        if content_type and not (
+            content_type.startswith("audio/")
+            or content_type in {"application/ogg", "application/octet-stream"}
+        ):
+            raise _fail(415, "background_audio_type_invalid", "上传文件不是受支持的音频")
+        if not content:
+            raise _fail(422, "background_audio_empty", "上传的音频文件为空")
+        if len(content) > 100 * 1024 * 1024:
+            raise _fail(413, "background_audio_too_large", "附加音频不能超过 100 MB")
+
+        lock = self._project_locks.setdefault(project_id, asyncio.Lock())
+        async with lock:
+            current = await self._require_current_timeline(project)
+            self._require_revision(current, expected_revision_id)
+            revision_id = uuid4()
+            destination = (
+                self._timeline_root(project)
+                / "audio"
+                / f"{revision_id}{suffix}"
+            )
+            await asyncio.to_thread(self._write_bytes_atomic, destination, content)
+            track = TimelineBackgroundAudioTrack(
+                source_relative_path=self.workspace.relative(destination),
+                source_url=(
+                    f"/api/v1/productions/{project.id}/timeline/background-audio"
+                    f"?v={revision_id}"
+                ),
+                name=Path(filename).name[:240] or f"背景音频{suffix}",
+                enabled=True,
+                volume=current.background_audio_track.volume,
+                loop=True,
+            )
+            next_timeline = current.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "revision_number": current.revision_number + 1,
+                    "background_audio_track": track,
+                    "last_preview_job_id": None,
+                    "last_export_job_id": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            return await asyncio.to_thread(
+                self._save_revision,
+                project,
+                next_timeline,
+                TimelineChangeKind.TRACKS_UPDATED,
+                f"添加附加音轨：{track.name}",
+                current.revision_id,
+            )
+
+    async def resolve_background_audio(self, project_id: UUID) -> tuple[Path, str]:
+        project = await self._require_project(project_id)
+        timeline = await self.get_timeline(project_id)
+        path = self._background_audio_path(project, timeline)
+        if path is None:
+            raise _fail(404, "background_audio_missing", "当前时间线没有可用的附加音轨")
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return path, media_type
+
     def validate_timeline(self, timeline: ProductionTimeline) -> TimelineValidationResponse:
         enabled = sorted(
             (clip for clip in timeline.clips if clip.enabled),
@@ -163,6 +363,11 @@ class TimelineService:
         if len(orders) != len(set(orders)):
             errors.append("时间线片段顺序重复")
         for index, clip in enumerate(enabled):
+            if clip.blocker_messages:
+                errors.extend(
+                    f"分镜 {clip.shot_index}：{message}"
+                    for message in clip.blocker_messages
+                )
             if clip.trim_out_seconds > clip.candidate_duration_seconds + 0.05:
                 errors.append(f"分镜 {clip.shot_index} 的出点超过候选视频时长")
             if clip.playback_rate < 0.5 or clip.playback_rate > 2:
@@ -248,7 +453,7 @@ class TimelineService:
                 }
             )
             restored = self._recompute_timeline(restored)
-            return await asyncio.to_thread(
+            saved = await asyncio.to_thread(
                 self._save_revision,
                 project,
                 restored,
@@ -256,6 +461,7 @@ class TimelineService:
                 f"恢复时间线版本 {source.revision_number}",
                 source.revision_id,
             )
+            return await self._synchronize_timeline_with_handoff(project, saved)
 
     async def create_preview(
         self,
@@ -340,62 +546,231 @@ class TimelineService:
             raise _fail(404, "render_output_missing", "预览渲染产物不存在")
         return resolved, "text/vtt; charset=utf-8" if subtitles else "video/mp4"
 
+    async def _timeline_clip_from_handoff(
+        self,
+        source: EditingHandoffClip,
+        order: int,
+        *,
+        clip_id: UUID | None = None,
+    ) -> TimelineClip:
+        candidate = await self.repository.get_generation_candidate(source.candidate_id)
+        candidate_duration = (
+            float(candidate.duration_seconds)
+            if candidate is not None and candidate.duration_seconds is not None
+            else source.trim_out_seconds
+        )
+        return TimelineClip(
+            id=clip_id or uuid4(),
+            shot_plan_id=source.shot_plan_id,
+            shot_index=source.shot_index,
+            candidate_id=source.candidate_id,
+            candidate_content_url=source.candidate_content_url,
+            cover_url=source.cover_url,
+            cover_timestamp_seconds=source.cover_timestamp_seconds,
+            order=order,
+            candidate_duration_seconds=max(candidate_duration, source.trim_out_seconds),
+            trim_in_seconds=source.trim_in_seconds,
+            trim_out_seconds=source.trim_out_seconds,
+            playback_rate=source.video_playback_rate,
+            timeline_start_seconds=source.timeline_start_seconds,
+            timeline_end_seconds=source.timeline_end_seconds,
+            timeline_duration_seconds=source.timeline_duration_seconds,
+            audio_mode=source.audio_mode,
+            source_audio_start_seconds=source.source_audio_start_seconds,
+            source_audio_end_seconds=source.source_audio_end_seconds,
+            quality_status=source.quality_status,
+            quality_report=source.quality_report,
+            blocker_messages=source.blocker_messages,
+            warning_messages=source.warning_messages,
+        )
+
+    @staticmethod
+    def _timeline_cues_from_handoff(
+        source: EditingHandoffClip,
+        clip: TimelineClip,
+        existing_ids: set[str],
+    ) -> list[TimelineSubtitleCue]:
+        cues: list[TimelineSubtitleCue] = []
+        for cue in source.subtitle_cues or source.transcript_cues:
+            cue_id = f"{clip.id.hex[:8]}-{cue.id}"[:120]
+            if cue_id in existing_ids:
+                continue
+            existing_ids.add(cue_id)
+            cues.append(
+                TimelineSubtitleCue(
+                    id=cue_id,
+                    source_cue_id=cue.id,
+                    clip_id=clip.id,
+                    text=cue.text,
+                    language=cue.language,
+                    start_seconds=round(
+                        source.timeline_start_seconds + cue.clip_start_seconds,
+                        3,
+                    ),
+                    end_seconds=round(
+                        source.timeline_start_seconds + cue.clip_end_seconds,
+                        3,
+                    ),
+                    clip_start_seconds=cue.clip_start_seconds,
+                    clip_end_seconds=cue.clip_end_seconds,
+                )
+            )
+        return cues
+
+    async def _synchronize_timeline_with_handoff(
+        self,
+        project: ProductionProject,
+        current: ProductionTimeline,
+    ) -> ProductionTimeline:
+        handoff = await self.handoff_provider.get_editing_handoff(project.id)
+        if current.source_handoff_revision_id == handoff.revision_id:
+            return current
+
+        sources_by_shot = {item.shot_plan_id: item for item in handoff.clips}
+        current_by_shot = {item.shot_plan_id: item for item in current.clips}
+        next_clips: list[TimelineClip] = []
+        added_sources: list[tuple[EditingHandoffClip, TimelineClip]] = []
+        replaced_count = 0
+        removed_count = 0
+
+        for existing in sorted(current.clips, key=lambda item: item.order):
+            source = sources_by_shot.get(existing.shot_plan_id)
+            if source is None:
+                removed_count += 1
+                continue
+            order = len(next_clips) + 1
+            if existing.candidate_id == source.candidate_id:
+                next_clips.append(
+                    existing.model_copy(
+                        update={
+                            "order": order,
+                            "shot_index": source.shot_index,
+                            "candidate_content_url": source.candidate_content_url,
+                            "source_audio_start_seconds": source.source_audio_start_seconds,
+                            "source_audio_end_seconds": source.source_audio_end_seconds,
+                        }
+                    )
+                )
+                continue
+
+            replacement = await self._timeline_clip_from_handoff(
+                source,
+                order,
+                clip_id=existing.id,
+            )
+            trimmed_duration = replacement.trim_out_seconds - replacement.trim_in_seconds
+            timeline_duration = max(
+                existing.timeline_duration_seconds,
+                round(trimmed_duration / 8, 3),
+            )
+            replacement = replacement.model_copy(
+                update={
+                    "enabled": existing.enabled,
+                    "timeline_duration_seconds": timeline_duration,
+                    "playback_rate": round(trimmed_duration / timeline_duration, 6),
+                    "audio_mode": existing.audio_mode,
+                    "audio_volume": existing.audio_volume,
+                    "transition_after": existing.transition_after,
+                }
+            )
+            next_clips.append(replacement)
+            replaced_count += 1
+
+        for source in handoff.clips:
+            if source.shot_plan_id in current_by_shot:
+                continue
+            clip = await self._timeline_clip_from_handoff(source, len(next_clips) + 1)
+            next_clips.append(clip)
+            added_sources.append((source, clip))
+
+        enabled_indexes = [index for index, clip in enumerate(next_clips) if clip.enabled]
+        if enabled_indexes:
+            last_index = enabled_indexes[-1]
+            last_clip = next_clips[last_index]
+            if last_clip.transition_after.kind != TimelineTransitionKind.NONE:
+                next_clips[last_index] = last_clip.model_copy(
+                    update={
+                        "transition_after": last_clip.transition_after.model_copy(
+                            update={
+                                "kind": TimelineTransitionKind.NONE,
+                                "duration_seconds": 0,
+                            }
+                        )
+                    }
+                )
+
+        retained_clip_ids = {clip.id for clip in next_clips}
+        next_cues = [
+            cue
+            for cue in current.subtitle_cues
+            if cue.clip_id is None or cue.clip_id in retained_clip_ids
+        ]
+        cue_ids = {cue.id for cue in next_cues}
+        for source, clip in added_sources:
+            next_cues.extend(self._timeline_cues_from_handoff(source, clip, cue_ids))
+
+        audio_track = current.audio_track
+        if audio_track.strategy != "muted":
+            if handoff.audio_strategy == "muted" or not handoff.source_audio_url:
+                audio_track = audio_track.model_copy(
+                    update={
+                        "strategy": "muted",
+                        "source_audio_url": None,
+                        "enabled": False,
+                    }
+                )
+            else:
+                audio_track = audio_track.model_copy(
+                    update={
+                        "strategy": handoff.audio_strategy,
+                        "source_audio_url": handoff.source_audio_url,
+                    }
+                )
+
+        next_timeline = current.model_copy(
+            update={
+                "source_handoff_revision_id": handoff.revision_id,
+                "revision_id": uuid4(),
+                "revision_number": current.revision_number + 1,
+                "clips": next_clips,
+                "audio_track": audio_track,
+                "subtitle_cues": next_cues,
+                "last_preview_job_id": None,
+                "last_export_job_id": None,
+                "updated_at": utc_now(),
+            }
+        )
+        next_timeline = self._recompute_timeline(next_timeline)
+        validation = self.validate_timeline(next_timeline)
+        next_timeline = next_timeline.model_copy(
+            update={
+                "validation_messages": validation.errors,
+                "warning_messages": validation.warnings,
+            }
+        )
+        summary = (
+            "同步最新分段视频交接："
+            f"替换 {replaced_count} 个，新增 {len(added_sources)} 个，"
+            f"移除 {removed_count} 个"
+        )
+        return await asyncio.to_thread(
+            self._save_revision,
+            project,
+            next_timeline,
+            TimelineChangeKind.HANDOFF_SYNCED,
+            summary,
+            current.revision_id,
+        )
+
     async def _initialize_timeline(self, project: ProductionProject) -> ProductionTimeline:
         handoff = await self.handoff_provider.get_editing_handoff(project.id)
         clips: list[TimelineClip] = []
         subtitles: list[TimelineSubtitleCue] = []
-        seen_cues: set[tuple[str, UUID]] = set()
+        seen_cues: set[str] = set()
         for order, source in enumerate(handoff.clips, start=1):
-            candidate = await self.repository.get_generation_candidate(source.candidate_id)
-            candidate_duration = (
-                float(candidate.duration_seconds)
-                if candidate is not None and candidate.duration_seconds is not None
-                else source.trim_out_seconds
-            )
-            clip = TimelineClip(
-                shot_plan_id=source.shot_plan_id,
-                shot_index=source.shot_index,
-                candidate_id=source.candidate_id,
-                candidate_content_url=source.candidate_content_url,
-                cover_url=source.cover_url,
-                order=order,
-                candidate_duration_seconds=max(candidate_duration, source.trim_out_seconds),
-                trim_in_seconds=source.trim_in_seconds,
-                trim_out_seconds=source.trim_out_seconds,
-                playback_rate=source.video_playback_rate,
-                timeline_start_seconds=source.timeline_start_seconds,
-                timeline_end_seconds=source.timeline_end_seconds,
-                timeline_duration_seconds=source.timeline_duration_seconds,
-                audio_mode=source.audio_mode,
-                source_audio_start_seconds=source.source_audio_start_seconds,
-                source_audio_end_seconds=source.source_audio_end_seconds,
-                warning_messages=source.warning_messages,
-            )
+            clip = await self._timeline_clip_from_handoff(source, order)
             clips.append(clip)
-            for cue in source.subtitle_cues or source.transcript_cues:
-                cue_key = (cue.id, clip.id)
-                if cue_key in seen_cues:
-                    continue
-                seen_cues.add(cue_key)
-                subtitles.append(
-                    TimelineSubtitleCue(
-                        id=f"{clip.id.hex[:8]}-{cue.id}"[:120],
-                        source_cue_id=cue.id,
-                        clip_id=clip.id,
-                        text=cue.text,
-                        language=cue.language,
-                        start_seconds=round(
-                            source.timeline_start_seconds + cue.clip_start_seconds,
-                            3,
-                        ),
-                        end_seconds=round(
-                            source.timeline_start_seconds + cue.clip_end_seconds,
-                            3,
-                        ),
-                        clip_start_seconds=cue.clip_start_seconds,
-                        clip_end_seconds=cue.clip_end_seconds,
-                    )
-                )
+            subtitles.extend(self._timeline_cues_from_handoff(source, clip, seen_cues))
         timeline = ProductionTimeline(
             project_id=project.id,
             source_handoff_revision_id=handoff.revision_id,
@@ -460,6 +835,7 @@ class TimelineService:
                     "enabled",
                     "trim_in_seconds",
                     "trim_out_seconds",
+                    "cover_timestamp_seconds",
                     "timeline_duration_seconds",
                     "audio_mode",
                     "audio_volume",
@@ -468,6 +844,12 @@ class TimelineService:
                     value = getattr(update, field)
                     if value is not None:
                         values[field] = value
+            cover_timestamp = values.get("cover_timestamp_seconds")
+            if cover_timestamp is not None:
+                values["cover_timestamp_seconds"] = min(
+                    max(float(cover_timestamp), float(values["trim_in_seconds"])),
+                    float(values["trim_out_seconds"]),
+                )
             trimmed_duration = values["trim_out_seconds"] - values["trim_in_seconds"]
             if trimmed_duration <= 0:
                 raise _fail(422, "timeline_trim_invalid", f"分镜 {clip.shot_index} 的裁剪范围无效")
@@ -485,6 +867,10 @@ class TimelineService:
                 "revision_number": current.revision_number + 1,
                 "clips": next_clips,
                 "audio_track": payload.audio_track or current.audio_track,
+                "background_audio_track": (
+                    payload.background_audio_track
+                    or current.background_audio_track
+                ),
                 "subtitle_cues": (
                     payload.subtitle_cues
                     if payload.subtitle_cues is not None
@@ -589,6 +975,7 @@ class TimelineService:
                 / str(job.id)
             )
             audio_path = self._source_audio_path(project, timeline)
+            background_audio_path = self._background_audio_path(project, timeline)
             if (
                 timeline.audio_track.enabled
                 and timeline.audio_track.strategy != "muted"
@@ -598,10 +985,16 @@ class TimelineService:
                     "source_audio_missing",
                     "原视频音轨文件不存在，请切换为静音或重新分析源视频",
                 )
+            if timeline.background_audio_track.enabled and background_audio_path is None:
+                raise TimelineRenderError(
+                    "background_audio_missing",
+                    "附加音轨文件不存在，请重新上传或关闭该轨道",
+                )
             output_path, subtitle_path = await self.renderer.render(
                 timeline,
                 output_root,
                 source_audio_path=audio_path,
+                background_audio_path=background_audio_path,
                 progress=update_progress,
                 is_cancelled=lambda: job.id in self._render_cancellations,
             )
@@ -674,6 +1067,21 @@ class TimelineService:
         )
         return path if path.is_file() else None
 
+    def _background_audio_path(
+        self,
+        project: ProductionProject,
+        timeline: ProductionTimeline,
+    ) -> Path | None:
+        relative_path = timeline.background_audio_track.source_relative_path
+        if not relative_path:
+            return None
+        try:
+            path = self.workspace.resolve(relative_path).resolve()
+            path.relative_to(self._timeline_root(project).resolve())
+        except (WorkspaceError, ValueError):
+            return None
+        return path if path.is_file() else None
+
     async def _publish_render_notification(
         self,
         project: ProductionProject,
@@ -689,7 +1097,7 @@ class TimelineService:
             title, message = "正在生成低清预览", "完成后会在消息中心通知你。"
         elif job.status == TimelineRenderStatus.SUCCEEDED:
             level, status = "success", "succeeded"
-            title, message = "低清预览已生成", "可以返回剪辑合成页面播放并审核预览。"
+            title, message = "低清预览已生成", "可以返回视频剪辑页面播放并审核预览。"
         elif job.status == TimelineRenderStatus.CANCELLED:
             level, status = "warning", "cancelled"
             title, message = "低清预览已取消", "本次渲染没有生成可用产物。"
@@ -721,7 +1129,7 @@ class TimelineService:
         if project is None:
             raise _fail(404, "production_missing", "创作方案不存在")
         if project.active_step not in {ProductionStep.EDITING, ProductionStep.EXPORT}:
-            raise _fail(409, "timeline_not_available", "请先完成分段视频并进入剪辑合成")
+            raise _fail(409, "timeline_not_available", "请先完成分段视频并进入视频剪辑")
         return project
 
     async def _require_current_timeline(
@@ -731,7 +1139,7 @@ class TimelineService:
         timeline = await asyncio.to_thread(self._read_current_timeline, project)
         if timeline is None:
             return await self._initialize_timeline(project)
-        return timeline
+        return await self._synchronize_timeline_with_handoff(project, timeline)
 
     @staticmethod
     def _require_revision(timeline: ProductionTimeline, expected_revision_id: UUID) -> None:
@@ -843,5 +1251,17 @@ class TimelineService:
             os.replace(temporary, destination)
         except OSError as exc:
             raise _fail(507, "workspace_write_failed", "无法写入时间线工作区文件") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _write_bytes_atomic(destination: Path, payload: bytes) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.parent / f".tmp-{uuid4().hex[:8]}"
+        try:
+            temporary.write_bytes(payload)
+            os.replace(temporary, destination)
+        except OSError as exc:
+            raise _fail(507, "workspace_write_failed", "无法写入时间线音频文件") from exc
         finally:
             temporary.unlink(missing_ok=True)

@@ -763,7 +763,6 @@ export function ShotImageWorkspace({
       >
         <div className="shot-candidate-batch-label">
           <strong>{title}</strong>
-          <span>{group.candidates.length} 张</span>
           <small>{batchTime}</small>
         </div>
         <div className="shot-candidate-strip-items">
@@ -1327,7 +1326,7 @@ export function ShotImageWorkspace({
                   </div>
                   {displayedCandidate && (
                     <div className="shot-candidate-current-detail">
-                      <strong>当前预览 · 候选 {displayedCandidate.ordinal}</strong>
+                      <strong>当前预览</strong>
                       <span>
                         {displayedCandidateModelLabel} · {displayedCandidateBatchTime} · {displayedCandidateQualityLabel}
                       </span>

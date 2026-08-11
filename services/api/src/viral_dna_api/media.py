@@ -26,7 +26,7 @@ from .models import (
 )
 from .workspace import workspace_manager
 
-PROCESSOR_VERSION = "ffmpeg-hybrid-candidates-v3"
+PROCESSOR_VERSION = "ffmpeg-hybrid-candidates-v4-motion-clips"
 MAX_VIDEO_SECONDS = 5 * 60
 MAX_SHOTS = 120
 MIN_SHOT_SECONDS = 0.45
@@ -192,6 +192,37 @@ def boundary_evidence_timestamps(
         clamp(timestamp_seconds + near_offset_seconds),
         clamp(timestamp_seconds + far_offset_seconds),
     )
+
+
+def shot_motion_evidence_timestamps(
+    content_start_seconds: float,
+    content_end_seconds: float,
+    *,
+    transition_start_seconds: float | None = None,
+    transition_end_seconds: float | None = None,
+) -> list[float]:
+    """Return a dense, ordered timeline for motion and outgoing-transition fallback."""
+
+    content_duration = max(0.001, content_end_seconds - content_start_seconds)
+    timestamps = [
+        content_start_seconds + content_duration * fraction
+        for fraction in (0.05, 0.2, 0.4, 0.6, 0.8, 0.95)
+    ]
+    if (
+        transition_start_seconds is not None
+        and transition_end_seconds is not None
+        and transition_end_seconds - transition_start_seconds >= 0.03
+    ):
+        transition_duration = transition_end_seconds - transition_start_seconds
+        timestamps.extend(
+            transition_start_seconds + transition_duration * fraction
+            for fraction in (0.05, 0.5, 0.95)
+        )
+    ordered: list[float] = []
+    for timestamp in sorted(round(value, 3) for value in timestamps):
+        if not ordered or timestamp - ordered[-1] >= 0.025:
+            ordered.append(timestamp)
+    return ordered[:12]
 
 
 def get_storage_root() -> Path:
@@ -753,6 +784,8 @@ class MediaProcessor:
             content_end = end
             incoming_transition_start: float | None = None
             incoming_transition_end: float | None = None
+            outgoing_transition_start: float | None = None
+            outgoing_transition_end: float | None = None
             if incoming_candidate is not None and (
                 incoming_candidate.selected_by_model or incoming_candidate.hard_boundary
             ):
@@ -770,11 +803,19 @@ class MediaProcessor:
             if outgoing_candidate is not None and (
                 outgoing_candidate.selected_by_model or outgoing_candidate.hard_boundary
             ):
-                content_end = min(
-                    end,
+                outgoing_transition_start = (
                     outgoing_candidate.transition_start_seconds
                     if outgoing_candidate.transition_start_seconds is not None
-                    else outgoing_candidate.timestamp_seconds,
+                    else outgoing_candidate.timestamp_seconds
+                )
+                outgoing_transition_end = (
+                    outgoing_candidate.stable_new_scene_seconds
+                    if outgoing_candidate.stable_new_scene_seconds is not None
+                    else outgoing_candidate.timestamp_seconds
+                )
+                content_end = min(
+                    end,
+                    outgoing_transition_start,
                 )
             if content_end - content_start < 0.05:
                 content_start = start
@@ -823,6 +864,79 @@ class MediaProcessor:
                 )
                 frame_urls.append(artifact_url(analysis_id, f"shots/{filename}"))
 
+            analysis_clip_start = content_start
+            analysis_clip_end = max(
+                content_end,
+                outgoing_transition_end if outgoing_transition_end is not None else content_end,
+            )
+            motion_timestamps = shot_motion_evidence_timestamps(
+                content_start,
+                content_end,
+                transition_start_seconds=outgoing_transition_start,
+                transition_end_seconds=outgoing_transition_end,
+            )
+            motion_frame_urls: list[str] = []
+            for motion_index, timestamp in enumerate(motion_timestamps, 1):
+                filename = f"shot_{index:03d}_motion_{motion_index:02d}.jpg"
+                output_path = shots_dir / filename
+                await _run_command(
+                    [
+                        self.ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostdin",
+                        "-y",
+                        "-ss",
+                        f"{timestamp:.3f}",
+                        "-i",
+                        str(proxy_path),
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        "scale=w='min(640,iw)':h=-2",
+                        "-q:v",
+                        "2",
+                        str(output_path),
+                    ],
+                    timeout_seconds=60,
+                )
+                motion_frame_urls.append(artifact_url(analysis_id, f"shots/{filename}"))
+
+            analysis_clip_filename = f"shot_{index:03d}_analysis.mp4"
+            analysis_clip_path = shots_dir / analysis_clip_filename
+            await _run_command(
+                [
+                    self.ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-ss",
+                    f"{analysis_clip_start:.3f}",
+                    "-i",
+                    str(proxy_path),
+                    "-t",
+                    f"{analysis_clip_end - analysis_clip_start:.3f}",
+                    "-an",
+                    "-vf",
+                    "scale=w='min(640,iw)':h=-2",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "28",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    str(analysis_clip_path),
+                ],
+                timeout_seconds=120,
+            )
+
             keyframe_url = artifact_url(analysis_id, f"shots/shot_{index:03d}.jpg")
             boundary_candidate = candidates_by_timestamp.get(round(start, 3))
             if index == 1:
@@ -867,10 +981,28 @@ class MediaProcessor:
                         if incoming_transition_end is not None
                         else None
                     ),
+                    outgoing_transition_start_seconds=(
+                        round(outgoing_transition_start, 3)
+                        if outgoing_transition_start is not None
+                        else None
+                    ),
+                    outgoing_transition_end_seconds=(
+                        round(outgoing_transition_end, 3)
+                        if outgoing_transition_end is not None
+                        else None
+                    ),
+                    analysis_clip_url=artifact_url(
+                        analysis_id,
+                        f"shots/{analysis_clip_filename}",
+                    ),
+                    analysis_clip_start_seconds=round(analysis_clip_start, 3),
+                    analysis_clip_end_seconds=round(analysis_clip_end, 3),
                     representative_timestamp=representative,
                     keyframe_url=keyframe_url,
                     evidence_frame_urls=frame_urls,
                     evidence_timestamps=[timestamp for _, timestamp in samples],
+                    motion_frame_urls=motion_frame_urls,
+                    motion_timestamps=motion_timestamps,
                     detection_method=(
                         "hybrid_candidate_vlm"
                         if boundary_candidates is not None

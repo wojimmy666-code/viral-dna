@@ -11,6 +11,7 @@ from viral_dna_api.media import MediaProcessor
 from viral_dna_api.models import (
     ProductionTimeline,
     TimelineAudioTrack,
+    TimelineBackgroundAudioTrack,
     TimelineClip,
     TimelineSubtitleCue,
     TimelineTransition,
@@ -61,6 +62,7 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
     first_path = tmp_path / "first.mp4"
     second_path = tmp_path / "second.mp4"
     audio_path = tmp_path / "source.wav"
+    background_audio_path = tmp_path / "background.wav"
     run_ffmpeg(
         [
             media.ffmpeg,
@@ -111,6 +113,22 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
             "-c:a",
             "pcm_s16le",
             str(audio_path),
+        ]
+    )
+    run_ffmpeg(
+        [
+            media.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:duration=2:sample_rate=48000",
+            "-c:a",
+            "pcm_s16le",
+            str(background_audio_path),
         ]
     )
     first_clip = TimelineClip(
@@ -167,6 +185,14 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
             strategy="per_shot",
             source_audio_url="/source.wav",
         ),
+        background_audio_track=TimelineBackgroundAudioTrack(
+            source_relative_path="timeline/audio/background.wav",
+            source_url="/background.wav",
+            name="background.wav",
+            enabled=True,
+            volume=0.25,
+            loop=True,
+        ),
         subtitle_cues=[
             TimelineSubtitleCue(
                 id="subtitle-1",
@@ -193,6 +219,7 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
         timeline,
         tmp_path / "preview",
         source_audio_path=audio_path,
+        background_audio_path=background_audio_path,
         progress=progress,
         is_cancelled=lambda: False,
     )
@@ -210,6 +237,7 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
         timeline,
         tmp_path / "final",
         source_audio_path=audio_path,
+        background_audio_path=background_audio_path,
         progress=progress,
         is_cancelled=lambda: False,
         profile=TimelineRenderProfile(

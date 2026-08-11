@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowDown,
   ArrowRight,
   CheckCircle,
   CircleNotch,
@@ -28,7 +27,7 @@ import {
   workflowStatusLabel,
 } from "./production-ui.js";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
-import { VideoPreparationPanel } from "./VideoPreparationPanel.jsx";
+import { VideoCandidateLibrary } from "./VideoCandidateLibrary.jsx";
 
 const ACTIVE_RUN_STATUSES = new Set([
   "queued",
@@ -64,19 +63,6 @@ function supportsOrderedMultiImage(model) {
     && capability?.multi_image_reference
     && capability?.ordered_reference_images,
   );
-}
-
-function formatCandidateBatchTime(value) {
-  if (!value) return "时间未知";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "时间未知";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
 }
 
 function generationRunCostLabel(run) {
@@ -148,12 +134,13 @@ export function ShotVideoWorkspace({
   initialCandidateId = "",
   onAdvance,
   onApprove,
+  onArchiveCandidates,
   onCancelRun,
   onGenerate,
   onOpenModelSettings,
-  onPrepare,
   onReject,
   onRetryRun,
+  onRestoreCandidates,
   onRevokeApproval,
   onSave,
   onSelectCandidate,
@@ -168,7 +155,6 @@ export function ShotVideoWorkspace({
   videoGenerationSettings,
 }) {
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
-  const [candidateHistoryExpanded, setCandidateHistoryExpanded] = useState(false);
   const [durationAdjustmentMessage, setDurationAdjustmentMessage] = useState("");
   const [diagnosticCopyState, setDiagnosticCopyState] = useState("");
   const modelSelectRef = useRef(null);
@@ -212,15 +198,31 @@ export function ShotVideoWorkspace({
       .filter((group) => group.candidates.length > 0),
     [candidateSequenceById, videoRuns],
   );
+  const archivedCandidateGroups = useMemo(
+    () => videoRuns
+      .map((run) => ({
+        run,
+        candidates: (run.candidates || [])
+          .filter((candidate) => (
+            candidate.status === "archived"
+            && (
+              candidate.archive_reason === "user_deleted"
+              || candidate.quality_report?.archive_reason === "user_deleted"
+            )
+          ))
+          .sort((left, right) => left.ordinal - right.ordinal)
+          .map((candidate) => ({
+            ...candidate,
+            generationRun: run,
+            sequence: candidateSequenceById.get(candidate.id),
+          })),
+      }))
+      .filter((group) => group.candidates.length > 0),
+    [candidateSequenceById, videoRuns],
+  );
   const candidates = useMemo(
     () => candidateGroups.flatMap((group) => group.candidates),
     [candidateGroups],
-  );
-  const latestCandidateGroup = candidateGroups[0] || null;
-  const historicalCandidateGroups = candidateGroups.slice(1);
-  const historicalCandidateCount = historicalCandidateGroups.reduce(
-    (total, group) => total + group.candidates.length,
-    0,
   );
   const referenceFrames = useMemo(
     () => approvedVisualBeatFrames(shotDetail),
@@ -326,10 +328,6 @@ export function ShotVideoWorkspace({
   }, [initialCandidateId, latestRun?.id, plan?.id]);
 
   useEffect(() => {
-    setCandidateHistoryExpanded(false);
-  }, [plan?.id]);
-
-  useEffect(() => {
     if (compatibleVideoModels.length === 0 || selectedModel) return;
     const fallback = compatibleVideoModels[0];
     setVideoDraft((current) => ({
@@ -406,72 +404,6 @@ export function ShotVideoWorkspace({
     }
   }
 
-  function renderVideoCandidateGroup(group, title, historical = false) {
-    if (!group) return null;
-    const modelLabel = (
-      group.run.model_display_name
-      || group.run.model_alias
-      || group.run.model
-      || "未记录模型"
-    );
-    const batchTime = formatCandidateBatchTime(
-      group.run.completed_at || group.run.created_at,
-    );
-    return (
-      <div
-        aria-label={`${title}，${group.candidates.length} 个视频，${modelLabel}，${batchTime}`}
-        className={`shot-candidate-strip-group${historical ? " historical" : ""}`}
-        key={group.run.id}
-        role="group"
-      >
-        <div className="shot-candidate-batch-label">
-          <strong>{title}</strong>
-          <span>{group.candidates.length} 个</span>
-          <small>{batchTime}</small>
-        </div>
-        <div className="shot-candidate-strip-items">
-          {group.candidates.map((candidate) => {
-            const isApproved = (
-              plan?.video_status === "approved"
-              && candidate.id === plan?.approved_video_candidate_id
-            );
-            const isPreviewing = candidate.id === displayedCandidate?.id;
-            const sequence = candidate.sequence || candidate.ordinal;
-            const stateLabel = isApproved
-              ? "已采用"
-              : candidate.status === "selected"
-                ? "已选择"
-                : "可采用";
-            return (
-              <button
-                aria-label={`视频 ${sequence}，${title}，${stateLabel}`}
-                aria-pressed={isPreviewing}
-                className={[
-                  "shot-candidate-tile",
-                  isPreviewing ? "previewing active" : "",
-                  isApproved ? "approved" : "",
-                ].filter(Boolean).join(" ")}
-                disabled={busy}
-                key={candidate.id}
-                onClick={() => setDisplayedCandidateId(candidate.id)}
-                title={`${modelLabel} · ${batchTime} · ${stateLabel}`}
-                type="button"
-              >
-                <span className="shot-candidate-thumb">
-                  <img
-                    alt={`视频 ${sequence} 缩略图`}
-                    src={resolveUrl(candidate.thumbnail_url)}
-                  />
-                  <small>{formatVideoDuration(candidate.duration_seconds || 0)}s</small>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <section className="shot-video-workspace">
       <header className="shot-video-stage-header">
@@ -481,10 +413,7 @@ export function ShotVideoWorkspace({
         </div>
         <div className="shot-video-gate">
           <span>
-            {gate?.prepared_shot_count || 0} / {gate?.required_shot_count || 0} 可交接
-            {(gate?.approved_shot_count || 0) > (gate?.prepared_shot_count || 0)
-              ? ` · ${gate.approved_shot_count} 个已确认`
-              : ""}
+            {gate?.approved_shot_count || 0} / {gate?.required_shot_count || 0} 已采用
           </span>
           <button
             className="primary-button compact"
@@ -492,7 +421,7 @@ export function ShotVideoWorkspace({
             onClick={onAdvance}
             type="button"
           >
-            {advanced ? "已进入剪辑合成" : "进入剪辑合成"}
+            {advanced ? "已进入视频剪辑" : "进入视频剪辑"}
             <ArrowRight size={16} />
           </button>
         </div>
@@ -544,12 +473,6 @@ export function ShotVideoWorkspace({
                         )}
                         <b>图{beat.index}</b>
                       </div>
-                      <figcaption>
-                        <strong>{beat.title}</strong>
-                        <small>
-                          {Math.round(beat.start_ratio * 100)}%–{Math.round(beat.end_ratio * 100)}%
-                        </small>
-                      </figcaption>
                     </figure>
                     {index < referenceFrames.length - 1 && (
                       <span className="shot-video-storyboard-transition">
@@ -599,76 +522,17 @@ export function ShotVideoWorkspace({
             </article>
           </div>
 
-          {latestCandidateGroup && (
-            <section
-              aria-label="视频候选历史"
-              className="shot-candidate-library shot-video-candidate-library"
-            >
-              <header className="shot-candidate-library-heading">
-                <div>
-                  <strong>视频候选</strong>
-                  <small>共 {candidates.length} 个 · {candidateGroups.length} 个批次，点击缩略图切换预览</small>
-                </div>
-                {historicalCandidateCount > 0 && (
-                  <button
-                    aria-expanded={candidateHistoryExpanded}
-                    className={candidateHistoryExpanded ? "expanded" : ""}
-                    onClick={() => setCandidateHistoryExpanded((value) => !value)}
-                    type="button"
-                  >
-                    历史 {historicalCandidateCount} 个
-                    <ArrowDown size={14} />
-                  </button>
-                )}
-              </header>
-              <div
-                aria-label="视频候选，可横向滚动"
-                className="shot-candidate-strip"
-                role="region"
-                tabIndex={0}
-              >
-                {renderVideoCandidateGroup(latestCandidateGroup, "最新")}
-                {candidateHistoryExpanded && historicalCandidateGroups.map(
-                  (group, index) => renderVideoCandidateGroup(
-                    group,
-                    `历史 ${index + 1}`,
-                    true,
-                  ),
-                )}
-              </div>
-              {displayedCandidate && (
-                <div className="shot-candidate-current-detail">
-                  <strong>当前预览 · 视频 #{displayedCandidate.sequence || displayedCandidate.ordinal}</strong>
-                  <span>
-                    {displayedCandidateRun?.model_display_name
-                      || displayedCandidateRun?.model_alias
-                      || displayedCandidateRun?.model
-                      || "未记录模型"}
-                    {" · "}{formatCandidateBatchTime(
-                      displayedCandidateRun?.completed_at || displayedCandidateRun?.created_at,
-                    )}
-                    {" · "}{formatVideoDuration(displayedCandidate.duration_seconds || 0)} 秒
-                    {" · "}{displayedCandidateCostLabel}
-                  </span>
-                  <em className={
-                    plan.video_status === "approved"
-                    && plan.approved_video_candidate_id === displayedCandidate.id
-                      ? "approved"
-                      : displayedCandidate.status === "selected"
-                        ? "selected"
-                        : ""
-                  }>
-                    {plan.video_status === "approved"
-                    && plan.approved_video_candidate_id === displayedCandidate.id
-                      ? "已采用"
-                      : displayedCandidate.status === "selected"
-                        ? "已选择"
-                        : "可采用"}
-                  </em>
-                </div>
-              )}
-            </section>
-          )}
+          <VideoCandidateLibrary
+            archivedCandidateGroups={archivedCandidateGroups}
+            busy={busy}
+            candidateGroups={candidateGroups}
+            displayedCandidate={displayedCandidate}
+            onArchiveCandidates={onArchiveCandidates}
+            onPreviewCandidate={setDisplayedCandidateId}
+            onRestoreCandidates={onRestoreCandidates}
+            plan={plan}
+            resolveUrl={resolveUrl}
+          />
 
           <div className="shot-video-prompt-panel">
             {latestFailure && !activeRun && (
@@ -731,9 +595,10 @@ export function ShotVideoWorkspace({
                 value={videoDraft.videoPrompt}
               />
             </label>
-            <label>
-              <span>视频负面约束</span>
+            <details className="shot-video-negative-constraints">
+              <summary>视频负面约束（可选）</summary>
               <textarea
+                aria-label="视频负面约束"
                 className="prompt-editor-textarea"
                 maxLength={3000}
                 onChange={(event) => setVideoDraft((current) => ({
@@ -744,7 +609,7 @@ export function ShotVideoWorkspace({
                 rows={3}
                 value={videoDraft.negativeConstraints}
               />
-            </label>
+            </details>
             <div className="shot-video-generation-options">
               <label className="shot-video-generation-field">
                 <span className="shot-video-field-heading">视频模型</span>
@@ -894,19 +759,6 @@ export function ShotVideoWorkspace({
             </footer>
           )}
 
-          {displayedCandidate
-            && plan.video_status === "approved"
-            && plan.approved_video_candidate_id === displayedCandidate.id && (
-              <VideoPreparationPanel
-                busy={busy}
-                candidate={displayedCandidate}
-                onPrepare={onPrepare}
-                preparation={shotDetail.video_preparation}
-                resolveUrl={resolveUrl}
-                shotIndex={plan.index}
-                timelineDuration={plan.duration_seconds}
-              />
-            )}
         </div>
       </div>
 

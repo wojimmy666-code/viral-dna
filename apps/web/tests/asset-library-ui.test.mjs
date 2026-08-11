@@ -1,13 +1,42 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  assetLibraryView,
+  assetListFolderForView,
   buildAssetListQuery,
   buildAssetPaginationItems,
   buildPostUploadView,
   formatAssetSize,
   normalizeAssetTags,
 } from "../src/asset-library-ui.js";
+
+test("uses the all-assets route as a folder home and flattens active searches", () => {
+  assert.equal(assetLibraryView(), "home");
+  assert.equal(assetListFolderForView({ folderId: "" }), "unfiled");
+  assert.equal(assetLibraryView({ folderId: "folder-1" }), "folder");
+  assert.equal(assetListFolderForView({ folderId: "folder-1" }), "folder-1");
+  assert.equal(assetLibraryView({ folderId: "unfiled" }), "unfiled");
+  assert.equal(assetLibraryView({ query: "主播" }), "search");
+  assert.equal(assetLibraryView({ type: "person" }), "search");
+  assert.equal(assetLibraryView({ includeArchived: true }), "search");
+  assert.equal(assetListFolderForView({ query: "主播" }), "");
+});
+
+test("asset library home presents folder covers before unfiled assets", () => {
+  const source = readFileSync(new URL("../src/AssetLibrary.jsx", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../src/asset-library.css", import.meta.url), "utf8");
+
+  assert.match(source, /className="asset-folder-card-grid"/);
+  assert.match(source, /<FolderCover cover=\{folder\.cover\}/);
+  assert.match(source, /cover\?\.thumbnail_url/);
+  assert.match(source, /<h2 id="asset-unfiled-heading">未分类资产<\/h2>/);
+  assert.match(source, /cover_asset_id: coverAssetId \|\| null/);
+  assert.match(source, /设为所在目录封面/);
+  assert.match(styles, /\.asset-folder-card-cover > img[\s\S]*?object-fit: contain/);
+  assert.match(styles, /\.asset-cover-option-visual img[\s\S]*?object-fit: contain/);
+});
 
 test("uploaded assets return to a clean list view without opening details", () => {
   assert.deepEqual(buildPostUploadView({ id: "asset-1", folder_id: "folder-1" }), {

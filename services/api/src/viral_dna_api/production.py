@@ -32,12 +32,15 @@ from .models import (
     ApprovalEvent,
     CandidateActionResponse,
     CandidateApprovalRequest,
+    CandidateBatchLifecycleRequest,
+    CandidateBatchLifecycleResponse,
     CandidateSelectRequest,
     ChangeImpactRequest,
     ChangeImpactResponse,
     EditingHandoffClip,
     EditingHandoffManifest,
     GenerationCandidate,
+    GenerationCandidateArchiveReason,
     GenerationCandidateResponse,
     GenerationCandidateStatus,
     GenerationCostSource,
@@ -48,6 +51,7 @@ from .models import (
     ImageGenerationCreate,
     ImageGenerationInputMode,
     ProductionAdvanceRequest,
+    ProductionAnalysisUpdatePreview,
     ProductionBranchCreate,
     ProductionChangeKind,
     ProductionGateStatus,
@@ -56,10 +60,14 @@ from .models import (
     ProductionProjectDetail,
     ProductionProjectStatus,
     ProductionProjectUpdate,
+    ProductionPromptFieldDiff,
+    ProductionPromptSyncChoice,
+    ProductionPromptSyncRequest,
     ProductionRevision,
     ProductionRevisionDetail,
     ProductionRevisionResponse,
     ProductionRunStatus,
+    ProductionShotPromptDiff,
     ProductionStep,
     PromptAssetMention,
     ReferenceAsset,
@@ -1323,6 +1331,43 @@ class ProductionService:
             # Notification delivery is secondary and must never change generation state.
             return
 
+    async def _notify_candidate_lifecycle(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        *,
+        affected_count: int,
+        restored: bool,
+    ) -> None:
+        if self.notification_publisher is None:
+            return
+        action = "恢复" if restored else "移入回收站"
+        try:
+            await self.notification_publisher.publish(
+                category="production",
+                level="success",
+                status="succeeded",
+                title=f"已{action} {affected_count} 个视频候选",
+                message=(
+                    f"分镜 {plan.index} 的候选已恢复为可采用状态。"
+                    if restored
+                    else f"分镜 {plan.index} 的候选文件仍会保留，可从回收站恢复。"
+                ),
+                event_key=(
+                    f"video-candidates:{project.current_revision_id}:"
+                    f"{'restore' if restored else 'archive'}"
+                ),
+                action_kind="production_shot",
+                action_label="查看分镜",
+                action_payload={
+                    "project_id": str(project.id),
+                    "shot_plan_id": str(plan.id),
+                    "candidate_id": "",
+                },
+            )
+        except Exception:
+            return
+
     async def create_project(
         self,
         record_id: UUID,
@@ -1354,6 +1399,7 @@ class ProductionService:
             record_id=record.id,
             video_id=video.id,
             base_analysis_id=analysis.id,
+            prompt_source_analysis_id=analysis.id,
             source_prompt_package_id=report.prompt_package.id,
             name=_simplified_text(
                 payload.name or default_name,
@@ -1562,6 +1608,10 @@ class ProductionService:
             record_id=source_project.record_id,
             video_id=frozen_project.video_id,
             base_analysis_id=frozen_project.base_analysis_id,
+            prompt_source_analysis_id=(
+                frozen_project.prompt_source_analysis_id
+                or frozen_project.base_analysis_id
+            ),
             source_prompt_package_id=frozen_project.source_prompt_package_id,
             source_project_id=source_project.id,
             source_revision_id=source_revision.id,
@@ -2805,6 +2855,350 @@ class ProductionService:
             ),
         )
 
+    async def preview_analysis_update(
+        self,
+        project_id: UUID,
+        target_analysis_id: UUID | None = None,
+    ) -> ProductionAnalysisUpdatePreview:
+        project = await self._require_project(project_id)
+        record = await self.repository.get_record(project.record_id)
+        if record is None:
+            raise _fail(404, "record_not_found", "创作方案所属分析记录不存在")
+        target_id = target_analysis_id or record.latest_analysis_id or project.base_analysis_id
+        prompt_source_id = project.prompt_source_analysis_id or project.base_analysis_id
+        _, prompt_base_report = await self._completed_analysis(record, prompt_source_id)
+        _, structural_base_report = await self._completed_analysis(
+            record,
+            project.base_analysis_id,
+        )
+        _, target_report = await self._completed_analysis(record, target_id)
+        plans = await self.repository.list_shot_plans(project.id)
+        if not plans:
+            project, plans = await self._ensure_project_shots(project)
+        return self._build_analysis_update_preview(
+            project,
+            prompt_base_report,
+            target_report,
+            plans,
+            structural_base_report=structural_base_report,
+        )
+
+    async def sync_analysis_prompts(
+        self,
+        project_id: UUID,
+        payload: ProductionPromptSyncRequest,
+    ) -> ProductionProjectDetail:
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            record = await self.repository.get_record(project.record_id)
+            if record is None:
+                raise _fail(404, "record_not_found", "创作方案所属分析记录不存在")
+            prompt_source_id = project.prompt_source_analysis_id or project.base_analysis_id
+            _, prompt_base_report = await self._completed_analysis(
+                record,
+                prompt_source_id,
+            )
+            _, structural_base_report = await self._completed_analysis(
+                record,
+                project.base_analysis_id,
+            )
+            _, target_report = await self._completed_analysis(
+                record,
+                payload.target_analysis_id,
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            preview = self._build_analysis_update_preview(
+                project,
+                prompt_base_report,
+                target_report,
+                plans,
+                structural_base_report=structural_base_report,
+            )
+            if not preview.update_available:
+                raise _fail(409, "analysis_prompts_current", "当前方案提示词已经是最新版本")
+            if not preview.compatible:
+                raise _fail(
+                    409,
+                    "analysis_structure_changed",
+                    "新分析没有可安全一一对应的提示词字段，请等待结构同步功能",
+                )
+
+            valid_fields = {
+                (shot.shot_plan_id, field.field_key): field
+                for shot in preview.shots
+                for field in shot.fields
+            }
+            decisions = {
+                (item.shot_plan_id, item.field_key): item.choice
+                for item in payload.decisions
+            }
+            unknown = set(decisions) - set(valid_fields)
+            if unknown:
+                raise _fail(
+                    422,
+                    "invalid_prompt_sync_decision",
+                    "提示词同步选择已失效，请刷新差异后重试",
+                )
+
+            target_templates = {
+                item.source_shot_id: item
+                for item in self._initial_shot_plans(project, target_report, uuid4())
+            }
+            revision_id = uuid4()
+            now = utc_now()
+            changed_plans: list[ShotPlan] = []
+            next_plans: list[ShotPlan] = []
+            synced_field_count = 0
+            preview_by_plan = {item.shot_plan_id: item for item in preview.shots}
+
+            for plan in plans:
+                shot_diff = preview_by_plan.get(plan.id)
+                target = target_templates.get(plan.source_shot_id)
+                if shot_diff is None or target is None:
+                    next_plans.append(plan)
+                    continue
+
+                next_beats = list(plan.visual_beats)
+                next_video_prompt = plan.video_prompt
+                plan_changed = False
+                target_beats = {
+                    item.index: item for item in target.visual_beats
+                }
+                for field in shot_diff.fields:
+                    choice = decisions.get(
+                        (plan.id, field.field_key),
+                        field.suggested_choice,
+                    )
+                    if choice != ProductionPromptSyncChoice.USE_LATEST:
+                        continue
+                    if field.field_kind == "video_prompt":
+                        if next_video_prompt != field.latest_value:
+                            next_video_prompt = field.latest_value
+                            plan_changed = True
+                            synced_field_count += 1
+                        continue
+                    beat_index = field.visual_beat_index
+                    target_beat = target_beats.get(beat_index or -1)
+                    if target_beat is None:
+                        continue
+                    next_beats = [
+                        beat.model_copy(
+                            update={
+                                "image_prompt": field.latest_value,
+                                "updated_at": now,
+                            }
+                        )
+                        if beat.index == beat_index
+                        else beat
+                        for beat in next_beats
+                    ]
+                    plan_changed = True
+                    synced_field_count += 1
+
+                if plan_changed:
+                    updated = _sync_shot_visual_beats(
+                        plan,
+                        next_beats,
+                        revision_id=revision_id,
+                        invalidate_video=False,
+                    ).model_copy(
+                        update={
+                            "video_prompt": next_video_prompt,
+                            "revision_id": revision_id,
+                            "updated_at": now,
+                        }
+                    )
+                    changed_plans.append(updated)
+                    next_plans.append(updated)
+                else:
+                    next_plans.append(plan)
+
+            updated_project = project.model_copy(
+                update={
+                    "prompt_source_analysis_id": target_report.analysis_id,
+                    "source_prompt_package_id": target_report.prompt_package.id,
+                    "updated_at": now,
+                }
+            )
+            updated_project, revision = await self._prepare_revision(
+                updated_project,
+                ProductionChangeKind.ANALYSIS_PROMPTS_SYNCED,
+                f"同步新分析提示词，共更新 {synced_field_count} 个字段",
+                revision_id=revision_id,
+                report=target_report,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                updated_project,
+                revision,
+                shot_plans=changed_plans,
+            )
+        return await self.get_project(project_id)
+
+    def _build_analysis_update_preview(
+        self,
+        project: ProductionProject,
+        base_report: AnalysisReport,
+        target_report: AnalysisReport,
+        plans: list[ShotPlan],
+        *,
+        structural_base_report: AnalysisReport | None = None,
+    ) -> ProductionAnalysisUpdatePreview:
+        if project.current_revision_id is None:
+            raise _fail(409, "revision_required", "创作方案尚无可同步的版本")
+
+        base_templates = {
+            item.source_shot_id: item
+            for item in self._initial_shot_plans(project, base_report, uuid4())
+        }
+        target_templates = {
+            item.source_shot_id: item
+            for item in self._initial_shot_plans(project, target_report, uuid4())
+        }
+        current_by_source = {
+            item.source_shot_id: item
+            for item in plans
+            if item.source_kind == ShotSourceKind.ANALYSIS
+        }
+        structural_report = structural_base_report or base_report
+        structural_templates = {
+            item.source_shot_id: item
+            for item in self._initial_shot_plans(project, structural_report, uuid4())
+        }
+        base_ids = set(structural_templates)
+        target_ids = set(target_templates)
+        structural_messages: list[str] = []
+        added = sorted(target_ids - base_ids)
+        removed = sorted(base_ids - target_ids)
+        if added:
+            structural_messages.append(f"新分析增加 {len(added)} 个分镜")
+        if removed:
+            structural_messages.append(f"新分析减少 {len(removed)} 个分镜")
+        missing_current = sorted(base_ids - set(current_by_source))
+        if missing_current:
+            structural_messages.append(f"当前方案缺少 {len(missing_current)} 个原分析分镜")
+
+        target_titles = {item.id: item.title for item in target_report.shots}
+        shot_diffs: list[ProductionShotPromptDiff] = []
+        automatic_count = 0
+        conflict_count = 0
+
+        for source_id in sorted(
+            set(base_templates) & target_ids & set(current_by_source),
+            key=lambda value: current_by_source[value].index,
+        ):
+            base = base_templates[source_id]
+            current = current_by_source[source_id]
+            latest = target_templates[source_id]
+            base_beats = {item.index: item for item in base.visual_beats}
+            current_beats = {item.index: item for item in current.visual_beats}
+            latest_beats = {item.index: item for item in latest.visual_beats}
+            if set(base_beats) != set(latest_beats) or set(base_beats) != set(current_beats):
+                structural_messages.append(
+                    f"分镜 {current.index} 的画面数量或顺序发生变化"
+                )
+
+            fields: list[ProductionPromptFieldDiff] = []
+            for beat_index in sorted(set(base_beats) & set(current_beats) & set(latest_beats)):
+                if set(base_beats) != set(latest_beats) or set(base_beats) != set(current_beats):
+                    continue
+                base_value = base_beats[beat_index].image_prompt
+                current_value = current_beats[beat_index].image_prompt
+                latest_value = latest_beats[beat_index].image_prompt
+                if self._same_prompt(current_value, latest_value):
+                    continue
+                manually_edited = not self._same_prompt(current_value, base_value)
+                suggested = (
+                    ProductionPromptSyncChoice.KEEP_CURRENT
+                    if manually_edited
+                    else ProductionPromptSyncChoice.USE_LATEST
+                )
+                fields.append(
+                    ProductionPromptFieldDiff(
+                        field_key=f"visual_beat:{beat_index}:image_prompt",
+                        field_kind="image_prompt",
+                        label=f"画面 {beat_index} 图片提示词",
+                        visual_beat_index=beat_index,
+                        base_value=base_value,
+                        current_value=current_value,
+                        latest_value=latest_value,
+                        manually_edited=manually_edited,
+                        suggested_choice=suggested,
+                    )
+                )
+                if suggested == ProductionPromptSyncChoice.KEEP_CURRENT:
+                    conflict_count += 1
+                else:
+                    automatic_count += 1
+
+            if not self._same_prompt(current.video_prompt, latest.video_prompt):
+                manually_edited = not self._same_prompt(
+                    current.video_prompt,
+                    base.video_prompt,
+                )
+                suggested = (
+                    ProductionPromptSyncChoice.KEEP_CURRENT
+                    if manually_edited
+                    else ProductionPromptSyncChoice.USE_LATEST
+                )
+                fields.append(
+                    ProductionPromptFieldDiff(
+                        field_key="video_prompt",
+                        field_kind="video_prompt",
+                        label="视频提示词",
+                        base_value=base.video_prompt,
+                        current_value=current.video_prompt,
+                        latest_value=latest.video_prompt,
+                        manually_edited=manually_edited,
+                        suggested_choice=suggested,
+                    )
+                )
+                if suggested == ProductionPromptSyncChoice.KEEP_CURRENT:
+                    conflict_count += 1
+                else:
+                    automatic_count += 1
+
+            if fields:
+                shot_diffs.append(
+                    ProductionShotPromptDiff(
+                        shot_plan_id=current.id,
+                        source_shot_id=source_id,
+                        index=current.index,
+                        title=target_titles.get(source_id) or f"分镜 {current.index}",
+                        fields=fields,
+                    )
+                )
+
+        structural_messages = list(dict.fromkeys(structural_messages))
+        changed_field_count = automatic_count + conflict_count
+        prompt_source_id = project.prompt_source_analysis_id or project.base_analysis_id
+        target_is_new = target_report.analysis_id != prompt_source_id
+        structural_change_detected = bool(structural_messages)
+        return ProductionAnalysisUpdatePreview(
+            project_id=project.id,
+            current_revision_id=project.current_revision_id,
+            base_analysis_id=project.base_analysis_id,
+            prompt_source_analysis_id=prompt_source_id,
+            target_analysis_id=target_report.analysis_id,
+            target_prompt_package_id=target_report.prompt_package.id,
+            target_generated_at=target_report.generated_at,
+            update_available=(target_is_new and changed_field_count > 0)
+            or structural_change_detected,
+            compatible=changed_field_count > 0,
+            structural_change_detected=structural_change_detected,
+            structural_change_messages=structural_messages,
+            changed_field_count=changed_field_count,
+            automatic_field_count=automatic_count,
+            conflict_field_count=conflict_count,
+            shots=shot_diffs,
+        )
+
+    @staticmethod
+    def _same_prompt(left: str, right: str) -> bool:
+        return " ".join(left.split()) == " ".join(right.split())
+
     async def _restore_legacy_archived_video_candidates(
         self,
         project: ProductionProject,
@@ -2824,6 +3218,7 @@ class ProductionService:
             for candidate in await self.repository.list_generation_candidates(run.id):
                 if (
                     candidate.status != GenerationCandidateStatus.ARCHIVED
+                    or candidate.archive_reason is not None
                     or candidate.quality_report.get("archive_reason")
                 ):
                     continue
@@ -5146,6 +5541,226 @@ class ProductionService:
         await self._require_project(run.project_id)
         return await self._run_response(run)
 
+    async def archive_video_candidates(
+        self,
+        payload: CandidateBatchLifecycleRequest,
+        *,
+        actor_account_id: UUID | None = None,
+    ) -> CandidateBatchLifecycleResponse:
+        first_candidate = await self._require_candidate(payload.candidate_ids[0])
+        first_run = await self._require_run(first_candidate.generation_run_id)
+        lock = await self._project_lock(first_run.project_id)
+        async with lock:
+            project, plan, candidates = await self._load_video_candidate_batch(
+                payload.candidate_ids
+            )
+            self._require_expected_revision(project, payload.expected_revision_id)
+
+            approved_candidate_id = plan.approved_video_candidate_id
+            if any(item.id == approved_candidate_id for item in candidates):
+                raise _fail(
+                    409,
+                    "approved_video_candidate_archive_forbidden",
+                    "已采用的视频不能移入回收站，请先取消采用或改用其他视频",
+                )
+            unavailable = [
+                item
+                for item in candidates
+                if item.status
+                not in {
+                    GenerationCandidateStatus.READY,
+                    GenerationCandidateStatus.SELECTED,
+                }
+            ]
+            if unavailable:
+                raise _fail(
+                    409,
+                    "video_candidate_archive_unavailable",
+                    "所选视频包含已退回或已归档候选，请刷新后重试",
+                )
+
+            now = utc_now()
+            revision_id = uuid4()
+            candidate_ids = {item.id for item in candidates}
+            updated_candidates: list[GenerationCandidate] = []
+            for candidate in candidates:
+                quality_report = dict(candidate.quality_report)
+                quality_report["archive_reason"] = (
+                    GenerationCandidateArchiveReason.USER_DELETED.value
+                )
+                updated_candidates.append(
+                    candidate.model_copy(
+                        update={
+                            "status": GenerationCandidateStatus.ARCHIVED,
+                            "archived_at": now,
+                            "archived_by_account_id": actor_account_id,
+                            "archive_reason": (
+                                GenerationCandidateArchiveReason.USER_DELETED
+                            ),
+                            "quality_report": quality_report,
+                        }
+                    )
+                )
+
+            remaining_candidates: list[GenerationCandidate] = []
+            for run in await self.repository.list_generation_runs(project.id, plan.id):
+                if run.kind != GenerationKind.VIDEO:
+                    continue
+                remaining_candidates.extend(
+                    item
+                    for item in await self.repository.list_generation_candidates(run.id)
+                    if item.id not in candidate_ids
+                    and item.status
+                    in {
+                        GenerationCandidateStatus.READY,
+                        GenerationCandidateStatus.SELECTED,
+                    }
+                )
+
+            next_video_status = plan.video_status
+            if (
+                any(item.status == GenerationCandidateStatus.SELECTED for item in candidates)
+                and plan.video_status != WorkflowItemStatus.APPROVED
+            ):
+                next_video_status = (
+                    WorkflowItemStatus.REVIEW_REQUIRED
+                    if remaining_candidates
+                    else WorkflowItemStatus.READY
+                )
+            updated_plan = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "video_status": next_video_status,
+                    "updated_at": now,
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [
+                updated_plan if item.id == updated_plan.id else item for item in plans
+            ]
+            next_project = project.model_copy(update={"updated_at": now})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.VIDEO_CANDIDATES_ARCHIVED,
+                f"将分镜 {plan.index} 的 {len(candidates)} 个视频候选移入回收站",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=updated_candidates,
+            )
+
+        await self._notify_candidate_lifecycle(
+            next_project,
+            updated_plan,
+            affected_count=len(updated_candidates),
+            restored=False,
+        )
+        return CandidateBatchLifecycleResponse(
+            project_id=next_project.id,
+            shot_plan_id=updated_plan.id,
+            current_revision_id=next_project.current_revision_id,
+            candidates=[self._candidate_response(item) for item in updated_candidates],
+            affected_count=len(updated_candidates),
+        )
+
+    async def restore_video_candidates(
+        self,
+        payload: CandidateBatchLifecycleRequest,
+    ) -> CandidateBatchLifecycleResponse:
+        first_candidate = await self._require_candidate(payload.candidate_ids[0])
+        first_run = await self._require_run(first_candidate.generation_run_id)
+        lock = await self._project_lock(first_run.project_id)
+        async with lock:
+            project, plan, candidates = await self._load_video_candidate_batch(
+                payload.candidate_ids
+            )
+            self._require_expected_revision(project, payload.expected_revision_id)
+
+            restorable = all(
+                item.status == GenerationCandidateStatus.ARCHIVED
+                and (
+                    item.archive_reason
+                    == GenerationCandidateArchiveReason.USER_DELETED
+                    or item.quality_report.get("archive_reason")
+                    == GenerationCandidateArchiveReason.USER_DELETED.value
+                )
+                for item in candidates
+            )
+            if not restorable:
+                raise _fail(
+                    409,
+                    "video_candidate_restore_unavailable",
+                    "仅能恢复由用户移入回收站的视频候选",
+                )
+
+            now = utc_now()
+            revision_id = uuid4()
+            updated_candidates: list[GenerationCandidate] = []
+            for candidate in candidates:
+                quality_report = dict(candidate.quality_report)
+                quality_report.pop("archive_reason", None)
+                updated_candidates.append(
+                    candidate.model_copy(
+                        update={
+                            "status": GenerationCandidateStatus.READY,
+                            "archived_at": None,
+                            "archived_by_account_id": None,
+                            "archive_reason": None,
+                            "quality_report": quality_report,
+                        }
+                    )
+                )
+
+            next_video_status = plan.video_status
+            if plan.video_status not in {
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }:
+                next_video_status = WorkflowItemStatus.REVIEW_REQUIRED
+            updated_plan = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "video_status": next_video_status,
+                    "updated_at": now,
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [
+                updated_plan if item.id == updated_plan.id else item for item in plans
+            ]
+            next_project = project.model_copy(update={"updated_at": now})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.VIDEO_CANDIDATES_RESTORED,
+                f"恢复分镜 {plan.index} 的 {len(candidates)} 个视频候选",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=updated_candidates,
+            )
+
+        await self._notify_candidate_lifecycle(
+            next_project,
+            updated_plan,
+            affected_count=len(updated_candidates),
+            restored=True,
+        )
+        return CandidateBatchLifecycleResponse(
+            project_id=next_project.id,
+            shot_plan_id=updated_plan.id,
+            current_revision_id=next_project.current_revision_id,
+            candidates=[self._candidate_response(item) for item in updated_candidates],
+            affected_count=len(updated_candidates),
+        )
+
     async def select_candidate(
         self,
         candidate_id: UUID,
@@ -6094,6 +6709,17 @@ class ProductionService:
                         or preparation.warning_messages
                     ):
                         quality_warnings.append(item)
+                elif item.approved_video_candidate_id is not None:
+                    candidate = await self.repository.get_generation_candidate(
+                        item.approved_video_candidate_id
+                    )
+                    quality_report = candidate.quality_report if candidate is not None else {}
+                    if (
+                        not quality_report
+                        or quality_report.get("status") == VideoQualityStatus.WARNING.value
+                        or quality_report.get("warnings")
+                    ):
+                        quality_warnings.append(item)
             stale = [
                 item for item in required
                 if item.video_status == WorkflowItemStatus.STALE
@@ -6122,10 +6748,6 @@ class ProductionService:
         pending = len(required) - len(approved)
         if pending:
             blockers.append(f"仍有 {pending} 个{pending_label}未审批")
-        if video_stage:
-            preparation_pending = len(approved) - len(prepared)
-            if preparation_pending:
-                blockers.append(f"仍有 {preparation_pending} 个已确认视频未完成剪辑准备")
         if stale:
             blockers.append(f"有 {len(stale)} 个分镜结果已过期")
         return ProductionGateStatus(
@@ -6152,7 +6774,7 @@ class ProductionService:
             raise _fail(
                 404,
                 "editing_handoff_missing",
-                "尚未生成剪辑交接清单，请先完成全部必需视频的剪辑准备",
+                "尚未生成剪辑交接清单，请先确认全部必需视频并进入视频剪辑",
             )
         try:
             manifest = EditingHandoffManifest.model_validate_json(
@@ -6186,7 +6808,6 @@ class ProductionService:
             key=lambda item: item.index,
         )
         clips: list[EditingHandoffClip] = []
-        preparations: list[VideoClipPreparation] = []
         timeline_cursor = 0.0
         for plan in plans:
             if not await self._has_valid_approved_video_output(project, plan):
@@ -6194,69 +6815,152 @@ class ProductionService:
             preparation = await self.repository.get_video_clip_preparation(plan.id)
             if preparation is not None:
                 preparation = _apply_video_preparation_policy(preparation)
-            if (
-                preparation is None
-                or preparation.candidate_id != plan.approved_video_candidate_id
-                or preparation.status != VideoClipPreparationStatus.READY
-            ):
+            legacy_preparation = (
+                preparation
+                if preparation is not None
+                and preparation.candidate_id == plan.approved_video_candidate_id
+                and preparation.status == VideoClipPreparationStatus.READY
+                else None
+            )
+            candidate = await self.repository.get_generation_candidate(
+                plan.approved_video_candidate_id
+            )
+            if candidate is None:
                 if plan.required:
                     raise _fail(
                         409,
-                        "editing_handoff_incomplete",
-                        f"分镜 {plan.index} 尚未完成剪辑准备",
+                        "editing_handoff_candidate_missing",
+                        f"分镜 {plan.index} 的已采用视频不存在",
                     )
                 continue
+
+            candidate_duration = round(
+                float(candidate.duration_seconds or plan.duration_seconds),
+                3,
+            )
+            if legacy_preparation is not None:
+                trim_in = legacy_preparation.trim_in_seconds
+                trim_out = legacy_preparation.trim_out_seconds
+                timeline_duration = legacy_preparation.timeline_duration_seconds
+                playback_rate = legacy_preparation.video_playback_rate
+                cover_url = f"/api/v1/production-shots/{plan.id}/video-preparation/cover"
+                cover_timestamp = legacy_preparation.cover_timestamp_seconds
+                audio_mode = legacy_preparation.audio_mode
+                source_audio_start = legacy_preparation.source_audio_start_seconds
+                source_audio_end = legacy_preparation.source_audio_end_seconds
+                transcript_cues = legacy_preparation.transcript_cues
+                subtitle_cues = legacy_preparation.subtitle_cues
+                quality_status = legacy_preparation.quality_status
+                quality_report = legacy_preparation.quality_report
+                blocker_messages = legacy_preparation.blocker_messages
+                warning_messages = legacy_preparation.warning_messages
+            else:
+                trim_in = 0.0
+                trim_out = candidate_duration
+                timeline_duration = round(float(plan.duration_seconds), 3)
+                playback_rate, duration_alignment = playback_alignment(
+                    candidate_duration,
+                    timeline_duration,
+                )
+                cover_url = f"/api/v1/generation-candidates/{candidate.id}/thumbnail"
+                cover_timestamp = round(candidate_duration / 2, 3)
+                audio_mode = (
+                    VideoClipAudioMode.SOURCE
+                    if source_audio_url
+                    else VideoClipAudioMode.MUTED
+                )
+                source_audio_start = round(plan.start_seconds, 3)
+                source_audio_end = round(plan.end_seconds, 3)
+                evidence = report.evidence_timeline
+                transcript_cues = (
+                    map_timed_text(
+                        evidence.transcript_segments,
+                        source_start_seconds=plan.start_seconds,
+                        source_end_seconds=plan.end_seconds,
+                        kind="transcript",
+                    )
+                    if evidence is not None
+                    else []
+                )
+                subtitle_cues = (
+                    map_timed_text(
+                        evidence.subtitle_cues,
+                        source_start_seconds=plan.start_seconds,
+                        source_end_seconds=plan.end_seconds,
+                        kind="subtitle",
+                    )
+                    if evidence is not None
+                    else []
+                )
+                quality_report = candidate.quality_report or {}
+                try:
+                    quality_status = VideoQualityStatus(
+                        quality_report.get("status", VideoQualityStatus.WARNING)
+                    )
+                except ValueError:
+                    quality_status = VideoQualityStatus.WARNING
+                blocker_messages = []
+                warning_messages = [
+                    str(item)
+                    for item in quality_report.get("warnings", [])
+                    if str(item).strip()
+                ]
+                if not quality_report:
+                    warning_messages.append("将在视频剪辑阶段完成基础质检")
+                if duration_alignment == "outside_safe_range":
+                    warning_messages.append(_duration_alignment_warning(playback_rate))
+                warning_messages = list(dict.fromkeys(warning_messages))
             timeline_start = round(timeline_cursor, 3)
-            timeline_end = round(timeline_start + preparation.timeline_duration_seconds, 3)
+            timeline_end = round(timeline_start + timeline_duration, 3)
             clips.append(
                 EditingHandoffClip(
                     shot_plan_id=plan.id,
                     shot_index=plan.index,
-                    candidate_id=preparation.candidate_id,
+                    candidate_id=candidate.id,
                     candidate_content_url=(
-                        f"/api/v1/generation-candidates/{preparation.candidate_id}/content"
+                        f"/api/v1/generation-candidates/{candidate.id}/content"
                     ),
-                    cover_url=(
-                        f"/api/v1/production-shots/{plan.id}/video-preparation/cover"
-                    ),
+                    cover_url=cover_url,
+                    cover_timestamp_seconds=cover_timestamp,
                     timeline_start_seconds=timeline_start,
                     timeline_end_seconds=timeline_end,
-                    timeline_duration_seconds=preparation.timeline_duration_seconds,
-                    trim_in_seconds=preparation.trim_in_seconds,
-                    trim_out_seconds=preparation.trim_out_seconds,
-                    video_playback_rate=preparation.video_playback_rate,
-                    audio_mode=preparation.audio_mode,
-                    source_audio_start_seconds=preparation.source_audio_start_seconds,
-                    source_audio_end_seconds=preparation.source_audio_end_seconds,
-                    transcript_cues=preparation.transcript_cues,
-                    subtitle_cues=preparation.subtitle_cues,
-                    quality_status=preparation.quality_status,
-                    warning_messages=preparation.warning_messages,
+                    timeline_duration_seconds=timeline_duration,
+                    trim_in_seconds=trim_in,
+                    trim_out_seconds=trim_out,
+                    video_playback_rate=playback_rate,
+                    audio_mode=audio_mode,
+                    source_audio_start_seconds=source_audio_start,
+                    source_audio_end_seconds=source_audio_end,
+                    transcript_cues=transcript_cues,
+                    subtitle_cues=subtitle_cues,
+                    quality_status=quality_status,
+                    quality_report=quality_report,
+                    blocker_messages=blocker_messages,
+                    warning_messages=warning_messages,
                 )
             )
-            preparations.append(preparation)
             timeline_cursor = timeline_end
         if not clips:
             raise _fail(409, "editing_handoff_empty", "没有可交给剪辑阶段的视频片段")
 
-        source_preparations = [
-            item for item in preparations if item.audio_mode == VideoClipAudioMode.SOURCE
+        source_clips = [
+            item for item in clips if item.audio_mode == VideoClipAudioMode.SOURCE
         ]
         ranges_are_contiguous = all(
             abs(left.source_audio_end_seconds - right.source_audio_start_seconds) <= 0.05
             for left, right in zip(
-                source_preparations,
-                source_preparations[1:],
+                source_clips,
+                source_clips[1:],
                 strict=False,
             )
         )
         if (
             source_audio_url
-            and len(source_preparations) == len(preparations)
+            and len(source_clips) == len(clips)
             and ranges_are_contiguous
         ):
             audio_strategy = "continuous_source_track"
-        elif source_preparations:
+        elif source_clips:
             audio_strategy = "per_shot"
         else:
             audio_strategy = "muted"
@@ -6285,7 +6989,7 @@ class ProductionService:
                 label = (
                     "分段视频"
                     if payload.target_step == ProductionStep.SHOT_VIDEOS
-                    else "剪辑合成"
+                    else "视频剪辑"
                 )
                 raise _fail(409, "workflow_already_advanced", f"当前方案已进入{label}阶段")
             expected_target = (
@@ -6318,7 +7022,7 @@ class ProductionService:
                 next_project,
                 ProductionChangeKind.WORKFLOW_ADVANCED,
                 (
-                    "所有必需分镜视频已审批，推进到剪辑合成"
+                    "所有必需分镜视频已审批，推进到视频剪辑"
                     if payload.target_step == ProductionStep.EDITING
                     else "所有必需分镜图片已审批，推进到分段视频"
                 ),
@@ -6362,7 +7066,7 @@ class ProductionService:
             ):
                 return
             if project.active_step != ProductionStep.EDITING:
-                raise _fail(409, "export_stage_conflict", "创作方案当前不在剪辑合成阶段")
+                raise _fail(409, "export_stage_conflict", "创作方案当前不在视频剪辑阶段")
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.COMPLETED,
@@ -8051,6 +8755,9 @@ class ProductionService:
             sha256=candidate.sha256,
             quality_report=candidate.quality_report,
             status=candidate.status,
+            archived_at=candidate.archived_at,
+            archived_by_account_id=candidate.archived_by_account_id,
+            archive_reason=candidate.archive_reason,
             content_url=f"/api/v1/generation-candidates/{candidate.id}/content",
             thumbnail_url=f"/api/v1/generation-candidates/{candidate.id}/thumbnail",
             created_at=candidate.created_at,
@@ -8456,6 +9163,37 @@ class ProductionService:
             raise _fail(404, "generation_candidate_not_found", "生成候选不存在")
         return candidate
 
+    async def _load_video_candidate_batch(
+        self,
+        candidate_ids: list[UUID],
+    ) -> tuple[ProductionProject, ShotPlan, list[GenerationCandidate]]:
+        candidates: list[GenerationCandidate] = []
+        runs: list[GenerationRun] = []
+        for candidate_id in candidate_ids:
+            candidate = await self._require_candidate(candidate_id)
+            run = await self._require_run(candidate.generation_run_id)
+            if candidate.kind != run.kind or run.kind != GenerationKind.VIDEO:
+                raise _fail(
+                    409,
+                    "video_candidate_batch_required",
+                    "批量操作仅支持视频候选",
+                )
+            candidates.append(candidate)
+            runs.append(run)
+
+        project_ids = {run.project_id for run in runs}
+        shot_plan_ids = {run.shot_plan_id for run in runs}
+        if len(project_ids) != 1 or len(shot_plan_ids) != 1:
+            raise _fail(
+                409,
+                "video_candidate_batch_scope_mismatch",
+                "一次只能处理同一分镜中的视频候选",
+            )
+        project = await self._require_project(next(iter(project_ids)))
+        plan = await self._require_shot(next(iter(shot_plan_ids)))
+        self._ensure_shot_active(plan)
+        return project, plan, candidates
+
     async def _completed_analysis(
         self,
         record: AnalysisRecord,
@@ -8594,7 +9332,9 @@ class ProductionService:
         video_clip_preparations: list[VideoClipPreparation] | None,
     ) -> dict[str, object]:
         if report is None:
-            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            report = await self.repository.get_report_by_analysis(
+                project.prompt_source_analysis_id or project.base_analysis_id
+            )
         if report is None or report.video_id != project.video_id:
             raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
         assets = (

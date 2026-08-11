@@ -6,6 +6,7 @@ import {
   CaretRight,
   Check,
   CircleNotch,
+  DotsThree,
   DownloadSimple,
   Folder,
   FolderOpen,
@@ -26,6 +27,8 @@ import {
   ASSET_TYPE_LABELS,
   ASSET_TYPE_OPTIONS,
   STORAGE_STATE_LABELS,
+  assetLibraryView,
+  assetListFolderForView,
   buildAssetListQuery,
   buildAssetPaginationItems,
   buildPostUploadView,
@@ -89,6 +92,22 @@ function StorageBadge({ asset, compact = false }) {
   );
 }
 
+function FolderCover({ cover, resolveUrl }) {
+  const [failed, setFailed] = useState(false);
+  const source = cover?.thumbnail_url ? resolveUrl(cover.thumbnail_url) : "";
+
+  useEffect(() => setFailed(false), [source]);
+
+  if (!source || failed) {
+    return (
+      <span className="asset-folder-card-placeholder" aria-hidden="true">
+        <FolderOpen size={30} />
+      </span>
+    );
+  }
+  return <img alt="" decoding="async" loading="lazy" onError={() => setFailed(true)} src={source} />;
+}
+
 function Modal({ children, label, onClose, size = "default" }) {
   return (
     <div
@@ -130,19 +149,35 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
   const [uploading, setUploading] = useState(false);
   const [folderDialog, setFolderDialog] = useState(null);
   const [folderSaving, setFolderSaving] = useState(false);
+  const [coverDialog, setCoverDialog] = useState(null);
+  const [coverSaving, setCoverSaving] = useState(false);
   const [detailDraft, setDetailDraft] = useState(null);
   const [detailSaving, setDetailSaving] = useState(false);
   const [listRefreshToken, setListRefreshToken] = useState(0);
   const [justCreatedAssetId, setJustCreatedAssetId] = useState(null);
   const listRequestRef = useRef(0);
   const assetCardRefs = useRef(new Map());
-  const resultHeadingRef = useRef(null);
   const uploadPreview = useObjectUrl(uploadFile);
   const workspaceId = context?.active_workspace?.id || "";
   const workspaceName = context?.active_workspace?.name || "主工作区";
   const localLocation = context?.storage_locations?.find(
     (item) => item.provider_type === "local_filesystem",
   );
+  const browserView = assetLibraryView({
+    folderId: selectedFolder,
+    type: typeFilter,
+    query,
+    storageState: storageFilter,
+    includeArchived,
+  });
+  const listFolderId = assetListFolderForView({
+    folderId: selectedFolder,
+    type: typeFilter,
+    query,
+    storageState: storageFilter,
+    includeArchived,
+  });
+  const homeMode = browserView === "home";
 
   useEffect(() => {
     let active = true;
@@ -191,7 +226,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
     const parameters = buildAssetListQuery({
       page,
       pageSize,
-      folderId: selectedFolder,
+      folderId: listFolderId,
       type: typeFilter,
       query,
       storageState: storageFilter,
@@ -221,7 +256,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
     workspaceId,
     page,
     pageSize,
-    selectedFolder,
+    listFolderId,
     typeFilter,
     query,
     storageFilter,
@@ -266,7 +301,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
     const parameters = buildAssetListQuery({
       page,
       pageSize,
-      folderId: selectedFolder,
+      folderId: listFolderId,
       type: typeFilter,
       query,
       storageState: storageFilter,
@@ -287,6 +322,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
 
   function changeFolder(folderId) {
     setSelectedFolder(folderId);
+    setSelectedAsset(null);
     setPage(1);
   }
 
@@ -399,6 +435,99 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
     }
   }
 
+  async function openCoverPicker(folder) {
+    setCoverDialog({
+      folder,
+      items: [],
+      loading: true,
+      selectedAssetId: folder.cover?.source === "manual"
+        ? folder.cover.asset_id || ""
+        : "",
+      error: "",
+    });
+    try {
+      const parameters = buildAssetListQuery({
+        page: 1,
+        pageSize: 100,
+        folderId: folder.id,
+      });
+      const payload = await request(`/workspaces/${workspaceId}/assets?${parameters}`);
+      let items = payload.items || [];
+      const manualCoverId = folder.cover?.source === "manual" ? folder.cover.asset_id : "";
+      if (manualCoverId && !items.some((item) => item.id === manualCoverId)) {
+        const manualCover = await request(`/assets/${manualCoverId}`);
+        items = [manualCover, ...items];
+      }
+      setCoverDialog((current) => (
+        current?.folder.id === folder.id
+          ? { ...current, items, loading: false }
+          : current
+      ));
+    } catch (requestError) {
+      setCoverDialog((current) => (
+        current?.folder.id === folder.id
+          ? { ...current, error: requestError.message, loading: false }
+          : current
+      ));
+    }
+  }
+
+  async function updateFolderCover(folder, coverAssetId) {
+    setCoverSaving(true);
+    try {
+      const updated = await request(`/asset-folders/${folder.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_version: folder.version,
+          cover_asset_id: coverAssetId || null,
+        }),
+      });
+      setFolders((current) => current.map((item) => (
+        item.id === updated.id ? updated : item
+      )));
+      return updated;
+    } finally {
+      setCoverSaving(false);
+    }
+  }
+
+  async function saveFolderCover(event) {
+    event.preventDefault();
+    if (!coverDialog) return;
+    setCoverDialog((current) => ({ ...current, error: "" }));
+    try {
+      await updateFolderCover(coverDialog.folder, coverDialog.selectedAssetId);
+      setCoverDialog(null);
+      onNotice?.(coverDialog.selectedAssetId ? "目录封面已更新" : "目录已恢复自动封面");
+    } catch (requestError) {
+      setCoverDialog((current) => ({ ...current, error: requestError.message }));
+    }
+  }
+
+  async function setSelectedAssetAsCover() {
+    if (!selectedAsset?.folder_id) return;
+    const folder = folders.find((item) => item.id === selectedAsset.folder_id);
+    if (!folder) return;
+    setError("");
+    try {
+      await updateFolderCover(folder, selectedAsset.id);
+      onNotice?.("已设为目录封面");
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
+
+  async function restoreAutomaticCover(folder) {
+    setError("");
+    try {
+      await updateFolderCover(folder, "");
+      onNotice?.("目录已恢复自动封面");
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
+
   async function deleteFolder(folder) {
     const hasAssets = folder.asset_count > 0;
     const accepted = window.confirm(
@@ -478,9 +607,213 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
   const paginationItems = buildAssetPaginationItems(assetList.page, assetList.total_pages);
   const activeFolderName = selectedFolder === "unfiled"
     ? "未分类"
-    : folders.find((item) => item.id === selectedFolder)?.name || "全部资产";
+    : selectedFolder
+      ? folders.find((item) => item.id === selectedFolder)?.name || "资产目录"
+      : browserView === "search"
+        ? "搜索结果"
+        : "全部资产";
   const resultStart = assetList.total ? (assetList.page - 1) * assetList.page_size + 1 : 0;
   const resultEnd = Math.min(assetList.page * assetList.page_size, assetList.total);
+
+  function renderAssetGrid() {
+    return (
+      <div className="asset-grid" aria-busy={loading}>
+        {assetList.items.map((asset, index) => (
+          <button
+            className={`asset-card ${selectedAsset?.id === asset.id ? "selected" : ""} ${justCreatedAssetId === asset.id ? "just-created" : ""} ${asset.archived_at ? "archived" : ""}`}
+            key={asset.id}
+            onClick={() => setSelectedAsset(asset)}
+            ref={(node) => {
+              if (node) assetCardRefs.current.set(asset.id, node);
+              else assetCardRefs.current.delete(asset.id);
+            }}
+            type="button"
+          >
+            <span className="asset-card-visual">
+              <AssetThumbnail asset={asset} eager={index < 6} resolveUrl={resolveUrl} />
+              <StorageBadge asset={asset} compact />
+              {asset.archived_at && <span className="asset-archived-label"><Archive size={12} />已归档</span>}
+            </span>
+            <span className="asset-card-copy">
+              <span className="asset-card-name">{asset.name}</span>
+              <span className="asset-card-meta">
+                <span>{ASSET_TYPE_LABELS[asset.type] || asset.type}</span>
+                <i />
+                <span>{asset.width} × {asset.height}</span>
+              </span>
+              <span className="asset-card-tags">
+                {(asset.tags || []).slice(0, 2).map((tag) => <small key={tag}>{tag}</small>)}
+                {!asset.tags?.length && <small className="muted">未添加标签</small>}
+              </span>
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  function renderPagination() {
+    return (
+      <nav className="asset-pagination" aria-label="资产分页">
+        <div>
+          <span>显示 {resultStart}–{resultEnd} 个，共 {assetList.total} 个</span>
+          <label>
+            每页
+            <select
+              aria-label="每页资产数"
+              onChange={(event) => {
+                setPageSize(Number(event.target.value));
+                setPage(1);
+              }}
+              value={pageSize}
+            >
+              {ASSET_PAGE_SIZES.map((size) => <option key={size} value={size}>{size} 个</option>)}
+            </select>
+          </label>
+        </div>
+        <div>
+          <button aria-label="上一页" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} type="button">
+            <CaretLeft size={15} />
+          </button>
+          {paginationItems.map((item) => typeof item === "number" ? (
+            <button
+              aria-current={item === page ? "page" : undefined}
+              className={item === page ? "active" : ""}
+              disabled={loading}
+              key={item}
+              onClick={() => setPage(item)}
+              type="button"
+            >
+              {item}
+            </button>
+          ) : <span aria-hidden="true" key={item}>…</span>)}
+          <button
+            aria-label="下一页"
+            disabled={page >= assetList.total_pages || loading}
+            onClick={() => setPage(page + 1)}
+            type="button"
+          >
+            <CaretRight size={15} />
+          </button>
+        </div>
+      </nav>
+    );
+  }
+
+  function renderAssetCollection({ compactEmpty = false } = {}) {
+    if (loading && !assetList.items.length) {
+      return (
+        <div className={`asset-loading ${compactEmpty ? "compact" : ""}`} role="status">
+          <CircleNotch className="spin" size={21} />
+          正在读取工作区资产…
+        </div>
+      );
+    }
+    if (!assetList.items.length) {
+      if (compactEmpty) {
+        return (
+          <div className="asset-home-empty">
+            <span><ImageSquare size={24} /></span>
+            <div>
+              <strong>未分类中还没有资产</strong>
+              <p>上传时不选择目录的资产会显示在这里。</p>
+            </div>
+            <button className="secondary-button compact" onClick={openUpload} type="button">
+              <Plus size={15} />上传资产
+            </button>
+          </div>
+        );
+      }
+      const filtered = query || selectedFolder || typeFilter || storageFilter || includeArchived;
+      return (
+        <div className="asset-empty">
+          <span><ImageSquare size={30} /></span>
+          <h2>{filtered ? "没有匹配的资产" : "工作区还没有资产"}</h2>
+          <p>{filtered ? "调整目录或筛选条件后再试。" : "上传人物、产品、服装或场景图片，供后续分镜生图复用。"}</p>
+          {!filtered && (
+            <button className="primary-button compact" onClick={openUpload} type="button">
+              <Plus size={16} />上传第一个资产
+            </button>
+          )}
+        </div>
+      );
+    }
+    return (
+      <>
+        {renderAssetGrid()}
+        {renderPagination()}
+      </>
+    );
+  }
+
+  function renderFolderCard(folder) {
+    return (
+      <article className="asset-folder-card" key={folder.id}>
+        <button
+          aria-label={`打开目录${folder.name}`}
+          className="asset-folder-card-open"
+          onClick={() => changeFolder(folder.id)}
+          type="button"
+        >
+          <span className="asset-folder-card-cover">
+            <FolderCover cover={folder.cover} resolveUrl={resolveUrl} />
+          </span>
+          <span className="asset-folder-card-copy">
+            <strong title={folder.name}>{folder.name}</strong>
+            <small>{folder.asset_count} 个资产</small>
+          </span>
+        </button>
+        <details className="asset-folder-card-menu">
+          <summary aria-label={`管理目录${folder.name}`} title="管理目录">
+            <DotsThree size={18} weight="bold" />
+          </summary>
+          <div>
+            <button
+              disabled={!folder.asset_count}
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                openCoverPicker(folder);
+              }}
+              type="button"
+            >
+              <ImageSquare size={15} />设置封面
+            </button>
+            {folder.cover?.source === "manual" && (
+              <button
+                disabled={coverSaving}
+                onClick={(event) => {
+                  event.currentTarget.closest("details")?.removeAttribute("open");
+                  restoreAutomaticCover(folder);
+                }}
+                type="button"
+              >
+                <ArrowClockwise size={15} />恢复自动封面
+              </button>
+            )}
+            <button
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                setFolderDialog({ folder, name: folder.name });
+              }}
+              type="button"
+            >
+              <PencilSimple size={15} />重命名
+            </button>
+            <button
+              className="danger"
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                deleteFolder(folder);
+              }}
+              type="button"
+            >
+              <Trash size={15} />删除目录
+            </button>
+          </div>
+        </details>
+      </article>
+    );
+  }
 
   return (
     <main className={`asset-library-page ${selectedAsset ? "has-detail" : ""}`}>
@@ -612,23 +945,6 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
             </label>
           </div>
 
-          <div className="asset-result-heading" ref={resultHeadingRef}>
-            <div>
-              <strong>{activeFolderName}</strong>
-              <span>{assetList.total} 个资产</span>
-            </div>
-            <button
-              aria-label="刷新资产列表"
-              className="asset-refresh-button"
-              disabled={loading}
-              onClick={() => Promise.all([refreshFolders(), refreshAssets()]).catch((requestError) => setError(requestError.message))}
-              type="button"
-            >
-              <ArrowClockwise className={loading ? "spin" : ""} size={16} />
-              刷新
-            </button>
-          </div>
-
           {error && (
             <div className="asset-error" role="alert">
               <WarningCircle size={17} weight="fill" />
@@ -637,100 +953,86 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
             </div>
           )}
 
-          {loading && !assetList.items.length ? (
-            <div className="asset-loading" role="status">
-              <CircleNotch className="spin" size={21} />
-              正在读取工作区资产…
-            </div>
-          ) : assetList.items.length === 0 ? (
-            <div className="asset-empty">
-              <span><ImageSquare size={30} /></span>
-              <h2>{query || selectedFolder || typeFilter || storageFilter ? "没有匹配的资产" : "工作区还没有资产"}</h2>
-              <p>{query || selectedFolder || typeFilter || storageFilter ? "调整目录或筛选条件后再试。" : "上传人物、产品、服装或场景图片，供后续分镜生图复用。"}</p>
-              {!query && !selectedFolder && !typeFilter && !storageFilter && (
-                <button className="primary-button compact" onClick={openUpload} type="button">
-                  <Plus size={16} />上传第一个资产
-                </button>
-              )}
+          {homeMode ? (
+            <div className="asset-home">
+              <section className="asset-home-section" aria-labelledby="asset-folder-heading">
+                <header className="asset-home-heading">
+                  <div>
+                    <h2 id="asset-folder-heading">目录</h2>
+                    <span>{folders.length} 个目录</span>
+                  </div>
+                  <div className="asset-home-heading-actions">
+                    <button
+                      aria-label="刷新资产目录"
+                      className="asset-refresh-button"
+                      disabled={loading}
+                      onClick={() => Promise.all([refreshFolders(), refreshAssets()]).catch((requestError) => setError(requestError.message))}
+                      type="button"
+                    >
+                      <ArrowClockwise className={loading ? "spin" : ""} size={16} />
+                      刷新
+                    </button>
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => setFolderDialog({ folder: null, name: "" })}
+                      type="button"
+                    >
+                      <FolderPlus size={16} />新建目录
+                    </button>
+                  </div>
+                </header>
+                {folders.length ? (
+                  <div className="asset-folder-card-grid">
+                    {folders.map(renderFolderCard)}
+                  </div>
+                ) : (
+                  <div className="asset-home-empty directory">
+                    <span><FolderPlus size={24} /></span>
+                    <div>
+                      <strong>还没有资产目录</strong>
+                      <p>按人物、产品或场景创建一级目录，之后查找会更快。</p>
+                    </div>
+                    <button className="secondary-button compact" onClick={() => setFolderDialog({ folder: null, name: "" })} type="button">
+                      <Plus size={15} />新建目录
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              <section className="asset-home-section" aria-labelledby="asset-unfiled-heading">
+                <header className="asset-home-heading">
+                  <div>
+                    <h2 id="asset-unfiled-heading">未分类资产</h2>
+                    <span>{assetList.total} 个资产</span>
+                  </div>
+                  {assetList.total > 0 && (
+                    <button className="asset-section-link" onClick={() => changeFolder("unfiled")} type="button">
+                      查看全部<CaretRight size={15} />
+                    </button>
+                  )}
+                </header>
+                {renderAssetCollection({ compactEmpty: true })}
+              </section>
             </div>
           ) : (
             <>
-              <div className="asset-grid" aria-busy={loading}>
-                {assetList.items.map((asset, index) => (
-                  <button
-                    className={`asset-card ${selectedAsset?.id === asset.id ? "selected" : ""} ${justCreatedAssetId === asset.id ? "just-created" : ""} ${asset.archived_at ? "archived" : ""}`}
-                    key={asset.id}
-                    onClick={() => setSelectedAsset(asset)}
-                    ref={(node) => {
-                      if (node) assetCardRefs.current.set(asset.id, node);
-                      else assetCardRefs.current.delete(asset.id);
-                    }}
-                    type="button"
-                  >
-                    <span className="asset-card-visual">
-                      <AssetThumbnail asset={asset} eager={index < 6} resolveUrl={resolveUrl} />
-                      <StorageBadge asset={asset} compact />
-                      {asset.archived_at && <span className="asset-archived-label"><Archive size={12} />已归档</span>}
-                    </span>
-                    <span className="asset-card-copy">
-                      <span className="asset-card-name">{asset.name}</span>
-                      <span className="asset-card-meta">
-                        <span>{ASSET_TYPE_LABELS[asset.type] || asset.type}</span>
-                        <i />
-                        <span>{asset.width} × {asset.height}</span>
-                      </span>
-                      <span className="asset-card-tags">
-                        {(asset.tags || []).slice(0, 2).map((tag) => <small key={tag}>{tag}</small>)}
-                        {!asset.tags?.length && <small className="muted">未添加标签</small>}
-                      </span>
-                    </span>
-                  </button>
-                ))}
+              <div className="asset-result-heading">
+                <div>
+                  <strong>{activeFolderName}</strong>
+                  <span>{assetList.total} 个资产</span>
+                </div>
+                <button
+                  aria-label="刷新资产列表"
+                  className="asset-refresh-button"
+                  disabled={loading}
+                  onClick={() => Promise.all([refreshFolders(), refreshAssets()]).catch((requestError) => setError(requestError.message))}
+                  type="button"
+                >
+                  <ArrowClockwise className={loading ? "spin" : ""} size={16} />
+                  刷新
+                </button>
               </div>
-
-              <nav className="asset-pagination" aria-label="资产分页">
-                <div>
-                  <span>显示 {resultStart}–{resultEnd} 个，共 {assetList.total} 个</span>
-                  <label>
-                    每页
-                    <select
-                      aria-label="每页资产数"
-                      onChange={(event) => {
-                        setPageSize(Number(event.target.value));
-                        setPage(1);
-                      }}
-                      value={pageSize}
-                    >
-                      {ASSET_PAGE_SIZES.map((size) => <option key={size} value={size}>{size} 个</option>)}
-                    </select>
-                  </label>
-                </div>
-                <div>
-                  <button aria-label="上一页" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} type="button">
-                    <CaretLeft size={15} />
-                  </button>
-                  {paginationItems.map((item) => typeof item === "number" ? (
-                    <button
-                      aria-current={item === page ? "page" : undefined}
-                      className={item === page ? "active" : ""}
-                      disabled={loading}
-                      key={item}
-                      onClick={() => setPage(item)}
-                      type="button"
-                    >
-                      {item}
-                    </button>
-                  ) : <span aria-hidden="true" key={item}>…</span>)}
-                  <button
-                    aria-label="下一页"
-                    disabled={page >= assetList.total_pages || loading}
-                    onClick={() => setPage(page + 1)}
-                    type="button"
-                  >
-                    <CaretRight size={15} />
-                  </button>
-                </div>
-              </nav>
+              {renderAssetCollection()}
             </>
           )}
         </section>
@@ -824,6 +1126,17 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 <div><dt>更新</dt><dd>{formatAssetDate(selectedAsset.updated_at)}</dd></div>
                 <div><dt>校验</dt><dd title={selectedAsset.sha256}>{selectedAsset.sha256.slice(0, 12)}…</dd></div>
               </dl>
+              {selectedAsset.folder_id && !selectedAsset.archived_at && (
+                <button
+                  className="asset-set-cover-action"
+                  disabled={coverSaving || detailSaving}
+                  onClick={setSelectedAssetAsCover}
+                  type="button"
+                >
+                  {coverSaving ? <CircleNotch className="spin" size={16} /> : <ImageSquare size={16} />}
+                  设为所在目录封面
+                </button>
+              )}
               <div className="asset-detail-primary-actions">
                 <button className="primary-button compact" disabled={detailSaving || Boolean(selectedAsset.archived_at)} type="submit">
                   {detailSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} weight="bold" />}
@@ -890,6 +1203,78 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               <span />
               <button className="secondary-button compact" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button">取消</button>
               <button className="primary-button compact" disabled={folderSaving || !folderDialog.name.trim()} type="submit">{folderSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} />}{folderDialog.folder ? "保存" : "创建目录"}</button>
+            </footer>
+          </form>
+        </Modal>
+      )}
+
+      {coverDialog && (
+        <Modal
+          label={`设置${coverDialog.folder.name}目录封面`}
+          onClose={() => !coverSaving && setCoverDialog(null)}
+        >
+          <form className="asset-cover-dialog" onSubmit={saveFolderCover}>
+            <header className="asset-modal-header">
+              <div>
+                <span>目录封面</span>
+                <h2>设置“{coverDialog.folder.name}”封面</h2>
+                <p>选择目录中的一张资产，或由系统自动使用最近更新的有效资产。</p>
+              </div>
+              <button aria-label="关闭目录封面设置" disabled={coverSaving} onClick={() => setCoverDialog(null)} type="button">
+                <X size={18} />
+              </button>
+            </header>
+            <div className="asset-cover-dialog-body">
+              {coverDialog.error && (
+                <div className="asset-error" role="alert">
+                  <WarningCircle size={17} weight="fill" />
+                  <span>{coverDialog.error}</span>
+                </div>
+              )}
+              {coverDialog.loading ? (
+                <div className="asset-cover-loading" role="status">
+                  <CircleNotch className="spin" size={20} />正在读取目录资产…
+                </div>
+              ) : (
+                <div className="asset-cover-options" role="radiogroup" aria-label="目录封面选项">
+                  <button
+                    aria-checked={!coverDialog.selectedAssetId}
+                    className="asset-cover-option automatic"
+                    onClick={() => setCoverDialog((current) => ({ ...current, selectedAssetId: "" }))}
+                    role="radio"
+                    type="button"
+                  >
+                    <span className="asset-cover-option-visual"><FolderOpen size={32} /></span>
+                    <span><strong>自动选择</strong><small>使用最近更新的有效资产</small></span>
+                  </button>
+                  {coverDialog.items.map((asset) => (
+                    <button
+                      aria-checked={coverDialog.selectedAssetId === asset.id}
+                      className="asset-cover-option"
+                      key={asset.id}
+                      onClick={() => setCoverDialog((current) => ({ ...current, selectedAssetId: asset.id }))}
+                      role="radio"
+                      type="button"
+                    >
+                      <span className="asset-cover-option-visual">
+                        <AssetThumbnail asset={asset} alt="" resolveUrl={resolveUrl} />
+                      </span>
+                      <span><strong title={asset.name}>{asset.name}</strong><small>{ASSET_TYPE_LABELS[asset.type] || asset.type}</small></span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!coverDialog.loading && coverDialog.items.length >= 100 && (
+                <p className="asset-cover-limit-note">当前显示最近 100 个有效资产。</p>
+              )}
+            </div>
+            <footer className="asset-modal-footer">
+              <span>{coverDialog.selectedAssetId ? "将使用所选资产作为固定封面" : "目录内容变化时，自动封面会同步更新"}</span>
+              <button className="secondary-button compact" disabled={coverSaving} onClick={() => setCoverDialog(null)} type="button">取消</button>
+              <button className="primary-button compact" disabled={coverSaving || coverDialog.loading} type="submit">
+                {coverSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} />}
+                保存封面
+              </button>
             </footer>
           </form>
         </Modal>

@@ -69,7 +69,11 @@ async def _data_url(path: Path) -> str:
     return f"data:{media_type};base64,{encoded}"
 
 
-def _usage_from_payload(payload: object, image_count: int) -> ModelUsage:
+def _usage_from_payload(
+    payload: object,
+    image_count: int,
+    video_seconds: float = 0.0,
+) -> ModelUsage:
     def non_negative_int(value: object) -> int:
         try:
             return max(0, int(value or 0))
@@ -93,6 +97,7 @@ def _usage_from_payload(payload: object, image_count: int) -> ModelUsage:
             non_negative_int(usage_payload.get("total_tokens")) or input_tokens + output_tokens
         ),
         image_count=image_count,
+        video_seconds=max(0.0, video_seconds),
     )
 
 
@@ -121,6 +126,7 @@ class DashScopeProvider:
         payload: dict[str, Any],
         *,
         image_count: int = 0,
+        video_seconds: float = 0.0,
     ) -> tuple[dict[str, Any], int, str | None, ModelUsage]:
         if not self.api_key.strip():
             raise ModelProviderUnavailable("未配置百炼 API Key")
@@ -172,7 +178,7 @@ class DashScopeProvider:
                 latency_ms=latency_ms,
             )
 
-        usage = _usage_from_payload(response_payload, image_count)
+        usage = _usage_from_payload(response_payload, image_count, video_seconds)
         resolved_model = str(response_payload.get("model") or payload.get("model") or "")
         request_id = str(response_payload.get("id") or header_request_id or "").strip() or None
         if response.status_code >= 400:
@@ -223,16 +229,31 @@ class DashScopeProvider:
         request: ModelRequest,
         response_schema: type[ResultT],
     ) -> ProviderResult[ResultT]:
-        image_urls = await asyncio.gather(*(_data_url(path) for path in request.image_paths))
-        user_content: list[dict[str, Any]] = [{"type": "text", "text": request.user_prompt}]
-        if request.image_labels and len(request.image_labels) == len(image_urls):
-            for label, image_url in zip(request.image_labels, image_urls, strict=True):
-                user_content.append({"type": "text", "text": label})
-                user_content.append({"type": "image_url", "image_url": {"url": image_url}})
+        image_urls: tuple[str, ...] | list[str] = ()
+        video_seconds = 0.0
+        if request.video_path is not None:
+            video_url = await _data_url(request.video_path)
+            user_content: list[dict[str, Any]] = [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                    "fps": min(10.0, max(0.1, request.video_fps)),
+                },
+                {"type": "text", "text": request.user_prompt},
+            ]
+            video_seconds = max(0.0, request.video_duration_seconds)
         else:
-            user_content.extend(
-                {"type": "image_url", "image_url": {"url": image_url}} for image_url in image_urls
-            )
+            image_urls = await asyncio.gather(*(_data_url(path) for path in request.image_paths))
+            user_content = [{"type": "text", "text": request.user_prompt}]
+            if request.image_labels and len(request.image_labels) == len(image_urls):
+                for label, image_url in zip(request.image_labels, image_urls, strict=True):
+                    user_content.append({"type": "text", "text": label})
+                    user_content.append({"type": "image_url", "image_url": {"url": image_url}})
+            else:
+                user_content.extend(
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                    for image_url in image_urls
+                )
         payload = {
             "model": request.target.model,
             "messages": [
@@ -245,7 +266,8 @@ class DashScopeProvider:
         }
         response_payload, latency_ms, request_id, usage = await self._request_json(
             payload,
-            image_count=len(request.image_paths),
+            image_count=0 if request.video_path is not None else len(request.image_paths),
+            video_seconds=video_seconds,
         )
         resolved_model = str(response_payload.get("model") or request.target.model)
         content = ""

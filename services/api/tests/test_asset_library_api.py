@@ -206,6 +206,132 @@ def test_asset_library_crud_pagination_and_safe_content_urls(
         assert restored.json()["archived_at"] is None
 
 
+def test_asset_folder_covers_support_automatic_manual_and_safe_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, workspace_id, _workspace_root = _test_client(tmp_path, monkeypatch)
+    with client:
+        folder = client.post(
+            f"/api/v1/workspaces/{workspace_id}/asset-folders",
+            json={"name": "主视觉"},
+        ).json()
+        other_folder = client.post(
+            f"/api/v1/workspaces/{workspace_id}/asset-folders",
+            json={"name": "其他目录"},
+        ).json()
+        empty_folder = client.post(
+            f"/api/v1/workspaces/{workspace_id}/asset-folders",
+            json={"name": "空目录"},
+        ).json()
+
+        first = _upload(
+            client,
+            workspace_id,
+            name="封面一",
+            asset_type="scene",
+            folder_id=folder["id"],
+            color=(180, 40, 40),
+        ).json()
+        second = _upload(
+            client,
+            workspace_id,
+            name="封面二",
+            asset_type="scene",
+            folder_id=folder["id"],
+            color=(40, 40, 180),
+        ).json()
+        other = _upload(
+            client,
+            workspace_id,
+            name="其他资产",
+            asset_type="scene",
+            folder_id=other_folder["id"],
+            color=(40, 180, 40),
+        ).json()
+
+        folders = {
+            item["id"]: item
+            for item in client.get(
+                f"/api/v1/workspaces/{workspace_id}/asset-folders"
+            ).json()
+        }
+        assert folders[folder["id"]]["asset_count"] == 2
+        assert folders[folder["id"]]["cover"] == {
+            "asset_id": second["id"],
+            "thumbnail_url": second["thumbnail_url"],
+            "width": 320,
+            "height": 200,
+            "source": "automatic",
+        }
+        assert folders[empty_folder["id"]]["cover"] == {
+            "asset_id": None,
+            "thumbnail_url": None,
+            "width": None,
+            "height": None,
+            "source": "empty",
+        }
+
+        selected = client.patch(
+            f"/api/v1/asset-folders/{folder['id']}",
+            json={
+                "expected_version": folders[folder["id"]]["version"],
+                "cover_asset_id": first["id"],
+            },
+        )
+        assert selected.status_code == 200
+        assert selected.json()["cover"]["asset_id"] == first["id"]
+        assert selected.json()["cover"]["source"] == "manual"
+
+        invalid = client.patch(
+            f"/api/v1/asset-folders/{folder['id']}",
+            json={
+                "expected_version": selected.json()["version"],
+                "cover_asset_id": other["id"],
+            },
+        )
+        assert invalid.status_code == 409
+        assert invalid.json()["detail"]["code"] == "folder_cover_asset_mismatch"
+
+        archived = client.delete(f"/api/v1/assets/{first['id']}")
+        assert archived.status_code == 200
+        folders = {
+            item["id"]: item
+            for item in client.get(
+                f"/api/v1/workspaces/{workspace_id}/asset-folders"
+            ).json()
+        }
+        assert folders[folder["id"]]["cover"]["asset_id"] == second["id"]
+        assert folders[folder["id"]]["cover"]["source"] == "automatic"
+
+        restored = client.post(f"/api/v1/assets/{first['id']}/restore")
+        assert restored.status_code == 200
+        manual_second = client.patch(
+            f"/api/v1/asset-folders/{folder['id']}",
+            json={
+                "expected_version": folders[folder["id"]]["version"],
+                "cover_asset_id": second["id"],
+            },
+        )
+        assert manual_second.status_code == 200
+        moved = client.patch(
+            f"/api/v1/assets/{second['id']}",
+            json={
+                "expected_version": second["version"],
+                "folder_id": None,
+            },
+        )
+        assert moved.status_code == 200
+        folders = {
+            item["id"]: item
+            for item in client.get(
+                f"/api/v1/workspaces/{workspace_id}/asset-folders"
+            ).json()
+        }
+        assert folders[folder["id"]]["cover"]["asset_id"] == first["id"]
+        assert folders[folder["id"]]["cover"]["source"] == "automatic"
+
+
 def test_asset_upload_rejects_cloud_policy_and_missing_rights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

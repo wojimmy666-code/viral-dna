@@ -13,7 +13,7 @@ from viral_dna_api.ai.catalog import (
 )
 from viral_dna_api.ai.contracts import ModelProviderError, ModelRequest, ProviderResult
 from viral_dna_api.ai.router import ModelRouter
-from viral_dna_api.ai.shot_facts import ShotFactsService
+from viral_dna_api.ai.shot_facts import ShotFactsService, _normalize_shot_facts
 from viral_dna_api.models import (
     AnalysisJob,
     AnalysisMode,
@@ -25,8 +25,11 @@ from viral_dna_api.models import (
     ModelTask,
     ModelUsage,
     ShotEvidence,
+    ShotMotionPhaseFact,
     ShotTimelineEvidence,
+    ShotTransitionFact,
     ShotVisualBeatFact,
+    ShotVisualFacts,
     SourceType,
     Video,
 )
@@ -173,7 +176,7 @@ def test_catalog_freezes_profile_routes(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("VIRAL_DNA_VLM_PROVIDER", "dashscope")
     plan = load_model_plan(AnalysisProfile.ECONOMY)
     assert plan is not None
-    assert plan.catalog_version == "phase2-model-catalog-2026-08-06-r6"
+    assert plan.catalog_version == "phase2-model-catalog-2026-08-11-r7"
     assert PriceCatalog().catalog_version == plan.pricing_version
     targets = plan.targets_for(ModelTask.SHOT_FACTS)
     assert [target.model for target in targets] == [
@@ -209,6 +212,95 @@ def test_price_catalog_calculates_cached_and_uncached_tokens() -> None:
     )
     assert calculate_cost_micros(usage, price) == 5400
     assert cny_to_micros(Decimal("0.125")) == 125000
+
+
+def test_shot_facts_normalize_clip_relative_motion_and_transition_conflicts() -> None:
+    shot = ShotEvidence(
+        shot_id="shot_002",
+        index=2,
+        start_seconds=3.2,
+        end_seconds=9.2,
+        duration_seconds=6,
+        content_start_seconds=3.2,
+        content_end_seconds=8.9,
+        outgoing_transition_start_seconds=8.9,
+        outgoing_transition_end_seconds=9.6,
+        analysis_clip_url="/api/v1/analyses/test/artifacts/shots/shot_002_analysis.mp4",
+        analysis_clip_start_seconds=3.2,
+        analysis_clip_end_seconds=9.6,
+        representative_timestamp=6,
+        keyframe_url="/api/v1/analyses/test/artifacts/shots/shot_002.jpg",
+        detection_method="test",
+    )
+    facts = ShotVisualFacts(
+        title="连续推近丝带",
+        subjects=["黑色长发女性", "浅绿色丝带"],
+        action="手整理丝带，丝带逐渐靠近镜头",
+        scene="室内",
+        camera="镜头持续推近",
+        composition="丝带由局部逐渐占据画面",
+        lighting="柔和明亮",
+        color="暖木色与浅绿色",
+        transition="硬切",
+        narrative_role="遮挡转场",
+        replication_prompt="人物整理丝带，随后画面切换为丝带特写，硬切结束。",
+        confidence=0.9,
+        continuous_take=True,
+        motion_confidence=0.86,
+        visual_beats=[
+            ShotVisualBeatFact(
+                index=1,
+                title="丝带运动",
+                start_seconds=0,
+                end_seconds=5.7,
+                source_timestamp_seconds=2.85,
+                image_prompt="人物背对镜头，浅绿色丝带垂落",
+            )
+        ],
+        motion_phases=[
+            ShotMotionPhaseFact(
+                index=1,
+                start_seconds=0,
+                end_seconds=4,
+                description="中景缓慢推近，手整理丝带",
+                camera_motion="缓慢推近",
+                subject_motion="手整理丝带",
+                foreground_motion="丝带向镜头靠近",
+                foreground_occupancy_start_percent=15,
+                foreground_occupancy_end_percent=65,
+                confidence=0.88,
+            ),
+            ShotMotionPhaseFact(
+                index=2,
+                start_seconds=4,
+                end_seconds=5.7,
+                description="继续推至极近特写，丝带大面积遮挡画面",
+                camera_motion="快速推近",
+                foreground_motion="丝带覆盖镜头",
+                foreground_occupancy_start_percent=65,
+                foreground_occupancy_end_percent=100,
+                confidence=0.91,
+            ),
+        ],
+        outgoing_transition=ShotTransitionFact(),
+    )
+
+    normalized = _normalize_shot_facts(shot, facts)
+
+    assert normalized.visual_beats[0].start_seconds == pytest.approx(3.2)
+    assert normalized.visual_beats[0].end_seconds == pytest.approx(8.9)
+    assert normalized.visual_beats[0].source_timestamp_seconds == pytest.approx(6.05)
+    assert [(phase.start_seconds, phase.end_seconds) for phase in normalized.motion_phases] == [
+        (3.2, 7.2),
+        (7.2, 8.9),
+    ]
+    assert normalized.outgoing_transition.kind == "uncertain"
+    assert normalized.outgoing_transition.start_seconds == pytest.approx(8.9)
+    assert normalized.outgoing_transition.end_seconds == pytest.approx(9.6)
+    assert normalized.outgoing_transition.description != "无出场转场"
+    assert "时序运镜" in normalized.replication_prompt
+    assert "硬切" not in normalized.replication_prompt
+    assert "画面切换为" not in normalized.replication_prompt
 
 
 @pytest.mark.asyncio

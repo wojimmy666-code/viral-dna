@@ -49,6 +49,9 @@ class ModelRequest:
     user_prompt: str
     image_paths: tuple[Path, ...] = ()
     image_labels: tuple[str, ...] = ()
+    video_path: Path | None = None
+    video_fps: float = 4.0
+    video_duration_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,6 +30,7 @@ from .models import (
     PromptPackage,
     PromptShot,
     Shot,
+    ShotTransitionFact,
     ShotVisualFacts,
     SourceType,
     Video,
@@ -370,6 +371,12 @@ def build_media_evidence_report(
                 source_candidate_ids=shot.source_candidate_ids,
                 semantic_group=shot.semantic_group,
                 visual_beats=facts.visual_beats if facts else [],
+                motion_phases=facts.motion_phases if facts else [],
+                continuous_take=facts.continuous_take if facts else None,
+                motion_confidence=facts.motion_confidence if facts else 0,
+                outgoing_transition=(
+                    facts.outgoing_transition if facts else ShotTransitionFact()
+                ),
             )
         )
 

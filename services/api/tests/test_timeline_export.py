@@ -53,11 +53,13 @@ class FakeRenderer:
         output_root: Path,
         *,
         source_audio_path,
+        background_audio_path,
         progress,
         is_cancelled,
         profile,
     ):
         assert source_audio_path is None
+        assert background_audio_path is None
         assert profile.width == 1920
         assert profile.height == 1080
         assert profile.subtitle_mode == "embedded"

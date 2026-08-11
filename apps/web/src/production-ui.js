@@ -3,7 +3,7 @@ export const PRODUCTION_STEPS = Object.freeze([
   { id: "reference_assets", label: "参考资产（可选）", description: "可跳过 · 人物、产品和场景" },
   { id: "shot_images", label: "分镜图片", description: "逐镜头生成和审核" },
   { id: "shot_videos", label: "分段视频", description: "图片转视频" },
-  { id: "editing", label: "剪辑合成", description: "排序、音轨和字幕" },
+  { id: "editing", label: "视频剪辑", description: "裁剪、轨道和字幕" },
   { id: "export", label: "导出成片", description: "高清渲染和归档" },
 ]);
 
@@ -43,11 +43,14 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   image_approval_revoked: "取消采用分镜图片",
   image_rejected: "退回图片候选",
   video_candidates_created: "生成视频候选",
+  video_candidates_archived: "视频候选移入回收站",
+  video_candidates_restored: "恢复视频候选",
   video_candidate_selected: "选择视频候选",
   video_approved: "确认分镜视频",
   video_approval_revoked: "取消采用分镜视频",
   video_rejected: "退回视频候选",
   video_preparation_changed: "更新视频剪辑准备",
+  analysis_prompts_synced: "同步分析提示词",
   workflow_advanced: "推进工作流",
   branch_created: "创建版本分支",
 });

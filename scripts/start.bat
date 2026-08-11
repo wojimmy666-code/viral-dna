@@ -71,12 +71,20 @@ if "%API_RUNNING%"=="1" if "%WEB_RUNNING%"=="1" goto :ready
 
 if "%API_RUNNING%"=="0" (
   echo [ViralDNA] Starting API...
-  start "ViralDNA API" /D "%PROJECT_ROOT%" "%ComSpec%" /k ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
+  if defined PROJECT_LAUNCHER_MANAGED (
+    start "ViralDNA API" /D "%PROJECT_ROOT%" "%ComSpec%" /d /s /c ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
+  ) else (
+    start "ViralDNA API" /D "%PROJECT_ROOT%" "%ComSpec%" /k ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
+  )
 )
 
 if "%WEB_RUNNING%"=="0" (
   echo [ViralDNA] Starting Web...
-  start "ViralDNA Web" /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /k "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
+  if defined PROJECT_LAUNCHER_MANAGED (
+    start "ViralDNA Web" /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /d /s /c "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
+  ) else (
+    start "ViralDNA Web" /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /k "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
+  )
 )
 
 echo [ViralDNA] Waiting for both services...
@@ -180,11 +188,11 @@ exit /b %errorlevel%
 echo.
 echo [ViralDNA] ERROR: Services did not become ready within 30 seconds.
 echo [ViralDNA] Check the API and Web windows for details.
-pause
+if not defined PROJECT_LAUNCHER_MANAGED pause
 exit /b 1
 
 :failed
 echo.
 echo [ViralDNA] ERROR: Startup preparation failed.
-pause
+if not defined PROJECT_LAUNCHER_MANAGED pause
 exit /b 1

@@ -233,7 +233,10 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert keyframe_response.status_code == 200
         assert keyframe_response.headers["content-type"].startswith("image/jpeg")
         assert manifest_response.status_code == 200
-        assert manifest_response.json()["processor_version"] == "ffmpeg-hybrid-candidates-v3"
+        assert (
+            manifest_response.json()["processor_version"]
+            == "ffmpeg-hybrid-candidates-v4-motion-clips"
+        )
         assert context_response.status_code == 200
         assert comparison_response.status_code == 200
         assert timeline_response.status_code == 200

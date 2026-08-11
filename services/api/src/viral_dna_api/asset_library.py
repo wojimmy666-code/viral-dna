@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -49,6 +49,7 @@ class AssetFolder(BaseModel):
     parent_id: UUID | None = None
     name: str = Field(min_length=1, max_length=120)
     sort_order: int = Field(default=0, ge=-10_000, le=10_000)
+    cover_asset_id: UUID | None = None
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -85,12 +86,21 @@ class AssetFolderUpdate(BaseModel):
     expected_version: int = Field(ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=120)
     sort_order: int | None = Field(default=None, ge=-10_000, le=10_000)
+    cover_asset_id: UUID | None = None
 
     @model_validator(mode="after")
     def require_change(self) -> AssetFolderUpdate:
         if not (self.model_fields_set - {"expected_version"}):
             raise ValueError("至少需要修改一个目录字段")
         return self
+
+
+class AssetFolderCoverResponse(BaseModel):
+    asset_id: UUID | None = None
+    thumbnail_url: str | None = None
+    width: int | None = None
+    height: int | None = None
+    source: Literal["manual", "automatic", "empty"]
 
 
 class AssetFolderResponse(BaseModel):
@@ -100,6 +110,7 @@ class AssetFolderResponse(BaseModel):
     sort_order: int
     version: int
     asset_count: int = 0
+    cover: AssetFolderCoverResponse
     created_at: datetime
     updated_at: datetime
 
@@ -291,15 +302,12 @@ class AssetLibraryService:
             for item in await self.repository.list_assets()
             if item.workspace_id == workspace_id and item.archived_at is None
         ]
-        counts: dict[UUID, int] = {}
+        assets_by_folder: dict[UUID, list[Asset]] = {}
         for asset in assets:
             if asset.folder_id is not None:
-                counts[asset.folder_id] = counts.get(asset.folder_id, 0) + 1
+                assets_by_folder.setdefault(asset.folder_id, []).append(asset)
         return [
-            AssetFolderResponse(
-                **folder.model_dump(exclude={"parent_id", "deleted_at"}),
-                asset_count=counts.get(folder.id, 0),
-            )
+            self._folder_response(folder, assets_by_folder.get(folder.id, []))
             for folder in sorted(
                 folders,
                 key=lambda item: (item.sort_order, item.name.casefold(), str(item.id)),
@@ -321,7 +329,7 @@ class AssetLibraryService:
                 sort_order=payload.sort_order,
             )
             await self.repository.save_asset_folder(folder)
-        return AssetFolderResponse(**folder.model_dump(exclude={"parent_id", "deleted_at"}))
+        return self._folder_response(folder, [])
 
     async def update_folder(
         self,
@@ -351,16 +359,33 @@ class AssetLibraryService:
                 updates["name"] = name
             if "sort_order" in payload.model_fields_set:
                 updates["sort_order"] = payload.sort_order
+            if "cover_asset_id" in payload.model_fields_set:
+                if payload.cover_asset_id is not None:
+                    cover_asset = await self._require_asset(payload.cover_asset_id)
+                    if cover_asset.archived_at is not None:
+                        raise AssetLibraryError(
+                            "已归档资产不能设为目录封面",
+                            status_code=409,
+                            code="folder_cover_asset_archived",
+                        )
+                    if (
+                        cover_asset.workspace_id != folder.workspace_id
+                        or cover_asset.folder_id != folder.id
+                    ):
+                        raise AssetLibraryError(
+                            "目录封面必须使用当前目录中的资产",
+                            status_code=409,
+                            code="folder_cover_asset_mismatch",
+                        )
+                updates["cover_asset_id"] = payload.cover_asset_id
             updated = folder.model_copy(update=updates)
             await self.repository.save_asset_folder(updated)
-        active_count = sum(
-            item.folder_id == folder_id and item.archived_at is None
+        active_assets = [
+            item
             for item in await self.repository.list_assets()
-        )
-        return AssetFolderResponse(
-            **updated.model_dump(exclude={"parent_id", "deleted_at"}),
-            asset_count=active_count,
-        )
+            if item.folder_id == folder_id and item.archived_at is None
+        ]
+        return self._folder_response(updated, active_assets)
 
     async def delete_folder(
         self,
@@ -597,9 +622,10 @@ class AssetLibraryService:
                     status_code=409,
                     code="asset_version_conflict",
                 )
+            now = utc_now()
             updates: dict[str, object] = {
                 "version": asset.version + 1,
-                "updated_at": utc_now(),
+                "updated_at": now,
             }
             fields = payload.model_fields_set - {"expected_version"}
             if "folder_id" in fields:
@@ -611,6 +637,8 @@ class AssetLibraryService:
                             status_code=409,
                             code="folder_workspace_mismatch",
                         )
+                if payload.folder_id != asset.folder_id:
+                    await self._clear_manual_cover(asset.folder_id, asset.id, now)
                 updates["folder_id"] = payload.folder_id
             if "type" in fields:
                 updates["type"] = payload.type
@@ -651,10 +679,12 @@ class AssetLibraryService:
             asset = await self._require_asset(asset_id)
             await self._active_context(asset.workspace_id)
             if asset.archived_at is None:
+                now = utc_now()
+                await self._clear_manual_cover(asset.folder_id, asset.id, now)
                 asset = asset.model_copy(
                     update={
-                        "archived_at": utc_now(),
-                        "updated_at": utc_now(),
+                        "archived_at": now,
+                        "updated_at": now,
                         "version": asset.version + 1,
                     }
                 )
@@ -753,6 +783,70 @@ class AssetLibraryService:
             for item in await self.repository.list_asset_folders()
             if item.workspace_id == workspace_id and item.deleted_at is None
         }
+
+    @staticmethod
+    def _folder_response(
+        folder: AssetFolder,
+        active_assets: list[Asset],
+    ) -> AssetFolderResponse:
+        manual_cover = next(
+            (item for item in active_assets if item.id == folder.cover_asset_id),
+            None,
+        )
+        automatic_cover = max(
+            active_assets,
+            key=lambda item: (item.updated_at, item.created_at, str(item.id)),
+            default=None,
+        )
+        cover_asset = manual_cover or automatic_cover
+        source: Literal["manual", "automatic", "empty"] = (
+            "manual"
+            if manual_cover is not None
+            else "automatic"
+            if automatic_cover is not None
+            else "empty"
+        )
+        cover = AssetFolderCoverResponse(source=source)
+        if cover_asset is not None:
+            cover = AssetFolderCoverResponse(
+                asset_id=cover_asset.id,
+                thumbnail_url=f"/api/v1/assets/{cover_asset.id}/thumbnail?v={cover_asset.version}",
+                width=cover_asset.width,
+                height=cover_asset.height,
+                source=source,
+            )
+        return AssetFolderResponse(
+            **folder.model_dump(
+                exclude={"parent_id", "deleted_at", "cover_asset_id"},
+            ),
+            asset_count=len(active_assets),
+            cover=cover,
+        )
+
+    async def _clear_manual_cover(
+        self,
+        folder_id: UUID | None,
+        asset_id: UUID,
+        updated_at: datetime,
+    ) -> None:
+        if folder_id is None:
+            return
+        folder = await self.repository.get_asset_folder(folder_id)
+        if (
+            folder is None
+            or folder.deleted_at is not None
+            or folder.cover_asset_id != asset_id
+        ):
+            return
+        await self.repository.save_asset_folder(
+            folder.model_copy(
+                update={
+                    "cover_asset_id": None,
+                    "version": folder.version + 1,
+                    "updated_at": updated_at,
+                }
+            )
+        )
 
     async def _response(
         self,

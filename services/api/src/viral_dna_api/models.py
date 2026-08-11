@@ -163,11 +163,14 @@ class ProductionChangeKind(StrEnum):
     IMAGE_APPROVAL_REVOKED = "image_approval_revoked"
     IMAGE_REJECTED = "image_rejected"
     VIDEO_CANDIDATES_CREATED = "video_candidates_created"
+    VIDEO_CANDIDATES_ARCHIVED = "video_candidates_archived"
+    VIDEO_CANDIDATES_RESTORED = "video_candidates_restored"
     VIDEO_CANDIDATE_SELECTED = "video_candidate_selected"
     VIDEO_APPROVED = "video_approved"
     VIDEO_APPROVAL_REVOKED = "video_approval_revoked"
     VIDEO_REJECTED = "video_rejected"
     VIDEO_PREPARATION_CHANGED = "video_preparation_changed"
+    ANALYSIS_PROMPTS_SYNCED = "analysis_prompts_synced"
     WORKFLOW_ADVANCED = "workflow_advanced"
     BRANCH_CREATED = "branch_created"
 
@@ -258,6 +261,10 @@ class GenerationCandidateStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class GenerationCandidateArchiveReason(StrEnum):
+    USER_DELETED = "user_deleted"
+
+
 class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     REVOKED = "revoked"
@@ -289,6 +296,7 @@ class TimelineTransitionKind(StrEnum):
 
 class TimelineChangeKind(StrEnum):
     INITIALIZED = "initialized"
+    HANDOFF_SYNCED = "handoff_synced"
     CLIPS_UPDATED = "clips_updated"
     TRACKS_UPDATED = "tracks_updated"
     RESTORED = "restored"
@@ -874,6 +882,66 @@ class ShotVisualBeatFact(BaseModel):
         return self
 
 
+class ShotMotionPhaseFact(BaseModel):
+    """Observable motion state for one time-bound phase inside a shot."""
+
+    index: int = Field(ge=1, le=20)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    description: str = Field(min_length=1, max_length=1600)
+    camera_motion: str = Field(default="无法确认", max_length=800)
+    subject_motion: str = Field(default="无法确认", max_length=800)
+    foreground_motion: str = Field(default="无明显前景运动", max_length=800)
+    focus_change: str = Field(default="无法确认", max_length=800)
+    foreground_occupancy_start_percent: int | None = Field(default=None, ge=0, le=100)
+    foreground_occupancy_end_percent: int | None = Field(default=None, ge=0, le=100)
+    occlusion_start_percent: int | None = Field(default=None, ge=0, le=100)
+    occlusion_end_percent: int | None = Field(default=None, ge=0, le=100)
+    observed: bool = True
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> ShotMotionPhaseFact:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("运镜阶段结束时间必须晚于开始时间")
+        return self
+
+
+class ShotTransitionFact(BaseModel):
+    """Outgoing transition facts kept separate from the current shot content."""
+
+    kind: Literal[
+        "none",
+        "hard_cut",
+        "crossfade",
+        "foreground_occlusion",
+        "wipe",
+        "whip_pan",
+        "match_cut",
+        "other",
+        "uncertain",
+    ] = "none"
+    start_seconds: float | None = Field(default=None, ge=0)
+    end_seconds: float | None = Field(default=None, ge=0)
+    description: str = Field(default="无出场转场", max_length=1600)
+    mask_object: str | None = Field(default=None, max_length=300)
+    direction: str | None = Field(default=None, max_length=300)
+    terminal_frame: str = Field(default="", max_length=800)
+    continuity_anchor: str | None = Field(default=None, max_length=800)
+    generation_prompt: str = Field(default="", max_length=2000)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> ShotTransitionFact:
+        if (
+            self.start_seconds is not None
+            and self.end_seconds is not None
+            and self.end_seconds < self.start_seconds
+        ):
+            raise ValueError("出场转场结束时间不能早于开始时间")
+        return self
+
+
 class Shot(BaseModel):
     id: str
     index: int
@@ -906,6 +974,10 @@ class Shot(BaseModel):
     source_candidate_ids: list[str] = Field(default_factory=list)
     semantic_group: str | None = Field(default=None, max_length=120)
     visual_beats: list[ShotVisualBeatFact] = Field(default_factory=list, max_length=20)
+    motion_phases: list[ShotMotionPhaseFact] = Field(default_factory=list, max_length=20)
+    continuous_take: bool | None = None
+    motion_confidence: float = Field(default=0, ge=0, le=1)
+    outgoing_transition: ShotTransitionFact = Field(default_factory=ShotTransitionFact)
 
     @model_validator(mode="after")
     def validate_content_range(self) -> Shot:
@@ -942,6 +1014,10 @@ class ShotVisualFacts(BaseModel):
     contains_multiple_scenes: bool = False
     multiple_scenes_reason: str | None = Field(default=None, max_length=800)
     visual_beats: list[ShotVisualBeatFact] = Field(min_length=1, max_length=20)
+    motion_phases: list[ShotMotionPhaseFact] = Field(default_factory=list, max_length=20)
+    continuous_take: bool | None = None
+    motion_confidence: float = Field(default=0, ge=0, le=1)
+    outgoing_transition: ShotTransitionFact = Field(default_factory=ShotTransitionFact)
 
 
 SemanticShotGroup = Literal[
@@ -1079,10 +1155,17 @@ class ShotEvidence(BaseModel):
     content_end_seconds: float | None = Field(default=None, gt=0)
     incoming_transition_start_seconds: float | None = Field(default=None, ge=0)
     incoming_transition_end_seconds: float | None = Field(default=None, ge=0)
+    outgoing_transition_start_seconds: float | None = Field(default=None, ge=0)
+    outgoing_transition_end_seconds: float | None = Field(default=None, ge=0)
+    analysis_clip_url: str | None = None
+    analysis_clip_start_seconds: float | None = Field(default=None, ge=0)
+    analysis_clip_end_seconds: float | None = Field(default=None, gt=0)
     representative_timestamp: float = Field(ge=0)
     keyframe_url: str
     evidence_frame_urls: list[str] = Field(default_factory=list)
     evidence_timestamps: list[float] = Field(default_factory=list, max_length=20)
+    motion_frame_urls: list[str] = Field(default_factory=list, max_length=20)
+    motion_timestamps: list[float] = Field(default_factory=list, max_length=20)
     detection_method: str
 
     boundary_method: str | None = Field(default=None, max_length=80)
@@ -1111,6 +1194,23 @@ class ShotEvidence(BaseModel):
             for timestamp in self.evidence_timestamps
         ):
             raise ValueError("镜头证据帧必须位于有效内容范围内")
+        if (
+            self.analysis_clip_start_seconds is not None
+            and self.analysis_clip_end_seconds is not None
+            and self.analysis_clip_end_seconds <= self.analysis_clip_start_seconds
+        ):
+            raise ValueError("分析视频片段结束时间必须晚于开始时间")
+        if self.motion_timestamps and self.analysis_clip_start_seconds is not None:
+            analysis_end = (
+                self.analysis_clip_end_seconds
+                or self.content_end_seconds
+                or self.end_seconds
+            )
+            if any(
+                timestamp < self.analysis_clip_start_seconds or timestamp > analysis_end
+                for timestamp in self.motion_timestamps
+            ):
+                raise ValueError("运动证据帧必须位于分析视频片段范围内")
         return self
 
 
@@ -1412,6 +1512,7 @@ class ProductionProject(BaseModel):
     record_id: UUID
     video_id: UUID
     base_analysis_id: UUID
+    prompt_source_analysis_id: UUID | None = None
     source_prompt_package_id: UUID
     source_project_id: UUID | None = None
     source_revision_id: UUID | None = None
@@ -1893,6 +1994,9 @@ class GenerationCandidate(BaseModel):
     metadata_relative_path: str = Field(min_length=1, max_length=2048)
     quality_report: dict[str, Any] = Field(default_factory=dict)
     status: GenerationCandidateStatus = GenerationCandidateStatus.READY
+    archived_at: datetime | None = None
+    archived_by_account_id: UUID | None = None
+    archive_reason: GenerationCandidateArchiveReason | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
     @field_validator(
@@ -2147,6 +2251,72 @@ class ShotVisualBeatCreate(BaseModel):
         ):
             raise ValueError("画面结束位置必须晚于开始位置")
         return self
+
+
+class ProductionPromptSyncChoice(StrEnum):
+    USE_LATEST = "use_latest"
+    KEEP_CURRENT = "keep_current"
+
+
+class ProductionPromptFieldDiff(BaseModel):
+    field_key: str = Field(min_length=1, max_length=120)
+    field_kind: Literal["image_prompt", "video_prompt"]
+    label: str = Field(min_length=1, max_length=120)
+    visual_beat_index: int | None = Field(default=None, ge=1, le=20)
+    base_value: str = Field(default="", max_length=8000)
+    current_value: str = Field(default="", max_length=8000)
+    latest_value: str = Field(default="", max_length=8000)
+    manually_edited: bool = False
+    suggested_choice: ProductionPromptSyncChoice
+
+
+class ProductionShotPromptDiff(BaseModel):
+    shot_plan_id: UUID
+    source_shot_id: str = Field(min_length=1, max_length=120)
+    index: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=200)
+    fields: list[ProductionPromptFieldDiff] = Field(default_factory=list)
+
+
+class ProductionAnalysisUpdatePreview(BaseModel):
+    project_id: UUID
+    current_revision_id: UUID
+    base_analysis_id: UUID
+    prompt_source_analysis_id: UUID
+    target_analysis_id: UUID
+    target_prompt_package_id: UUID
+    target_generated_at: datetime
+    update_available: bool = False
+    compatible: bool = True
+    structural_change_detected: bool = False
+    structural_change_messages: list[str] = Field(default_factory=list, max_length=100)
+    changed_field_count: int = Field(default=0, ge=0)
+    automatic_field_count: int = Field(default=0, ge=0)
+    conflict_field_count: int = Field(default=0, ge=0)
+    shots: list[ProductionShotPromptDiff] = Field(default_factory=list)
+
+
+class ProductionPromptSyncDecision(BaseModel):
+    shot_plan_id: UUID
+    field_key: str = Field(min_length=1, max_length=120)
+    choice: ProductionPromptSyncChoice
+
+
+class ProductionPromptSyncRequest(BaseModel):
+    expected_revision_id: UUID
+    target_analysis_id: UUID
+    decisions: list[ProductionPromptSyncDecision] = Field(default_factory=list)
+
+    @field_validator("decisions")
+    @classmethod
+    def require_unique_prompt_decisions(
+        cls,
+        values: list[ProductionPromptSyncDecision],
+    ) -> list[ProductionPromptSyncDecision]:
+        keys = [(item.shot_plan_id, item.field_key) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("同一个提示词字段不能重复选择同步策略")
+        return values
 
 
 class ShotVisualBeatUpdate(BaseModel):
@@ -2487,6 +2657,9 @@ class GenerationCandidateResponse(BaseModel):
     sha256: str
     quality_report: dict[str, Any] = Field(default_factory=dict)
     status: GenerationCandidateStatus
+    archived_at: datetime | None = None
+    archived_by_account_id: UUID | None = None
+    archive_reason: GenerationCandidateArchiveReason | None = None
     content_url: str
     thumbnail_url: str
     created_at: datetime
@@ -2594,6 +2767,7 @@ class EditingHandoffClip(BaseModel):
     candidate_id: UUID
     candidate_content_url: str
     cover_url: str
+    cover_timestamp_seconds: float | None = Field(default=None, ge=0)
     timeline_start_seconds: float = Field(ge=0)
     timeline_end_seconds: float = Field(gt=0)
     timeline_duration_seconds: float = Field(gt=0)
@@ -2606,6 +2780,8 @@ class EditingHandoffClip(BaseModel):
     transcript_cues: list[VideoMappedTextCue] = Field(default_factory=list)
     subtitle_cues: list[VideoMappedTextCue] = Field(default_factory=list)
     quality_status: VideoQualityStatus
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    blocker_messages: list[str] = Field(default_factory=list, max_length=20)
     warning_messages: list[str] = Field(default_factory=list)
 
 
@@ -2636,6 +2812,26 @@ class TimelineTransition(BaseModel):
         return self
 
 
+class CandidateBatchLifecycleRequest(BaseModel):
+    expected_revision_id: UUID
+    candidate_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def require_unique_candidate_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("候选 ID 不能重复")
+        return value
+
+
+class CandidateBatchLifecycleResponse(BaseModel):
+    project_id: UUID
+    shot_plan_id: UUID
+    current_revision_id: UUID
+    candidates: list[GenerationCandidateResponse]
+    affected_count: int = Field(ge=1)
+
+
 class TimelineClip(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     shot_plan_id: UUID
@@ -2643,6 +2839,8 @@ class TimelineClip(BaseModel):
     candidate_id: UUID
     candidate_content_url: str = Field(min_length=1, max_length=2048)
     cover_url: str = Field(min_length=1, max_length=2048)
+    cover_relative_path: str | None = Field(default=None, max_length=2048)
+    cover_timestamp_seconds: float | None = Field(default=None, ge=0)
     order: int = Field(ge=1)
     enabled: bool = True
     candidate_duration_seconds: float = Field(gt=0)
@@ -2657,7 +2855,15 @@ class TimelineClip(BaseModel):
     source_audio_start_seconds: float = Field(ge=0)
     source_audio_end_seconds: float = Field(gt=0)
     transition_after: TimelineTransition = Field(default_factory=TimelineTransition)
+    quality_status: VideoQualityStatus = VideoQualityStatus.WARNING
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    blocker_messages: list[str] = Field(default_factory=list, max_length=20)
     warning_messages: list[str] = Field(default_factory=list)
+
+    @field_validator("cover_relative_path")
+    @classmethod
+    def validate_cover_relative_path(cls, value: str | None) -> str | None:
+        return _normalize_workspace_relative_path(value) if value is not None else None
 
     @model_validator(mode="after")
     def validate_clip_ranges(self) -> TimelineClip:
@@ -2665,6 +2871,13 @@ class TimelineClip(BaseModel):
             raise ValueError("片段出点必须晚于入点")
         if self.trim_out_seconds > self.candidate_duration_seconds + 0.05:
             raise ValueError("片段出点不能超过候选视频时长")
+        if (
+            self.cover_timestamp_seconds is not None
+            and not self.trim_in_seconds
+            <= self.cover_timestamp_seconds
+            <= self.trim_out_seconds
+        ):
+            raise ValueError("封面帧必须位于当前片段裁剪范围内")
         if self.timeline_end_seconds <= self.timeline_start_seconds:
             raise ValueError("时间线片段结束时间必须晚于开始时间")
         if self.source_audio_end_seconds <= self.source_audio_start_seconds:
@@ -2713,6 +2926,26 @@ class TimelineAudioTrack(BaseModel):
         return self
 
 
+class TimelineBackgroundAudioTrack(BaseModel):
+    source_relative_path: str | None = Field(default=None, max_length=2048)
+    source_url: str | None = Field(default=None, max_length=2048)
+    name: str | None = Field(default=None, max_length=240)
+    enabled: bool = False
+    volume: float = Field(default=0.35, ge=0, le=2)
+    loop: bool = True
+
+    @field_validator("source_relative_path")
+    @classmethod
+    def validate_source_relative_path(cls, value: str | None) -> str | None:
+        return _normalize_workspace_relative_path(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_source(self) -> TimelineBackgroundAudioTrack:
+        if self.enabled and (not self.source_relative_path or not self.source_url):
+            raise ValueError("启用附加音轨时必须先上传音频文件")
+        return self
+
+
 class ProductionTimeline(BaseModel):
     schema_version: Literal["viral-dna-timeline/v1"] = "viral-dna-timeline/v1"
     project_id: UUID
@@ -2726,6 +2959,9 @@ class ProductionTimeline(BaseModel):
     duration_seconds: float = Field(gt=0)
     clips: list[TimelineClip] = Field(min_length=1)
     audio_track: TimelineAudioTrack
+    background_audio_track: TimelineBackgroundAudioTrack = Field(
+        default_factory=TimelineBackgroundAudioTrack
+    )
     subtitle_cues: list[TimelineSubtitleCue] = Field(default_factory=list)
     validation_messages: list[str] = Field(default_factory=list)
     warning_messages: list[str] = Field(default_factory=list)
@@ -2740,6 +2976,7 @@ class TimelineClipUpdate(BaseModel):
     enabled: bool | None = None
     trim_in_seconds: float | None = Field(default=None, ge=0)
     trim_out_seconds: float | None = Field(default=None, gt=0)
+    cover_timestamp_seconds: float | None = Field(default=None, ge=0)
     timeline_duration_seconds: float | None = Field(default=None, gt=0, le=300)
     audio_mode: VideoClipAudioMode | None = None
     audio_volume: float | None = Field(default=None, ge=0, le=2)
@@ -2751,8 +2988,13 @@ class TimelineUpdateRequest(BaseModel):
     clip_order: list[UUID] | None = Field(default=None, min_length=1)
     clip_updates: list[TimelineClipUpdate] = Field(default_factory=list)
     audio_track: TimelineAudioTrack | None = None
+    background_audio_track: TimelineBackgroundAudioTrack | None = None
     subtitle_cues: list[TimelineSubtitleCue] | None = None
     summary: str = Field(default="更新时间线", min_length=1, max_length=240)
+
+
+class TimelineClipInspectionRequest(BaseModel):
+    expected_revision_id: UUID
 
 
 class TimelineValidationResponse(BaseModel):

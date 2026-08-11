@@ -20,6 +20,7 @@ from viral_dna_api.media import (
     boundary_evidence_timestamps,
     merge_scene_candidates,
     parse_scene_score_metadata,
+    shot_motion_evidence_timestamps,
 )
 from viral_dna_api.models import (
     AnalysisJob,
@@ -275,18 +276,42 @@ async def test_keyframe_extraction_excludes_transition_from_shot_facts(
     )
 
     assert shots[0].content_end_seconds == pytest.approx(3.047)
+    assert shots[0].outgoing_transition_start_seconds == pytest.approx(3.047)
+    assert shots[0].outgoing_transition_end_seconds == pytest.approx(3.917)
+    assert shots[0].analysis_clip_start_seconds == pytest.approx(0)
+    assert shots[0].analysis_clip_end_seconds == pytest.approx(3.917)
+    assert shots[0].analysis_clip_url.endswith("/shots/shot_001_analysis.mp4")
+    assert any(value > 3.167 for value in shots[0].motion_timestamps)
     assert shots[1].content_start_seconds == pytest.approx(3.917)
     assert shots[1].incoming_transition_start_seconds == pytest.approx(3.047)
     assert shots[1].incoming_transition_end_seconds == pytest.approx(3.917)
     assert shots[1].evidence_timestamps[0] > 3.917
     assert all(value >= 3.917 for value in shots[1].evidence_timestamps)
-    assert len(commands) == 6
+    assert len(commands) == 23
+    assert any(command[-1].endswith("shot_001_analysis.mp4") for command in commands)
+    assert any(command[-1].endswith("shot_001_motion_09.jpg") for command in commands)
     assert boundary_evidence_timestamps(0.45, 1.0) == (
         0.001,
         0.33,
         0.57,
         0.999,
     )
+
+
+def test_motion_evidence_samples_content_and_outgoing_transition() -> None:
+    timestamps = shot_motion_evidence_timestamps(
+        0,
+        3.047,
+        transition_start_seconds=3.047,
+        transition_end_seconds=3.917,
+    )
+
+    assert len(timestamps) == 9
+    assert timestamps == sorted(timestamps)
+    assert timestamps[0] == pytest.approx(0.152)
+    assert timestamps[5] == pytest.approx(2.895)
+    assert timestamps[6] > 3.047
+    assert timestamps[-1] < 3.917
 
 
 @pytest.mark.asyncio

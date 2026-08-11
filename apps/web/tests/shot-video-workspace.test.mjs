@@ -6,6 +6,14 @@ const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
   "utf8",
 );
+const candidateLibrarySource = readFileSync(
+  new URL("../src/VideoCandidateLibrary.jsx", import.meta.url),
+  "utf8",
+);
+const candidateLibraryStyles = readFileSync(
+  new URL("../src/video-candidate-library.css", import.meta.url),
+  "utf8",
+);
 const workflowStyles = readFileSync(
   new URL("../src/production-workflow.css", import.meta.url),
   "utf8",
@@ -14,8 +22,12 @@ const baseStyles = readFileSync(
   new URL("../src/styles.css", import.meta.url),
   "utf8",
 );
-const preparationSource = readFileSync(
-  new URL("../src/VideoPreparationPanel.jsx", import.meta.url),
+const videoEditorSource = readFileSync(
+  new URL("../src/video-editor/VideoEditorWorkspace.jsx", import.meta.url),
+  "utf8",
+);
+const videoEditorStyles = readFileSync(
+  new URL("../src/video-editor/video-editor.css", import.meta.url),
   "utf8",
 );
 const imageWorkspaceSource = readFileSync(
@@ -27,11 +39,11 @@ const appSource = readFileSync(
   "utf8",
 );
 
-function cssRule(selector) {
-  const start = workflowStyles.indexOf(`${selector} {`);
+function cssRule(selector, source = workflowStyles) {
+  const start = source.indexOf(`${selector} {`);
   assert.notEqual(start, -1, `missing CSS rule for ${selector}`);
-  const end = workflowStyles.indexOf("}", start);
-  return workflowStyles.slice(start, end + 1);
+  const end = source.indexOf("}", start);
+  return source.slice(start, end + 1);
 }
 
 test("keeps the production workspace on a readable semantic type ramp", () => {
@@ -45,11 +57,7 @@ test("keeps the production workspace on a readable semantic type ramp", () => {
   assert.match(readableSection, /\.production-workspace\s*\{/);
   assert.match(readableSection, /font-size:\s*var\(--production-type-body\)/);
   assert.match(readableSection, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-size:\s*var\(--production-type-body\)/s);
-  assert.match(readableSection, /\.video-preparation-status,/);
-  assert.match(
-    readableSection,
-    /\.production-workspace :is\([\s\S]*?\.video-preparation-status,[\s\S]*?\)\s*\{[\s\S]*?font-size:\s*var\(--production-type-caption\)/,
-  );
+  assert.match(readableSection, /\.production-export-status/);
   assert.doesNotMatch(readableSection, /font-size:\s*(?:7|8|9|10|11)px/);
 });
 
@@ -71,6 +79,25 @@ test("uses one prompt editor role in image and video workspaces", () => {
   assert.match(workspaceSource, /className="prompt-editor-textarea"/);
   assert.match(imageWorkspaceSource, /className="prompt-editor-textarea"/);
   assert.match(workflowStyles, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-weight:\s*var\(--type-weight-regular\)/s);
+});
+
+test("distills repeated candidate metadata and progressively reveals negative constraints", () => {
+  assert.match(workspaceSource, /<details className="shot-video-negative-constraints">/);
+  assert.match(workspaceSource, /<summary>视频负面约束（可选）<\/summary>/);
+  assert.doesNotMatch(
+    workspaceSource,
+    /<details className="shot-video-negative-constraints"[^>]*\sopen(?:=|>)/,
+  );
+  assert.match(workspaceSource, /aria-label="视频负面约束"/);
+  assert.match(workflowStyles, /\.shot-video-negative-constraints summary\s*\{/);
+
+  assert.doesNotMatch(workspaceSource, /Math\.round\(beat\.start_ratio \* 100\)/);
+  assert.doesNotMatch(candidateLibrarySource, /<span>\{group\.candidates\.length\} 个<\/span>/);
+  assert.match(candidateLibrarySource, /<strong>当前预览<\/strong>/);
+  assert.doesNotMatch(candidateLibrarySource, /当前预览 · 视频 #/);
+  assert.doesNotMatch(imageWorkspaceSource, /<span>\{group\.candidates\.length\} 张<\/span>/);
+  assert.match(imageWorkspaceSource, /<strong>当前预览<\/strong>/);
+  assert.doesNotMatch(imageWorkspaceSource, /当前预览 · 候选/);
 });
 
 test("associates the duration label, output and help text with the range input", () => {
@@ -125,9 +152,9 @@ test("shows actionable provider failures and hides unsafe direct retry", () => {
 test("keeps video candidates from every generation batch selectable", () => {
   assert.match(workspaceSource, /const videoRuns = useMemo/);
   assert.match(workspaceSource, /const candidateGroups = useMemo/);
-  assert.match(workspaceSource, /historicalCandidateGroups/);
-  assert.match(workspaceSource, /className="shot-candidate-library shot-video-candidate-library"/);
-  assert.match(workspaceSource, /历史 \{historicalCandidateCount\} 个/);
+  assert.match(workspaceSource, /<VideoCandidateLibrary/);
+  assert.match(candidateLibrarySource, /className="shot-candidate-library shot-video-candidate-library"/);
+  assert.match(candidateLibrarySource, /历史 \{historicalCount\} 个/);
   assert.match(workspaceSource, /改用此视频/);
   assert.match(workspaceSource, /displayedCandidateRun\?\.model_display_name/);
   assert.doesNotMatch(
@@ -146,26 +173,71 @@ test("keeps video candidates from every generation batch selectable", () => {
   assert.match(thumbRule, /background:\s*#19191e/);
 });
 
-test("requires approved videos to complete an explicit editing preparation", () => {
-  assert.match(workspaceSource, /<VideoPreparationPanel/);
-  assert.match(workspaceSource, /gate\?\.prepared_shot_count/);
-  assert.match(preparationSource, /trim_in_seconds:\s*draft\.trimIn/);
-  assert.match(preparationSource, /trim_out_seconds:\s*draft\.trimOut/);
-  assert.match(preparationSource, /cover_timestamp_seconds:\s*draft\.cover/);
-  assert.match(preparationSource, /audio_mode:\s*draft\.audioMode/);
-  assert.match(preparationSource, /className="video-preparation-audio"/);
-
-  const bodyRule = cssRule(".video-preparation-body");
-  const coverRule = cssRule(".video-preparation-cover-frame");
-  assert.match(bodyRule, /grid-template-columns:/);
-  assert.match(coverRule, /overflow:\s*hidden/);
+test("manages video candidate history through a recoverable recycle bin", () => {
+  assert.match(workspaceSource, /const archivedCandidateGroups = useMemo/);
+  assert.match(workspaceSource, /candidate\.archive_reason === "user_deleted"/);
+  assert.match(candidateLibrarySource, /管理/);
+  assert.match(candidateLibrarySource, /移入回收站/);
+  assert.match(candidateLibrarySource, /回收站 \{archivedCandidates\.length\}/);
+  assert.match(candidateLibrarySource, /恢复所选/);
+  assert.match(candidateLibrarySource, /approved_video_candidate_id/);
+  assert.match(candidateLibrarySource, /已采用，请先取消采用或改用其他视频/);
+  assert.match(candidateLibrarySource, /候选文件会保留，可随时恢复/);
+  assert.match(candidateLibrarySource, /全选可删除/);
+  assert.match(candidateLibrarySource, /全选可恢复/);
+  assert.match(candidateLibrarySource, /清空选择/);
+  assert.doesNotMatch(candidateLibrarySource, /candidate-batch-selector/);
+  assert.match(candidateLibraryStyles, /\.candidate-lifecycle-confirm\s*\{/);
+  assert.match(candidateLibraryStyles, /\.shot-candidate-tile\.lifecycle-locked\s*\{/);
+  assert.doesNotMatch(candidateLibraryStyles, /\.candidate-batch-selector/);
+  assert.match(candidateLibraryStyles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.doesNotMatch(candidateLibrarySource, /window\.confirm|window\.prompt/);
 });
 
-test("shows duration alignment risk as a non-blocking preparation warning", () => {
-  assert.match(preparationSource, /preparation\?\.warning_messages\?\.length/);
-  assert.match(preparationSource, /可交接 · 有提示/);
-  assert.match(preparationSource, /className="video-preparation-warnings"/);
-  assert.match(workflowStyles, /\.video-preparation-warnings/);
+test("lazy-loads one muted hover preview without changing candidate selection", () => {
+  assert.match(candidateLibrarySource, /HOVER_PREVIEW_DELAY_MS = 180/);
+  assert.match(candidateLibrarySource, /\(hover: hover\) and \(pointer: fine\)/);
+  assert.match(candidateLibrarySource, /prefers-reduced-motion: reduce/);
+  assert.match(candidateLibrarySource, /candidate\.content_url/);
+  assert.match(candidateLibrarySource, /onPointerEnter=\{schedulePreview\}/);
+  assert.match(candidateLibrarySource, /onPointerLeave=\{stopPreview\}/);
+  assert.match(candidateLibrarySource, /className="shot-candidate-hover-video"/);
+  assert.match(candidateLibrarySource, /loop\s+muted/);
+  assert.match(candidateLibrarySource, /playsInline/);
+  assert.match(candidateLibrarySource, /preload="auto"/);
+  assert.match(candidateLibrarySource, /renderThumbnail\(candidate, !interactionBusy\)/);
+  assert.match(candidateLibrarySource, /renderThumbnail\(candidate\)/);
+
+  const hoverVideoRule = cssRule(".shot-candidate-hover-video", candidateLibraryStyles);
+  assert.match(hoverVideoRule, /position:\s*absolute/);
+  assert.match(hoverVideoRule, /object-fit:\s*contain/);
+  assert.match(hoverVideoRule, /opacity:\s*0/);
+  assert.match(hoverVideoRule, /pointer-events:\s*none/);
+});
+
+test("advances after approval and keeps editing controls in the video editor module", () => {
+  assert.doesNotMatch(workspaceSource, /VideoPreparationPanel/);
+  assert.doesNotMatch(workspaceSource, /gate\?\.prepared_shot_count/);
+  assert.match(workspaceSource, /gate\?\.approved_shot_count/);
+  assert.match(workspaceSource, /进入视频剪辑/);
+  assert.match(videoEditorSource, /trim_in_seconds/);
+  assert.match(videoEditorSource, /trim_out_seconds/);
+  assert.match(videoEditorSource, /cover_timestamp_seconds/);
+  assert.match(videoEditorSource, /audio_mode/);
+  assert.match(videoEditorSource, /background_audio_track/);
+  assert.match(videoEditorSource, /V1 视频/);
+  assert.match(videoEditorSource, /A1 原音/);
+  assert.match(videoEditorSource, /A2 附加/);
+  assert.match(videoEditorSource, /T1 字幕/);
+  assert.match(videoEditorSource, /timeline\/background-audio/);
+});
+
+test("shows clip quality warnings inside the independent editor inspector", () => {
+  assert.match(videoEditorSource, /clip\.warning_messages/);
+  assert.match(videoEditorSource, /timeline-quality-summary/);
+  assert.match(videoEditorSource, /重新质检/);
+  assert.doesNotMatch(videoEditorSource, /timeline-cover-field|封面帧必须位于入点和出点之间/);
+  assert.match(videoEditorStyles, /\.timeline-quality-summary/);
 });
 
 test("submits approved visual beats as an explicit ordered storyboard", () => {

@@ -1,0 +1,259 @@
+.shot-candidate-library-heading > .shot-candidate-library-actions,
+.candidate-lifecycle-confirm,
+.candidate-lifecycle-confirm > div,
+.candidate-recycle-panel > header,
+.candidate-recycle-panel > header > div {
+  display: flex;
+  align-items: center;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > span,
+.candidate-recycle-panel > header span {
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  white-space: nowrap;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button,
+.candidate-recycle-panel button,
+.candidate-lifecycle-confirm button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  color: #5f53ae;
+  background: #f3f0ff;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
+  white-space: nowrap;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button:hover,
+.candidate-recycle-panel button:hover,
+.candidate-lifecycle-confirm button:hover {
+  background: #ebe7ff;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button.danger,
+.candidate-lifecycle-confirm button.danger {
+  color: #a23645;
+  background: #fff0f2;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button.danger:hover,
+.candidate-lifecycle-confirm button.danger:hover {
+  background: #ffe4e8;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button:disabled,
+.candidate-recycle-panel button:disabled,
+.candidate-lifecycle-confirm button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button:focus-visible,
+.candidate-recycle-panel button:focus-visible,
+.candidate-lifecycle-confirm button:focus-visible,
+.shot-candidate-tile.lifecycle-selectable > input:focus-visible {
+  outline: 3px solid #ddd7ff;
+  outline-offset: 2px;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button svg {
+  transition: transform 150ms ease;
+}
+
+.shot-candidate-library-heading > .shot-candidate-library-actions > button.expanded svg {
+  transform: rotate(180deg);
+}
+
+.candidate-lifecycle-confirm {
+  min-height: 44px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #f0d9dd;
+  color: #6f343d;
+  background: #fff7f8;
+  font-size: var(--type-caption-size);
+}
+
+.candidate-lifecycle-confirm.restore {
+  border-top: 1px solid #e2ddf5;
+  border-bottom-color: #e2ddf5;
+  color: #504789;
+  background: #faf8ff;
+}
+
+.candidate-lifecycle-confirm > span {
+  min-width: 0;
+  line-height: var(--type-leading-ui);
+}
+
+.candidate-lifecycle-confirm > div {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.shot-candidate-tile.lifecycle-selectable > input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #6654e8;
+  cursor: pointer;
+}
+
+.shot-candidate-tile.lifecycle-selectable {
+  display: block;
+  cursor: pointer;
+}
+
+.shot-candidate-tile.lifecycle-selectable > input {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  border-radius: 4px;
+}
+
+.shot-candidate-tile.selected-for-lifecycle {
+  border-color: #7563e2;
+  box-shadow: 0 0 0 2px #e9e5ff;
+}
+
+.shot-video-candidate-library .shot-candidate-thumb > img {
+  transition: opacity 120ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.shot-candidate-hover-video {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  opacity: 0;
+  background: #19191e;
+  pointer-events: none;
+  transition: opacity 150ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.shot-candidate-thumb.hover-preview-ready > img {
+  opacity: 0;
+}
+
+.shot-candidate-thumb.hover-preview-ready > .shot-candidate-hover-video {
+  opacity: 1;
+}
+
+.shot-video-candidate-library .shot-candidate-thumb > small {
+  z-index: 3;
+}
+
+.shot-candidate-tile.lifecycle-locked {
+  cursor: not-allowed;
+}
+
+.candidate-lifecycle-lock {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #26734e;
+  background: #eaf7f0;
+}
+
+.candidate-library-empty {
+  padding: 16px 12px;
+  color: var(--text-secondary);
+  background: #fbfafd;
+  font-size: var(--type-label-size);
+  text-align: center;
+}
+
+.candidate-recycle-panel {
+  border-top: 1px solid #e6e3ef;
+  background: #faf9fc;
+}
+
+.candidate-recycle-panel > header {
+  min-height: 42px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+}
+
+.candidate-recycle-panel > header > div {
+  min-width: 0;
+  gap: 7px;
+}
+
+.candidate-recycle-panel > header strong {
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
+}
+
+.candidate-recycle-panel > header small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-recycle-panel .shot-candidate-strip {
+  border-top: 1px solid #ece9f3;
+  background: #f7f6fa;
+}
+
+.candidate-recycle-panel .shot-candidate-thumb {
+  opacity: 0.78;
+}
+
+@media (max-width: 760px) {
+  .shot-candidate-library-heading,
+  .candidate-lifecycle-confirm,
+  .candidate-recycle-panel > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shot-candidate-library-heading > .shot-candidate-library-actions,
+  .candidate-lifecycle-confirm > div,
+  .candidate-recycle-panel > header > div:last-child {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .candidate-recycle-panel > header small {
+    white-space: normal;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shot-candidate-library-heading > .shot-candidate-library-actions > button svg,
+  .shot-video-candidate-library .shot-candidate-thumb > img,
+  .shot-candidate-hover-video {
+    transition: none;
+  }
+}

@@ -115,6 +115,7 @@ class TimelinePreviewRenderer:
         output_root: Path,
         *,
         source_audio_path: Path | None,
+        background_audio_path: Path | None,
         progress: ProgressCallback,
         is_cancelled: CancellationCheck,
         profile: TimelineRenderProfile | None = None,
@@ -211,6 +212,35 @@ class TimelinePreviewRenderer:
                 profile=profile,
             )
 
+        if (
+            timeline.background_audio_track.enabled
+            and background_audio_path is not None
+            and await asyncio.to_thread(background_audio_path.is_file)
+        ):
+            rendered_background = intermediate_root / "background-audio.m4a"
+            await self._render_background_audio(
+                background_audio_path,
+                rendered_background,
+                duration_seconds=timeline.duration_seconds,
+                volume=timeline.background_audio_track.volume,
+                loop=timeline.background_audio_track.loop,
+                is_cancelled=is_cancelled,
+                profile=profile,
+            )
+            if audio_path is None:
+                audio_path = rendered_background
+            else:
+                mixed_audio = intermediate_root / "mixed-audio.m4a"
+                await self._mix_audio_tracks(
+                    audio_path,
+                    rendered_background,
+                    mixed_audio,
+                    duration_seconds=timeline.duration_seconds,
+                    is_cancelled=is_cancelled,
+                    profile=profile,
+                )
+                audio_path = mixed_audio
+
         subtitle_path = self._write_subtitles(
             timeline,
             output_root / profile.subtitle_filename,
@@ -228,6 +258,90 @@ class TimelinePreviewRenderer:
         )
         await progress(100)
         return output_path, subtitle_path
+
+    async def _render_background_audio(
+        self,
+        source_path: Path,
+        output_path: Path,
+        *,
+        duration_seconds: float,
+        volume: float,
+        loop: bool,
+        is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
+    ) -> None:
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+        ]
+        if loop:
+            command.extend(["-stream_loop", "-1"])
+        command.extend(
+            [
+                "-i",
+                str(source_path),
+                "-filter:a",
+                f"volume={volume:.6f},atrim=duration={duration_seconds:.6f},asetpts=PTS-STARTPTS",
+                "-t",
+                f"{duration_seconds:.6f}",
+                "-c:a",
+                "aac",
+                "-b:a",
+                profile.audio_bitrate,
+                str(output_path),
+            ]
+        )
+        await self._run(
+            command,
+            is_cancelled=is_cancelled,
+            code=f"{profile.error_prefix}_background_audio_failed",
+            message=f"{profile.operation_label}附加音轨处理失败",
+            timeout_seconds=profile.timeout_seconds,
+        )
+
+    async def _mix_audio_tracks(
+        self,
+        source_path: Path,
+        background_path: Path,
+        output_path: Path,
+        *,
+        duration_seconds: float,
+        is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
+    ) -> None:
+        await self._run(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(source_path),
+                "-i",
+                str(background_path),
+                "-filter_complex",
+                "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[a]",
+                "-map",
+                "[a]",
+                "-t",
+                f"{duration_seconds:.6f}",
+                "-c:a",
+                "aac",
+                "-b:a",
+                profile.audio_bitrate,
+                str(output_path),
+            ],
+            is_cancelled=is_cancelled,
+            code=f"{profile.error_prefix}_audio_mix_failed",
+            message=f"{profile.operation_label}音轨混合失败",
+            timeout_seconds=profile.timeout_seconds,
+        )
 
     async def _render_video_clip(
         self,

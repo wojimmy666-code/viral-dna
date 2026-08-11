@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import {
   PRODUCTION_STEPS,
@@ -39,6 +40,33 @@ import {
   workflowStatusClass,
   workflowStatusLabel,
 } from "../src/production-ui.js";
+
+const productionWorkflowSource = readFileSync(
+  new URL("../src/ProductionWorkflow.jsx", import.meta.url),
+  "utf8",
+);
+const productionWorkflowStyles = readFileSync(
+  new URL("../src/production-workflow.css", import.meta.url),
+  "utf8",
+);
+
+test("detects analysis updates and synchronizes only selected prompt fields", () => {
+  assert.equal(productionChangeLabel("analysis_prompts_synced"), "同步分析提示词");
+  assert.match(productionWorkflowSource, /\/analysis-update`/);
+  assert.match(productionWorkflowSource, /\/analysis-update\/sync-prompts/);
+  assert.match(productionWorkflowSource, /function AnalysisUpdateBanner/);
+  assert.match(productionWorkflowSource, /function AnalysisUpdatePanel/);
+  assert.match(productionWorkflowSource, /使用新分析/);
+  assert.match(productionWorkflowSource, /保留当前/);
+  assert.match(productionWorkflowSource, /同步所选提示词并创建 Revision/);
+  assert.match(productionWorkflowStyles, /\.analysis-update-diff-grid/);
+  assert.match(productionWorkflowStyles, /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+});
+
+test("labels video candidate recycle-bin revisions", () => {
+  assert.equal(productionChangeLabel("video_candidates_archived"), "视频候选移入回收站");
+  assert.equal(productionChangeLabel("video_candidates_restored"), "恢复视频候选");
+});
 
 test("keeps a compatible video resolution and otherwise prefers 720P", () => {
   const flagship = {

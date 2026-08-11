@@ -19,7 +19,9 @@ from viral_dna_api.models import (
     AnalysisStage,
     ApprovalDecision,
     CandidateApprovalRequest,
+    CandidateBatchLifecycleRequest,
     CandidateSelectRequest,
+    GenerationCandidateArchiveReason,
     GenerationCandidateStatus,
     ImageExecutionMode,
     ImageGenerationCreate,
@@ -28,6 +30,7 @@ from viral_dna_api.models import (
     ProductionAdvanceRequest,
     ProductionChangeKind,
     ProductionProjectCreate,
+    ProductionPromptSyncRequest,
     ProductionStep,
     ReferenceAssetCreate,
     ReferenceAssetType,
@@ -43,6 +46,7 @@ from viral_dna_api.models import (
     VideoClipPreparationStatus,
     VideoClipPreparationUpdate,
     VideoGenerationCreate,
+    VideoQualityStatus,
     VideoStatus,
     WorkflowItemStatus,
 )
@@ -316,6 +320,55 @@ async def seed_completed_analysis(repository):
     return record, video, analysis, report
 
 
+async def seed_updated_prompt_analysis(repository, record, analysis, report):
+    next_analysis = analysis.model_copy(
+        update={
+            "id": uuid4(),
+            "message": "重新分析完成",
+        }
+    )
+    next_image_prompt = "更新后的画面提示词：丝带贴近镜头并完全遮挡画面。"
+    next_shot_prompt = "更新后的镜头提示词：镜头持续推近丝带，直至丝带覆盖整个画面。"
+    source_shot = report.shots[0]
+    next_visual_beats = list(source_shot.visual_beats)
+    if next_visual_beats:
+        next_visual_beats[0] = next_visual_beats[0].model_copy(
+            update={"image_prompt": next_image_prompt}
+        )
+    next_shots = list(report.shots)
+    next_shots[0] = source_shot.model_copy(
+        update={
+            "prompt": next_shot_prompt,
+            "action": "丝带向镜头推进并形成满屏遮挡",
+            "camera": "连续推进至极近特写并穿过丝带",
+            "visual_beats": next_visual_beats,
+        }
+    )
+    next_prompt_shots = list(report.prompt_package.shots)
+    next_prompt_shots[0] = next_prompt_shots[0].model_copy(
+        update={"prompt": next_image_prompt}
+    )
+    next_prompt_package = report.prompt_package.model_copy(
+        update={
+            "id": uuid4(),
+            "shots": next_prompt_shots,
+        }
+    )
+    next_report = report.model_copy(
+        update={
+            "analysis_id": next_analysis.id,
+            "shots": next_shots,
+            "prompt_package": next_prompt_package,
+        }
+    )
+    await repository.add_analysis(next_analysis)
+    await repository.save_report(next_report)
+    await repository.save_record(
+        record.model_copy(update={"latest_analysis_id": next_analysis.id})
+    )
+    return next_analysis, next_report
+
+
 def isolated_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -355,6 +408,132 @@ def test_project_default_output_follows_source_video_ratio(
         assert detail.project.output_aspect_ratio == "16:9"
         assert detail.project.output_width == 1920
         assert detail.project.output_height == 1080
+
+    asyncio.run(scenario())
+
+
+def test_analysis_update_preview_and_prompt_only_sync_preserve_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, report = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        plans = await repository.list_shot_plans(detail.project.id)
+        retained_candidate_id = uuid4()
+        manually_edited = plans[1].model_copy(
+            update={
+                "video_prompt": "用户手工修改的视频提示词",
+                "approved_image_candidate_id": retained_candidate_id,
+                "image_status": WorkflowItemStatus.APPROVED,
+            }
+        )
+        await repository.save_shot_plan(manually_edited)
+        next_analysis, next_report = await seed_updated_prompt_analysis(
+            repository,
+            record,
+            analysis,
+            report,
+        )
+
+        preview = await service.preview_analysis_update(detail.project.id)
+
+        assert preview.update_available is True
+        assert preview.compatible is True
+        assert preview.target_analysis_id == next_analysis.id
+        assert preview.changed_field_count >= 2
+        first_video = next(
+            field
+            for shot in preview.shots
+            if shot.index == 1
+            for field in shot.fields
+            if field.field_key == "video_prompt"
+        )
+        assert first_video.suggested_choice == "use_latest"
+        second_video = next(
+            field
+            for shot in preview.shots
+            if shot.index == 2
+            for field in shot.fields
+            if field.field_key == "video_prompt"
+        )
+        assert second_video.manually_edited is True
+        assert second_video.suggested_choice == "keep_current"
+
+        synced = await service.sync_analysis_prompts(
+            detail.project.id,
+            ProductionPromptSyncRequest(
+                expected_revision_id=detail.project.current_revision_id,
+                target_analysis_id=next_analysis.id,
+            ),
+        )
+        synced_plans = await repository.list_shot_plans(detail.project.id)
+
+        assert synced.project.base_analysis_id == analysis.id
+        assert synced.project.prompt_source_analysis_id == next_analysis.id
+        assert synced.project.source_prompt_package_id == next_report.prompt_package.id
+        assert synced.current_revision.change_kind == ProductionChangeKind.ANALYSIS_PROMPTS_SYNCED
+        assert "连续推进至极近特写" in synced_plans[0].video_prompt
+        assert synced_plans[1].video_prompt == "用户手工修改的视频提示词"
+        assert synced_plans[1].approved_image_candidate_id == retained_candidate_id
+        assert synced_plans[1].image_status == WorkflowItemStatus.APPROVED
+        assert (await service.preview_analysis_update(detail.project.id)).update_available is False
+
+    asyncio.run(scenario())
+
+
+def test_prompt_sync_preserves_structure_when_analysis_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, report = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        next_analysis, next_report = await seed_updated_prompt_analysis(
+            repository,
+            record,
+            analysis,
+            report,
+        )
+        shortened_report = next_report.model_copy(
+            update={
+                "shots": next_report.shots[:-1],
+                "prompt_package": next_report.prompt_package.model_copy(
+                    update={"shots": next_report.prompt_package.shots[:-1]}
+                ),
+            }
+        )
+        await repository.save_report(shortened_report)
+
+        preview = await service.preview_analysis_update(detail.project.id)
+
+        assert preview.update_available is True
+        assert preview.compatible is True
+        assert preview.structural_change_detected is True
+        synced = await service.sync_analysis_prompts(
+            detail.project.id,
+            ProductionPromptSyncRequest(
+                expected_revision_id=detail.project.current_revision_id,
+                target_analysis_id=next_analysis.id,
+            ),
+        )
+        synced_plans = await repository.list_shot_plans(detail.project.id)
+        remaining = await service.preview_analysis_update(detail.project.id)
+
+        assert synced.project.base_analysis_id == analysis.id
+        assert synced.project.prompt_source_analysis_id == next_analysis.id
+        assert len(synced_plans) == len(report.shots)
+        assert remaining.update_available is True
+        assert remaining.compatible is False
+        assert remaining.structural_change_detected is True
 
     asyncio.run(scenario())
 
@@ -2092,6 +2271,11 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             assert approved.approval_event is not None
             assert approved.approval_event.target_kind == "video"
 
+            # The last shot intentionally skips the legacy preparation record. An
+            # approved candidate must still be allowed into the independent editor.
+            if index == len(shots) - 1:
+                continue
+
             trim_in = 0.0 if index == 0 else 0.1
             trim_out = requested_duration if index == 0 else shot.plan.duration_seconds - 0.1
             prepared = await service.prepare_video_clip(
@@ -2178,6 +2362,63 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     if item.id == candidate.id
                 )
                 assert repaired_old.status == GenerationCandidateStatus.SELECTED
+
+                current = await service.get_project(detail.project.id)
+                with pytest.raises(ProductionServiceError) as protected_archive:
+                    await service.archive_video_candidates(
+                        CandidateBatchLifecycleRequest(
+                            expected_revision_id=current.project.current_revision_id,
+                            candidate_ids=[candidate.id, alternative.id],
+                        )
+                    )
+                assert (
+                    protected_archive.value.code
+                    == "approved_video_candidate_archive_forbidden"
+                )
+                unchanged_alternative = await repository.get_generation_candidate(
+                    alternative.id
+                )
+                assert unchanged_alternative is not None
+                assert unchanged_alternative.status == GenerationCandidateStatus.READY
+
+                actor_account_id = uuid4()
+                archived = await service.archive_video_candidates(
+                    CandidateBatchLifecycleRequest(
+                        expected_revision_id=current.project.current_revision_id,
+                        candidate_ids=[alternative.id],
+                    ),
+                    actor_account_id=actor_account_id,
+                )
+                assert archived.affected_count == 1
+                assert archived.candidates[0].status == GenerationCandidateStatus.ARCHIVED
+                assert (
+                    archived.candidates[0].archive_reason
+                    == GenerationCandidateArchiveReason.USER_DELETED
+                )
+                assert archived.candidates[0].archived_by_account_id == actor_account_id
+                archived_content, _ = await service.resolve_candidate_content(
+                    alternative.id
+                )
+                assert archived_content.is_file()
+                archived_history = await service.get_shot(shot.plan.id)
+                archived_alternative = next(
+                    item
+                    for run in archived_history.generation_runs
+                    for item in run.candidates
+                    if item.id == alternative.id
+                )
+                assert archived_alternative.status == GenerationCandidateStatus.ARCHIVED
+
+                restored = await service.restore_video_candidates(
+                    CandidateBatchLifecycleRequest(
+                        expected_revision_id=archived.current_revision_id,
+                        candidate_ids=[alternative.id],
+                    )
+                )
+                assert restored.affected_count == 1
+                assert restored.candidates[0].status == GenerationCandidateStatus.READY
+                assert restored.candidates[0].archive_reason is None
+                assert restored.candidates[0].archived_at is None
 
                 current = await service.get_project(detail.project.id)
                 switched = await service.approve_candidate(
@@ -2267,8 +2508,9 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
         assert gate.next_step == ProductionStep.EDITING
         assert gate.allowed is True
         assert gate.approved_shot_count == len(shots)
-        assert gate.prepared_shot_count == len(shots)
+        assert gate.prepared_shot_count == len(shots) - 1
         assert gate.quality_warning_shot_count == 1
+        assert await repository.get_video_clip_preparation(shots[-1].plan.id) is None
 
         current = await service.get_project(detail.project.id)
         editing = await service.advance(
@@ -2284,6 +2526,10 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
         assert len(handoff.clips) == len(shots)
         assert handoff.clips[0].trim_in_seconds == 0.0
         assert handoff.clips[0].warning_messages
+        assert handoff.clips[-1].quality_status == VideoQualityStatus.WARNING
+        assert handoff.clips[-1].audio_mode == VideoClipAudioMode.MUTED
+        assert handoff.clips[-1].trim_in_seconds == 0
+        assert handoff.clips[-1].trim_out_seconds > 0
         assert handoff.clips[0].timeline_start_seconds == 0
         assert handoff.clips[-1].timeline_end_seconds == handoff.timeline_duration_seconds
         await service.shutdown_generation_runs()
