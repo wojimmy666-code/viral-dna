@@ -3,8 +3,7 @@ export function isRecordDetailView(activeNav, report) {
 }
 
 export function shouldShowTopbarCreate(activeNav, report) {
-  return !["assets", "history", "platform-connections"].includes(activeNav)
-    && !isRecordDetailView(activeNav, report);
+  return activeNav === "workspace" && !isRecordDetailView(activeNav, report);
 }
 
 export function buildRecordBreadcrumb(workspaceMode, projectName = "") {

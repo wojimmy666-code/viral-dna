@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   ArrowClockwise,
   Archive,
@@ -60,9 +61,13 @@ import { notificationToastPayload } from "./notification-ui.js";
 import { ProductionHub } from "./ProductionWorkflow.jsx";
 import {
   buildRecordBreadcrumb,
-  isRecordDetailView,
   shouldShowTopbarCreate,
 } from "./app-layout.js";
+import {
+  pathForNav,
+  recordWorkspacePath,
+  resolveAppRoute,
+} from "./app-routing.js";
 import { inferVideoOrientation } from "./video-layout.js";
 import {
   buildRecordListParams,
@@ -85,6 +90,12 @@ import {
   platformLabel,
 } from "./platform-connection-ui.js";
 import { preferredVideoResolution } from "./production-ui.js";
+import {
+  NewAnalysisPage,
+  RecordWorkspacePage,
+  RecordWorkspaceState,
+  WorkbenchHomePage,
+} from "./WorkspacePages.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 const DEFAULT_PLATFORM_CONNECTIONS = Object.freeze({
@@ -489,7 +500,13 @@ function useFilePreview(file) {
 export function App() {
   const initialModelSettings = useMemo(loadModelSettings, []);
   const initialHistoryState = useMemo(loadHistoryState, []);
-  const [activeNav, setActiveNav] = useState("workspace");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const appRoute = useMemo(
+    () => resolveAppRoute(location.pathname),
+    [location.pathname],
+  );
+  const activeNav = appRoute.activeNav;
   const [sourceMode, setSourceMode] = useState("link");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState(null);
@@ -549,6 +566,9 @@ export function App() {
   const [historyPage, setHistoryPage] = useState(initialHistoryState.page);
   const [historyPageSize, setHistoryPageSize] = useState(initialHistoryState.pageSize);
   const [historyActionBusy, setHistoryActionBusy] = useState(false);
+  const [workbenchRecords, setWorkbenchRecords] = useState([]);
+  const [workbenchTotal, setWorkbenchTotal] = useState(0);
+  const [workbenchLoading, setWorkbenchLoading] = useState(false);
   const [platformConnections, setPlatformConnections] = useState(
     DEFAULT_PLATFORM_CONNECTIONS,
   );
@@ -580,11 +600,14 @@ export function App() {
   const [notificationFilter, setNotificationFilter] = useState("all");
   const [notificationLoading, setNotificationLoading] = useState(false);
   const [notificationTarget, setNotificationTarget] = useState(null);
+  const [recordRouteLoading, setRecordRouteLoading] = useState(false);
+  const [recordRouteError, setRecordRouteError] = useState("");
   const eventSourceRef = useRef(null);
   const toastSequenceRef = useRef(0);
   const notificationSnapshotRef = useRef(new Map());
   const notificationFeedInitializedRef = useRef(false);
   const historyRequestIdRef = useRef(0);
+  const recordRouteRequestIdRef = useRef(0);
   const productionRequestIdRef = useRef(0);
   const importSectionRef = useRef(null);
   const reportSectionRef = useRef(null);
@@ -693,6 +716,28 @@ export function App() {
     historyPage,
     historyPageSize,
   ]);
+
+  useEffect(() => {
+    if (appRoute.name !== "workbench-home") return;
+    loadWorkbenchRecords().catch(() => undefined);
+  }, [appRoute.name]);
+
+  useEffect(() => {
+    if (appRoute.name !== "record-workspace" || !appRoute.recordId) return;
+    const currentRecordReady = video?.record_id === appRoute.recordId
+      && Boolean(analysis || report);
+    if (currentRecordReady) {
+      setRecordRouteError("");
+      setRecordRouteLoading(false);
+      return;
+    }
+    loadRecordWorkspace(appRoute.recordId).catch(() => undefined);
+  }, [appRoute.name, appRoute.recordId]);
+
+  useEffect(() => {
+    if (appRoute.name !== "not-found") return;
+    navigate(pathForNav("workspace"), { replace: true });
+  }, [appRoute.name, navigate]);
 
   useEffect(() => {
     saveHistoryState({
@@ -843,10 +888,8 @@ export function App() {
   function selectNav(id) {
     setSettingsOpen(false);
     setPlatformConnectionTarget("");
-    setActiveNav(id);
-    if (id === "new-analysis") {
-      importSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
+    navigate(pathForNav(id));
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function changeHistoryQuery(value) {
@@ -869,10 +912,66 @@ export function App() {
     setHistorySort(value);
   }
 
+  async function loadWorkbenchRecords() {
+    setWorkbenchLoading(true);
+    const params = buildRecordListParams({
+      lifecycle: "active",
+      page: 1,
+      pageSize: 6,
+      sort: "updated_desc",
+    });
+    try {
+      const payload = await apiRequest(`/records?${params.toString()}`);
+      setWorkbenchRecords(payload.items || []);
+      setWorkbenchTotal(payload.total || 0);
+      setHistoryLifecycleCounts(payload.lifecycle_counts || {
+        active: 0,
+        archived: 0,
+        trashed: 0,
+      });
+      return payload.items || [];
+    } finally {
+      setWorkbenchLoading(false);
+    }
+  }
+
+  function applyRecordWorkspaceDetail(detail) {
+    resetProductionWorkspace();
+    setVideo(detail.video);
+    setAnalysisVersions(detail.analyses || []);
+    setAnalysis(detail.analyses?.[0] || null);
+    setReport(detail.latest_report || null);
+    setReplacementVersion(null);
+    setActiveShotId(detail.latest_report?.shots?.[0]?.id || null);
+    setActiveReportTab("overview");
+    loadProductions(detail.record.id).catch(() => undefined);
+  }
+
+  async function loadRecordWorkspace(recordId, { quiet = false } = {}) {
+    const requestId = ++recordRouteRequestIdRef.current;
+    if (!quiet) setRecordRouteLoading(true);
+    setRecordRouteError("");
+    try {
+      const detail = await apiRequest(`/records/${recordId}`);
+      if (requestId !== recordRouteRequestIdRef.current) return null;
+      applyRecordWorkspaceDetail(detail);
+      return detail;
+    } catch (requestError) {
+      if (requestId === recordRouteRequestIdRef.current) {
+        setRecordRouteError(requestError.message);
+      }
+      throw requestError;
+    } finally {
+      if (requestId === recordRouteRequestIdRef.current) {
+        setRecordRouteLoading(false);
+      }
+    }
+  }
+
   function openPlatformConnections(platform = "") {
     setSettingsOpen(false);
     setPlatformConnectionTarget(platform);
-    setActiveNav("platform-connections");
+    navigate(pathForNav("platform-connections"));
   }
 
   function changeHistoryLifecycle(value) {
@@ -1080,21 +1179,11 @@ export function App() {
 
   async function openHistoryRecord(recordId) {
     setHistoryError("");
-    resetProductionWorkspace();
     try {
-      const detail = await apiRequest(`/records/${recordId}`);
-      setVideo(detail.video);
-      setAnalysisVersions(detail.analyses || []);
-      setAnalysis(detail.analyses?.[0] || null);
-      setReport(detail.latest_report || null);
-      setReplacementVersion(null);
-      setActiveShotId(detail.latest_report?.shots?.[0]?.id || null);
-      setActiveReportTab("overview");
-      setActiveNav("workspace");
-      loadProductions(detail.record.id).catch(() => undefined);
-      window.setTimeout(() => {
-        reportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 120);
+      const detail = await loadRecordWorkspace(recordId);
+      if (!detail) return null;
+      navigate(recordWorkspacePath(detail.record.id));
+      window.scrollTo({ top: 0, behavior: "smooth" });
       return detail;
     } catch (requestError) {
       setHistoryError(requestError.message);
@@ -1426,16 +1515,16 @@ export function App() {
     setVideo(processedVideo);
     setAnalysisErrorCode("");
     setAnalysisErrorPlatform("");
-    setActiveNav("workspace");
+    setRecordRouteError("");
+    setRecordRouteLoading(false);
+    navigate(recordWorkspacePath(processedVideo.record_id), { replace: true });
     setActiveShotId(nextReport.shots[0]?.id || null);
     setActiveReportTab("overview");
     resetProductionWorkspace();
     loadProductions(processedVideo.record_id).catch(() => undefined);
     loadWorkspace().catch(() => undefined);
     refreshHistory({ quiet: true }).catch(() => undefined);
-    window.setTimeout(() => {
-      reportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 120);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function createAnalysisForVideo(createdVideo) {
@@ -1504,6 +1593,10 @@ export function App() {
       loadWorkspace().catch(() => undefined);
       refreshHistory({ quiet: true }).catch(() => undefined);
       await createAnalysisForVideo(createdVideo);
+      setRecordRouteError("");
+      setRecordRouteLoading(false);
+      navigate(recordWorkspacePath(createdVideo.record_id));
+      window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (requestError) {
       setError(requestError.message);
       setAnalysisErrorCode(requestError.code || "");
@@ -1844,7 +1937,7 @@ export function App() {
     setActiveShotId(null);
     setReplacementVersion(null);
     resetProductionWorkspace();
-    setActiveNav("workspace");
+    navigate(pathForNav("workspace"));
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -1863,11 +1956,13 @@ export function App() {
     }
   }
 
-  const recordDetailMode = isRecordDetailView(activeNav, report);
+  const recordDetailMode = appRoute.name === "record-workspace";
   const recordBreadcrumbItems = buildRecordBreadcrumb(
     recordWorkspaceMode,
     activeProductionProjectName,
   );
+  const recordMatchesRoute = appRoute.name === "record-workspace"
+    && video?.record_id === appRoute.recordId;
 
   return (
     <div className="app-shell">
@@ -1878,7 +1973,7 @@ export function App() {
         onSelect={selectNav}
         onSelectHistoryLifecycle={(value) => {
           changeHistoryLifecycle(value);
-          setActiveNav("history");
+          navigate(pathForNav("history"));
         }}
         onOpenSettings={openModelSettings}
         settingsOpen={settingsOpen}
@@ -1896,7 +1991,7 @@ export function App() {
           onToggleNotifications={toggleNotificationCenter}
           onSearch={(value) => {
             changeHistoryQuery(value);
-            if (value) setActiveNav("history");
+            if (value) navigate(pathForNav("history"));
           }}
           searchValue={historyQuery}
         />
@@ -1962,27 +2057,8 @@ export function App() {
               request={apiRequest}
               resolveUrl={resolveArtifactUrl}
             />
-          ) : (<>
-          <main className={`workspace-main ${recordDetailMode ? "detail-mode" : ""}`}>
-            {!recordDetailMode && (
-              <section className="page-intro">
-                <div>
-                  <div className="breadcrumb">
-                    <span>工作台</span>
-                    <CaretRight size={14} />
-                    <span className="breadcrumb-current">单视频拆解</span>
-                  </div>
-                  <h1>把一个视频拆成可复用的创作指令</h1>
-                  <p>识别分镜、主体、服装、场景和爆点，输出可编辑的复刻提示词包。</p>
-                </div>
-                <div className="intro-status">
-                  <ShieldCheck size={17} weight="fill" />
-                  Phase 1 · 单视频模式
-                </div>
-              </section>
-            )}
-
-            {!recordDetailMode && (
+          ) : appRoute.name === "new-analysis" ? (
+            <NewAnalysisPage>
               <ImportPanel
                 ref={importSectionRef}
                 sourceMode={sourceMode}
@@ -2013,38 +2089,50 @@ export function App() {
                 onRetry={retryCurrentLinkAnalysis}
                 onStart={startAnalysis}
               />
-            )}
-
-            {analysis && analysis.stage !== "completed" && (
-              <AnalysisProgress analysis={analysis} video={video} />
-            )}
-
-            {!analysis && !report && <EmptyWorkspace />}
-
-            {report && (
+            </NewAnalysisPage>
+          ) : appRoute.name === "record-workspace" ? (
+            <RecordWorkspacePage>
+              {!recordMatchesRoute || recordRouteLoading ? (
+                <RecordWorkspaceState
+                  error={recordRouteError}
+                  loading={!recordRouteError}
+                  onBack={() => selectNav("history")}
+                  onRetry={() => loadRecordWorkspace(appRoute.recordId).catch(() => undefined)}
+                />
+              ) : (
               <>
-              <RecordBreadcrumb
-                items={recordBreadcrumbItems}
-                onNavigate={navigateRecordBreadcrumb}
-              />
-              <section className="report-card" ref={reportSectionRef}>
-                <ReportHeader
-                  video={video}
-                  report={report}
-                  promptPackage={currentPromptPackage}
-                  onDownload={downloadPromptPackage}
-                  onRestart={reanalyzeCurrent}
-                  analysisVersions={analysisVersions}
-                  activeAnalysisId={report.analysis_id}
-                  onVersionChange={openAnalysisVersion}
-                  showActions={recordWorkspaceMode === "analysis"}
+                <RecordBreadcrumb
+                  items={recordBreadcrumbItems}
+                  onNavigate={navigateRecordBreadcrumb}
                 />
-                <RecordWorkspaceTabs
-                  active={recordWorkspaceMode}
-                  count={productionProjects.length}
-                  onChange={changeRecordWorkspace}
-                />
-                {recordWorkspaceMode === "analysis" ? (
+                {analysis && analysis.stage !== "completed" && (
+                  <AnalysisProgress analysis={analysis} video={video} />
+                )}
+                {analysis?.stage === "completed" && !report && (
+                  <RecordWorkspaceState loading />
+                )}
+                {!analysis && !report && (
+                  <RecordWorkspaceState onBack={() => selectNav("history")} />
+                )}
+                {report && (
+                <section className="report-card" ref={reportSectionRef}>
+                  <ReportHeader
+                    video={video}
+                    report={report}
+                    promptPackage={currentPromptPackage}
+                    onDownload={downloadPromptPackage}
+                    onRestart={reanalyzeCurrent}
+                    analysisVersions={analysisVersions}
+                    activeAnalysisId={report.analysis_id}
+                    onVersionChange={openAnalysisVersion}
+                    showActions={recordWorkspaceMode === "analysis"}
+                  />
+                  <RecordWorkspaceTabs
+                    active={recordWorkspaceMode}
+                    count={productionProjects.length}
+                    onChange={changeRecordWorkspace}
+                  />
+                  {recordWorkspaceMode === "analysis" ? (
                   <>
                     <ReportTabs active={activeReportTab} onChange={setActiveReportTab} mode={report.analysis_mode} />
                     <div className="report-content">
@@ -2112,12 +2200,22 @@ export function App() {
                     }}
                     sourceTitle={video.title}
                   />
+                  )}
+                </section>
                 )}
-              </section>
               </>
-            )}
-          </main>
-          </>)}
+              )}
+            </RecordWorkspacePage>
+          ) : (
+            <WorkbenchHomePage
+              loading={workbenchLoading}
+              onCreate={() => selectNav("new-analysis")}
+              onOpenHistory={() => selectNav("history")}
+              onOpenRecord={openHistoryRecord}
+              records={workbenchRecords}
+              total={workbenchTotal}
+            />
+          )}
         </div>
       </div>
 
@@ -4295,7 +4393,7 @@ function AnalysisProgress({ analysis, video }) {
         <strong>{analysis.progress}%</strong>
       </div>
       <div className="progress-track">
-        <span style={{ width: `${analysis.progress}%` }} />
+        <span style={{ transform: `scaleX(${analysis.progress / 100})` }} />
       </div>
       <div className="stage-list">
         {stages.map((stage, index) => {
@@ -4323,20 +4421,6 @@ function AnalysisProgress({ analysis, video }) {
             : "正在解析平台链接并下载源视频；下载完成后会继续提取真实镜头、关键帧和音频证据。"}
         </div>
       )}
-    </section>
-  );
-}
-
-function EmptyWorkspace() {
-  return (
-    <section className="empty-workspace">
-      <span className="empty-icon">
-        <VideoCamera size={30} />
-      </span>
-      <div>
-        <h2>分析结果会在这里展开</h2>
-        <p>上传视频文件或粘贴公开平台链接后，可以查看真实镜头时间线、关键帧和媒体证据。</p>
-      </div>
     </section>
   );
 }
@@ -4789,7 +4873,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
               <span>/100</span>
             </div>
             <div className="score-track">
-              <span style={{ width: `${overview.viral_potential_score}%` }} />
+              <span style={{ transform: `scaleX(${overview.viral_potential_score / 100})` }} />
             </div>
             <p>基于视频内容结构的启发式评分，不代表真实平台播放表现。</p>
           </div>

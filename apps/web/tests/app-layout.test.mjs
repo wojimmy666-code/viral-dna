@@ -39,15 +39,24 @@ test("keeps every workbench state full-width without the analysis side panel", (
   );
 });
 
-test("keeps new-analysis in the workbench but removes it from records and details", () => {
+test("shows the topbar create action only on the workbench home", () => {
   const report = { analysis_id: "analysis-1" };
 
   assert.equal(shouldShowTopbarCreate("workspace", null), true);
-  assert.equal(shouldShowTopbarCreate("new-analysis", report), true);
+  assert.equal(shouldShowTopbarCreate("new-analysis", null), false);
+  assert.equal(shouldShowTopbarCreate("new-analysis", report), false);
   assert.equal(shouldShowTopbarCreate("history", null), false);
   assert.equal(shouldShowTopbarCreate("assets", null), false);
   assert.equal(shouldShowTopbarCreate("platform-connections", null), false);
   assert.equal(shouldShowTopbarCreate("workspace", report), false);
+});
+
+test("renders new analysis and record workspaces through separate page branches", () => {
+  assert.match(appSource, /appRoute\.name === "new-analysis"/);
+  assert.match(appSource, /<NewAnalysisPage>/);
+  assert.match(appSource, /appRoute\.name === "record-workspace"/);
+  assert.match(appSource, /<RecordWorkspacePage>/);
+  assert.doesNotMatch(appSource, /!recordDetailMode\s*&&\s*\(\s*<ImportPanel/);
 });
 
 test("builds concise breadcrumbs for report, production list and project detail", () => {

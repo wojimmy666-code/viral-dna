@@ -26,6 +26,8 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 ## Record detail layout
 
 - 分析报告与创作方案共用专注的记录详情布局：顶部不显示全局搜索和“新建分析”，正文不显示产品介绍区与“导入短视频”模块；记录卡上方保留紧凑面包屑，支持返回工作台、分析记录和方案列表；这些入口只保留在分析记录页和新建分析流程中。
+- “新建分析”使用独立的 `/analyses/new` 页面，只显示导入与分析参数表单；分析进度、分析报告和创作方案不得在该页面下方继续渲染。创建任务成功后立即进入 `/workbench/records/:recordId` 记录工作台，浏览器刷新、前进、后退和通知深链都必须恢复同一记录。
+- `/workbench` 是独立工作台首页，首期展示最近分析和任务入口；未选择记录时不得默认混入新建分析表单，也不得静默打开上一次记录。
 
 ## Analysis record lifecycle
 
