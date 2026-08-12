@@ -5,6 +5,7 @@ import test from "node:test";
 const APP_URL = new URL("../src/App.jsx", import.meta.url);
 const REPLICATION_URL = new URL("../src/viral-report/ReplicationWorkspace.jsx", import.meta.url);
 const MECHANISM_URL = new URL("../src/viral-report/ViralMechanismWorkspace.jsx", import.meta.url);
+const SHOT_TRAFFIC_URL = new URL("../src/viral-report/ShotTrafficRoles.jsx", import.meta.url);
 const CSS_URL = new URL("../src/viral-report/viral-report.css", import.meta.url);
 const STYLES_URL = new URL("../src/styles.css", import.meta.url);
 
@@ -52,4 +53,14 @@ test("viral workspaces use one bounded content frame and a responsive preparatio
 test("report tabs keep keyboard focus inside the clipped tab strip", async () => {
   const source = await readFile(STYLES_URL, "utf8");
   assert.match(source, /\.report-tabs button:focus-visible\s*\{[^}]*outline:\s*0[^}]*box-shadow:\s*inset/s);
+});
+
+test("shot traffic roles keep long preservation guidance out of tag pills", async () => {
+  const component = await readFile(SHOT_TRAFFIC_URL, "utf8");
+  const source = await readFile(CSS_URL, "utf8");
+  assert.match(component, /viral-report-page shot-traffic-section/);
+  assert.match(component, /shot-traffic-preserve-list/);
+  assert.doesNotMatch(component, /shot-traffic-tags/);
+  assert.match(source, /\.shot-traffic-list > button\s*\{[^}]*grid-template-columns:\s*7rem minmax\(0, 1fr\)/s);
+  assert.match(source, /\.shot-traffic-preserve\s*\{[^}]*grid-template-columns:\s*5\.5rem minmax\(0, 1fr\)/s);
 });
