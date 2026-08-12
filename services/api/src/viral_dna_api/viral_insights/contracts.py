@@ -194,15 +194,29 @@ class ViralConcept(BaseModel):
 
 
 class ViralConceptSet(BaseModel):
-    schema_version: Literal["viral-dna-concepts-v1"] = "viral-dna-concepts-v1"
+    schema_version: Literal["viral-dna-concepts-v1", "viral-dna-concepts-v2"] = (
+        "viral-dna-concepts-v2"
+    )
     id: UUID = Field(default_factory=uuid4)
     analysis_id: UUID
     video_id: UUID
     insight_report_id: UUID
     input_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
-    status: Literal["completed", "failed"] = "completed"
+    status: Literal["completed", "stale", "failed"] = "completed"
     concepts: list[ViralConcept] = Field(min_length=1, max_length=3)
     generator_id: str = Field(default="replication-rules-v1", min_length=1, max_length=120)
+    strategy_contract_version: str = Field(
+        default="strategy-contract-v1",
+        min_length=1,
+        max_length=120,
+    )
+    source_insight_fingerprint: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    stale_reason: str | None = Field(default=None, max_length=500)
     model_cost_micros: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
 

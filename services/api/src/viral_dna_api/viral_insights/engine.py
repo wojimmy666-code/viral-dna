@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
 
 from viral_dna_api.chinese import to_simplified
 from viral_dna_api.models import AnalysisReport, Entity, Shot
 
+from .concept_strategies import (
+    CONCEPT_GENERATOR_ID,
+    CONCEPT_SCHEMA_VERSION,
+    STRATEGY_CONTRACT_VERSION,
+    build_strategy_context,
+    get_strategy_builder,
+    validate_concept_diversity,
+)
 from .contracts import (
     ViralClaimKind,
-    ViralConcept,
     ViralConceptSet,
-    ViralConceptShot,
     ViralDNA,
     ViralEvidenceRef,
     ViralImprovement,
@@ -31,28 +36,6 @@ ROLE_LABELS = {
     "payoff": "结果兑现",
     "cta": "互动承接",
 }
-
-STRATEGY_META = {
-    ViralStrategy.FAITHFUL: {
-        "label": "结构忠实复刻",
-        "one_liner": "锁定原片节奏、运镜与信息兑现顺序，只替换可变元素。",
-        "difficulty": "low",
-        "cost": "low",
-    },
-    ViralStrategy.DIFFERENTIATED: {
-        "label": "差异化同构",
-        "one_liner": "保留流量机制，改写人物、场景与视觉记忆点，降低同质化。",
-        "difficulty": "medium",
-        "cost": "medium",
-    },
-    ViralStrategy.ENHANCED: {
-        "label": "强化改进版",
-        "one_liner": "前置核心视觉刺激，压缩铺垫，并强化结尾兑现和互动动机。",
-        "difficulty": "high",
-        "cost": "high",
-    },
-}
-
 
 def _text(value: str | None, fallback: str = "") -> str:
     cleaned = " ".join((to_simplified(value or "") or "").split()).strip()
@@ -403,139 +386,32 @@ def build_viral_insight(report: AnalysisReport) -> ViralInsightReport:
     )
 
 
-def _replace_entities(text: str, entities: Iterable[Entity], replacements: dict[str, str]) -> str:
-    result = text
-    for entity in entities:
-        replacement = replacements.get(entity.id)
-        if not replacement:
-            continue
-        for token in (entity.name, entity.description):
-            if token:
-                result = result.replace(token, replacement)
-    return result
-
-
-def _concept_prompt(strategy: ViralStrategy, base: str, role: str, locks: list[str]) -> str:
-    if strategy == ViralStrategy.FAITHFUL:
-        prefix = "忠实复刻：保持原分镜时间、动作方向与运镜结构。"
-    elif strategy == ViralStrategy.DIFFERENTIATED:
-        prefix = "差异化同构：保持流量功能和节奏，但强化新的场景与人物辨识度。"
-    else:
-        prefix = "强化改进：核心视觉信号在首秒出现，减少无信息停留，并强化结尾兑现。"
-    lock_text = "、".join(locks[:4]) if locks else "时长、动作、运镜"
-    return f"{prefix} 本镜头承担{role}；锁定{lock_text}。{base}"
-
-
 def build_concept_set(
     report: AnalysisReport,
     insight: ViralInsightReport,
     strategies: list[ViralStrategy],
     selections: list[ViralReplacementSelection],
 ) -> ViralConceptSet:
-    replacements = {item.entity_id: _text(item.replacement) for item in selections}
-    replacement_clause = (
-        "；元素替换："
-        + "、".join(
-            f"{entity.name}改为{replacements[entity.id]}"
-            for entity in report.entities
-            if entity.id in replacements
-        )
-        if replacements
-        else ""
-    )
-    prompt_shots = {item.shot_id: item for item in report.prompt_package.shots}
-    roles = {item.shot_id: item for item in insight.shot_roles}
-    concepts = []
-    for strategy in strategies:
-        meta = STRATEGY_META[strategy]
-        shots = []
-        for shot in sorted(report.shots, key=lambda item: item.index):
-            prompt = prompt_shots.get(shot.id)
-            base_image = (
-                _replace_entities(
-                    prompt.prompt if prompt else shot.prompt,
-                    report.entities,
-                    replacements,
-                )
-                + replacement_clause
-            )
-            role = roles.get(shot.id)
-            role_label = ROLE_LABELS.get(role.role if role else "retention", "留存推进")
-            base_video = (
-                _replace_entities(
-                    f"{shot.prompt}；动作过程：{shot.action}；运镜：{shot.camera}。",
-                    report.entities,
-                    replacements,
-                )
-                + replacement_clause
-            )
-            shots.append(
-                ViralConceptShot(
-                    source_shot_id=shot.id,
-                    index=shot.index,
-                    duration_seconds=max(0.01, shot.end_seconds - shot.start_seconds),
-                    title=_text(shot.title, f"分镜 {shot.index}"),
-                    traffic_role=role_label,
-                    description=_text(shot.narrative_role, role_label),
-                    image_prompt=_concept_prompt(
-                        strategy,
-                        base_image,
-                        role_label,
-                        insight.dna.recommended_locks,
-                    ),
-                    video_prompt=_concept_prompt(
-                        strategy,
-                        base_video,
-                        role_label,
-                        insight.dna.recommended_locks,
-                    ),
-                    negative_constraints=(
-                        list(
-                            dict.fromkeys(
-                                prompt.negative_constraints
-                                if prompt
-                                else report.prompt_package.negative_constraints
-                            )
-                        )
-                    ),
-                    retained_mechanisms=[item.title for item in insight.mechanisms[:3]],
-                )
-            )
-        replacement_labels = [
-            opportunity.label
-            for opportunity in insight.replacement_opportunities
-            if opportunity.entity_id in replacements
-        ]
-        concepts.append(
-            ViralConcept(
-                strategy=strategy,
-                name=f"{meta['label']}方案",
-                one_liner=meta["one_liner"],
-                target_audience=insight.audience,
-                why_it_can_work=(
-                    f"保留{'、'.join(insight.dna.invariants[:3]) or '原片关键机制'}，"
-                    "同时按证据角色重写逐镜头提示词。该判断仍需发布后的平台数据验证。"
-                ),
-                difficulty=meta["difficulty"],
-                estimated_cost_level=meta["cost"],
-                retained_dna=insight.dna.invariants,
-                improvements=[item.title for item in insight.improvements],
-                required_assets=replacement_labels or ["原视频关键帧"],
-                risks=insight.dna.risks,
-                shots=shots,
-            )
-        )
+    context = build_strategy_context(report, insight, selections)
+    concepts = [get_strategy_builder(strategy).build(context) for strategy in strategies]
+    validate_concept_diversity(concepts)
     fingerprint = _fingerprint(
         {
+            "generator_id": CONCEPT_GENERATOR_ID,
+            "strategy_contract_version": STRATEGY_CONTRACT_VERSION,
             "insight": insight.input_fingerprint,
             "strategies": [item.value for item in strategies],
             "replacements": [item.model_dump(mode="json") for item in selections],
         }
     )
     return ViralConceptSet(
+        schema_version=CONCEPT_SCHEMA_VERSION,
         analysis_id=report.analysis_id,
         video_id=report.video_id,
         insight_report_id=insight.id,
         input_fingerprint=fingerprint,
+        source_insight_fingerprint=insight.input_fingerprint,
+        strategy_contract_version=STRATEGY_CONTRACT_VERSION,
+        generator_id=CONCEPT_GENERATOR_ID,
         concepts=concepts,
     )

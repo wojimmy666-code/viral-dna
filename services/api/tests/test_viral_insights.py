@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -18,6 +19,13 @@ from viral_dna_api.models import (
     ViralFinding,
 )
 from viral_dna_api.store import InMemoryStore
+from viral_dna_api.viral_insights.concept_strategies import (
+    CONCEPT_GENERATOR_ID,
+    CONCEPT_SCHEMA_VERSION,
+    STRATEGY_CONTRACT_VERSION,
+    ConceptDiversityError,
+    validate_concept_diversity,
+)
 from viral_dna_api.viral_insights.contracts import (
     ViralConceptGenerateRequest,
     ViralConceptPublishRequest,
@@ -27,7 +35,7 @@ from viral_dna_api.viral_insights.contracts import (
 from viral_dna_api.viral_insights.engine import build_concept_set, build_viral_insight
 from viral_dna_api.viral_insights.publisher import ProductionConceptPublisher
 from viral_dna_api.viral_insights.routes import create_viral_insight_router
-from viral_dna_api.viral_insights.service import ViralInsightService
+from viral_dna_api.viral_insights.service import ViralInsightService, ViralInsightServiceError
 
 
 def sample_report() -> AnalysisReport:
@@ -172,7 +180,76 @@ def test_concept_generation_creates_three_distinct_routes_and_replacements() -> 
     ]
     assert all(len(item.shots) == 2 for item in concepts.concepts)
     assert all("短发男摄影师" in item.shots[0].video_prompt for item in concepts.concepts)
+    assert concepts.schema_version == CONCEPT_SCHEMA_VERSION
+    assert concepts.generator_id == CONCEPT_GENERATOR_ID
+    assert concepts.strategy_contract_version == STRATEGY_CONTRACT_VERSION
+    assert concepts.source_insight_fingerprint == insight.input_fingerprint
+    assert len({item.why_it_can_work for item in concepts.concepts}) == 3
+    assert len({tuple(item.retained_dna) for item in concepts.concepts}) == 3
+    assert len({tuple(item.improvements) for item in concepts.concepts}) == 3
+    assert len({tuple(item.risks) for item in concepts.concepts}) == 3
+    assert len({item.shots[0].image_prompt for item in concepts.concepts}) == 3
     assert len({item.shots[0].video_prompt for item in concepts.concepts}) == 3
+
+
+def test_concept_diversity_guard_rejects_duplicated_strategy_content() -> None:
+    report = sample_report()
+    insight = build_viral_insight(report)
+    concepts = build_concept_set(
+        report,
+        insight,
+        list(ViralConceptGenerateRequest().strategies),
+        [],
+    ).concepts
+    duplicate = concepts[0].model_copy(
+        update={"id": uuid4(), "strategy": "differentiated"},
+    )
+
+    with pytest.raises(ConceptDiversityError) as caught:
+        validate_concept_diversity([concepts[0], duplicate])
+
+    assert "有效性说明" in caught.value.duplicate_fields
+    assert "逐镜头视频提示词" in caught.value.duplicate_fields
+
+
+def test_legacy_concept_batch_is_returned_as_stale_and_cannot_be_published() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        report = sample_report()
+        await store.save_report(report)
+        service = ViralInsightService(store, publisher=FakePublisher())
+        insight = await service.get_insight(report.analysis_id)
+        generated = build_concept_set(
+            report,
+            insight,
+            list(ViralConceptGenerateRequest().strategies),
+            [],
+        )
+        legacy = generated.model_copy(
+            update={
+                "schema_version": "viral-dna-concepts-v1",
+                "generator_id": "replication-rules-v1",
+                "strategy_contract_version": "strategy-contract-v1",
+                "source_insight_fingerprint": None,
+            }
+        )
+        await store.save_viral_concept_set(legacy)
+
+        latest = await service.latest_concepts(report.analysis_id)
+        assert latest is not None
+        assert latest.status == "stale"
+        assert latest.stale_reason is not None
+
+        with pytest.raises(ViralInsightServiceError) as caught:
+            await service.publish_concept(
+                legacy.id,
+                legacy.concepts[0].id,
+                ViralConceptPublishRequest(record_id=uuid4()),
+            )
+        assert caught.value.status_code == 409
+        assert caught.value.code == "concept_set_stale"
+
+    asyncio.run(scenario())
 
 
 class FakePublisher:

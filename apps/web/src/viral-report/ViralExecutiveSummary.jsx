@@ -10,7 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import { confidenceLabel, difficultyLabel, useViralInsight } from "./viral-report-ui.js";
 
-export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms }) {
+export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms, onOpenReplication }) {
   const { insight, loading, error, reload } = useViralInsight({ analysisId, request });
 
   if (loading && !insight) {
@@ -31,6 +31,10 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms })
     );
   }
   if (!insight) return null;
+  const strongestMechanism = insight.mechanisms.reduce(
+    (strongest, item) => (!strongest || item.score > strongest.score ? item : strongest),
+    null,
+  );
 
   return (
     <section className="viral-executive-summary">
@@ -38,7 +42,6 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms })
         <div>
           <span className="viral-basis-badge"><Sparkle size={15} weight="fill" />内容证据推断</span>
           <h2>{insight.headline}</h2>
-          <p>{insight.content_value}</p>
         </div>
         <button className="viral-refresh-button" type="button" onClick={() => reload({ refresh: true })} disabled={loading}>
           {loading ? <CircleNotch className="spin" size={17} /> : <ArrowClockwise size={17} />}
@@ -47,15 +50,17 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms })
       </div>
 
       <div className="viral-summary-metrics" aria-label="洞察摘要">
-        <div><span>证据覆盖</span><strong>{Math.round(insight.evidence_coverage * 100)}%</strong></div>
         <div><span>判断置信度</span><strong>{confidenceLabel(insight.confidence)}</strong></div>
         <div><span>复刻难度</span><strong>{difficultyLabel(insight.replication_difficulty)}</strong></div>
-        <div><span>机制数量</span><strong>{insight.mechanisms.length} 项</strong></div>
       </div>
 
       <div className="viral-hook-callout">
         <Target size={23} weight="fill" />
-        <div><span>最强流量抓手</span><p>{insight.strongest_hook}</p></div>
+        <div>
+          <span>最强流量抓手</span>
+          <strong>{strongestMechanism?.title || "核心视觉信号前置"}</strong>
+          <p>{strongestMechanism?.mechanism || insight.strongest_hook}</p>
+        </div>
       </div>
 
       <div className="viral-dna-grid">
@@ -73,8 +78,11 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms })
       </div>
 
       <div className="viral-inference-note">
-        当前没有读取真实平台播放、完播或互动指标；以上结论用于创作决策，不代表已验证的流量结果。
-        <button type="button" onClick={onOpenMechanisms}>查看机制与证据<CaretRight size={16} /></button>
+        <span>当前未读取真实平台播放、完播或互动指标，结论用于创作决策。</span>
+        <div className="viral-summary-actions">
+          <button type="button" onClick={onOpenMechanisms}>查看机制与证据<CaretRight size={16} /></button>
+          <button className="primary" type="button" onClick={onOpenReplication}>开始复刻<CaretRight size={16} /></button>
+        </div>
       </div>
     </section>
   );

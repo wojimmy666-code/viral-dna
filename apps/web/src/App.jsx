@@ -97,6 +97,7 @@ import {
   WorkbenchHomePage,
 } from "./WorkspacePages.jsx";
 import {
+  hasReportableNarrativeStructure,
   ReplicationWorkspace,
   ShotTrafficRoles,
   ViralExecutiveSummary,
@@ -2150,7 +2151,6 @@ export function App() {
                   <ReportHeader
                     video={video}
                     report={report}
-                    promptPackage={currentPromptPackage}
                     onDownload={downloadPromptPackage}
                     onRestart={reanalyzeCurrent}
                     analysisVersions={analysisVersions}
@@ -2173,6 +2173,7 @@ export function App() {
                         analysisId={report.analysis_id}
                         request={apiRequest}
                         onOpenMechanisms={() => setActiveReportTab("viral")}
+                        onOpenReplication={() => setActiveReportTab("replicate")}
                       />
                       <OverviewTab
                         report={report}
@@ -4536,7 +4537,6 @@ function RecordWorkspaceTabs({ active, count, onChange }) {
 function ReportHeader({
   video,
   report,
-  promptPackage,
   onDownload,
   onRestart,
   analysisVersions,
@@ -4546,7 +4546,6 @@ function ReportHeader({
 }) {
   const isMediaEvidence = report.analysis_mode === "media_evidence";
   const isModel = report.analysis_mode === "model";
-  const primaryModel = report.model_cost_summary?.breakdown?.[0]?.model;
   const segmentation = report.media_evidence?.segmentation;
   const completedVersions = analysisVersions.filter((item) => item.stage === "completed");
   return (
@@ -4569,20 +4568,11 @@ function ReportHeader({
             )}
           </div>
           {isMediaEvidence ? (
-            <p>{report.shots.length} 个真实镜头 · FFmpeg 证据层 · 语义分析待接入</p>
+            <p>{report.shots.length} 个镜头 · 媒体证据已生成</p>
           ) : isModel ? (
-            <p>
-              {report.shots.filter((shot) => shot.evidence_kind === "model").length} / {report.shots.length} 个镜头已理解
-              {segmentation?.verified_by_model ? ` · ${segmentation.candidate_count} 个候选已审核` : ""}
-              {primaryModel ? ` · ${primaryModel}` : ""}
-              {report.model_cost_summary
-                ? ` · ${formatCost(report.model_cost_summary.measured_cost_micros)}`
-                : ""}
-            </p>
+            <p>{report.shots.length} 个镜头 · 分析完成</p>
           ) : (
-            <p>
-              {report.shots.length} 个镜头 · {report.entities.length} 个可替换元素 · Prompt v{promptPackage.version}
-            </p>
+            <p>{report.shots.length} 个镜头 · {report.entities.length} 个可替换元素</p>
           )}
         </div>
       </div>
@@ -4821,7 +4811,9 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
   const isModel = report.analysis_mode === "model";
   const mediaAvailable = isMediaEvidence || isModel || Boolean(filePreview);
   const modelCost = report.model_cost_summary;
-  const primaryModel = modelCost?.breakdown?.[0]?.model;
+  const showNarrativeStructure = hasReportableNarrativeStructure(
+    overview.narrative_structure,
+  );
   const playbackUrl =
     filePreview ||
     (mediaAvailable
@@ -4860,16 +4852,8 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
           </div>
         )}
 
-        <div className="section-block">
-          <span className="eyebrow">
-            {isMediaEvidence
-              ? "媒体证据概览"
-              : isModel
-                ? "逐镜头 VLM 概览"
-                : "视频概览"}
-          </span>
-          <h3>{overview.summary}</h3>
-          <p>{overview.narrative_structure}</p>
+        <div className="section-block overview-media-summary">
+          <h3>原视频与内容结构</h3>
           <div className="tag-row">
             <span>{overview.content_type}</span>
             <span>{overview.aspect_ratio}</span>
@@ -4877,46 +4861,21 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
           </div>
         </div>
 
-        <div className="structure-strip">
-          {overview.narrative_structure.split("→").map((part, index, parts) => (
-            <div key={part.trim()}>
-              <span>{String(index + 1).padStart(2, "0")}</span>
-              <strong>{part.trim()}</strong>
-              {index < parts.length - 1 && <CaretRight size={15} />}
-            </div>
-          ))}
-        </div>
+        {showNarrativeStructure && (
+          <div className="structure-strip">
+            {overview.narrative_structure.split("→").map((part, index, parts) => (
+              <div key={part.trim()}>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <strong>{part.trim()}</strong>
+                {index < parts.length - 1 && <CaretRight size={15} />}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <aside className="overview-sidebar">
-        {isMediaEvidence ? (
-          <div className="media-evidence-card">
-            <span className="media-evidence-icon">
-              <ShieldCheck size={20} weight="fill" />
-            </span>
-            <div>
-              <span className="eyebrow">真实媒体已验证</span>
-              <strong>
-                {metadata?.width} × {metadata?.height} · {metadata?.fps?.toFixed(2)} FPS
-              </strong>
-              <p>编码、时长、分镜和关键帧均来自真实源视频，不包含模型臆测。</p>
-            </div>
-          </div>
-        ) : isModel ? (
-          <div className="media-evidence-card model-cost-card">
-            <span className="media-evidence-icon">
-              <Sparkle size={20} weight="fill" />
-            </span>
-            <div>
-              <span className="eyebrow">本次模型成本</span>
-              <strong>{formatCost(modelCost?.measured_cost_micros)}</strong>
-              <p>
-                {primaryModel || "模型未返回"} · {modelCost?.run_count || 0} 次调用
-                {modelCost?.cached_run_count ? ` · ${modelCost.cached_run_count} 次缓存` : ""}
-              </p>
-            </div>
-          </div>
-        ) : (
+        {!isMediaEvidence && !isModel && (
           <div className="score-card">
             <span className="eyebrow">内容爆点潜力</span>
             <div className="score-value">
@@ -4929,7 +4888,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             <p>基于视频内容结构的启发式评分，不代表真实平台播放表现。</p>
           </div>
         )}
-        <dl className="overview-facts">
+        <dl className="overview-facts overview-core-facts">
           <div>
             <dt>时长</dt>
             <dd>{overview.duration_seconds.toFixed(1)} 秒</dd>
@@ -4938,39 +4897,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             <dt>镜头</dt>
             <dd>{report.shots.length} 个</dd>
           </div>
-          {isMediaEvidence ? (
-            <>
-              <div>
-                <dt>视频编码</dt>
-                <dd>{metadata?.video_codec?.toUpperCase() || "—"}</dd>
-              </div>
-              <div>
-                <dt>音轨</dt>
-                <dd>{metadata?.has_audio ? metadata.audio_codec?.toUpperCase() : "无"}</dd>
-              </div>
-              <div>
-                <dt>独立字幕轨</dt>
-                <dd>{metadata?.subtitle_streams?.length || 0} 条</dd>
-              </div>
-            </>
-          ) : isModel ? (
-            <>
-              <div>
-                <dt>VLM 镜头</dt>
-                <dd>
-                  {report.shots.filter((shot) => shot.evidence_kind === "model").length} / {report.shots.length}
-                </dd>
-              </div>
-              <div>
-                <dt>模型调用</dt>
-                <dd>{modelCost?.run_count || 0} 次</dd>
-              </div>
-              <div>
-                <dt>实测成本</dt>
-                <dd>{formatCost(modelCost?.measured_cost_micros)}</dd>
-              </div>
-            </>
-          ) : (
+          {!isMediaEvidence && !isModel && (
             <>
               <div>
                 <dt>主体元素</dt>
@@ -4983,12 +4910,17 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             </>
           )}
         </dl>
-        <div className="audience-card">
-          <span className="eyebrow">
-            {isMediaEvidence ? "语义分析状态" : isModel ? "模型与证据状态" : "受众推断"}
-          </span>
-          {isMediaEvidence ? (
-            <>
+        {(isMediaEvidence || isModel) ? (
+          <details className="overview-technical-details">
+            <summary>分析详情<CaretDown size={15} /></summary>
+            <dl className="overview-facts">
+              <div><dt>画面</dt><dd>{metadata?.width} × {metadata?.height}</dd></div>
+              <div><dt>编码与帧率</dt><dd>{metadata?.video_codec?.toUpperCase() || "—"} · {metadata?.fps?.toFixed(2) || "—"} FPS</dd></div>
+              <div><dt>模型调用</dt><dd>{modelCost?.run_count || 0} 次</dd></div>
+              <div><dt>实测成本</dt><dd>{formatCost(modelCost?.measured_cost_micros)}</dd></div>
+            </dl>
+            <div className="audience-card">
+            {isMediaEvidence ? <>
               <p>
                 {timeline
                   ? `统一证据时间线已生成：${timeline.transcript_segments.length} 条 ASR 转写、${timeline.subtitle_cues?.length || 0} 条独立字幕、${timeline.ocr_observations.length} 条画面 OCR；VLM、爆点判断和复刻提示词待下一批接入。`
@@ -5010,9 +4942,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
                   ))}
                 </div>
               )}
-            </>
-          ) : isModel ? (
-            <>
+            </> : <>
               <p>
                 已结合 {timeline?.transcript_segments?.length || 0} 条 ASR、
                 {timeline?.subtitle_cues?.length || 0} 条独立字幕和
@@ -5022,14 +4952,13 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
               {report.model_warnings?.map((warning) => (
                 <p className="model-warning" key={warning}>{warning}</p>
               ))}
-            </>
-          ) : (
-            <p>{overview.audience_inference}</p>
-          )}
-          {(isMediaEvidence || isModel) && metadata?.sha256 && (
+            </>}
+          {metadata?.sha256 && (
             <code className="media-hash">SHA-256 {metadata.sha256.slice(0, 12)}…</code>
           )}
-        </div>
+            </div>
+          </details>
+        ) : <div className="audience-card"><span className="eyebrow">受众推断</span><p>{overview.audience_inference}</p></div>}
         <button className="secondary-button full" type="button" onClick={onOpenShots}>
           {isMediaEvidence ? "查看真实分镜证据" : isModel ? "查看 VLM 分镜事实" : "查看逐镜头拆解"}
           <CaretRight size={16} />
@@ -5101,11 +5030,6 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
                 {activeShot.boundary_confidence != null && ` ${Math.round(activeShot.boundary_confidence * 100)}%`}
               </p>
             </div>
-            {!isMediaEvidence && (
-              <button className="icon-button bordered" type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")} aria-label="复制镜头提示词">
-                <Copy size={17} />
-              </button>
-            )}
           </div>
 
           {hasHybridSegmentation && (
@@ -5213,18 +5137,18 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
                 <Fact label="主体动作" value={activeShot.action} />
                 <Fact label="场景" value={activeShot.scene} />
                 <Fact label="机位与运镜" value={activeShot.camera} />
-                <Fact label="构图" value={activeShot.composition} />
-                <Fact label="灯光" value={activeShot.lighting} />
-                <Fact label="色彩" value={activeShot.color} />
-                <Fact label="声音" value={activeShot.audio} />
                 <Fact label="转场" value={activeShot.transition} />
-                {hasHybridSegmentation && (
-                  <Fact
-                    label="分镜边界"
-                    value={`${formatBoundaryMethod(activeShot.boundary_method)}${activeShot.semantic_group ? ` · ${activeShot.semantic_group}` : ""}`}
-                  />
-                )}
               </div>
+              <details className="shot-secondary-facts">
+                <summary>查看构图、灯光、色彩与声音<CaretDown size={16} /></summary>
+                <div className="shot-facts-grid">
+                  <Fact label="构图" value={activeShot.composition} />
+                  <Fact label="灯光" value={activeShot.lighting} />
+                  <Fact label="色彩" value={activeShot.color} />
+                  <Fact label="声音" value={activeShot.audio} />
+                  {hasHybridSegmentation && <Fact label="分镜边界" value={`${formatBoundaryMethod(activeShot.boundary_method)}${activeShot.semantic_group ? ` · ${activeShot.semantic_group}` : ""}`} />}
+                </div>
+              </details>
               {(activeShot.dialogue || activeShot.subtitle_text || activeShot.ocr_text) && (
             <div className="transcript-box">
               {activeShot.dialogue && (
@@ -5248,13 +5172,11 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
             </div>
               )}
 
-              <div className="prompt-box">
-                <div>
-                  <MagicWand size={17} weight="fill" />
-                  <strong>逐镜头复刻提示词</strong>
-                </div>
+              <details className="prompt-box shot-prompt-disclosure">
+                <summary><span><MagicWand size={17} weight="fill" /><strong>逐镜头复刻提示词</strong></span><CaretDown size={16} /></summary>
                 <p>{activeShot.prompt}</p>
-              </div>
+                <button type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")}><Copy size={16} />复制提示词</button>
+              </details>
             </>
           )}
         </article>
@@ -5285,46 +5207,43 @@ function PromptsTab({ promptPackage, onCopy, onDownload }) {
             <Copy size={17} />
           </button>
         </div>
-        <p>{promptPackage.global_prompt}</p>
+        {hasReportableNarrativeStructure(promptPackage.global_prompt) && <p>{promptPackage.global_prompt}</p>}
       </div>
 
-      <div className="prompt-two-column">
-        <div className="continuity-card">
-          <div className="mini-heading">
+      {(promptPackage.continuity_locks.length > 0 || promptPackage.negative_constraints.length > 0) && <div className="prompt-two-column">
+        {promptPackage.continuity_locks.length > 0 && <details className="continuity-card">
+          <summary className="mini-heading">
             <LockSimple size={17} />
-            <strong>连续性锁</strong>
-          </div>
+            <strong>连续性锁 · {promptPackage.continuity_locks.length} 项</strong><CaretDown size={15} />
+          </summary>
           <ul>
             {promptPackage.continuity_locks.map((lock) => <li key={lock}>{lock}</li>)}
           </ul>
-        </div>
-        <div className="continuity-card negative">
-          <div className="mini-heading">
+        </details>}
+        {promptPackage.negative_constraints.length > 0 && <details className="continuity-card negative">
+          <summary className="mini-heading">
             <ShieldCheck size={17} />
-            <strong>负面约束</strong>
-          </div>
+            <strong>负面约束 · {promptPackage.negative_constraints.length} 项</strong><CaretDown size={15} />
+          </summary>
           <ul>
             {promptPackage.negative_constraints.map((constraint) => <li key={constraint}>{constraint}</li>)}
           </ul>
-        </div>
-      </div>
+        </details>}
+      </div>}
 
       <div className="prompt-shot-list">
         {promptPackage.shots.map((shot, index) => (
-          <article key={shot.shot_id}>
-            <div>
+          <details key={shot.shot_id} open={index === 0}>
+            <summary>
               <span>{String(index + 1).padStart(2, "0")}</span>
               <div>
                 <strong>{shot.shot_id}</strong>
                 <small>{shot.duration_seconds.toFixed(1)} 秒</small>
               </div>
-            </div>
-            <p>{shot.prompt}</p>
-            <button type="button" onClick={() => onCopy(shot.prompt, `${shot.shot_id} 已复制`)}>
-              <Copy size={16} />
-              复制
-            </button>
-          </article>
+              <CaretDown className="prompt-shot-caret" size={16} />
+            </summary>
+            <div className="prompt-shot-body"><p>{shot.prompt}</p><button type="button" onClick={() => onCopy(shot.prompt, `${shot.shot_id} 已复制`)}><Copy size={16} />复制</button></div>
+          </details>
         ))}
       </div>
 

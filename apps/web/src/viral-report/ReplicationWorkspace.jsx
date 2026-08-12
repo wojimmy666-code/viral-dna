@@ -1,5 +1,6 @@
 import {
   ArrowClockwise,
+  CaretDown,
   Check,
   CircleNotch,
   LockSimple,
@@ -85,34 +86,32 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
   return (
     <div className="viral-report-page replication-workspace">
       <header className="viral-section-header">
-        <div><span>REPLICATE & IMPROVE</span><h2>复刻与改进工作台</h2><p>先锁定经过证据支持的结构机制，再替换人物、产品或场景。参考资产不是必填项。</p></div>
+        <div><h2>复刻与改进工作台</h2><p>锁定有效结构，再替换人物、产品或场景。参考资产不是必填项。</p></div>
         <span className="viral-basis-badge"><Sparkle size={15} />不会调用视频生成模型</span>
       </header>
 
-      <div className="replication-preparation-grid">
-        <section className="replication-dna-locks">
-          <div className="replication-section-title"><LockSimple size={20} /><div><strong>内容 DNA 锁定</strong><p>以下项会自动写入三套方案，避免只换素材后丢失原片的流量功能。</p></div></div>
+      <div className={`replication-preparation-grid ${insight.replacement_opportunities.length ? "" : "dna-only"}`}>
+        <details className="replication-dna-locks">
+          <summary className="replication-section-title"><LockSimple size={20} /><div><strong>内容 DNA 已锁定</strong><p>{insight.dna.invariants.length} 项机制会自动写入新方案，点击查看</p></div><CaretDown size={17} /></summary>
           <div className="dna-lock-list">{insight.dna.invariants.map((item) => <span key={item}><Check size={14} weight="bold" />{item}</span>)}</div>
-        </section>
+        </details>
 
-        <section className="replacement-opportunities">
+        {insight.replacement_opportunities.length > 0 && <section className="replacement-opportunities">
           <div className="replication-section-title"><Swap size={20} /><div><strong>元素替换</strong><p>留空表示继续使用原描述；填写后会同步进入三套方案的逐镜头提示词。</p></div></div>
-          {insight.replacement_opportunities.length ? (
-            <div className="replacement-opportunity-list">
-              {insight.replacement_opportunities.map((item) => (
-                <label key={item.entity_id}>
-                  <span className="replacement-entity-meta"><strong>{item.label}</strong><small>{item.entity_type} · 影响 {item.affected_shot_ids.length} 个分镜 · {item.risk === "high" ? "高一致性风险" : item.risk === "medium" ? "中等风险" : "低风险"}</small></span>
-                  <span className="replacement-current">{item.current_description}</span>
-                  <input value={replacementValues[item.entity_id] || ""} onChange={(event) => setReplacementValues((current) => ({ ...current, [item.entity_id]: event.target.value }))} placeholder={`替换为，例如：${item.suggested_alternatives[0] || "同功能新元素"}`} />
-                </label>
-              ))}
-            </div>
-          ) : <div className="replication-empty">当前分析没有独立实体，仍可直接生成结构方案。</div>}
-        </section>
+          <div className="replacement-opportunity-list">
+            {insight.replacement_opportunities.map((item) => (
+              <label key={item.entity_id}>
+                <span className="replacement-entity-meta"><strong>{item.label}</strong><small>{item.entity_type} · 影响 {item.affected_shot_ids.length} 个分镜 · {item.risk === "high" ? "高一致性风险" : item.risk === "medium" ? "中等风险" : "低风险"}</small></span>
+                <span className="replacement-current">{item.current_description}</span>
+                <input value={replacementValues[item.entity_id] || ""} onChange={(event) => setReplacementValues((current) => ({ ...current, [item.entity_id]: event.target.value }))} placeholder={`替换为，例如：${item.suggested_alternatives[0] || "同功能新元素"}`} />
+              </label>
+            ))}
+          </div>
+        </section>}
       </div>
 
       <section className="replication-generate-bar">
-        <div><strong>{selectedReplacements.length ? `已设置 ${selectedReplacements.length} 项替换` : "未设置元素替换"}</strong><span>一次生成忠实复刻、差异化同构、强化改进三套方案 · 额外成本 ¥0.00</span></div>
+        <div><strong>{selectedReplacements.length ? `已设置 ${selectedReplacements.length} 项替换` : "直接沿用原元素"}</strong><span>一次生成忠实复刻、差异化同构、强化改进三套方案 · 额外成本 ¥0.00</span></div>
         <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading}>
           {conceptLoading ? <CircleNotch className="spin" size={19} /> : <MagicWand size={19} weight="fill" />}
           {conceptSet ? "重新生成三套方案" : "生成三套方案"}
@@ -120,6 +119,19 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
       </section>
 
       {conceptError && <div className="viral-error-state compact" role="alert"><ShieldWarning size={19} />{conceptError}</div>}
+      {conceptSet?.status === "stale" && (
+        <section className="concept-stale-notice" role="status">
+          <ShieldWarning size={20} />
+          <div>
+            <strong>现有三套方案需要更新</strong>
+            <p>{conceptSet.stale_reason || "方案来自旧版生成规则，请重新生成后再创建创作方案。"}</p>
+          </div>
+          <button type="button" onClick={generateConcepts} disabled={conceptLoading}>
+            {conceptLoading ? <CircleNotch className="spin" size={17} /> : <ArrowClockwise size={17} />}
+            重新生成
+          </button>
+        </section>
+      )}
       <ConceptComparison conceptSet={conceptSet} publishingId={publishingId} onPublish={publishConcept} />
     </div>
   );
