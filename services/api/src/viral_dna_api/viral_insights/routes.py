@@ -33,16 +33,6 @@ def create_viral_insight_router(service: ViralInsightService) -> APIRouter:
         except ViralInsightServiceError as exc:
             raise http_error(exc) from exc
 
-    @router.post(
-        "/analyses/{analysis_id}/viral-insight/refresh",
-        response_model=ViralInsightReport,
-    )
-    async def refresh_viral_insight(analysis_id: UUID) -> ViralInsightReport:
-        try:
-            return await service.refresh_insight(analysis_id)
-        except ViralInsightServiceError as exc:
-            raise http_error(exc) from exc
-
     @router.get(
         "/analyses/{analysis_id}/viral-concepts/latest",
         response_model=ViralConceptSet | None,

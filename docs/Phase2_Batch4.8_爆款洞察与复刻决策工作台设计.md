@@ -122,8 +122,7 @@ apps/web/src/viral-report/
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/v1/analyses/{analysis_id}/viral-insight` | 读取或按当前分析生成洞察 |
-| POST | `/api/v1/analyses/{analysis_id}/viral-insight/refresh` | 强制重新生成洞察 |
+| GET | `/api/v1/analyses/{analysis_id}/viral-insight` | 读取洞察；分析报告指纹变化时自动重新生成 |
 | GET | `/api/v1/analyses/{analysis_id}/viral-concepts/latest` | 读取最近一次三方案结果 |
 | POST | `/api/v1/analyses/{analysis_id}/viral-concepts` | 按替换清单生成方案 |
 | POST | `/api/v1/viral-concept-sets/{set_id}/concepts/{concept_id}/publish` | 发布到创作方案 |

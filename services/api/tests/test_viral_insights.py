@@ -278,6 +278,19 @@ def test_service_persists_latest_concepts_and_publishes_selected_route() -> None
         second = await service.get_insight(report.analysis_id)
         assert first.id == second.id
 
+        updated_report = report.model_copy(
+            update={
+                "generated_at": datetime.now(UTC),
+                "overview": report.overview.model_copy(
+                    update={"summary": "重新分析后生成的新摘要。"}
+                ),
+            }
+        )
+        await store.save_report(updated_report)
+        rebuilt = await service.get_insight(report.analysis_id)
+        assert rebuilt.id != second.id
+        assert rebuilt.input_fingerprint != second.input_fingerprint
+
         concepts = await service.generate_concepts(
             report.analysis_id,
             ViralConceptGenerateRequest(),
@@ -310,6 +323,11 @@ def test_viral_insight_routes_cover_read_generate_and_publish() -> None:
         insight_response = client.get(f"/api/v1/analyses/{report.analysis_id}/viral-insight")
         assert insight_response.status_code == 200
         assert insight_response.json()["data_basis"] == "content_inference"
+
+        refresh_response = client.post(
+            f"/api/v1/analyses/{report.analysis_id}/viral-insight/refresh"
+        )
+        assert refresh_response.status_code == 404
 
         concepts_response = client.post(
             f"/api/v1/analyses/{report.analysis_id}/viral-concepts",

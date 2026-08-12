@@ -43,12 +43,15 @@ test("overview omits internal narrative placeholders without hiding real structu
 test("report summary prioritizes decisions and moves technical metadata behind disclosure", async () => {
   const app = await readFile(APP_URL, "utf8");
   const executive = await readFile(EXECUTIVE_URL, "utf8");
+  const helpers = await readFile(UI_HELPERS_URL, "utf8");
 
   assert.match(executive, /判断置信度/);
   assert.match(executive, /复刻难度/);
   assert.doesNotMatch(executive, /<span>证据覆盖<\/span>/);
   assert.doesNotMatch(executive, /<span>机制数量<\/span>/);
   assert.match(executive, /开始复刻/);
+  assert.doesNotMatch(executive, /重新整理|refresh:\s*true|viral-refresh-button/);
+  assert.doesNotMatch(helpers, /viral-insight\/refresh|refresh\s*=\s*false/);
   assert.match(app, /<details className="overview-technical-details">/);
   assert.match(app, /<p>\{report\.shots\.length\} 个镜头 · 分析完成<\/p>/);
 });
@@ -77,6 +80,20 @@ test("concept details do not repeat already locked DNA", async () => {
   const source = await readFile(CONCEPT_URL, "utf8");
   assert.match(source, /本策略锁定/);
   assert.doesNotMatch(source, /<strong>保留 DNA<\/strong>/);
+});
+
+test("shot creation instructions adapt to available width without leaving a dead column", async () => {
+  const component = await readFile(CONCEPT_URL, "utf8");
+  const source = await readFile(CSS_URL, "utf8");
+
+  assert.match(component, /concept-shot-content/);
+  assert.match(component, /concept-shot-video-prompt/);
+  assert.match(component, /concept-shot-image-prompt/);
+  assert.match(source, /\.concept-shot-list\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit, minmax\(min\(100%, 32rem\), 1fr\)\)[^}]*align-items:\s*start/s);
+  assert.match(source, /\.concept-shot-list > article:only-child\s*\{\s*grid-column:\s*1 \/ -1/);
+  assert.match(source, /\.concept-shot-list p\s*\{[^}]*width:\s*100%[^}]*max-width:\s*none/s);
+  assert.doesNotMatch(source, /@container \(min-width: 80rem\)/);
+  assert.doesNotMatch(source, /\.concept-shot-list p\s*\{[^}]*max-width:\s*72ch/s);
 });
 
 test("replication concepts expose distinct strategy goals and stale-batch recovery", async () => {
@@ -152,7 +169,7 @@ test("overview, mechanisms, and replication share the report typography hierarch
   assert.match(source, /\.viral-summary-heading h2,\s*\.viral-section-header h2\s*\{[^}]*font-size:\s*var\(--type-heading-size\)/s);
   assert.match(source, /\.viral-mechanism-summary-copy > strong\s*\{[^}]*font-size:\s*var\(--type-body-size\)/s);
   assert.match(source, /\.viral-logic-chain p\s*\{[^}]*font-size:\s*var\(--type-body-size\)/s);
-  assert.match(source, /\.concept-shot-list p\s*\{[^}]*font-size:\s*var\(--type-body-size\)[^}]*line-height:\s*var\(--type-leading-editor\)/s);
+  assert.match(source, /\.concept-shot-list p\s*\{[^}]*font-size:\s*var\(--type-body-size\)[^}]*line-height:\s*var\(--type-leading-copy\)/s);
   assert.doesNotMatch(source, /font-size:\s*clamp\(/);
   assert.match(styles, /\.section-block h3\s*\{[^}]*font-size:\s*var\(--type-body-size\)/s);
   assert.match(styles, /\.score-value strong\s*\{[^}]*font-size:\s*var\(--type-page-size\)/s);

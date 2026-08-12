@@ -52,15 +52,12 @@ export function useViralInsight({ analysisId, request }) {
   const [loading, setLoading] = useState(Boolean(analysisId));
   const [error, setError] = useState("");
 
-  const load = useCallback(async ({ refresh = false } = {}) => {
+  const load = useCallback(async () => {
     if (!analysisId) return null;
     setLoading(true);
     setError("");
     try {
-      const payload = await request(
-        `/analyses/${analysisId}/viral-insight${refresh ? "/refresh" : ""}`,
-        refresh ? { method: "POST" } : undefined,
-      );
+      const payload = await request(`/analyses/${analysisId}/viral-insight`);
       setInsight(payload);
       return payload;
     } catch (requestError) {

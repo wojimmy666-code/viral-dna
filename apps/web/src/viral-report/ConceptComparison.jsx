@@ -65,7 +65,15 @@ export function ConceptComparison({ conceptSet, publishingId, onPublish }) {
             {selected.shots.map((shot) => (
               <article key={shot.source_shot_id}>
                 <span className="concept-shot-number">{String(shot.index).padStart(2, "0")}</span>
-                <div><span>{shot.traffic_role} · {shot.duration_seconds.toFixed(1)} 秒</span><h4>{shot.title}</h4><p>{shot.video_prompt}</p><details><summary>图片提示词</summary><p>{shot.image_prompt}</p></details></div>
+                <div className="concept-shot-content">
+                  <span className="concept-shot-meta">{shot.traffic_role} · {shot.duration_seconds.toFixed(1)} 秒</span>
+                  <h4>{shot.title}</h4>
+                  <p className="concept-shot-video-prompt">{shot.video_prompt}</p>
+                  <details className="concept-shot-image-prompt">
+                    <summary>图片提示词</summary>
+                    <p>{shot.image_prompt}</p>
+                  </details>
+                </div>
               </article>
             ))}
           </div>

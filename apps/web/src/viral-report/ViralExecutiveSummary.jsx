@@ -43,10 +43,6 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms, o
           <span className="viral-basis-badge"><Sparkle size={15} weight="fill" />内容证据推断</span>
           <h2>{insight.headline}</h2>
         </div>
-        <button className="viral-refresh-button" type="button" onClick={() => reload({ refresh: true })} disabled={loading}>
-          {loading ? <CircleNotch className="spin" size={17} /> : <ArrowClockwise size={17} />}
-          重新整理
-        </button>
       </div>
 
       <div className="viral-summary-metrics" aria-label="洞察摘要">

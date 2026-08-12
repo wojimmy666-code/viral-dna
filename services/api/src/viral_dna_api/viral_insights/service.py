@@ -106,11 +106,6 @@ class ViralInsightService:
         generated = build_viral_insight(source)
         return await self.repository.save_viral_insight(generated)
 
-    async def refresh_insight(self, analysis_id: UUID) -> ViralInsightReport:
-        source = await self._source_report(analysis_id)
-        generated = build_viral_insight(source)
-        return await self.repository.save_viral_insight(generated)
-
     async def latest_concepts(self, analysis_id: UUID) -> ViralConceptSet | None:
         insight = await self.get_insight(analysis_id)
         items = await self.repository.list_viral_concept_sets(analysis_id)
