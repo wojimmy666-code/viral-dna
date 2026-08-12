@@ -987,9 +987,7 @@ class Shot(BaseModel):
             else self.start_seconds
         )
         content_end = (
-            self.content_end_seconds
-            if self.content_end_seconds is not None
-            else self.end_seconds
+            self.content_end_seconds if self.content_end_seconds is not None else self.end_seconds
         )
         if content_start < self.start_seconds or content_end > self.end_seconds:
             raise ValueError("分镜有效内容必须位于剪辑时间范围内")
@@ -1181,9 +1179,7 @@ class ShotEvidence(BaseModel):
             else self.start_seconds
         )
         content_end = (
-            self.content_end_seconds
-            if self.content_end_seconds is not None
-            else self.end_seconds
+            self.content_end_seconds if self.content_end_seconds is not None else self.end_seconds
         )
         if content_start < self.start_seconds or content_end > self.end_seconds:
             raise ValueError("镜头证据有效内容必须位于剪辑时间范围内")
@@ -1202,9 +1198,7 @@ class ShotEvidence(BaseModel):
             raise ValueError("分析视频片段结束时间必须晚于开始时间")
         if self.motion_timestamps and self.analysis_clip_start_seconds is not None:
             analysis_end = (
-                self.analysis_clip_end_seconds
-                or self.content_end_seconds
-                or self.end_seconds
+                self.analysis_clip_end_seconds or self.content_end_seconds or self.end_seconds
             )
             if any(
                 timestamp < self.analysis_clip_start_seconds or timestamp > analysis_end
@@ -1650,11 +1644,14 @@ class ShotVisualBeat(BaseModel):
         max_length=64,
         pattern=r"^[0-9a-f]{64}$",
     )
-    source_frame_warning: Literal[
-        "duplicate_frame",
-        "frame_extract_failed",
-        "timestamp_mismatch",
-    ] | None = None
+    source_frame_warning: (
+        Literal[
+            "duplicate_frame",
+            "frame_extract_failed",
+            "timestamp_mismatch",
+        ]
+        | None
+    ) = None
     source_origin: Literal[
         "analysis",
         "auto_extract",
@@ -2332,12 +2329,15 @@ class ShotVisualBeatUpdate(BaseModel):
     )
     image_negative_constraints: list[str] | None = Field(default=None, max_length=40)
     required: bool | None = None
-    transition_to_next_type: Literal[
-        "cut",
-        "dissolve",
-        "match_action",
-        "model_generated",
-    ] | None = None
+    transition_to_next_type: (
+        Literal[
+            "cut",
+            "dissolve",
+            "match_action",
+            "model_generated",
+        ]
+        | None
+    ) = None
     transition_to_next_duration_seconds: float | None = Field(default=None, ge=0, le=5)
     transition_to_next_prompt: str | None = Field(default=None, max_length=2000)
 
@@ -2565,9 +2565,7 @@ class ImageGenerationCreate(BaseModel):
 class VideoGenerationCreate(BaseModel):
     expected_revision_id: UUID
     candidate_count: int = Field(default=1, ge=1, le=4)
-    input_mode: Literal["multi_image_to_video", "image_to_video"] = (
-        "multi_image_to_video"
-    )
+    input_mode: Literal["multi_image_to_video", "image_to_video"] = "multi_image_to_video"
     execution_mode: Literal["simulated", "remote_api"] = "simulated"
     model_alias: str | None = Field(
         default=None,
@@ -2753,6 +2751,10 @@ class ProductionGateStatus(BaseModel):
     prepared_shot_count: int = Field(default=0, ge=0)
     quality_warning_shot_count: int = Field(default=0, ge=0)
     stale_shot_count: int = Field(ge=0)
+    continuity_status: Literal["not_run", "completed", "stale", "failed"] = "not_run"
+    continuity_verification_state: Literal["rule_only", "partial", "verified"] | None = None
+    continuity_blocker_count: int = Field(default=0, ge=0)
+    continuity_warning_count: int = Field(default=0, ge=0)
     blocker_messages: list[str] = Field(default_factory=list)
 
 
@@ -2786,9 +2788,7 @@ class EditingHandoffClip(BaseModel):
 
 
 class EditingHandoffManifest(BaseModel):
-    schema_version: Literal["viral-dna-editing-handoff/v1"] = (
-        "viral-dna-editing-handoff/v1"
-    )
+    schema_version: Literal["viral-dna-editing-handoff/v1"] = "viral-dna-editing-handoff/v1"
     project_id: UUID
     revision_id: UUID
     source_analysis_id: UUID
@@ -2873,9 +2873,7 @@ class TimelineClip(BaseModel):
             raise ValueError("片段出点不能超过候选视频时长")
         if (
             self.cover_timestamp_seconds is not None
-            and not self.trim_in_seconds
-            <= self.cover_timestamp_seconds
-            <= self.trim_out_seconds
+            and not self.trim_in_seconds <= self.cover_timestamp_seconds <= self.trim_out_seconds
         ):
             raise ValueError("封面帧必须位于当前片段裁剪范围内")
         if self.timeline_end_seconds <= self.timeline_start_seconds:
@@ -3265,6 +3263,8 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     service: str = "viral-dna-api"
     version: str = "0.1.0"
+    workspace_schema_version: int = WORKSPACE_SCHEMA_VERSION
+    process_started_at: datetime
     analyzer_mode: str
 
 

@@ -33,6 +33,7 @@ if exist "%LOCAL_ENV_FILE%" (
 set "WEB_URL=http://127.0.0.1:4174"
 set "API_URL=http://127.0.0.1:8000/health"
 set "PYTHON_EXE=%PROJECT_ROOT%\.venv\Scripts\python.exe"
+set "API_STATE_HELPER=%PROJECT_ROOT%\scripts\api-service-state.ps1"
 set "WEB_RUNNING=0"
 set "API_RUNNING=0"
 
@@ -50,8 +51,22 @@ echo [ViralDNA] Checking services...
 call :is_web_ready
 if not errorlevel 1 set "WEB_RUNNING=1"
 
-call :is_api_ready
-if not errorlevel 1 set "API_RUNNING=1"
+call :api_state
+set "API_STATE=%errorlevel%"
+if "%API_STATE%"=="0" set "API_RUNNING=1"
+if "%API_STATE%"=="2" (
+  echo [ViralDNA] API source or workspace schema changed. Restarting the stale API...
+  call :stop_stale_api
+  if errorlevel 1 goto :failed
+)
+if "%API_STATE%"=="3" (
+  echo [ViralDNA] ERROR: Port 8000 is occupied by another service.
+  goto :failed
+)
+if "%API_STATE%"=="4" (
+  echo [ViralDNA] ERROR: API compatibility check failed.
+  goto :failed
+)
 
 if "%API_RUNNING%"=="1" (
   echo [ViralDNA] API is already running on port 8000.
@@ -177,7 +192,15 @@ if not exist "%PROJECT_ROOT%\node_modules\.bin\vite.cmd" (
 exit /b 0
 
 :is_api_ready
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $result = Invoke-RestMethod -Uri '%API_URL%' -TimeoutSec 2; if ($result.service -eq 'viral-dna-api' -and $result.status -eq 'ok') { exit 0 } } catch {}; exit 1" >nul 2>&1
+call :api_state >nul 2>&1
+exit /b %errorlevel%
+
+:api_state
+powershell -NoProfile -ExecutionPolicy Bypass -File "%API_STATE_HELPER%" -Mode check -HealthUrl "%API_URL%" -Port 8000
+exit /b %errorlevel%
+
+:stop_stale_api
+powershell -NoProfile -ExecutionPolicy Bypass -File "%API_STATE_HELPER%" -Mode stop-stale -HealthUrl "%API_URL%" -Port 8000
 exit /b %errorlevel%
 
 :is_web_ready

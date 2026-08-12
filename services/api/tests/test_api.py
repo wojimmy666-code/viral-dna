@@ -9,13 +9,18 @@ os.environ["VIRAL_DNA_SIMULATION_DELAY"] = "0.01"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from viral_dna_api.main import app  # noqa: E402
+from viral_dna_api.schema import WORKSPACE_SCHEMA_VERSION  # noqa: E402
 
 
 def test_health() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["service"] == "viral-dna-api"
+    assert payload["workspace_schema_version"] == WORKSPACE_SCHEMA_VERSION
+    assert payload["process_started_at"].endswith("Z")
 
 
 def test_upload_video() -> None:

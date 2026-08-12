@@ -169,6 +169,8 @@ from .production import (
     ProductionServiceError,
 )
 from .project_assets import ProjectAssetService
+from .quality.continuity_service import ContinuityService
+from .quality.routes import create_continuity_router
 from .real_pipeline import HybridAnalysisPipeline
 from .records import RecordService, resolve_video_path, write_source_metadata
 from .storage_objects import StorageManager
@@ -181,6 +183,9 @@ from .video_generation.settings import (
     VideoGenerationSettingsService,
     VideoGenerationSettingsServiceError,
 )
+from .viral_insights.publisher import ProductionConceptPublisher
+from .viral_insights.routes import create_viral_insight_router
+from .viral_insights.service import ViralInsightService
 from .workspace import WORKSPACE_SCHEMA_VERSION, WorkspaceError, workspace_manager
 from .workspace_catalog import (
     Account,
@@ -206,6 +211,9 @@ ALLOWED_CONTENT_TYPES = {
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+PROCESS_STARTED_AT = utc_now()
 
 
 def parse_cors_origins() -> list[str]:
@@ -270,6 +278,7 @@ asset_library_service = AssetLibraryService(store, storage_manager, account_cont
 project_asset_service = ProjectAssetService(
     store, workspace_manager, storage_manager, account_context_service
 )
+continuity_service = ContinuityService(store)
 production_service = ProductionService(
     store,
     workspace_manager,
@@ -277,6 +286,11 @@ production_service = ProductionService(
     project_assets=project_asset_service,
     video_gateway=video_generation_gateway,
     notification_publisher=notification_service,
+    continuity_service=continuity_service,
+)
+viral_insight_service = ViralInsightService(
+    store,
+    publisher=ProductionConceptPublisher(production_service),
 )
 timeline_service = TimelineService(
     store,
@@ -293,11 +307,17 @@ timeline_export_service = TimelineExportService(
     on_export_succeeded=production_service.mark_export_completed,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
+app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
+app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    return HealthResponse(analyzer_mode=os.getenv("VIRAL_DNA_ANALYZER_MODE", "hybrid"))
+    return HealthResponse(
+        analyzer_mode=os.getenv("VIRAL_DNA_ANALYZER_MODE", "hybrid"),
+        workspace_schema_version=WORKSPACE_SCHEMA_VERSION,
+        process_started_at=PROCESS_STARTED_AT,
+    )
 
 
 @app.get(f"{API_PREFIX}/settings/model", response_model=ModelSettingsResponse)
@@ -774,6 +794,7 @@ async def upload_production_reference(
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+
 @app.post(
     f"{API_PREFIX}/productions/{{project_id}}/assets/{{asset_id}}/link",
     response_model=ReferenceAssetResponse,
@@ -793,7 +814,6 @@ async def link_production_asset(
         )
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
 
 
 @app.get(
@@ -823,9 +843,7 @@ async def update_production_reference(
     project_id: Annotated[UUID | None, Query()] = None,
 ) -> ReferenceAssetResponse:
     try:
-        return await production_service.update_reference(
-            asset_id, payload, project_id=project_id
-        )
+        return await production_service.update_reference(asset_id, payload, project_id=project_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -1055,8 +1073,7 @@ async def delete_production_visual_beat(
 
 
 @app.get(
-    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats/"
-    "{visual_beat_id}/source-frame"
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/visual-beats/{{visual_beat_id}}/source-frame"
 )
 async def get_production_visual_beat_source_frame(
     shot_plan_id: UUID,
@@ -2178,11 +2195,7 @@ async def list_records(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> AnalysisRecordList:
-    records = [
-        record
-        for record in await store.list_records()
-        if record.purged_at is None
-    ]
+    records = [record for record in await store.list_records() if record.purged_at is None]
     lifecycle_counts = AnalysisRecordLifecycleCounts(
         active=sum(
             analysis_record_lifecycle(record) == AnalysisRecordLifecycle.ACTIVE
@@ -2334,9 +2347,7 @@ async def update_record_lifecycle(
     response_model=AnalysisRecordMutationResult,
 )
 async def permanently_delete_record(record_id: UUID) -> AnalysisRecordMutationResult:
-    return await permanently_delete_records_batch(
-        AnalysisRecordBatchDelete(record_ids=[record_id])
-    )
+    return await permanently_delete_records_batch(AnalysisRecordBatchDelete(record_ids=[record_id]))
 
 
 @app.get(f"{API_PREFIX}/records/{{record_id}}/thumbnail")

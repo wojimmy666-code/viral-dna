@@ -35,7 +35,9 @@ from .models import (
     VideoProviderTask,
     VideoStatus,
 )
+from .quality.contracts import ContinuityReport
 from .storage_objects import ObjectReplica, StorageObject
+from .viral_insights.contracts import ViralConceptSet, ViralInsightReport
 from .workspace import WorkspaceError, workspace_manager
 
 
@@ -73,6 +75,9 @@ class InMemoryStore:
         self.asset_folders: dict[UUID, AssetFolder] = {}
         self.assets: dict[UUID, Asset] = {}
         self.project_asset_links: dict[UUID, ProjectAssetLink] = {}
+        self.continuity_reports: dict[UUID, ContinuityReport] = {}
+        self.viral_insights: dict[UUID, ViralInsightReport] = {}
+        self.viral_concept_sets: dict[UUID, ViralConceptSet] = {}
 
     async def add_video(self, video: Video) -> Video:
         async with self._lock:
@@ -579,6 +584,74 @@ class InMemoryStore:
         if shot_plan_id is not None:
             events = [event for event in events if event.shot_plan_id == shot_plan_id]
         return sorted(events, key=lambda event: event.created_at)
+
+    async def save_continuity_report(
+        self,
+        report: ContinuityReport,
+    ) -> ContinuityReport:
+        async with self._lock:
+            self.continuity_reports[report.id] = report
+        return report
+
+    async def get_continuity_report(
+        self,
+        report_id: UUID,
+    ) -> ContinuityReport | None:
+        return self.continuity_reports.get(report_id)
+
+    async def list_continuity_reports(
+        self,
+        project_id: UUID,
+    ) -> list[ContinuityReport]:
+        return sorted(
+            (
+                report
+                for report in self.continuity_reports.values()
+                if report.project_id == project_id
+            ),
+            key=lambda report: report.created_at,
+        )
+
+    async def save_viral_insight(
+        self,
+        report: ViralInsightReport,
+    ) -> ViralInsightReport:
+        async with self._lock:
+            self.viral_insights[report.analysis_id] = report
+        return report
+
+    async def get_viral_insight(
+        self,
+        analysis_id: UUID,
+    ) -> ViralInsightReport | None:
+        return self.viral_insights.get(analysis_id)
+
+    async def save_viral_concept_set(
+        self,
+        concepts: ViralConceptSet,
+    ) -> ViralConceptSet:
+        async with self._lock:
+            self.viral_concept_sets[concepts.id] = concepts
+        return concepts
+
+    async def get_viral_concept_set(
+        self,
+        concept_set_id: UUID,
+    ) -> ViralConceptSet | None:
+        return self.viral_concept_sets.get(concept_set_id)
+
+    async def list_viral_concept_sets(
+        self,
+        analysis_id: UUID,
+    ) -> list[ViralConceptSet]:
+        return sorted(
+            (
+                item
+                for item in self.viral_concept_sets.values()
+                if item.analysis_id == analysis_id
+            ),
+            key=lambda item: item.created_at,
+        )
 
 
 class WorkspaceStore:

@@ -1116,6 +1116,7 @@ export function ProductionHub({
   const [revisions, setRevisions] = useState([]);
   const [shots, setShots] = useState([]);
   const [gate, setGate] = useState(null);
+  const [continuityReport, setContinuityReport] = useState(null);
   const [selectedShotId, setSelectedShotId] = useState(null);
   const [selectedVisualBeatId, setSelectedVisualBeatId] = useState(null);
   const [shotDetail, setShotDetail] = useState(null);
@@ -1189,6 +1190,7 @@ export function ProductionHub({
     setAnalysisUpdateError("");
     setContentError("");
     setActionError("");
+    setContinuityReport(null);
     setActiveSection("project_setup");
   }, [listSignal]);
 
@@ -1214,6 +1216,7 @@ export function ProductionHub({
     setRevisions([]);
     setShots([]);
     setGate(null);
+    setContinuityReport(null);
     setSelectedShotId(null);
     setSelectedVisualBeatId(null);
     setShotDetail(null);
@@ -1297,6 +1300,15 @@ export function ProductionHub({
     selectedShotId,
   ]);
 
+  async function loadContinuityReport(projectId) {
+    try {
+      return await request(`/productions/${projectId}/continuity-reports/latest`);
+    } catch (error) {
+      if (error?.status === 404) return null;
+      throw error;
+    }
+  }
+
   async function refreshProject(
     projectId = selectedProjectId,
     preferredShotId = selectedShotId,
@@ -1310,6 +1322,7 @@ export function ProductionHub({
       nextShots,
       nextGate,
       nextGenerationSettings,
+      nextContinuityReport,
     ] = await Promise.all([
       request(`/productions/${projectId}`),
       request(`/productions/${projectId}/references`),
@@ -1317,12 +1330,14 @@ export function ProductionHub({
       request(`/productions/${projectId}/shots`),
       request(`/productions/${projectId}/gate-status`),
       request("/settings/image-generation"),
+      loadContinuityReport(projectId),
     ]);
     setDetail(nextDetail);
     setAssets(nextAssets || []);
     setRevisions(nextRevisions || []);
     setShots(nextShots || []);
     setGate(nextGate);
+    setContinuityReport(nextContinuityReport);
     setGenerationSettings(nextGenerationSettings);
     setSettingsDraft(settingsFromProject(nextDetail.project));
     const targetShotId = (
@@ -2359,6 +2374,31 @@ export function ProductionHub({
 
   async function advanceToEditing() {
     await executeAction(async () => {
+      const checkedReport = await request(
+        `/productions/${detail.project.id}/continuity-reports`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+          }),
+        },
+      );
+      setContinuityReport(checkedReport);
+      const checkedGate = await request(
+        `/productions/${detail.project.id}/gate-status`,
+      );
+      setGate(checkedGate);
+      if (checkedReport.blocker_count > 0) {
+        const message = `连续性质检仍有 ${checkedReport.blocker_count} 个阻断问题，请处理后再进入剪辑。`;
+        setActionError(message);
+        onNotice({
+          type: "warning",
+          title: "连续性质检未通过",
+          message,
+        });
+        return;
+      }
       await request(`/productions/${detail.project.id}/advance`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2377,6 +2417,59 @@ export function ProductionHub({
         title: "已进入视频剪辑",
         message: "已采用的视频已加入初始时间线，可继续裁剪和调整轨道。",
       });
+    });
+  }
+
+  async function runContinuityCheck() {
+    await executeAction(async () => {
+      const report = await request(
+        `/productions/${detail.project.id}/continuity-reports`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+          }),
+        },
+      );
+      const nextGate = await request(`/productions/${detail.project.id}/gate-status`);
+      setContinuityReport(report);
+      setGate(nextGate);
+      onNotice({
+        type: report.blocker_count > 0 ? "warning" : "success",
+        title: report.blocker_count > 0 ? "发现连续性问题" : "连续性质检已完成",
+        message: report.blocker_count > 0
+          ? `有 ${report.blocker_count} 个阻断问题需要处理。`
+          : report.verification_state === "verified"
+            ? "相邻分镜未发现待处理问题。"
+            : "结构规则已检查；当前尚未执行 VLM 视觉验证。",
+      });
+    });
+  }
+
+  async function decideContinuityFinding(finding, decision) {
+    let reason = null;
+    if (decision === "waive") {
+      reason = window.prompt("请说明为什么这是有意变化", "剧情或镜头设计要求");
+      if (!reason?.trim()) return;
+    }
+    await executeAction(async () => {
+      const report = await request(
+        `/productions/${detail.project.id}/continuity-reports/`
+        + `${continuityReport.id}/findings/${finding.key}/decision`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            decision,
+            reason: reason?.trim() || null,
+          }),
+        },
+      );
+      const nextGate = await request(`/productions/${detail.project.id}/gate-status`);
+      setContinuityReport(report);
+      setGate(nextGate);
     });
   }
 
@@ -2784,6 +2877,7 @@ export function ProductionHub({
               <ShotVideoWorkspace
                 advanced={["editing", "export"].includes(detail.project.active_step)}
                 busy={busy}
+                continuityReport={continuityReport}
                 error={actionError}
                 gate={gate}
                 initialCandidateId={focusedCandidateId}
@@ -2791,10 +2885,12 @@ export function ProductionHub({
                 onApprove={approveVideoCandidate}
                 onArchiveCandidates={archiveVideoCandidates}
                 onCancelRun={cancelVideoGeneration}
+                onDecideContinuity={decideContinuityFinding}
                 onGenerate={generateVideoCandidates}
                 onOpenModelSettings={onOpenModelSettings}
                 onReject={rejectVideoCandidate}
                 onRetryRun={retryVideoGeneration}
+                onRunContinuity={runContinuityCheck}
                 onRestoreCandidates={restoreVideoCandidates}
                 onRevokeApproval={revokeVideoApproval}
                 onSave={saveVideoPrompt}

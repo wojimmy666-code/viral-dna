@@ -168,7 +168,7 @@ def test_sqlite_migrates_v1_to_v2_without_losing_existing_rows(
             ("legacy-video",),
         ).fetchone()
 
-    assert versions == [1, 2, 3, 4, 5, 6]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     assert {
         "production_projects",
         "production_revisions",
@@ -179,10 +179,12 @@ def test_sqlite_migrates_v1_to_v2_without_losing_existing_rows(
         "generation_candidates",
         "video_clip_preparations",
         "approval_events",
+        "continuity_reports",
     }.issubset(tables)
     assert "idx_production_projects_record_id" in indexes
     assert "idx_generation_runs_shot_plan_id" in indexes
     assert "idx_video_clip_preparations_project_id" in indexes
+    assert "idx_continuity_reports_project_id" in indexes
     assert legacy_payload == ('{"legacy":true}',)
 
 

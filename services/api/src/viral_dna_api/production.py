@@ -124,6 +124,8 @@ from .production_media import (
     map_timed_text,
     playback_alignment,
 )
+from .quality.continuity_service import ContinuityService, ContinuityServiceError
+from .quality.contracts import ContinuityReportStatus
 from .video_generation import (
     OrderedReferenceFrame,
     VideoGenerationGateway,
@@ -194,10 +196,7 @@ def _step_after_reference_change(
 
 
 def _duration_alignment_warning(playback_rate: float) -> str:
-    return (
-        f"裁剪后时长与原分镜差异过大，将以 {playback_rate:.3f}× 对齐时间线；"
-        "请在剪辑阶段复核节奏"
-    )
+    return f"裁剪后时长与原分镜差异过大，将以 {playback_rate:.3f}× 对齐时间线；请在剪辑阶段复核节奏"
 
 
 def _apply_video_preparation_policy(
@@ -234,12 +233,9 @@ def _apply_video_preparation_policy(
 
 
 def _is_simulated_image_run(run: GenerationRun) -> bool:
-    return (
-        run.kind == GenerationKind.IMAGE
-        and (
-            run.execution_mode == ImageExecutionMode.SIMULATED
-            or run.provider.strip().casefold() == "simulated"
-        )
+    return run.kind == GenerationKind.IMAGE and (
+        run.execution_mode == ImageExecutionMode.SIMULATED
+        or run.provider.strip().casefold() == "simulated"
     )
 
 
@@ -741,9 +737,7 @@ def _report_shot_content_bounds(
     segmentation = report.media_evidence.segmentation if report.media_evidence else None
     if segmentation is not None:
         selected = [
-            item
-            for item in segmentation.candidates
-            if item.selected_by_model or item.hard_boundary
+            item for item in segmentation.candidates if item.selected_by_model or item.hard_boundary
         ]
         incoming = next(
             (
@@ -755,11 +749,7 @@ def _report_shot_content_bounds(
             None,
         )
         outgoing = next(
-            (
-                item
-                for item in selected
-                if abs(item.timestamp_seconds - shot.end_seconds) <= 0.002
-            ),
+            (item for item in selected if abs(item.timestamp_seconds - shot.end_seconds) <= 0.002),
             None,
         )
         if incoming is not None:
@@ -789,9 +779,7 @@ def _shot_frame_samples(
     duration = max(0.001, end - start)
     offset = min(0.18, max(0.001, duration * 0.2), duration / 3)
     representative = float(
-        media_shot.representative_timestamp
-        if media_shot is not None
-        else start + duration / 2
+        media_shot.representative_timestamp if media_shot is not None else start + duration / 2
     )
     timestamps = {
         "start": round(min(end, start + offset), 3),
@@ -803,11 +791,7 @@ def _shot_frame_samples(
     if not evidence_urls and media_shot is not None:
         evidence_urls = list(media_shot.evidence_frame_urls)
     role_urls: dict[str, str] = {}
-    evidence_timestamps = (
-        list(media_shot.evidence_timestamps)
-        if media_shot is not None
-        else []
-    )
+    evidence_timestamps = list(media_shot.evidence_timestamps) if media_shot is not None else []
     for url in evidence_urls:
         role_urls.setdefault(_visual_frame_role(url), url)
     if len(evidence_timestamps) == len(evidence_urls):
@@ -816,10 +800,7 @@ def _shot_frame_samples(
     keyframe_url = (
         shot.keyframe_url
         or (media_shot.keyframe_url if media_shot is not None else None)
-        or (
-            f"/api/v1/analyses/{report.analysis_id}/artifacts/"
-            f"shots/shot_{shot.index:03d}.jpg"
-        )
+        or (f"/api/v1/analyses/{report.analysis_id}/artifacts/shots/shot_{shot.index:03d}.jpg")
     )
     if keyframe_url:
         role_urls["middle"] = keyframe_url
@@ -1062,9 +1043,7 @@ def _default_output_ratio(
     source_orientation = orientation(source_ratio)
     ranked: list[tuple[int, int, int, str]] = []
     for index, candidate in enumerate(_SUPPORTED_OUTPUT_RATIOS):
-        candidate_width, candidate_height = (
-            int(part) for part in candidate.split(":")
-        )
+        candidate_width, candidate_height = (int(part) for part in candidate.split(":"))
         candidate_ratio = candidate_width / candidate_height
         ranked.append(
             (
@@ -1161,6 +1140,7 @@ class ProductionService:
         video_gateway: VideoGenerationGateway | None = None,
         notification_publisher: NotificationPublisher | None = None,
         video_inspector: VideoInspector | None = None,
+        continuity_service: ContinuityService | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
@@ -1175,9 +1155,8 @@ class ProductionService:
             media_processor=self.media_processor,
         )
         self.notification_publisher = notification_publisher
-        self.video_inspector = video_inspector or ProductionVideoInspector(
-            self.media_processor
-        )
+        self.video_inspector = video_inspector or ProductionVideoInspector(self.media_processor)
+        self.continuity = continuity_service or ContinuityService(repository)
         self._lock_guard = asyncio.Lock()
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -1219,9 +1198,7 @@ class ProductionService:
             )
             kind_label = "视频" if run.kind == GenerationKind.VIDEO else "图片"
             category = (
-                "video_generation"
-                if run.kind == GenerationKind.VIDEO
-                else "image_generation"
+                "video_generation" if run.kind == GenerationKind.VIDEO else "image_generation"
             )
             model_label = run.model_display_name or run.model_alias or run.model
             action_payload = {
@@ -1467,8 +1444,7 @@ class ProductionService:
             None,
         )
         active_shots = [
-            item for item in shots
-            if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
+            item for item in shots if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
         ]
         return ProductionProjectDetail(
             project=project,
@@ -1478,12 +1454,10 @@ class ProductionService:
             shot_count=len(active_shots),
             discarded_shot_count=len(shots) - len(active_shots),
             approved_image_count=sum(
-                item.image_status == WorkflowItemStatus.APPROVED
-                for item in active_shots
+                item.image_status == WorkflowItemStatus.APPROVED for item in active_shots
             ),
             stale_image_count=sum(
-                item.image_status == WorkflowItemStatus.STALE
-                for item in active_shots
+                item.image_status == WorkflowItemStatus.STALE for item in active_shots
             ),
         )
 
@@ -1609,8 +1583,7 @@ class ProductionService:
             video_id=frozen_project.video_id,
             base_analysis_id=frozen_project.base_analysis_id,
             prompt_source_analysis_id=(
-                frozen_project.prompt_source_analysis_id
-                or frozen_project.base_analysis_id
+                frozen_project.prompt_source_analysis_id or frozen_project.base_analysis_id
             ),
             source_prompt_package_id=frozen_project.source_prompt_package_id,
             source_project_id=source_project.id,
@@ -1659,8 +1632,7 @@ class ProductionService:
             reference_bindings=cloned_bindings,
         )
         active_cloned_shots = [
-            item for item in cloned_shots
-            if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
+            item for item in cloned_shots if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
         ]
         return ProductionProjectDetail(
             project=branch,
@@ -1670,12 +1642,10 @@ class ProductionService:
             shot_count=len(active_cloned_shots),
             discarded_shot_count=len(cloned_shots) - len(active_cloned_shots),
             approved_image_count=sum(
-                item.image_status == WorkflowItemStatus.APPROVED
-                for item in active_cloned_shots
+                item.image_status == WorkflowItemStatus.APPROVED for item in active_cloned_shots
             ),
             stale_image_count=sum(
-                item.image_status == WorkflowItemStatus.STALE
-                for item in active_cloned_shots
+                item.image_status == WorkflowItemStatus.STALE for item in active_cloned_shots
             ),
         )
 
@@ -1892,14 +1862,11 @@ class ProductionService:
             plans = await self.repository.list_shot_plans(project.id)
             all_bindings = await self._all_bindings(plans)
             impacted_ids = {
-                item.shot_plan_id
-                for item in all_bindings
-                if item.reference_asset_id == asset.id
+                item.shot_plan_id for item in all_bindings if item.reference_asset_id == asset.id
             }
             if (
                 any(
-                    item.id in impacted_ids
-                    and item.image_status == WorkflowItemStatus.APPROVED
+                    item.id in impacted_ids and item.image_status == WorkflowItemStatus.APPROVED
                     for item in plans
                 )
                 and not payload.confirm_stale
@@ -1973,14 +1940,11 @@ class ProductionService:
             plans = await self.repository.list_shot_plans(project.id)
             all_bindings = await self._all_bindings(plans)
             impacted_ids = {
-                item.shot_plan_id
-                for item in all_bindings
-                if item.reference_asset_id == asset.id
+                item.shot_plan_id for item in all_bindings if item.reference_asset_id == asset.id
             }
             if (
                 any(
-                    item.id in impacted_ids
-                    and item.image_status == WorkflowItemStatus.APPROVED
+                    item.id in impacted_ids and item.image_status == WorkflowItemStatus.APPROVED
                     for item in plans
                 )
                 and not confirm_stale
@@ -2026,7 +1990,6 @@ class ProductionService:
             )
         return self._reference_response(archived, next_project.current_revision_id)
 
-
     async def list_references(
         self,
         project_id: UUID,
@@ -2036,9 +1999,7 @@ class ProductionService:
         project = await self._require_project(project_id)
         if project.current_revision_id is None:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
-        assets = await self._list_reference_assets(
-            project.id, include_archived=include_archived
-        )
+        assets = await self._list_reference_assets(project.id, include_archived=include_archived)
         if not include_archived and self.project_assets is None:
             assets = [item for item in assets if item.archived_at is None]
         return [self._reference_response(item, project.current_revision_id) for item in assets]
@@ -2309,12 +2270,8 @@ class ProductionService:
     ) -> dict[UUID, tuple[ShotMediaPreview | None, ShotMediaPreview | None]]:
         runs = await self.repository.list_generation_runs(project_id)
         run_by_id = {run.id: run for run in runs}
-        candidates = await self.repository.list_generation_candidates_by_run_ids(
-            set(run_by_id)
-        )
-        candidates_by_shot: dict[UUID, list[GenerationCandidate]] = {
-            plan.id: [] for plan in plans
-        }
+        candidates = await self.repository.list_generation_candidates_by_run_ids(set(run_by_id))
+        candidates_by_shot: dict[UUID, list[GenerationCandidate]] = {plan.id: [] for plan in plans}
         for candidate in candidates:
             run = run_by_id.get(candidate.generation_run_id)
             if run is not None and run.shot_plan_id in candidates_by_shot:
@@ -2365,13 +2322,9 @@ class ProductionService:
             project = await self._require_project(project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
             plans = await self.repository.list_shot_plans(project.id)
-            active = [
-                item for item in plans
-                if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
-            ]
+            active = [item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE]
             discarded = [
-                item for item in plans
-                if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
+                item for item in plans if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
             ]
             active.sort(key=lambda item: item.index)
             discarded.sort(key=lambda item: item.index)
@@ -2403,11 +2356,7 @@ class ProductionService:
 
             if payload.mode == "duplicate":
                 source_plan = next(
-                    (
-                        item
-                        for item in plans
-                        if item.id == payload.source_shot_plan_id
-                    ),
+                    (item for item in plans if item.id == payload.source_shot_plan_id),
                     None,
                 )
                 if source_plan is None:
@@ -2431,8 +2380,7 @@ class ProductionService:
                     await asyncio.to_thread(self._write_atomic, destination, source_bytes)
                     source_keyframe_relative_path = self.workspace.relative(destination)
                     source_keyframe_url = (
-                        f"/api/v1/production-shots/{new_plan_id}/source-keyframe"
-                        f"?v={revision_id}"
+                        f"/api/v1/production-shots/{new_plan_id}/source-keyframe?v={revision_id}"
                     )
                 cloned_visual_beats = await self._clone_visual_beats(
                     source_project=project,
@@ -2542,8 +2490,7 @@ class ProductionService:
                     lifecycle_status=ShotLifecycleStatus.ACTIVE,
                     source_kind=ShotSourceKind.VIDEO_RANGE,
                     source_keyframe_url=(
-                        f"/api/v1/production-shots/{new_plan_id}/source-keyframe"
-                        f"?v={revision_id}"
+                        f"/api/v1/production-shots/{new_plan_id}/source-keyframe?v={revision_id}"
                     ),
                     source_keyframe_relative_path=self.workspace.relative(destination),
                     source_keyframe_timestamp_seconds=round(timestamp, 3),
@@ -2554,9 +2501,7 @@ class ProductionService:
                     image_prompt=prompt,
                     video_prompt=f"持续 {duration:.2f} 秒。",
                     image_status=(
-                        WorkflowItemStatus.READY
-                        if prompt.strip()
-                        else WorkflowItemStatus.DRAFT
+                        WorkflowItemStatus.READY if prompt.strip() else WorkflowItemStatus.DRAFT
                     ),
                     created_at=now,
                     updated_at=now,
@@ -2566,7 +2511,9 @@ class ProductionService:
                 start = float(
                     payload.start_seconds
                     if payload.start_seconds is not None
-                    else previous.end_seconds if previous is not None else 0
+                    else previous.end_seconds
+                    if previous is not None
+                    else 0
                 )
                 end = float(
                     payload.end_seconds
@@ -2596,9 +2543,7 @@ class ProductionService:
                     image_prompt=prompt,
                     video_prompt=f"持续 {duration:.2f} 秒。",
                     image_status=(
-                        WorkflowItemStatus.READY
-                        if prompt.strip()
-                        else WorkflowItemStatus.DRAFT
+                        WorkflowItemStatus.READY if prompt.strip() else WorkflowItemStatus.DRAFT
                     ),
                     created_at=now,
                     updated_at=now,
@@ -2650,10 +2595,7 @@ class ProductionService:
             plans = await self.repository.list_shot_plans(project.id)
             if plan.lifecycle_status == ShotLifecycleStatus.DISCARDED:
                 return await self.list_shots(project.id)
-            active = [
-                item for item in plans
-                if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
-            ]
+            active = [item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE]
             if len(active) <= 1:
                 raise _fail(409, "last_active_shot", "创作方案至少需要保留一个有效分镜")
             revision_id = uuid4()
@@ -2666,8 +2608,7 @@ class ProductionService:
             )
             next_active = [item for item in active if item.id != plan.id]
             discarded = [
-                item for item in plans
-                if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
+                item for item in plans if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
             ] + [discarded_plan]
             next_plans, changed_plans = self._resequence_plans(
                 next_active,
@@ -2705,10 +2646,7 @@ class ProductionService:
             if plan.lifecycle_status == ShotLifecycleStatus.ACTIVE:
                 return await self.list_shots(project.id)
             active = sorted(
-                (
-                    item for item in plans
-                    if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
-                ),
+                (item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE),
                 key=lambda item: item.index,
             )
             insert_index = len(active)
@@ -2734,9 +2672,9 @@ class ProductionService:
             )
             active.insert(insert_index, restored)
             discarded = [
-                item for item in plans
-                if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
-                and item.id != plan.id
+                item
+                for item in plans
+                if item.lifecycle_status == ShotLifecycleStatus.DISCARDED and item.id != plan.id
             ]
             next_plans, changed_plans = self._resequence_plans(
                 active,
@@ -2782,16 +2720,14 @@ class ProductionService:
                     "排序必须包含当前全部有效分镜，且不能包含已舍弃分镜",
                 )
             current_ids = [
-                item.id
-                for item in sorted(active_by_id.values(), key=lambda item: item.index)
+                item.id for item in sorted(active_by_id.values(), key=lambda item: item.index)
             ]
             if requested_ids == current_ids:
                 return await self.list_shots(project.id)
             revision_id = uuid4()
             active = [active_by_id[item_id] for item_id in requested_ids]
             discarded = [
-                item for item in plans
-                if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
+                item for item in plans if item.lifecycle_status == ShotLifecycleStatus.DISCARDED
             ]
             next_plans, changed_plans = self._resequence_plans(
                 active,
@@ -2825,12 +2761,9 @@ class ProductionService:
         preparation = await self.repository.get_video_clip_preparation(plan.id)
         if preparation is not None:
             preparation = _apply_video_preparation_policy(preparation)
-        if (
-            preparation is not None
-            and (
-                plan.video_status != WorkflowItemStatus.APPROVED
-                or preparation.candidate_id != plan.approved_video_candidate_id
-            )
+        if preparation is not None and (
+            plan.video_status != WorkflowItemStatus.APPROVED
+            or preparation.candidate_id != plan.approved_video_candidate_id
         ):
             preparation = preparation.model_copy(
                 update={
@@ -2849,9 +2782,7 @@ class ProductionService:
                 plan.id,
             ),
             video_preparation=(
-                self._video_preparation_response(preparation)
-                if preparation is not None
-                else None
+                self._video_preparation_response(preparation) if preparation is not None else None
             ),
         )
 
@@ -2931,8 +2862,7 @@ class ProductionService:
                 for field in shot.fields
             }
             decisions = {
-                (item.shot_plan_id, item.field_key): item.choice
-                for item in payload.decisions
+                (item.shot_plan_id, item.field_key): item.choice for item in payload.decisions
             }
             unknown = set(decisions) - set(valid_fields)
             if unknown:
@@ -2963,9 +2893,7 @@ class ProductionService:
                 next_beats = list(plan.visual_beats)
                 next_video_prompt = plan.video_prompt
                 plan_changed = False
-                target_beats = {
-                    item.index: item for item in target.visual_beats
-                }
+                target_beats = {item.index: item for item in target.visual_beats}
                 for field in shot_diff.fields:
                     choice = decisions.get(
                         (plan.id, field.field_key),
@@ -3096,9 +3024,7 @@ class ProductionService:
             current_beats = {item.index: item for item in current.visual_beats}
             latest_beats = {item.index: item for item in latest.visual_beats}
             if set(base_beats) != set(latest_beats) or set(base_beats) != set(current_beats):
-                structural_messages.append(
-                    f"分镜 {current.index} 的画面数量或顺序发生变化"
-                )
+                structural_messages.append(f"分镜 {current.index} 的画面数量或顺序发生变化")
 
             fields: list[ProductionPromptFieldDiff] = []
             for beat_index in sorted(set(base_beats) & set(current_beats) & set(latest_beats)):
@@ -3341,8 +3267,7 @@ class ProductionService:
                     _filesystem_path(temporary).unlink(missing_ok=True)
                 source_path = self.workspace.relative(destination)
                 source_url = (
-                    f"/api/v1/production-shots/{plan.id}/visual-beats/"
-                    f"{beat_id}/source-frame"
+                    f"/api/v1/production-shots/{plan.id}/visual-beats/{beat_id}/source-frame"
                 )
                 source_sha256, _ = await asyncio.to_thread(
                     _frame_sha256_and_dhash,
@@ -3377,9 +3302,7 @@ class ProductionService:
                 source_origin=source_origin,
                 image_prompt=prompt,
                 required=payload.required,
-                image_status=(
-                    WorkflowItemStatus.READY if prompt else WorkflowItemStatus.DRAFT
-                ),
+                image_status=(WorkflowItemStatus.READY if prompt else WorkflowItemStatus.DRAFT),
             )
             beats.insert(insert_index, new_beat)
             beats = _retime_visual_beats(beats)
@@ -3465,9 +3388,7 @@ class ProductionService:
                     {
                         "approved_image_candidate_id": None,
                         "image_status": (
-                            WorkflowItemStatus.READY
-                            if next_prompt
-                            else WorkflowItemStatus.DRAFT
+                            WorkflowItemStatus.READY if next_prompt else WorkflowItemStatus.DRAFT
                         ),
                     }
                 )
@@ -3553,9 +3474,7 @@ class ProductionService:
                     "downstream_stale_confirmation_required",
                     "删除画面会让当前分镜视频及下游结果过期，请确认后重试",
                 )
-            beats = _retime_visual_beats(
-                [item for item in plan.visual_beats if item.id != beat.id]
-            )
+            beats = _retime_visual_beats([item for item in plan.visual_beats if item.id != beat.id])
             revision_id = uuid4()
             updated_plan = _sync_shot_visual_beats(
                 plan,
@@ -3629,12 +3548,16 @@ class ProductionService:
             trim_in = float(
                 payload.trim_in_seconds
                 if payload.trim_in_seconds is not None
-                else existing.trim_in_seconds if same_candidate else 0.0
+                else existing.trim_in_seconds
+                if same_candidate
+                else 0.0
             )
             trim_out = float(
                 payload.trim_out_seconds
                 if payload.trim_out_seconds is not None
-                else existing.trim_out_seconds if same_candidate else candidate_duration
+                else existing.trim_out_seconds
+                if same_candidate
+                else candidate_duration
             )
             if trim_out - trim_in < 0.2:
                 raise _fail(422, "video_trim_too_short", "视频裁剪后至少保留 0.2 秒")
@@ -3694,11 +3617,7 @@ class ProductionService:
             audio_mode = (
                 payload.audio_mode
                 or (existing.audio_mode if same_candidate else None)
-                or (
-                    VideoClipAudioMode.SOURCE
-                    if source_audio_url
-                    else VideoClipAudioMode.MUTED
-                )
+                or (VideoClipAudioMode.SOURCE if source_audio_url else VideoClipAudioMode.MUTED)
             )
             transcript_cues = (
                 map_timed_text(
@@ -3735,9 +3654,7 @@ class ProductionService:
             if quality_status == VideoQualityStatus.FAILED:
                 blockers.append("视频技术质检未通过")
             preparation_status = (
-                VideoClipPreparationStatus.BLOCKED
-                if blockers
-                else VideoClipPreparationStatus.READY
+                VideoClipPreparationStatus.BLOCKED if blockers else VideoClipPreparationStatus.READY
             )
             now = utc_now()
             preparation = VideoClipPreparation(
@@ -3783,15 +3700,13 @@ class ProductionService:
                     "quality_report": inspection.quality_report,
                 }
             )
-            updated_plan = plan.model_copy(
-                update={"revision_id": revision_id, "updated_at": now}
-            )
+            updated_plan = plan.model_copy(update={"revision_id": revision_id, "updated_at": now})
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
             preparations = await self.repository.list_video_clip_preparations(project.id)
-            next_preparations = [
-                item for item in preparations if item.shot_plan_id != plan.id
-            ] + [preparation]
+            next_preparations = [item for item in preparations if item.shot_plan_id != plan.id] + [
+                preparation
+            ]
             next_project = project.model_copy(update={"updated_at": now})
             next_project, revision = await self._prepare_revision(
                 next_project,
@@ -3992,8 +3907,7 @@ class ProductionService:
             if missing:
                 raise _fail(404, "shot_plan_not_found", "批量更新包含不存在的分镜")
             if any(
-                plans_by_id[item.shot_plan_id].lifecycle_status
-                != ShotLifecycleStatus.ACTIVE
+                plans_by_id[item.shot_plan_id].lifecycle_status != ShotLifecycleStatus.ACTIVE
                 for item in payload.updates
             ):
                 raise _fail(409, "shot_discarded", "已舍弃分镜需要先恢复后才能修改")
@@ -4372,9 +4286,8 @@ class ProductionService:
                 beat.image_status == WorkflowItemStatus.APPROVED
                 and beat.approved_image_candidate_id is not None
             )
-            has_downstream_impact = (
-                replacing_approved
-                and self._image_choice_has_downstream_impact(project, plan)
+            has_downstream_impact = replacing_approved and self._image_choice_has_downstream_impact(
+                project, plan
             )
             if has_downstream_impact and not payload.confirm_downstream_stale:
                 raise _fail(
@@ -4448,9 +4361,7 @@ class ProductionService:
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
             preparations = await self.repository.list_video_clip_preparations(project.id)
-            next_preparations = [
-                item for item in preparations if item.shot_plan_id != plan.id
-            ]
+            next_preparations = [item for item in preparations if item.shot_plan_id != plan.id]
             if updated_preparation is not None:
                 next_preparations.append(updated_preparation)
             elif current_preparation is not None:
@@ -4541,9 +4452,7 @@ class ProductionService:
                 "当前分镜缺少有效的已确认图片",
             )
         if payload.generation_intent == "new_variation" and payload.seed is None:
-            payload = payload.model_copy(
-                update={"seed": secrets.randbelow(2_147_483_648)}
-            )
+            payload = payload.model_copy(update={"seed": secrets.randbelow(2_147_483_648)})
         if payload.input_mode != VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value:
             payload = payload.model_copy(
                 update={"input_mode": VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value}
@@ -4762,9 +4671,7 @@ class ProductionService:
         if payload.visual_beat_id != beat.id:
             payload = payload.model_copy(update={"visual_beat_id": beat.id})
         if payload.generation_intent == "new_variation" and payload.seed is None:
-            payload = payload.model_copy(
-                update={"seed": secrets.randbelow(2_147_483_648)}
-            )
+            payload = payload.model_copy(update={"seed": secrets.randbelow(2_147_483_648)})
         if not beat.image_prompt.strip():
             raise _fail(409, "image_prompt_required", "请先填写图片提示词")
         if beat.image_status == WorkflowItemStatus.APPROVED:
@@ -5213,16 +5120,8 @@ class ProductionService:
                 raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
 
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
-            bindings = (
-                await self.repository.list_reference_bindings(plan.id)
-                if uses_images
-                else []
-            )
-            assets = (
-                await self._list_reference_assets(project.id)
-                if uses_images
-                else []
-            )
+            bindings = await self.repository.list_reference_bindings(plan.id) if uses_images else []
+            assets = await self._list_reference_assets(project.id) if uses_images else []
             assets_by_id = {item.id: item for item in assets}
             for binding in bindings:
                 asset = assets_by_id.get(binding.reference_asset_id)
@@ -5235,9 +5134,7 @@ class ProductionService:
                 if not asset.rights_confirmed:
                     raise _fail(409, "reference_rights_required", "分镜参考资产尚未完成权利确认")
             source_path = (
-                self._resolve_source_keyframe(project, gateway_plan)
-                if uses_images
-                else None
+                self._resolve_source_keyframe(project, gateway_plan) if uses_images else None
             )
             try:
                 run, candidates = await self.image_gateway.generate(
@@ -5308,10 +5205,7 @@ class ProductionService:
             )
             updated_plan = _sync_shot_visual_beats(
                 plan,
-                [
-                    updated_beat if item.id == beat.id else item
-                    for item in plan.visual_beats
-                ],
+                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
                 revision_id=revision_id,
             )
             plans = await self.repository.list_shot_plans(project.id)
@@ -5331,8 +5225,7 @@ class ProductionService:
                 next_project,
                 ProductionChangeKind.SHOT_PLAN_CHANGED,
                 (
-                    f"为分镜 {plan.index} 画面 {beat.index} 创建 "
-                    f"{len(candidates)} 个图片候选"
+                    f"为分镜 {plan.index} 画面 {beat.index} 创建 {len(candidates)} 个图片候选"
                     if candidates
                     else (
                         f"分镜 {plan.index} 画面 {beat.index} 图片生成失败："
@@ -5400,9 +5293,7 @@ class ProductionService:
                         "approved_image_required",
                         f"画面 {beat.index} 缺少已确认图片",
                     )
-                candidate = await self._require_candidate(
-                    beat.approved_image_candidate_id
-                )
+                candidate = await self._require_candidate(beat.approved_image_candidate_id)
                 source_run = await self._require_run(candidate.generation_run_id)
                 if not _run_matches_visual_beat(source_run, plan, beat.id):
                     raise _fail(
@@ -5495,9 +5386,7 @@ class ProductionService:
                         )
                     ),
                     "approved_video_candidate_id": (
-                        plan.approved_video_candidate_id
-                        if preserve_approval
-                        else None
+                        plan.approved_video_candidate_id if preserve_approval else None
                     ),
                     "updated_at": utc_now(),
                 }
@@ -5508,9 +5397,7 @@ class ProductionService:
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
                     "active_step": (
-                        project.active_step
-                        if preserve_approval
-                        else ProductionStep.SHOT_VIDEOS
+                        project.active_step if preserve_approval else ProductionStep.SHOT_VIDEOS
                     ),
                     "estimated_cost_micros": (
                         project.estimated_cost_micros + run.estimated_cost_micros
@@ -5594,9 +5481,7 @@ class ProductionService:
                             "status": GenerationCandidateStatus.ARCHIVED,
                             "archived_at": now,
                             "archived_by_account_id": actor_account_id,
-                            "archive_reason": (
-                                GenerationCandidateArchiveReason.USER_DELETED
-                            ),
+                            "archive_reason": (GenerationCandidateArchiveReason.USER_DELETED),
                             "quality_report": quality_report,
                         }
                     )
@@ -5635,9 +5520,7 @@ class ProductionService:
                 }
             )
             plans = await self.repository.list_shot_plans(project.id)
-            next_plans = [
-                updated_plan if item.id == updated_plan.id else item for item in plans
-            ]
+            next_plans = [updated_plan if item.id == updated_plan.id else item for item in plans]
             next_project = project.model_copy(update={"updated_at": now})
             next_project, revision = await self._prepare_revision(
                 next_project,
@@ -5683,8 +5566,7 @@ class ProductionService:
             restorable = all(
                 item.status == GenerationCandidateStatus.ARCHIVED
                 and (
-                    item.archive_reason
-                    == GenerationCandidateArchiveReason.USER_DELETED
+                    item.archive_reason == GenerationCandidateArchiveReason.USER_DELETED
                     or item.quality_report.get("archive_reason")
                     == GenerationCandidateArchiveReason.USER_DELETED.value
                 )
@@ -5729,9 +5611,7 @@ class ProductionService:
                 }
             )
             plans = await self.repository.list_shot_plans(project.id)
-            next_plans = [
-                updated_plan if item.id == updated_plan.id else item for item in plans
-            ]
+            next_plans = [updated_plan if item.id == updated_plan.id else item for item in plans]
             next_project = project.model_copy(update={"updated_at": now})
             next_project, revision = await self._prepare_revision(
                 next_project,
@@ -5784,24 +5664,16 @@ class ProductionService:
                     "simulated_candidate_forbidden",
                     "模拟占位候选不能选择，请使用真实模型生成或直接采用源关键帧",
                 )
-            if (
-                candidate.status == GenerationCandidateStatus.REJECTED
-                or (
-                    candidate.status == GenerationCandidateStatus.ARCHIVED
-                    and run.kind != GenerationKind.IMAGE
-                )
+            if candidate.status == GenerationCandidateStatus.REJECTED or (
+                candidate.status == GenerationCandidateStatus.ARCHIVED
+                and run.kind != GenerationKind.IMAGE
             ):
                 raise _fail(409, "candidate_unavailable", "该候选已退回或归档")
             beat = (
-                _visual_beat(plan, run.visual_beat_id)
-                if run.kind == GenerationKind.IMAGE
-                else None
+                _visual_beat(plan, run.visual_beat_id) if run.kind == GenerationKind.IMAGE else None
             )
             target_status = beat.image_status if beat is not None else plan.video_status
-            if (
-                run.kind == GenerationKind.VIDEO
-                and target_status == WorkflowItemStatus.APPROVED
-            ):
+            if run.kind == GenerationKind.VIDEO and target_status == WorkflowItemStatus.APPROVED:
                 raise _fail(
                     409,
                     "video_already_approved",
@@ -5816,10 +5688,7 @@ class ProductionService:
                     plan.id,
                 )
                 if item.kind == run.kind
-                and (
-                    beat is None
-                    or _run_matches_visual_beat(item, plan, beat.id)
-                )
+                and (beat is None or _run_matches_visual_beat(item, plan, beat.id))
             ]
             run_candidates: list[GenerationCandidate] = []
             for shot_run in shot_runs:
@@ -5845,9 +5714,7 @@ class ProductionService:
             if run.kind == GenerationKind.IMAGE:
                 assert beat is not None
                 change_kind = ProductionChangeKind.IMAGE_CANDIDATE_SELECTED
-                summary = (
-                    f"选择分镜 {plan.index} 画面 {beat.index} 的图片候选 {candidate.ordinal}"
-                )
+                summary = f"选择分镜 {plan.index} 画面 {beat.index} 的图片候选 {candidate.ordinal}"
                 updated_beat = beat.model_copy(
                     update={
                         "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
@@ -5857,10 +5724,7 @@ class ProductionService:
                 )
                 updated_plan = _sync_shot_visual_beats(
                     plan,
-                    [
-                        updated_beat if item.id == beat.id else item
-                        for item in plan.visual_beats
-                    ],
+                    [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
                     revision_id=revision_id,
                 )
             else:
@@ -5928,14 +5792,11 @@ class ProductionService:
                     "模拟占位候选不能确认，请使用真实模型生成或直接采用源关键帧",
                 )
             beat = (
-                _visual_beat(plan, run.visual_beat_id)
-                if run.kind == GenerationKind.IMAGE
-                else None
+                _visual_beat(plan, run.visual_beat_id) if run.kind == GenerationKind.IMAGE else None
             )
             target_status = beat.image_status if beat is not None else plan.video_status
             direct_image_approval = (
-                run.kind == GenerationKind.IMAGE
-                and payload.decision == ApprovalDecision.APPROVED
+                run.kind == GenerationKind.IMAGE and payload.decision == ApprovalDecision.APPROVED
             )
             replacing_image_approval = (
                 direct_image_approval
@@ -5983,10 +5844,7 @@ class ProductionService:
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
             if candidate.status == GenerationCandidateStatus.REJECTED:
                 raise _fail(409, "candidate_unavailable", "已退回候选不能审批")
-            if (
-                candidate.status == GenerationCandidateStatus.ARCHIVED
-                and not direct_image_approval
-            ):
+            if candidate.status == GenerationCandidateStatus.ARCHIVED and not direct_image_approval:
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
             if target_status == WorkflowItemStatus.STALE and not direct_image_approval:
                 raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
@@ -5997,30 +5855,18 @@ class ProductionService:
                     plan.id,
                 )
                 if item.kind == run.kind
-                and (
-                    beat is None
-                    or _run_matches_visual_beat(item, plan, beat.id)
-                )
+                and (beat is None or _run_matches_visual_beat(item, plan, beat.id))
             ]
             image_downstream_impact = (
-                replacing_image_approval
-                and self._image_choice_has_downstream_impact(project, plan)
+                replacing_image_approval and self._image_choice_has_downstream_impact(project, plan)
             )
-            video_downstream_impact = (
-                replacing_video_approval
-                and project.active_step
-                in {ProductionStep.EDITING, ProductionStep.EXPORT}
-            )
-            requires_downstream_confirmation = (
-                image_downstream_impact or video_downstream_impact
-            )
-            invalidate_preparation = (
-                image_downstream_impact or replacing_video_approval
-            )
-            if (
-                requires_downstream_confirmation
-                and not payload.confirm_downstream_stale
-            ):
+            video_downstream_impact = replacing_video_approval and project.active_step in {
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
+            }
+            requires_downstream_confirmation = image_downstream_impact or video_downstream_impact
+            invalidate_preparation = image_downstream_impact or replacing_video_approval
+            if requires_downstream_confirmation and not payload.confirm_downstream_stale:
                 raise _fail(
                     409,
                     "downstream_stale_confirmation_required",
@@ -6073,9 +5919,7 @@ class ProductionService:
             candidate_updates: list[GenerationCandidate] = []
             if payload.decision == ApprovalDecision.APPROVED:
                 for shot_run in shot_runs:
-                    for item in await self.repository.list_generation_candidates(
-                        shot_run.id
-                    ):
+                    for item in await self.repository.list_generation_candidates(shot_run.id):
                         if item.id == candidate.id:
                             updated_candidate = item.model_copy(
                                 update={
@@ -6116,9 +5960,7 @@ class ProductionService:
                 for shot_run in shot_runs:
                     other_candidates.extend(
                         item
-                        for item in await self.repository.list_generation_candidates(
-                            shot_run.id
-                        )
+                        for item in await self.repository.list_generation_candidates(shot_run.id)
                         if item.id != candidate.id
                         and item.status
                         in {
@@ -6166,10 +6008,7 @@ class ProductionService:
                 )
                 updated_plan = _sync_shot_visual_beats(
                     plan,
-                    [
-                        updated_beat if item.id == beat.id else item
-                        for item in plan.visual_beats
-                    ],
+                    [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
                     revision_id=revision_id,
                     invalidate_video=image_downstream_impact,
                 )
@@ -6216,9 +6055,7 @@ class ProductionService:
                             "updated_at": utc_now(),
                         }
                     )
-                    preparations = await self.repository.list_video_clip_preparations(
-                        project.id
-                    )
+                    preparations = await self.repository.list_video_clip_preparations(project.id)
                     next_preparations = [
                         item for item in preparations if item.shot_plan_id != plan.id
                     ]
@@ -6250,6 +6087,16 @@ class ProductionService:
                 ),
                 approval_events=[event],
             )
+            if (
+                run.kind == GenerationKind.VIDEO
+                and plan.approved_video_candidate_id
+                != updated_plan.approved_video_candidate_id
+            ):
+                await self.continuity.invalidate_for_shot(
+                    project.id,
+                    plan.id,
+                    revision_id,
+                )
         return CandidateActionResponse(
             shot=ShotPlanResponse(
                 plan=updated_plan,
@@ -6314,8 +6161,7 @@ class ProductionService:
                 ProductionStep.EXPORT,
             }
             has_downstream_impact = (
-                plan.video_status in downstream_result_statuses
-                or downstream_stage_active
+                plan.video_status in downstream_result_statuses or downstream_stage_active
             )
             if has_downstream_impact and not payload.confirm_downstream_stale:
                 raise _fail(
@@ -6346,9 +6192,7 @@ class ProductionService:
             updated_candidate = (
                 candidate
                 if candidate.status == GenerationCandidateStatus.SELECTED
-                else candidate.model_copy(
-                    update={"status": GenerationCandidateStatus.SELECTED}
-                )
+                else candidate.model_copy(update={"status": GenerationCandidateStatus.SELECTED})
             )
             updated_beat = beat.model_copy(
                 update={
@@ -6380,9 +6224,7 @@ class ProductionService:
                 else None
             )
             preparations = await self.repository.list_video_clip_preparations(project.id)
-            next_preparations = [
-                item for item in preparations if item.shot_plan_id != plan.id
-            ]
+            next_preparations = [item for item in preparations if item.shot_plan_id != plan.id]
             if updated_preparation is not None:
                 next_preparations.append(updated_preparation)
             next_project = project.model_copy(
@@ -6495,9 +6337,7 @@ class ProductionService:
             updated_candidate = (
                 candidate
                 if candidate.status == GenerationCandidateStatus.SELECTED
-                else candidate.model_copy(
-                    update={"status": GenerationCandidateStatus.SELECTED}
-                )
+                else candidate.model_copy(update={"status": GenerationCandidateStatus.SELECTED})
             )
             updated_plan = plan.model_copy(
                 update={
@@ -6524,9 +6364,7 @@ class ProductionService:
                 else None
             )
             preparations = await self.repository.list_video_clip_preparations(project.id)
-            next_preparations = [
-                item for item in preparations if item.shot_plan_id != plan.id
-            ]
+            next_preparations = [item for item in preparations if item.shot_plan_id != plan.id]
             if updated_preparation is not None:
                 next_preparations.append(updated_preparation)
             next_project = project.model_copy(
@@ -6553,6 +6391,11 @@ class ProductionService:
                     [updated_preparation] if updated_preparation is not None else None
                 ),
                 approval_events=[event],
+            )
+            await self.continuity.invalidate_for_shot(
+                project.id,
+                plan.id,
+                revision_id,
             )
         return CandidateActionResponse(
             shot=ShotPlanResponse(
@@ -6600,9 +6443,7 @@ class ProductionService:
         if thumbnail:
             return filesystem_path, "image/webp"
         return filesystem_path, (
-            "image/jpeg"
-            if candidate.kind == GenerationKind.IMAGE
-            else "video/mp4"
+            "image/jpeg" if candidate.kind == GenerationKind.IMAGE else "video/mp4"
         )
 
     async def _has_valid_approved_image_output(
@@ -6610,9 +6451,7 @@ class ProductionService:
         project: ProductionProject,
         plan: ShotPlan,
     ) -> bool:
-        targets = [item for item in plan.visual_beats if item.required] or list(
-            plan.visual_beats
-        )
+        targets = [item for item in plan.visual_beats if item.required] or list(plan.visual_beats)
         if not targets:
             return False
         for beat in targets:
@@ -6633,8 +6472,7 @@ class ProductionService:
                 and run.shot_plan_id == plan.id
                 and run.kind == GenerationKind.IMAGE
                 and _run_matches_visual_beat(run, plan, beat.id)
-                and run.status
-                in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+                and run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
                 and not _is_simulated_image_run(run)
             ):
                 return False
@@ -6678,7 +6516,8 @@ class ProductionService:
         project = await self._require_project(project_id)
         project, plans = await self._ensure_project_shots(project)
         required = [
-            item for item in plans
+            item
+            for item in plans
             if item.lifecycle_status == ShotLifecycleStatus.ACTIVE and item.required
         ]
         video_stage = project.active_step in {
@@ -6720,10 +6559,7 @@ class ProductionService:
                         or quality_report.get("warnings")
                     ):
                         quality_warnings.append(item)
-            stale = [
-                item for item in required
-                if item.video_status == WorkflowItemStatus.STALE
-            ]
+            stale = [item for item in required if item.video_status == WorkflowItemStatus.STALE]
             next_step = (
                 ProductionStep.EDITING
                 if project.active_step == ProductionStep.SHOT_VIDEOS
@@ -6736,10 +6572,7 @@ class ProductionService:
                 for item in required
                 if await self._has_valid_approved_image_output(project, item)
             ]
-            stale = [
-                item for item in required
-                if item.image_status == WorkflowItemStatus.STALE
-            ]
+            stale = [item for item in required if item.image_status == WorkflowItemStatus.STALE]
             next_step = ProductionStep.SHOT_VIDEOS
             pending_label = "必需分镜图片"
         blockers: list[str] = []
@@ -6750,6 +6583,20 @@ class ProductionService:
             blockers.append(f"仍有 {pending} 个{pending_label}未审批")
         if stale:
             blockers.append(f"有 {len(stale)} 个分镜结果已过期")
+        continuity_report = await self.continuity.latest_report(project.id) if video_stage else None
+        continuity_status = "not_run"
+        continuity_verification_state = None
+        continuity_blocker_count = 0
+        continuity_warning_count = 0
+        if continuity_report is not None:
+            continuity_status = continuity_report.status.value
+            continuity_verification_state = continuity_report.verification_state.value
+            continuity_blocker_count = continuity_report.blocker_count
+            continuity_warning_count = continuity_report.warning_count
+            if continuity_report.status == ContinuityReportStatus.STALE:
+                blockers.append("相邻分镜连续性质检已过期，请重新检查")
+            elif continuity_report.blocker_count:
+                blockers.append(f"连续性质检仍有 {continuity_report.blocker_count} 个阻断问题")
         return ProductionGateStatus(
             project_id=project.id,
             current_step=project.active_step,
@@ -6760,6 +6607,10 @@ class ProductionService:
             prepared_shot_count=len(prepared),
             quality_warning_shot_count=len(quality_warnings),
             stale_shot_count=len(stale),
+            continuity_status=continuity_status,
+            continuity_verification_state=continuity_verification_state,
+            continuity_blocker_count=continuity_blocker_count,
+            continuity_warning_count=continuity_warning_count,
             blocker_messages=blockers,
         )
 
@@ -6865,9 +6716,7 @@ class ProductionService:
                 cover_url = f"/api/v1/generation-candidates/{candidate.id}/thumbnail"
                 cover_timestamp = round(candidate_duration / 2, 3)
                 audio_mode = (
-                    VideoClipAudioMode.SOURCE
-                    if source_audio_url
-                    else VideoClipAudioMode.MUTED
+                    VideoClipAudioMode.SOURCE if source_audio_url else VideoClipAudioMode.MUTED
                 )
                 source_audio_start = round(plan.start_seconds, 3)
                 source_audio_end = round(plan.end_seconds, 3)
@@ -6901,9 +6750,7 @@ class ProductionService:
                     quality_status = VideoQualityStatus.WARNING
                 blocker_messages = []
                 warning_messages = [
-                    str(item)
-                    for item in quality_report.get("warnings", [])
-                    if str(item).strip()
+                    str(item) for item in quality_report.get("warnings", []) if str(item).strip()
                 ]
                 if not quality_report:
                     warning_messages.append("将在视频剪辑阶段完成基础质检")
@@ -6917,9 +6764,7 @@ class ProductionService:
                     shot_plan_id=plan.id,
                     shot_index=plan.index,
                     candidate_id=candidate.id,
-                    candidate_content_url=(
-                        f"/api/v1/generation-candidates/{candidate.id}/content"
-                    ),
+                    candidate_content_url=(f"/api/v1/generation-candidates/{candidate.id}/content"),
                     cover_url=cover_url,
                     cover_timestamp_seconds=cover_timestamp,
                     timeline_start_seconds=timeline_start,
@@ -6943,9 +6788,7 @@ class ProductionService:
         if not clips:
             raise _fail(409, "editing_handoff_empty", "没有可交给剪辑阶段的视频片段")
 
-        source_clips = [
-            item for item in clips if item.audio_mode == VideoClipAudioMode.SOURCE
-        ]
+        source_clips = [item for item in clips if item.audio_mode == VideoClipAudioMode.SOURCE]
         ranges_are_contiguous = all(
             abs(left.source_audio_end_seconds - right.source_audio_start_seconds) <= 0.05
             for left, right in zip(
@@ -6954,11 +6797,7 @@ class ProductionService:
                 strict=False,
             )
         )
-        if (
-            source_audio_url
-            and len(source_clips) == len(clips)
-            and ranges_are_contiguous
-        ):
+        if source_audio_url and len(source_clips) == len(clips) and ranges_are_contiguous:
             audio_strategy = "continuous_source_track"
         elif source_clips:
             audio_strategy = "per_shot"
@@ -6987,9 +6826,7 @@ class ProductionService:
             self._require_expected_revision(project, payload.expected_revision_id)
             if project.active_step == payload.target_step:
                 label = (
-                    "分段视频"
-                    if payload.target_step == ProductionStep.SHOT_VIDEOS
-                    else "视频剪辑"
+                    "分段视频" if payload.target_step == ProductionStep.SHOT_VIDEOS else "视频剪辑"
                 )
                 raise _fail(409, "workflow_already_advanced", f"当前方案已进入{label}阶段")
             expected_target = (
@@ -7003,6 +6840,11 @@ class ProductionService:
                     "unsupported_target_step",
                     f"当前阶段只能推进到 {expected_target.value}",
                 )
+            if payload.target_step == ProductionStep.EDITING:
+                try:
+                    await self.continuity.ensure_current_report(project.id)
+                except ContinuityServiceError as exc:
+                    raise _fail(exc.status_code, exc.code, str(exc)) from exc
             gate = await self.gate_status(project.id)
             if not gate.allowed:
                 raise _fail(
@@ -7221,9 +7063,7 @@ class ProductionService:
                             )
                         except OSError:
                             preserved_dhash = None
-                    next_beat = beat.model_copy(
-                        update={"source_frame_sha256": preserved_hash}
-                    )
+                    next_beat = beat.model_copy(update={"source_frame_sha256": preserved_hash})
                     if preserved_dhash is not None:
                         prior_frames.append((preserved_dhash, beat.image_prompt.strip()))
                     next_beats.append(next_beat)
@@ -7290,9 +7130,10 @@ class ProductionService:
                             source_dhash = None
 
                 if source_dhash is not None:
-                    if prior_hashes and min(
-                        _hash_distance(source_dhash, item) for item in prior_hashes
-                    ) <= 4:
+                    if (
+                        prior_hashes
+                        and min(_hash_distance(source_dhash, item) for item in prior_hashes) <= 4
+                    ):
                         source_warning = "duplicate_frame"
                     prior_frames.append((source_dhash, beat.image_prompt.strip()))
                 elif source_url and any(item.source_frame_url == source_url for item in next_beats):
@@ -7328,10 +7169,7 @@ class ProductionService:
         if (
             plan.source_kind != ShotSourceKind.ANALYSIS
             or len(plan.visual_beats) <= 1
-            or any(
-                beat.image_status == WorkflowItemStatus.GENERATING
-                for beat in plan.visual_beats
-            )
+            or any(beat.image_status == WorkflowItemStatus.GENERATING for beat in plan.visual_beats)
         ):
             return False
         source_shot = next(
@@ -7341,11 +7179,7 @@ class ProductionService:
         if source_shot is None:
             return False
         beats = sorted(plan.visual_beats, key=lambda item: item.index)
-        eligible = [
-            item
-            for item in beats
-            if item.source_origin in {"analysis", "legacy", "blank"}
-        ]
+        eligible = [item for item in beats if item.source_origin in {"analysis", "legacy", "blank"}]
         urls = [item.source_frame_url for item in eligible if item.source_frame_url]
         if len(urls) != len(set(urls)):
             return True
@@ -7372,9 +7206,7 @@ class ProductionService:
         if report is None or report.video_id != project.video_id:
             return project, plans
         affected_ids = {
-            plan.id
-            for plan in plans
-            if self._visual_beat_frame_mapping_repair_needed(report, plan)
+            plan.id for plan in plans if self._visual_beat_frame_mapping_repair_needed(report, plan)
         }
         if not affected_ids:
             return project, plans
@@ -7425,8 +7257,7 @@ class ProductionService:
                 for beat in materialized_plan.visual_beats:
                     old_beat = old_beats[beat.id]
                     changed = any(
-                        getattr(old_beat, field) != getattr(beat, field)
-                        for field in source_fields
+                        getattr(old_beat, field) != getattr(beat, field) for field in source_fields
                     )
                     if not changed:
                         next_beats.append(old_beat)
@@ -7521,10 +7352,7 @@ class ProductionService:
         report = await self.repository.get_report_by_analysis(project.base_analysis_id)
         if report is None or report.video_id != project.video_id:
             return project, plans
-        affected = {
-            plan.id: _boundary_contaminated_visual_beat_ids(report, plan)
-            for plan in plans
-        }
+        affected = {plan.id: _boundary_contaminated_visual_beat_ids(report, plan) for plan in plans}
         affected = {plan_id: beat_ids for plan_id, beat_ids in affected.items() if beat_ids}
         if not affected:
             return project, plans
@@ -7537,12 +7365,9 @@ class ProductionService:
             if report is None or report.video_id != project.video_id:
                 return project, plans
             affected = {
-                plan.id: _boundary_contaminated_visual_beat_ids(report, plan)
-                for plan in plans
+                plan.id: _boundary_contaminated_visual_beat_ids(report, plan) for plan in plans
             }
-            affected = {
-                plan_id: beat_ids for plan_id, beat_ids in affected.items() if beat_ids
-            }
+            affected = {plan_id: beat_ids for plan_id, beat_ids in affected.items() if beat_ids}
             if not affected:
                 return project, plans
 
@@ -7724,13 +7549,9 @@ class ProductionService:
                             else WorkflowItemStatus.DRAFT
                         ),
                         transition_to_next_type=(
-                            "model_generated"
-                            if beat_index < beat_count
-                            else "cut"
+                            "model_generated" if beat_index < beat_count else "cut"
                         ),
-                        transition_to_next_duration_seconds=(
-                            0.5 if beat_index < beat_count else 0
-                        ),
+                        transition_to_next_duration_seconds=(0.5 if beat_index < beat_count else 0),
                     )
                 )
             primary_beat = visual_beats[0]
@@ -7741,9 +7562,7 @@ class ProductionService:
                     source_shot_id=shot.id,
                     index=shot.index,
                     source_keyframe_url=primary_beat.source_frame_url,
-                    source_keyframe_timestamp_seconds=(
-                        primary_beat.source_timestamp_seconds
-                    ),
+                    source_keyframe_timestamp_seconds=(primary_beat.source_timestamp_seconds),
                     source_keyframe_origin="analysis",
                     start_seconds=shot.start_seconds,
                     end_seconds=shot.end_seconds,
@@ -7983,16 +7802,12 @@ class ProductionService:
                                 max_length=8000,
                             ),
                             image_prompt_mentions=original.image_prompt_mentions,
-                            image_negative_constraints=(
-                                original.image_negative_constraints
-                            ),
+                            image_negative_constraints=(original.image_negative_constraints),
                             required=original.required,
                             image_status=image_status,
                             approved_image_candidate_id=approved_candidate_id,
                             transition_to_next_type=(
-                                "model_generated"
-                                if beat_index < beat_count
-                                else "cut"
+                                "model_generated" if beat_index < beat_count else "cut"
                             ),
                             transition_to_next_duration_seconds=(
                                 0.5 if beat_index < beat_count else 0
@@ -8130,7 +7945,8 @@ class ProductionService:
                         eligible_active_candidates.update(
                             candidate.id
                             for candidate in candidates
-                            if candidate.status in {
+                            if candidate.status
+                            in {
                                 GenerationCandidateStatus.READY,
                                 GenerationCandidateStatus.SELECTED,
                             }
@@ -8139,9 +7955,8 @@ class ProductionService:
             changed_plans: list[ShotPlan] = []
             next_plans: list[ShotPlan] = []
             for plan in plans:
-                invalid_approval = (
-                    plan.approved_image_candidate_id
-                    in simulated_candidate_ids.get(plan.id, set())
+                invalid_approval = plan.approved_image_candidate_id in simulated_candidate_ids.get(
+                    plan.id, set()
                 )
                 simulated_review_state = (
                     plan.id in had_reviewable_simulated
@@ -8152,10 +7967,7 @@ class ProductionService:
                         WorkflowItemStatus.APPROVED,
                         WorkflowItemStatus.STALE,
                     }
-                    and (
-                        plan.approved_image_candidate_id is None
-                        or invalid_approval
-                    )
+                    and (plan.approved_image_candidate_id is None or invalid_approval)
                 )
                 if not invalid_approval and not simulated_review_state:
                     next_plans.append(plan)
@@ -8163,9 +7975,7 @@ class ProductionService:
 
                 has_eligible_candidate = any(
                     candidate_id in eligible_active_candidates
-                    for candidate_id in (
-                        await self._candidate_ids_for_plan(project.id, plan.id)
-                    )
+                    for candidate_id in (await self._candidate_ids_for_plan(project.id, plan.id))
                 )
                 image_status = (
                     WorkflowItemStatus.REVIEW_REQUIRED
@@ -8244,7 +8054,8 @@ class ProductionService:
             candidate_ids.update(
                 candidate.id
                 for candidate in await self.repository.list_generation_candidates(run.id)
-                if candidate.status in {
+                if candidate.status
+                in {
                     GenerationCandidateStatus.READY,
                     GenerationCandidateStatus.SELECTED,
                 }
@@ -8457,9 +8268,7 @@ class ProductionService:
             )
             if not has_prior_result:
                 updates["approved_video_candidate_id"] = None
-        updated_plan = ShotPlan.model_validate(
-            {**plan.model_dump(mode="python"), **updates}
-        )
+        updated_plan = ShotPlan.model_validate({**plan.model_dump(mode="python"), **updates})
         if image_changed and updated_plan.visual_beats:
             primary = updated_plan.visual_beats[0]
             beat_updates: dict[str, object] = {
@@ -8491,10 +8300,7 @@ class ProductionService:
         project: ProductionProject,
         mentions: list[PromptAssetMention],
     ) -> list[PromptAssetMention]:
-        assets = {
-            item.id: item
-            for item in await self._list_reference_assets(project.id)
-        }
+        assets = {item.id: item for item in await self._list_reference_assets(project.id)}
         normalized: list[PromptAssetMention] = []
         for mention in mentions:
             asset = assets.get(mention.reference_asset_id)
@@ -8528,10 +8334,7 @@ class ProductionService:
         inputs: list[ReferenceBindingInput],
         mentions: list[PromptAssetMention],
     ) -> list[ReferenceBindingInput]:
-        assets = {
-            item.id: item
-            for item in await self._list_reference_assets(project.id)
-        }
+        assets = {item.id: item for item in await self._list_reference_assets(project.id)}
         existing_ids = {item.reference_asset_id for item in inputs}
         merged = list(inputs)
         for mention in mentions:
@@ -8668,8 +8471,7 @@ class ProductionService:
             adapter_version=run.adapter_version,
             protocol_version=run.protocol_version,
             provider_request_id=(
-                run.provider_request_id
-                or (failed_task.provider_task_id if failed_task else None)
+                run.provider_request_id or (failed_task.provider_task_id if failed_task else None)
             ),
             capability_snapshot=run.capability_snapshot,
             cost_source=run.cost_source,
@@ -8782,8 +8584,7 @@ class ProductionService:
             duration_alignment=preparation.duration_alignment,
             cover_timestamp_seconds=preparation.cover_timestamp_seconds,
             cover_url=(
-                f"/api/v1/production-shots/{preparation.shot_plan_id}/"
-                "video-preparation/cover"
+                f"/api/v1/production-shots/{preparation.shot_plan_id}/video-preparation/cover"
             ),
             audio_mode=preparation.audio_mode,
             audio_mapping_strategy=preparation.audio_mapping_strategy,
@@ -8879,21 +8680,16 @@ class ProductionService:
         project: ProductionProject,
         plan: ShotPlan,
     ) -> bool:
-        return (
-            plan.video_status
-            in {
-                WorkflowItemStatus.GENERATING,
-                WorkflowItemStatus.REVIEW_REQUIRED,
-                WorkflowItemStatus.APPROVED,
-                WorkflowItemStatus.STALE,
-            }
-            or project.active_step
-            in {
-                ProductionStep.SHOT_VIDEOS,
-                ProductionStep.EDITING,
-                ProductionStep.EXPORT,
-            }
-        )
+        return plan.video_status in {
+            WorkflowItemStatus.GENERATING,
+            WorkflowItemStatus.REVIEW_REQUIRED,
+            WorkflowItemStatus.APPROVED,
+            WorkflowItemStatus.STALE,
+        } or project.active_step in {
+            ProductionStep.SHOT_VIDEOS,
+            ProductionStep.EDITING,
+            ProductionStep.EXPORT,
+        }
 
     async def _reset_selected_image_candidates(
         self,
@@ -8905,9 +8701,8 @@ class ProductionService:
     ) -> list[GenerationCandidate]:
         updates: list[GenerationCandidate] = []
         for run in await self.repository.list_generation_runs(project.id, plan.id):
-            if (
-                run.kind != GenerationKind.IMAGE
-                or not _run_matches_visual_beat(run, plan, visual_beat_id)
+            if run.kind != GenerationKind.IMAGE or not _run_matches_visual_beat(
+                run, plan, visual_beat_id
             ):
                 continue
             for candidate in await self.repository.list_generation_candidates(run.id):
@@ -8916,9 +8711,7 @@ class ProductionService:
                     and candidate.id != keep_candidate_id
                 ):
                     updates.append(
-                        candidate.model_copy(
-                            update={"status": GenerationCandidateStatus.READY}
-                        )
+                        candidate.model_copy(update={"status": GenerationCandidateStatus.READY})
                     )
         return updates
 
@@ -9072,9 +8865,7 @@ class ProductionService:
             capability_snapshot={"source_frame_passthrough": True},
             execution_summary={
                 "model_call": False,
-                "source_keyframe_timestamp_seconds": (
-                    plan.source_keyframe_timestamp_seconds
-                ),
+                "source_keyframe_timestamp_seconds": (plan.source_keyframe_timestamp_seconds),
             },
             cost_source=GenerationCostSource.UNMETERED,
             cost_estimate_known=True,
@@ -9095,9 +8886,7 @@ class ProductionService:
     ) -> Path | None:
         if plan.source_keyframe_relative_path is not None:
             try:
-                candidate = self.workspace.resolve(
-                    plan.source_keyframe_relative_path
-                ).resolve()
+                candidate = self.workspace.resolve(plan.source_keyframe_relative_path).resolve()
             except WorkspaceError:
                 return None
             root = self.workspace.production_shot_root(
@@ -9357,10 +9146,7 @@ class ProductionService:
             plan.id: [item for item in bindings if item.shot_plan_id == plan.id] for plan in plans
         }
         reference_snapshots = (
-            [
-                await self.project_assets.snapshot_reference(project.id, item)
-                for item in assets
-            ]
+            [await self.project_assets.snapshot_reference(project.id, item) for item in assets]
             if self.project_assets is not None
             else [item.model_dump(mode="json") for item in assets]
         )
@@ -9391,9 +9177,7 @@ class ProductionService:
                 }
                 for plan in plans
             ],
-            "video_clip_preparations": [
-                item.model_dump(mode="json") for item in preparations
-            ],
+            "video_clip_preparations": [item.model_dump(mode="json") for item in preparations],
         }
 
     async def _read_revision_snapshot(
@@ -9760,8 +9544,7 @@ class ProductionService:
                 await asyncio.to_thread(self._write_atomic, destination, payload)
                 source_keyframe_relative_path = self.workspace.relative(destination)
                 source_keyframe_url = (
-                    f"/api/v1/production-shots/{cloned_plan_id}/source-keyframe"
-                    f"?v={revision_id}"
+                    f"/api/v1/production-shots/{cloned_plan_id}/source-keyframe?v={revision_id}"
                 )
             cloned_visual_beats = await self._clone_visual_beats(
                 source_project=source_project,
@@ -9782,9 +9565,7 @@ class ProductionService:
                     "source_keyframe_url": source_keyframe_url,
                     "source_keyframe_relative_path": source_keyframe_relative_path,
                     "image_prompt": cloned_visual_beats[0].image_prompt,
-                    "image_prompt_mentions": (
-                        cloned_visual_beats[0].image_prompt_mentions
-                    ),
+                    "image_prompt_mentions": (cloned_visual_beats[0].image_prompt_mentions),
                     "image_negative_constraints": (
                         cloned_visual_beats[0].image_negative_constraints
                     ),

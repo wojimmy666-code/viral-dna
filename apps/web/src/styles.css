@@ -1327,6 +1327,12 @@ button:disabled {
   background: var(--purple);
 }
 
+.report-tabs button:focus-visible {
+  outline: 0;
+  border-radius: 8px 8px 0 0;
+  box-shadow: inset 0 0 0 2px rgba(91, 77, 245, 0.2);
+}
+
 .report-content {
   min-height: 460px;
 }

@@ -2,6 +2,7 @@ node_modules/
 dist/
 .vite/
 .venv/
+.venv.broken-*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -9,6 +10,7 @@ __pycache__/
 htmlcov/
 .env
 .env.local
+.tmp/
 *.log
 .DS_Store
 Thumbs.db

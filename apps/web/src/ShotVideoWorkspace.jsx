@@ -28,6 +28,7 @@ import {
 } from "./production-ui.js";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import { VideoCandidateLibrary } from "./VideoCandidateLibrary.jsx";
+import { ContinuityQualityPanel } from "./ContinuityQualityPanel.jsx";
 
 const ACTIVE_RUN_STATUSES = new Set([
   "queued",
@@ -129,6 +130,7 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
 export function ShotVideoWorkspace({
   advanced,
   busy,
+  continuityReport,
   error,
   gate,
   initialCandidateId = "",
@@ -136,7 +138,9 @@ export function ShotVideoWorkspace({
   onApprove,
   onArchiveCandidates,
   onCancelRun,
+  onDecideContinuity,
   onGenerate,
+  onRunContinuity,
   onOpenModelSettings,
   onReject,
   onRetryRun,
@@ -426,6 +430,13 @@ export function ShotVideoWorkspace({
           </button>
         </div>
       </header>
+
+      <ContinuityQualityPanel
+        busy={busy}
+        onDecide={onDecideContinuity}
+        onRun={onRunContinuity}
+        report={continuityReport}
+      />
 
       <div className="shot-video-foundation-note">
         <MagicWand size={18} weight="fill" />

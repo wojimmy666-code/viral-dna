@@ -35,8 +35,10 @@ from .models import (
     VideoClipPreparation,
     VideoProviderTask,
 )
+from .quality.contracts import ContinuityReport
 from .schema import WORKSPACE_SCHEMA_VERSION
 from .storage_objects import ObjectReplica, StorageObject
+from .viral_insights.contracts import ViralConceptSet, ViralInsightReport
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -134,6 +136,20 @@ _PROJECT_ASSET_INDEXES = (
     ("idx_project_asset_links_asset_id", "project_asset_links", "asset_id"),
 )
 
+_QUALITY_TABLES = frozenset({"continuity_reports"})
+
+_QUALITY_INDEXES = (
+    ("idx_continuity_reports_project_id", "continuity_reports", "project_id"),
+    ("idx_continuity_reports_revision_id", "continuity_reports", "revision_id"),
+)
+
+_VIRAL_INSIGHT_TABLES = frozenset({"viral_insights", "viral_concept_sets"})
+
+_VIRAL_INSIGHT_INDEXES = (
+    ("idx_viral_insights_analysis_id", "viral_insights", "analysis_id"),
+    ("idx_viral_concept_sets_analysis_id", "viral_concept_sets", "analysis_id"),
+)
+
 
 class SQLiteSchemaError(RuntimeError):
     """Raised when the durable database schema cannot be migrated safely."""
@@ -147,6 +163,8 @@ class SQLiteStore:
         | _PRODUCTION_TABLES
         | _WORKSPACE_ASSET_TABLES
         | _PROJECT_ASSET_TABLES
+        | _QUALITY_TABLES
+        | _VIRAL_INSIGHT_TABLES
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -214,6 +232,16 @@ class SQLiteStore:
                 self._create_production_indexes(connection)
                 if 6 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (6)")
+
+                self._create_json_tables(connection, _QUALITY_TABLES)
+                self._create_quality_indexes(connection)
+                if 7 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (7)")
+
+                self._create_json_tables(connection, _VIRAL_INSIGHT_TABLES)
+                self._create_viral_insight_indexes(connection)
+                if 8 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (8)")
             except Exception:
                 connection.rollback()
                 raise
@@ -251,8 +279,24 @@ class SQLiteStore:
             )
 
     @staticmethod
+    def _create_viral_insight_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _VIRAL_INSIGHT_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608 - internal allowlist
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
     def _create_project_asset_indexes(connection: sqlite3.Connection) -> None:
         for index_name, table, payload_field in _PROJECT_ASSET_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_quality_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _QUALITY_INDEXES:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
@@ -844,9 +888,7 @@ class SQLiteStore:
         shot_plan_id: UUID,
     ) -> VideoClipPreparation | None:
         payloads = await asyncio.to_thread(self._read_all, "video_clip_preparations")
-        preparations = [
-            VideoClipPreparation.model_validate_json(payload) for payload in payloads
-        ]
+        preparations = [VideoClipPreparation.model_validate_json(payload) for payload in payloads]
         return next(
             (item for item in preparations if item.shot_plan_id == shot_plan_id),
             None,
@@ -857,9 +899,7 @@ class SQLiteStore:
         project_id: UUID,
     ) -> list[VideoClipPreparation]:
         payloads = await asyncio.to_thread(self._read_all, "video_clip_preparations")
-        preparations = [
-            VideoClipPreparation.model_validate_json(payload) for payload in payloads
-        ]
+        preparations = [VideoClipPreparation.model_validate_json(payload) for payload in payloads]
         return sorted(
             (item for item in preparations if item.project_id == project_id),
             key=lambda item: item.created_at,
@@ -899,3 +939,61 @@ class SQLiteStore:
         if shot_plan_id is not None:
             filtered = [event for event in filtered if event.shot_plan_id == shot_plan_id]
         return sorted(filtered, key=lambda event: event.created_at)
+
+    async def save_continuity_report(
+        self,
+        report: ContinuityReport,
+    ) -> ContinuityReport:
+        return await self._save("continuity_reports", report.id, report)
+
+    async def get_continuity_report(
+        self,
+        report_id: UUID,
+    ) -> ContinuityReport | None:
+        return await self._get("continuity_reports", report_id, ContinuityReport)
+
+    async def list_continuity_reports(
+        self,
+        project_id: UUID,
+    ) -> list[ContinuityReport]:
+        payloads = await asyncio.to_thread(self._read_all, "continuity_reports")
+        reports = [ContinuityReport.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (report for report in reports if report.project_id == project_id),
+            key=lambda report: report.created_at,
+        )
+
+    async def save_viral_insight(
+        self,
+        report: ViralInsightReport,
+    ) -> ViralInsightReport:
+        return await self._save("viral_insights", report.analysis_id, report)
+
+    async def get_viral_insight(
+        self,
+        analysis_id: UUID,
+    ) -> ViralInsightReport | None:
+        return await self._get("viral_insights", analysis_id, ViralInsightReport)
+
+    async def save_viral_concept_set(
+        self,
+        concepts: ViralConceptSet,
+    ) -> ViralConceptSet:
+        return await self._save("viral_concept_sets", concepts.id, concepts)
+
+    async def get_viral_concept_set(
+        self,
+        concept_set_id: UUID,
+    ) -> ViralConceptSet | None:
+        return await self._get("viral_concept_sets", concept_set_id, ViralConceptSet)
+
+    async def list_viral_concept_sets(
+        self,
+        analysis_id: UUID,
+    ) -> list[ViralConceptSet]:
+        payloads = await asyncio.to_thread(self._read_all, "viral_concept_sets")
+        items = [ViralConceptSet.model_validate_json(payload) for payload in payloads]
+        return sorted(
+            (item for item in items if item.analysis_id == analysis_id),
+            key=lambda item: item.created_at,
+        )

@@ -30,6 +30,9 @@ dev = [
   "ruff>=0.9,<1"
 ]
 
+[project.scripts]
+viral-dna-quality-regression = "viral_dna_api.quality.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/viral_dna_api"]
 

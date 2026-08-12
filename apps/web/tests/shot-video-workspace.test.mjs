@@ -6,6 +6,14 @@ const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
   "utf8",
 );
+const continuityPanelSource = readFileSync(
+  new URL("../src/ContinuityQualityPanel.jsx", import.meta.url),
+  "utf8",
+);
+const productionWorkflowSource = readFileSync(
+  new URL("../src/ProductionWorkflow.jsx", import.meta.url),
+  "utf8",
+);
 const candidateLibrarySource = readFileSync(
   new URL("../src/VideoCandidateLibrary.jsx", import.meta.url),
   "utf8",
@@ -230,6 +238,32 @@ test("advances after approval and keeps editing controls in the video editor mod
   assert.match(videoEditorSource, /A2 附加/);
   assert.match(videoEditorSource, /T1 字幕/);
   assert.match(videoEditorSource, /timeline\/background-audio/);
+});
+
+test("checks adjacent-shot continuity before entering the editor", () => {
+  assert.match(workspaceSource, /<ContinuityQualityPanel/);
+  assert.match(continuityPanelSource, /跨分镜连续性/);
+  assert.match(continuityPanelSource, /规则检查完成/);
+  assert.match(continuityPanelSource, /尚未执行 VLM 视觉验证/);
+  assert.match(continuityPanelSource, /标记为有意变化/);
+  assert.match(continuityPanelSource, /重新打开/);
+  assert.match(productionWorkflowSource, /continuity-reports\/latest/);
+  assert.match(
+    productionWorkflowSource,
+    /async function loadContinuityReport[\s\S]*error\?\.status === 404[\s\S]*return null/,
+  );
+  assert.match(
+    productionWorkflowSource,
+    /Promise\.all\([\s\S]*loadContinuityReport\(projectId\)/,
+  );
+  assert.match(productionWorkflowSource, /async function runContinuityCheck/);
+  assert.match(productionWorkflowSource, /async function decideContinuityFinding/);
+  assert.match(
+    productionWorkflowSource,
+    /async function advanceToEditing\(\)[\s\S]*continuity-reports[\s\S]*target_step: "editing"/,
+  );
+  assert.match(workflowStyles, /\.continuity-quality-panel\s*\{/);
+  assert.match(workflowStyles, /\.continuity-quality-findings\s*\{/);
 });
 
 test("shows clip quality warnings inside the independent editor inspector", () => {

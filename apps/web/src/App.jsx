@@ -96,6 +96,13 @@ import {
   RecordWorkspaceState,
   WorkbenchHomePage,
 } from "./WorkspacePages.jsx";
+import {
+  ReplicationWorkspace,
+  ShotTrafficRoles,
+  ViralExecutiveSummary,
+  ViralMechanismWorkspace,
+} from "./viral-report/index.js";
+import "./viral-report/viral-report.css";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 const DEFAULT_PLATFORM_CONNECTIONS = Object.freeze({
@@ -299,9 +306,9 @@ const navItems = [
 
 const reportTabs = [
   { id: "overview", label: "总览", icon: ChartBar },
+  { id: "viral", label: "爆款机制", icon: Target },
   { id: "shots", label: "分镜拆解", icon: FilmStrip },
-  { id: "viral", label: "爆点分析", icon: Target },
-  { id: "replace", label: "元素替换", icon: Swap },
+  { id: "replicate", label: "复刻与改进", icon: Swap },
   { id: "prompts", label: "提示词", icon: TextT },
 ];
 
@@ -1832,6 +1839,30 @@ export function App() {
     }
   }
 
+  function openInsightEvidenceAt(seconds) {
+    setActiveReportTab("overview");
+    window.setTimeout(() => {
+      if (!videoRef.current || !Number.isFinite(seconds)) return;
+      videoRef.current.currentTime = seconds;
+      videoRef.current.play().catch(() => undefined);
+    }, 80);
+  }
+
+  async function openPublishedConcept(result) {
+    if (!video?.record_id || !result?.project_id) return;
+    await loadProductions(video.record_id, { quiet: true });
+    setRecordWorkspaceMode("production");
+    setProductionListSignal((current) => current + 1);
+    setNotificationTarget({
+      candidateId: "",
+      projectId: result.project_id,
+      recordId: video.record_id,
+      shotPlanId: "",
+      step: "shot_images",
+      token: `viral-concept:${result.project_id}:${Date.now()}`,
+    });
+  }
+
   async function testLocalCodexSandbox() {
     setCodexSandboxTesting(true);
     setCodexSandboxTest(null);
@@ -2137,31 +2168,53 @@ export function App() {
                     <ReportTabs active={activeReportTab} onChange={setActiveReportTab} mode={report.analysis_mode} />
                     <div className="report-content">
                   {activeReportTab === "overview" && (
-                    <OverviewTab
-                      report={report}
-                      filePreview={filePreview}
-                      videoRef={videoRef}
-                      onOpenShots={() => setActiveReportTab("shots")}
-                    />
+                    <>
+                      <ViralExecutiveSummary
+                        analysisId={report.analysis_id}
+                        request={apiRequest}
+                        onOpenMechanisms={() => setActiveReportTab("viral")}
+                      />
+                      <OverviewTab
+                        report={report}
+                        filePreview={filePreview}
+                        videoRef={videoRef}
+                        onOpenShots={() => setActiveReportTab("shots")}
+                      />
+                    </>
                   )}
                   {activeReportTab === "shots" && (
-                    <ShotsTab
-                      shots={report.shots}
-                      segmentation={report.media_evidence?.segmentation}
-                      activeShotId={activeShotId}
-                      onSelect={seekToShot}
-                      analysisMode={report.analysis_mode}
-                      onCopy={copyText}
+                    <>
+                      <ShotsTab
+                        shots={report.shots}
+                        segmentation={report.media_evidence?.segmentation}
+                        activeShotId={activeShotId}
+                        onSelect={seekToShot}
+                        analysisMode={report.analysis_mode}
+                        onCopy={copyText}
+                      />
+                      <ShotTrafficRoles
+                        analysisId={report.analysis_id}
+                        request={apiRequest}
+                        resolveUrl={resolveArtifactUrl}
+                        onSeek={openInsightEvidenceAt}
+                      />
+                    </>
+                  )}
+                  {activeReportTab === "viral" && (
+                    <ViralMechanismWorkspace
+                      analysisId={report.analysis_id}
+                      request={apiRequest}
+                      resolveUrl={resolveArtifactUrl}
+                      onSeek={openInsightEvidenceAt}
                     />
                   )}
-                  {activeReportTab === "viral" && <ViralTab report={report} />}
-                  {activeReportTab === "replace" && (
-                    <ReplacementTab
-                      videoId={report.video_id}
-                      entities={report.entities}
-                      replacementVersion={replacementVersion}
-                      onCreated={setReplacementVersion}
-                      onError={setError}
+                  {activeReportTab === "replicate" && (
+                    <ReplicationWorkspace
+                      analysisId={report.analysis_id}
+                      recordId={video.record_id}
+                      request={apiRequest}
+                      onPublished={openPublishedConcept}
+                      onNotice={showNotice}
                     />
                   )}
                   {activeReportTab === "prompts" && (
@@ -4577,10 +4630,8 @@ function ReportHeader({
 function ReportTabs({ active, onChange, mode }) {
   const visibleTabs =
     mode === "media_evidence"
-      ? reportTabs.slice(0, 2)
-      : mode === "model"
-        ? reportTabs.filter((tab) => ["overview", "shots", "prompts"].includes(tab.id))
-        : reportTabs;
+      ? reportTabs.filter((tab) => ["overview", "shots"].includes(tab.id))
+      : reportTabs;
   return (
     <div className="report-tabs" role="tablist" aria-label="分析报告">
       {visibleTabs.map((tab) => {
@@ -5217,198 +5268,6 @@ function Fact({ label, value }) {
     <div className="fact-card">
       <span>{label}</span>
       <p>{value}</p>
-    </div>
-  );
-}
-
-function ViralTab({ report }) {
-  return (
-    <div className="viral-layout">
-      <div className="viral-summary">
-        <span className="target-icon">
-          <Target size={25} weight="fill" />
-        </span>
-        <div>
-          <span className="eyebrow">内容潜力评分</span>
-          <h3>{report.overview.viral_potential_score} / 100</h3>
-          <p>所有判断均来自当前视频的画面、字幕和结构证据，不等同于实际平台表现。</p>
-        </div>
-      </div>
-      <div className="finding-list">
-        {report.viral_findings.map((finding, index) => (
-          <article className="finding-card" key={finding.id}>
-            <div className="finding-rank">{String(index + 1).padStart(2, "0")}</div>
-            <div className="finding-content">
-              <div className="finding-heading">
-                <div>
-                  <span>
-                    {formatTime(finding.start_seconds)} — {formatTime(finding.end_seconds)}
-                  </span>
-                  <h3>{finding.title}</h3>
-                </div>
-                <strong>{finding.score}</strong>
-              </div>
-              <p>{finding.observation}</p>
-              <dl>
-                <div>
-                  <dt>生效机制</dt>
-                  <dd>{finding.mechanism}</dd>
-                </div>
-                <div>
-                  <dt>预期作用</dt>
-                  <dd>{finding.expected_effect}</dd>
-                </div>
-                <div>
-                  <dt>复用建议</dt>
-                  <dd>{finding.recommendation}</dd>
-                </div>
-              </dl>
-              <span className="confidence">置信度 {Math.round(finding.confidence * 100)}%</span>
-            </div>
-          </article>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ReplacementTab({ videoId, entities, replacementVersion, onCreated, onError }) {
-  const [entityId, setEntityId] = useState(entities[0]?.id || "");
-  const [description, setDescription] = useState("");
-  const [locks, setLocks] = useState(["timing", "camera", "composition", "action"]);
-  const [loading, setLoading] = useState(false);
-  const currentEntity = entities.find((entity) => entity.id === entityId);
-  const lockOptions = [
-    ["timing", "时长节奏"],
-    ["camera", "机位运镜"],
-    ["composition", "画面构图"],
-    ["action", "主体动作"],
-    ["lighting", "灯光"],
-    ["audio", "音频结构"],
-  ];
-
-  function toggleLock(value) {
-    setLocks((current) =>
-      current.includes(value) ? current.filter((item) => item !== value) : [...current, value],
-    );
-  }
-
-  async function submitReplacement() {
-    if (!description.trim()) {
-      onError("请输入替换后的元素描述");
-      return;
-    }
-    setLoading(true);
-    onError("");
-    try {
-      const version = await apiRequest(`/videos/${videoId}/replacement-versions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          replacements: [{ entity_id: entityId, description: description.trim() }],
-          locks,
-        }),
-      });
-      onCreated(version);
-    } catch (requestError) {
-      onError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="replacement-layout">
-      <div className="entity-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">元素资产</span>
-            <h3>选择需要替换的元素</h3>
-          </div>
-          <span>{entities.length} 项</span>
-        </div>
-        <div className="entity-list">
-          {entities.map((entity) => (
-            <button
-              type="button"
-              className={entity.id === entityId ? "active" : ""}
-              key={entity.id}
-              onClick={() => setEntityId(entity.id)}
-            >
-              <span className={`entity-type ${entity.type}`}>
-                {entity.type === "person" ? <Target size={17} /> : <SquaresFour size={17} />}
-              </span>
-              <span>
-                <strong>{entity.name}</strong>
-                <small>{entity.id}</small>
-              </span>
-              <span className="entity-confidence">{Math.round(entity.confidence * 100)}%</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="replacement-editor">
-        <div className="current-entity">
-          <span>当前描述</span>
-          <p>{currentEntity?.description}</p>
-          <div className="tag-row">
-            {currentEntity?.replaceable_fields.map((field) => <span key={field}>{field}</span>)}
-          </div>
-        </div>
-
-        <label className="textarea-field">
-          <span>替换为</span>
-          <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            placeholder="例如：35 岁中国男厨师，黑色短发，穿白色亚麻厨师服，沉稳专业"
-            rows={5}
-          />
-        </label>
-
-        <div className="lock-options">
-          <div>
-            <LockSimple size={17} />
-            <span>保持不变</span>
-          </div>
-          <div className="lock-grid">
-            {lockOptions.map(([value, label]) => (
-              <label key={value}>
-                <input
-                  type="checkbox"
-                  checked={locks.includes(value)}
-                  onChange={() => toggleLock(value)}
-                />
-                <span>{locks.includes(value) && <Check size={12} weight="bold" />}</span>
-                {label}
-              </label>
-            ))}
-          </div>
-        </div>
-
-        <button className="primary-button full" type="button" onClick={submitReplacement} disabled={loading}>
-          {loading ? <CircleNotch className="spin" size={18} /> : <MagicWand size={18} weight="fill" />}
-          生成替换版提示词
-        </button>
-
-        {replacementVersion && (
-          <div className="replacement-result">
-            <div>
-              <CheckCircle size={19} weight="fill" />
-              <strong>Prompt v{replacementVersion.prompt_package.version} 已生成</strong>
-            </div>
-            {replacementVersion.diffs.map((diff) => (
-              <div className="diff-card" key={diff.entity_id}>
-                <span>{diff.entity_id}</span>
-                <p><del>{diff.before}</del></p>
-                <p><ins>{diff.after}</ins></p>
-                <small>影响 {diff.affected_shot_ids.length} 个镜头</small>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
