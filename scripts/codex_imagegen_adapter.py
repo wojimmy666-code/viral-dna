@@ -182,8 +182,17 @@ def _generation_prompt(
 ) -> str:
     prompt = payload.get("prompt") if isinstance(payload.get("prompt"), dict) else {}
     output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+    role_labels = {
+        "source": "构图、姿态、动作和机位控制图；禁止提供人物身份",
+        "identity": "唯一人物身份来源；年龄、五官、脸型和肤色均以此图为准",
+        "product": "产品外观与结构参考",
+        "scene": "场景环境参考",
+        "wardrobe": "服装款式与材质参考",
+        "style": "视觉风格参考",
+        "layout": "道具或布局参考",
+    }
     roles = "\n".join(
-        f"- 图像 {index + 1}: {role}，文件 {path.name}"
+        f"- 图像 {index + 1}: {role_labels.get(role, role)}，文件 {path.name}"
         for index, (role, path) in enumerate(inputs)
     ) or "- 无输入图片，本次为纯文字生成"
     task = "图片编辑" if inputs else "文生图"

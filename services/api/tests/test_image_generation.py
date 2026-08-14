@@ -18,11 +18,22 @@ from viral_dna_api.image_generation.catalog import load_image_model_catalog
 from viral_dna_api.image_generation.contracts import (
     AdapterIdentity,
     AdapterRequest,
+    ImageGenerationRequest,
+    ImageReferenceInput,
+    build_reference_inputs,
 )
 from viral_dna_api.image_generation.dashscope import DashScopeQwenImageAdapter
 from viral_dna_api.image_generation.gateway import (
     ImageGenerationGateway,
     ImageGenerationGatewayError,
+    _compiled_prompt,
+    _negative_prompt,
+)
+from viral_dna_api.image_generation.identity_policy import (
+    IdentityPolicyViolation,
+    build_input_manifest,
+    validate_identity_bindings,
+    validate_identity_generation,
 )
 from viral_dna_api.image_generation.local_tool import (
     CodexSandboxPreflightResult,
@@ -37,6 +48,7 @@ from viral_dna_api.image_generation.settings import (
 from viral_dna_api.models import (
     GenerationCostSource,
     ImageExecutionMode,
+    ImageGenerationCapability,
     ImageGenerationInputMode,
     ImageGenerationSettingsUpdate,
     LocalCodexAutoConfigureRequest,
@@ -619,6 +631,149 @@ def test_local_tool_supports_pure_text_generation_without_image_inputs(
     assert snapshot["input_mode"] == "text_to_image"
     assert snapshot["source"] is None
     assert snapshot["references"] == []
+
+
+def test_identity_reference_is_second_input_and_exclusive_identity_source() -> None:
+    project = _project()
+    shot = _shot(project.id)
+    identity_asset = ReferenceAsset(
+        project_id=project.id,
+        type=ReferenceAssetType.PERSON,
+        name="唯一人物",
+        relative_path="references/identity.jpg",
+        mime_type="image/jpeg",
+        width=720,
+        height=1280,
+        sha256="a" * 64,
+        rights_confirmed=True,
+    )
+    scene_asset = ReferenceAsset(
+        project_id=project.id,
+        type=ReferenceAssetType.SCENE,
+        name="场景参考",
+        relative_path="references/scene.jpg",
+        mime_type="image/jpeg",
+        width=720,
+        height=1280,
+        sha256="b" * 64,
+        rights_confirmed=True,
+    )
+    bindings = [
+        ReferenceBinding(
+            shot_plan_id=shot.id,
+            reference_asset_id=scene_asset.id,
+            role=ReferenceRole.SCENE,
+            weight=2,
+        ),
+        ReferenceBinding(
+            shot_plan_id=shot.id,
+            reference_asset_id=identity_asset.id,
+            role=ReferenceRole.IDENTITY,
+            weight=0.1,
+        ),
+    ]
+    references = build_reference_inputs(
+        bindings,
+        [scene_asset, identity_asset],
+        resolve_path=Path,
+    )
+    request = ImageGenerationRequest(
+        project=project,
+        shot=shot,
+        revision_id=uuid4(),
+        input_mode=ImageGenerationInputMode.KEYFRAME_EDIT,
+        source_path=Path("source.jpg"),
+        source_sha256="c" * 64,
+        references=references,
+        candidate_count=1,
+        execution_mode=ImageExecutionMode.LOCAL_TOOL,
+    )
+
+    assert [item.role for item in references] == ["identity", "scene"]
+    manifest = build_input_manifest(source_present=True, references=references)
+    assert manifest[0]["input_index"] == 1
+    assert manifest[0]["identity_source"] is False
+    assert manifest[1]["input_index"] == 2
+    assert manifest[1]["asset_id"] == str(identity_asset.id)
+    assert manifest[1]["responsibility"] == "exclusive_person_identity_source"
+    positive = _compiled_prompt(request)
+    negative = _negative_prompt(request)
+    assert "图像2" in positive
+    assert "唯一来源" in positive
+    assert "严禁从图像1继承人物的年龄、五官、脸型、肤色、发型、身份" in positive
+    assert "身份一律服从图像2" in positive
+    assert "混合图像1与图像2的人脸或身份" in negative
+    assert "生成第三个人物身份" in negative
+
+
+def test_identity_reference_forbids_text_to_image_and_multiple_identities() -> None:
+    project = _project()
+    shot = _shot(project.id)
+    first = ReferenceAsset(
+        project_id=project.id,
+        type=ReferenceAssetType.PERSON,
+        name="人物一",
+        relative_path="references/first.jpg",
+        mime_type="image/jpeg",
+        width=720,
+        height=1280,
+        sha256="a" * 64,
+        rights_confirmed=True,
+    )
+    second = first.model_copy(
+        update={"id": uuid4(), "name": "人物二", "sha256": "b" * 64}
+    )
+    first_binding = ReferenceBinding(
+        shot_plan_id=shot.id,
+        reference_asset_id=first.id,
+        role=ReferenceRole.IDENTITY,
+    )
+    state = validate_identity_bindings([first_binding], [first])
+    with pytest.raises(IdentityPolicyViolation) as text_error:
+        validate_identity_generation(
+            state=state,
+            input_mode=ImageGenerationInputMode.TEXT_TO_IMAGE,
+            source_present=False,
+        )
+    assert text_error.value.code == "identity_requires_reference_mode"
+
+    with pytest.raises(IdentityPolicyViolation) as duplicate_error:
+        validate_identity_bindings(
+            [
+                first_binding,
+                ReferenceBinding(
+                    shot_plan_id=shot.id,
+                    reference_asset_id=second.id,
+                    role=ReferenceRole.IDENTITY,
+                ),
+            ],
+            [first, second],
+        )
+    assert duplicate_error.value.code == "multiple_identity_references"
+
+    with pytest.raises(IdentityPolicyViolation) as missing_asset_error:
+        validate_identity_bindings([first_binding], [])
+    assert missing_asset_error.value.code == "identity_asset_missing"
+
+    with pytest.raises(IdentityPolicyViolation) as missing_input_error:
+        validate_identity_generation(
+            state=state,
+            input_mode=ImageGenerationInputMode.KEYFRAME_EDIT,
+            source_present=True,
+            references=(
+                ImageReferenceInput(
+                    asset_id=second.id,
+                    name="错误人物",
+                    role=ReferenceRole.IDENTITY.value,
+                    path=Path("second.jpg"),
+                    relative_path="references/second.jpg",
+                    sha256="b" * 64,
+                    weight=1,
+                ),
+            ),
+            capability=ImageGenerationCapability(),
+        )
+    assert missing_input_error.value.code == "identity_reference_missing"
 
 
 def test_gateway_reuses_verified_candidates_without_repeat_cost(

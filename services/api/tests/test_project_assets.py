@@ -126,6 +126,9 @@ async def test_legacy_reference_migration_is_idempotent_and_zero_copy(
     await repository.save_asset_folder(folder)
     moved = asset.model_copy(update={"folder_id": folder.id, "version": asset.version + 1})
     await repository.save_asset(moved)
+    projected = (await service.list_references(first_project.id))[0]
+    assert projected.folder_id == folder.id
+    assert projected.folder_name == "人物目录"
     assert (await repository.list_object_replicas(asset.content_object_id))[0].object_key == (
         content_relative
     )
@@ -134,6 +137,8 @@ async def test_legacy_reference_migration_is_idempotent_and_zero_copy(
     serialized = json.dumps(snapshot, ensure_ascii=False)
     assert snapshot["asset_id"] == str(asset.id)
     assert snapshot["content_object_id"] == str(asset.content_object_id)
+    assert snapshot["folder_id"] == str(folder.id)
+    assert snapshot["folder_name"] == "人物目录"
     assert "relative_path" not in serialized
     assert "object_key" not in serialized
     assert str(workspace.root) not in serialized

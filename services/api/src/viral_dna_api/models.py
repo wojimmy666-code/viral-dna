@@ -159,6 +159,8 @@ class ProductionChangeKind(StrEnum):
     SHOT_STRUCTURE_CHANGED = "shot_structure_changed"
     SOURCE_KEYFRAME_CHANGED = "source_keyframe_changed"
     IMAGE_CANDIDATE_SELECTED = "image_candidate_selected"
+    IMAGE_CANDIDATES_ARCHIVED = "image_candidates_archived"
+    IMAGE_CANDIDATES_RESTORED = "image_candidates_restored"
     IMAGE_APPROVED = "image_approved"
     IMAGE_APPROVAL_REVOKED = "image_approval_revoked"
     IMAGE_REJECTED = "image_rejected"
@@ -1558,6 +1560,8 @@ class ReferenceAsset(BaseModel):
     project_id: UUID
     type: ReferenceAssetType
     name: str = Field(min_length=1, max_length=120)
+    folder_id: UUID | None = None
+    folder_name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     relative_path: str = Field(min_length=1, max_length=2048)
     thumbnail_relative_path: str | None = Field(default=None, max_length=2048)
@@ -1616,7 +1620,7 @@ class ReferenceBinding(BaseModel):
 
 class PromptAssetMention(BaseModel):
     reference_asset_id: UUID
-    label: str = Field(min_length=1, max_length=120)
+    label: str = Field(min_length=1, max_length=260)
 
     @field_validator("label")
     @classmethod
@@ -2206,6 +2210,8 @@ class ReferenceAssetResponse(BaseModel):
     project_id: UUID
     type: ReferenceAssetType
     name: str
+    folder_id: UUID | None = None
+    folder_name: str | None = None
     description: str
     mime_type: str
     width: int
@@ -2682,6 +2688,7 @@ class GenerationRunResponse(BaseModel):
     protocol_version: str | None = None
     provider_request_id: str | None = None
     capability_snapshot: dict[str, Any] = Field(default_factory=dict)
+    execution_summary: dict[str, Any] = Field(default_factory=dict)
     cost_source: GenerationCostSource
     cost_estimate_known: bool
     actual_cost_known: bool = True

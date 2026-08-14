@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from io import BytesIO
 from pathlib import Path
@@ -13,6 +14,16 @@ from PIL import Image
 
 from viral_dna_api import main
 from viral_dna_api.generation import generate_simulated_images
+from viral_dna_api.image_generation.contracts import (
+    ImageGenerationRequest,
+    build_reference_inputs,
+)
+from viral_dna_api.image_generation.gateway import _compiled_prompt, _negative_prompt
+from viral_dna_api.image_generation.identity_policy import (
+    build_input_manifest,
+    policy_snapshot,
+    validate_identity_bindings,
+)
 from viral_dna_api.models import (
     AnalysisJob,
     AnalysisRecord,
@@ -229,6 +240,68 @@ class FakeRealImageGateway:
             input_mode=input_mode,
             run_id=run_id,
         )
+        references = build_reference_inputs(
+            bindings,
+            assets,
+            resolve_path=self.workspace.resolve,
+        )
+        identity_policy = validate_identity_bindings(bindings, assets)
+        request = ImageGenerationRequest(
+            project=project,
+            shot=plan,
+            revision_id=revision_id,
+            input_mode=input_mode,
+            source_path=source_path,
+            source_sha256=None,
+            references=references,
+            candidate_count=candidate_count,
+            execution_mode=ImageExecutionMode.REMOTE_API,
+            seed=seed,
+        )
+        input_path = self.workspace.resolve(run.input_snapshot_relative_path)
+        filesystem_input = (
+            Path(chr(92) * 2 + "?" + chr(92) + str(input_path))
+            if os.name == "nt"
+            else input_path
+        )
+        input_payload = json.loads(filesystem_input.read_text(encoding="utf-8"))
+        input_payload.update(
+            {
+                "schema_version": "viral-dna-image-generation/v2",
+                "prompt": {
+                    "positive": _compiled_prompt(request),
+                    "negative": _negative_prompt(request),
+                },
+                "references": [
+                    {
+                        "asset_id": str(item.asset_id),
+                        "name": item.name,
+                        "role": item.role,
+                        "weight": item.weight,
+                        "crop_hint": item.crop_hint,
+                        "notes": item.notes,
+                        "sha256": item.sha256,
+                    }
+                    for item in references
+                ],
+                "identity_policy": policy_snapshot(state=identity_policy),
+                "input_manifest": build_input_manifest(
+                    source_present=(
+                        input_mode.value == "keyframe_edit"
+                        and bool(
+                            source_path
+                            or plan.source_keyframe_url
+                            or plan.source_keyframe_relative_path
+                        )
+                    ),
+                    references=references,
+                ),
+            }
+        )
+        filesystem_input.write_text(
+            json.dumps(input_payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
         if seed is not None:
             run = run.model_copy(
                 update={
@@ -247,6 +320,12 @@ class FakeRealImageGateway:
                 "execution_mode": ImageExecutionMode.REMOTE_API,
                 "adapter_id": "test-image-adapter",
                 "adapter_version": "test-v1",
+                "schema_version": "viral-dna-image-generation/v2",
+                "prompt_version": "shot-image-v3",
+                "execution_summary": {
+                    "identity_policy": input_payload["identity_policy"],
+                    "input_manifest": input_payload["input_manifest"],
+                },
             }
         )
         return run, [
@@ -2072,6 +2151,14 @@ def test_prompt_asset_mentions_are_stable_and_auto_bind_references(
         assert "@主角参考图" in input_payload["image_prompt"]
         assert input_payload["references"][0]["asset_id"] == asset["id"]
         assert input_payload["references"][0]["name"] == "主角参考图"
+        assert input_payload["identity_policy"]["enabled"] is True
+        assert input_payload["identity_policy"]["primary_identity_asset_id"] == asset["id"]
+        assert input_payload["input_manifest"][0]["input_index"] == 1
+        assert input_payload["input_manifest"][0]["identity_source"] is False
+        assert input_payload["input_manifest"][1]["input_index"] == 2
+        assert input_payload["input_manifest"][1]["asset_id"] == asset["id"]
+        assert input_payload["input_manifest"][1]["identity_source"] is True
+        assert "严禁从图像1继承人物" in input_payload["prompt"]["positive"]
 
 
 def test_create_shot_from_source_video_range(
@@ -2126,6 +2213,92 @@ def test_create_shot_from_source_video_range(
         assert keyframe.status_code == 200
         with Image.open(BytesIO(keyframe.content)) as rendered:
             assert rendered.size == (720, 1280)
+
+
+def test_image_candidate_soft_delete_restore_and_approval_protection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis.id,
+                name="图片候选软删除",
+            ),
+        )
+        shot = (await service.list_shots(detail.project.id))[0]
+        current = await service.get_project(detail.project.id)
+        queued = await service.create_image_run(
+            shot.plan.id,
+            ImageGenerationCreate(
+                expected_revision_id=current.project.current_revision_id,
+                candidate_count=2,
+            ),
+        )
+        run = await wait_for_generation(service, queued.id)
+        assert run.status == "completed"
+        selected = await service.select_candidate(
+            run.candidates[0].id,
+            CandidateSelectRequest(
+                expected_revision_id=(
+                    await service.get_project(detail.project.id)
+                ).project.current_revision_id,
+            ),
+        )
+
+        deleted = await service.archive_generation_candidates(
+            CandidateBatchLifecycleRequest(
+                expected_revision_id=selected.shot.current_revision_id,
+                candidate_ids=[run.candidates[1].id],
+            ),
+            actor_account_id=uuid4(),
+        )
+        assert deleted.candidates[0].status == GenerationCandidateStatus.ARCHIVED
+        assert (
+            deleted.candidates[0].archive_reason
+            == GenerationCandidateArchiveReason.USER_DELETED
+        )
+        content, _ = await service.resolve_candidate_content(run.candidates[1].id)
+        assert content.is_file()
+
+        with pytest.raises(ProductionServiceError) as unavailable:
+            await service.select_candidate(
+                run.candidates[1].id,
+                CandidateSelectRequest(
+                    expected_revision_id=deleted.current_revision_id,
+                ),
+            )
+        assert unavailable.value.code == "candidate_unavailable"
+
+        restored = await service.restore_generation_candidates(
+            CandidateBatchLifecycleRequest(
+                expected_revision_id=deleted.current_revision_id,
+                candidate_ids=[run.candidates[1].id],
+            )
+        )
+        assert restored.candidates[0].status == GenerationCandidateStatus.READY
+        assert restored.candidates[0].archive_reason is None
+
+        approved = await service.approve_candidate(
+            run.candidates[0].id,
+            CandidateApprovalRequest(
+                expected_revision_id=restored.current_revision_id,
+                decision=ApprovalDecision.APPROVED,
+            ),
+        )
+        with pytest.raises(ProductionServiceError) as protected:
+            await service.archive_generation_candidates(
+                CandidateBatchLifecycleRequest(
+                    expected_revision_id=approved.shot.current_revision_id,
+                    candidate_ids=[run.candidates[0].id],
+                )
+            )
+        assert protected.value.code == "approved_image_candidate_archive_forbidden"
+
+    asyncio.run(scenario())
 
 
 def test_batch451_video_generation_review_revoke_and_gate_flow(

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from .asset_library import Asset, AssetType, normalize_tags
+from .asset_library import Asset, AssetFolder, AssetType, normalize_tags
 from .chinese import to_simplified
 from .models import (
     ProductionProject,
@@ -51,6 +51,8 @@ ASSET_TO_REFERENCE_TYPE = {
 
 class ProjectAssetRepository(Protocol):
     async def get_asset(self, asset_id: UUID) -> Asset | None: ...
+
+    async def get_asset_folder(self, folder_id: UUID) -> AssetFolder | None: ...
 
     async def save_asset(self, asset: Asset) -> Asset: ...
 
@@ -411,6 +413,11 @@ class ProjectAssetService:
             raise ProductionServiceError(409, "reference_asset_not_found", "项目参考资产不存在")
         content = await self.storage.get_object(asset.content_object_id)
         thumbnail = await self.storage.get_object(asset.thumbnail_object_id)
+        folder = (
+            await self.repository.get_asset_folder(asset.folder_id)
+            if asset.folder_id is not None
+            else None
+        )
         return {
             "asset_id": str(asset.id),
             "workspace_id": str(asset.workspace_id),
@@ -420,6 +427,8 @@ class ProjectAssetService:
             "thumbnail_object_id": str(thumbnail.id),
             "thumbnail_sha256": thumbnail.sha256,
             "name": asset.name,
+            "folder_id": str(asset.folder_id) if asset.folder_id else None,
+            "folder_name": folder.name if folder is not None else None,
             "description": asset.description,
             "tags": list(asset.tags),
             "rights_confirmed": asset.rights_confirmed,
@@ -483,6 +492,11 @@ class ProjectAssetService:
     ) -> ReferenceAsset:
         content = await self.storage.get_object(asset.content_object_id)
         thumbnail = await self.storage.get_object(asset.thumbnail_object_id)
+        folder = (
+            await self.repository.get_asset_folder(asset.folder_id)
+            if asset.folder_id is not None
+            else None
+        )
         try:
             content_path = await self.storage.materialize_local(asset.content_object_id)
             relative_path = self.workspace.relative(content_path)
@@ -498,6 +512,8 @@ class ProjectAssetService:
             project_id=project_id,
             type=reference_type,
             name=asset.name,
+            folder_id=asset.folder_id,
+            folder_name=folder.name if folder is not None else None,
             description=asset.description,
             relative_path=relative_path,
             thumbnail_relative_path=thumbnail_relative_path,

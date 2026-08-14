@@ -18,9 +18,9 @@ from ..models import (
     ShotPlan,
 )
 
-IMAGE_REQUEST_SCHEMA_VERSION = "viral-dna-image-generation/v1"
+IMAGE_REQUEST_SCHEMA_VERSION = "viral-dna-image-generation/v2"
 LOCAL_TOOL_PROTOCOL_VERSION = "viral-dna-image-tool/v1"
-IMAGE_PROMPT_VERSION = "shot-image-v2"
+IMAGE_PROMPT_VERSION = "shot-image-v3"
 MAX_GENERATED_IMAGE_BYTES = 25 * 1024 * 1024
 
 
@@ -148,7 +148,22 @@ def build_reference_inputs(
 ) -> tuple[ImageReferenceInput, ...]:
     assets_by_id = {asset.id: asset for asset in assets}
     references: list[ImageReferenceInput] = []
-    for binding in sorted(bindings, key=lambda item: (-item.weight, item.created_at)):
+    role_order = {
+        "identity": 0,
+        "product": 1,
+        "wardrobe": 2,
+        "scene": 3,
+        "style": 4,
+        "layout": 5,
+    }
+    for binding in sorted(
+        bindings,
+        key=lambda item: (
+            role_order.get(item.role.value, 99),
+            -item.weight,
+            item.created_at,
+        ),
+    ):
         asset = assets_by_id.get(binding.reference_asset_id)
         if asset is None:
             continue

@@ -49,6 +49,15 @@ from .contracts import (
     build_reference_inputs,
 )
 from .dashscope import DashScopeQwenImageAdapter
+from .identity_policy import (
+    IdentityPolicyState,
+    IdentityPolicyViolation,
+    build_input_manifest,
+    identity_reference,
+    policy_snapshot,
+    validate_identity_bindings,
+    validate_identity_generation,
+)
 from .local_tool import LocalToolImageAdapter, detect_local_tool
 from .process_slots import ProcessSlotLimiter
 from .semantic_quality import ImageSemanticQualityService, SemanticQualityOutcome
@@ -159,13 +168,18 @@ def _output_dimensions(
 
 def _compiled_prompt(request: ImageGenerationRequest) -> str:
     role_labels = {
-        "identity": "人物身份与面部特征",
+        "identity": "唯一人物身份来源",
         "product": "产品外观与结构",
         "scene": "场景环境",
         "wardrobe": "服装款式与材质",
         "style": "整体视觉风格",
         "layout": "道具或布局",
     }
+    mention_labels = {
+        item.reference_asset_id: item.label
+        for item in request.shot.image_prompt_mentions
+    }
+    primary_identity = identity_reference(request.references)
     if request.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
         lines = [
             "本次任务是纯文字生成，不使用原视频关键帧或参考图片。",
@@ -173,6 +187,21 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
             "根据文字从零构建完整画面，严格遵循主体、场景、构图、镜头、光影和风格描述。",
         ]
         reference_offset = 1
+    elif primary_identity is not None:
+        lines = [
+            "这是受控人物身份替换任务，必须严格区分每张输入图的职责。",
+            "图像1仅用于保留原视频关键帧的姿态、构图、动作关系、机位、运镜意图和光影逻辑。",
+            "严禁从图像1继承人物的年龄、五官、脸型、肤色、发型、身份或其他生物特征。",
+            (
+                "图像2（@"
+                f"{mention_labels.get(primary_identity.asset_id, primary_identity.name)}"
+                "）是生成结果中人物身份的唯一来源。"
+            ),
+            "人物年龄、五官、脸型、肤色和可识别身份必须以图像2为准；不得与图像1的人脸融合，不得生成第三个人物身份。",
+            "当图像1与图像2发生冲突时，身份一律服从图像2，姿态、构图和动作一律服从图像1。",
+            f"编辑要求：{request.shot.image_prompt.strip()}",
+        ]
+        reference_offset = 2
     else:
         lines = [
             "图像1是原视频分镜关键帧，作为基础图进行编辑。",
@@ -180,18 +209,21 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
             f"编辑要求：{request.shot.image_prompt.strip()}",
         ]
         reference_offset = 2
-    mention_labels = {
-        item.reference_asset_id: item.label
-        for item in request.shot.image_prompt_mentions
-    }
     for index, reference in enumerate(request.references, start=reference_offset):
         label = role_labels.get(reference.role, reference.role)
         mention_label = mention_labels.get(reference.asset_id)
-        detail = (
-            f"图像{index}对应提示词中的 @{mention_label}，用于参考{label}"
-            if mention_label
-            else f"图像{index}是参考资产“{reference.name}”，用于参考{label}"
-        )
+        if reference.role == "identity":
+            detail = (
+                f"图像{index}对应提示词中的 @{mention_label}，是唯一人物身份来源"
+                if mention_label
+                else f"图像{index}是人物资产“{reference.name}”，是唯一人物身份来源"
+            )
+        else:
+            detail = (
+                f"图像{index}对应提示词中的 @{mention_label}，用于参考{label}"
+                if mention_label
+                else f"图像{index}是参考资产“{reference.name}”，用于参考{label}"
+            )
         if reference.notes:
             detail += f"，说明：{reference.notes.strip()}"
         if reference.crop_hint:
@@ -201,7 +233,22 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
     return (to_simplified("\n".join(lines)) or "\n".join(lines)).strip()
 
 
-def _negative_prompt(shot: ShotPlan) -> str:
+def _negative_prompt(request: ImageGenerationRequest) -> str:
+    primary_identity = identity_reference(request.references)
+    identity_constraints = (
+        [
+            "继承图像1人物的年龄、五官、脸型、肤色、发型或身份",
+            "混合图像1与图像2的人脸或身份",
+            "改变图像2人物的年龄、五官、脸型或肤色",
+            "生成第三个人物身份",
+            "人物身份漂移",
+            "面部融合",
+            "双人脸",
+            "人脸重影",
+        ]
+        if primary_identity is not None
+        else []
+    )
     base = [
         "低清晰度",
         "模糊",
@@ -210,16 +257,15 @@ def _negative_prompt(shot: ShotPlan) -> str:
         "拼接画面",
         "多余肢体",
         "手指畸形",
-        "人物身份漂移",
         "产品结构变形",
     ]
-    values = [*shot.image_negative_constraints, *base]
+    values = [*identity_constraints, *request.shot.image_negative_constraints, *base]
     normalized: list[str] = []
     for value in values:
         text = (to_simplified(value) or value).strip()
         if text and text not in normalized:
             normalized.append(text)
-    return "，".join(normalized)[:500]
+    return "，".join(normalized)[:1000]
 
 
 def _candidate_quality_report(
@@ -483,6 +529,19 @@ class ImageGenerationGateway:
                 "simulated_override_forbidden",
                 "启用真实图片生成后不能通过业务接口切回模拟模式",
             )
+        try:
+            identity_policy = validate_identity_bindings(bindings, assets)
+            validate_identity_generation(
+                state=identity_policy,
+                input_mode=selected_input_mode,
+                source_present=source_path is not None,
+            )
+        except IdentityPolicyViolation as exc:
+            raise ImageGenerationGatewayError(
+                exc.status_code,
+                exc.code,
+                str(exc),
+            ) from exc
         if (
             selected_input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
             and (source_path is None or not await asyncio.to_thread(source_path.is_file))
@@ -527,6 +586,20 @@ class ImageGenerationGateway:
             settings,
             candidate_count=candidate_count,
         )
+        try:
+            validate_identity_generation(
+                state=identity_policy,
+                input_mode=selected_input_mode,
+                source_present=source_path is not None,
+                references=references,
+                capability=identity.capability,
+            )
+        except IdentityPolicyViolation as exc:
+            raise ImageGenerationGatewayError(
+                exc.status_code,
+                exc.code,
+                str(exc),
+            ) from exc
         if candidate_count > identity.capability.max_candidates:
             raise ImageGenerationGatewayError(
                 422,
@@ -579,10 +652,11 @@ class ImageGenerationGateway:
             identity.capability,
         )
         prompt = _compiled_prompt(request)
-        negative_prompt = _negative_prompt(shot)
+        negative_prompt = _negative_prompt(request)
         input_payload = self._input_payload(
             request,
             identity,
+            identity_policy=identity_policy,
             width=width,
             height=height,
             prompt=prompt,
@@ -704,6 +778,7 @@ class ImageGenerationGateway:
                 revision_id,
                 identity,
                 input_mode=request.input_mode,
+                input_payload=input_payload,
                 run_id=run_id,
                 fingerprint=fingerprint,
                 input_path=input_path,
@@ -787,6 +862,8 @@ class ImageGenerationGateway:
                 "semantic_quality_cost_micros": semantic_actual_cost,
             }
         execution_summary = dict(identity.execution_summary)
+        execution_summary["identity_policy"] = input_payload["identity_policy"]
+        execution_summary["input_manifest"] = input_payload["input_manifest"]
         execution_summary["semantic_quality"] = {
             "enabled": settings.semantic_quality_enabled,
             "candidate_count": len(semantic_outcomes),
@@ -806,6 +883,8 @@ class ImageGenerationGateway:
             ],
             "usage": usage_payload,
             "semantic_quality": [outcome.report for outcome in semantic_outcomes],
+            "identity_policy": input_payload["identity_policy"],
+            "input_manifest": input_payload["input_manifest"],
             "estimated_cost_micros": estimated_cost,
             "actual_cost_micros": actual_cost,
             "cost_source": cost_source.value,
@@ -873,6 +952,7 @@ class ImageGenerationGateway:
                 for item in references
             ],
             "locks": input_payload["locks"],
+            "identity_policy": input_payload["identity_policy"],
         }
         return hashlib.sha256(_canonical_json(stable_payload)).hexdigest()
 
@@ -1007,6 +1087,8 @@ class ImageGenerationGateway:
                     **identity.execution_summary,
                     "cache_hit": True,
                     "cache_source_run_id": str(source_run.id),
+                    "identity_policy": input_payload["identity_policy"],
+                    "input_manifest": input_payload["input_manifest"],
                 },
                 cost_source=GenerationCostSource.UNMETERED,
                 cost_estimate_known=True,
@@ -1202,11 +1284,19 @@ class ImageGenerationGateway:
         request: ImageGenerationRequest,
         identity: AdapterIdentity,
         *,
+        identity_policy: IdentityPolicyState,
         width: int,
         height: int,
         prompt: str,
         negative_prompt: str,
     ) -> dict[str, Any]:
+        input_manifest = build_input_manifest(
+            source_present=request.source_path is not None,
+            references=request.references,
+        )
+        identity_snapshot = policy_snapshot(
+            state=identity_policy,
+        )
         return {
             "schema_version": IMAGE_REQUEST_SCHEMA_VERSION,
             "input_mode": request.input_mode.value,
@@ -1266,6 +1356,8 @@ class ImageGenerationGateway:
                 }
                 for item in request.references
             ],
+            "identity_policy": identity_snapshot,
+            "input_manifest": input_manifest,
             "locks": [item.value for item in request.shot.locks],
             "cost": {
                 "estimated_cost_micros": identity.estimated_cost_micros,
@@ -1282,6 +1374,7 @@ class ImageGenerationGateway:
         identity: AdapterIdentity,
         *,
         input_mode: ImageGenerationInputMode,
+        input_payload: dict[str, Any],
         run_id: UUID,
         fingerprint: str,
         input_path: Path,
@@ -1312,7 +1405,11 @@ class ImageGenerationGateway:
             adapter_version=identity.adapter_version,
             protocol_version=identity.protocol_version,
             capability_snapshot=identity.capability.model_dump(mode="json"),
-            execution_summary=identity.execution_summary,
+            execution_summary={
+                **identity.execution_summary,
+                "identity_policy": input_payload["identity_policy"],
+                "input_manifest": input_payload["input_manifest"],
+            },
             cost_source=identity.cost_source,
             cost_estimate_known=identity.cost_estimate_known,
             status=ProductionRunStatus.FAILED,

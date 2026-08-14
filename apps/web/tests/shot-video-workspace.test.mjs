@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import {
+  videoCandidateCountOptions,
+  videoOutputSummary,
+} from "../src/video-generation-controls/video-generation-ui.js";
 
 const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
@@ -12,6 +16,26 @@ const continuityPanelSource = readFileSync(
 );
 const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
+  "utf8",
+);
+const generationControlsSource = readFileSync(
+  new URL("../src/ShotVideoGenerationControls.jsx", import.meta.url),
+  "utf8",
+);
+const generationControlsStyles = readFileSync(
+  new URL("../src/shot-video-generation-controls.css", import.meta.url),
+  "utf8",
+);
+const modelPopoverSource = readFileSync(
+  new URL("../src/video-generation-controls/VideoModelPopover.jsx", import.meta.url),
+  "utf8",
+);
+const settingsPopoverSource = readFileSync(
+  new URL("../src/video-generation-controls/VideoGenerationSettingsPopover.jsx", import.meta.url),
+  "utf8",
+);
+const anchoredPopoverSource = readFileSync(
+  new URL("../src/video-generation-controls/AnchoredPopover.jsx", import.meta.url),
   "utf8",
 );
 const candidateLibrarySource = readFileSync(
@@ -69,18 +93,53 @@ test("keeps the production workspace on a readable semantic type ramp", () => {
   assert.doesNotMatch(readableSection, /font-size:\s*(?:7|8|9|10|11)px/);
 });
 
-test("keeps video generation fields on shared heading and control rows", () => {
-  const optionsRule = cssRule(".shot-video-generation-options");
-  const fieldRule = cssRule(".shot-video-generation-field");
-  const durationRule = cssRule(".shot-video-duration-control");
+test("uses a compact generation command bar with upward anchored model and setting popovers", () => {
+  const commandRule = cssRule(".shot-video-generation-command", generationControlsStyles);
+  const barRule = cssRule(".shot-video-command-bar", generationControlsStyles);
+  const popoverRule = cssRule(".video-generation-popover", generationControlsStyles);
 
-  assert.match(optionsRule, /--shot-video-control-height:\s*48px/);
-  assert.match(optionsRule, /--shot-video-heading-height:\s*24px/);
-  assert.match(optionsRule, /align-items:\s*start/);
-  assert.match(fieldRule, /grid-template-rows:\s*var\(--shot-video-heading-height\) var\(--shot-video-control-height\)/);
-  assert.match(fieldRule, /align-content:\s*start/);
-  assert.match(fieldRule, /align-self:\s*start/);
-  assert.match(durationRule, /height:\s*var\(--shot-video-control-height\)/);
+  assert.match(workspaceSource, /<ShotVideoGenerationControls/);
+  assert.match(generationControlsSource, /<VideoModelPopover/);
+  assert.match(generationControlsSource, /<VideoGenerationSettingsPopover/);
+  assert.match(generationControlsSource, /aria-expanded=\{modelOpen\}/);
+  assert.match(generationControlsSource, /aria-expanded=\{settingsOpen\}/);
+  assert.match(generationControlsSource, /className=\"shot-video-model-trigger/);
+  assert.match(generationControlsSource, /className="shot-video-output-summary"/);
+  assert.doesNotMatch(generationControlsSource, /shot-video-capability-badge|>有序多图</);
+  assert.match(settingsPopoverSource, /生成前自动保存提示词与负面约束/);
+  assert.match(commandRule, /--video-command-control:\s*48px/);
+  assert.match(commandRule, /container-type:\s*inline-size/);
+  assert.match(barRule, /grid-template-areas:\s*"model summary cost actions"/);
+  assert.match(popoverRule, /position:\s*fixed/);
+  assert.match(popoverRule, /z-index:\s*60/);
+  assert.match(anchoredPopoverSource, /createPortal/);
+  assert.match(anchoredPopoverSource, /placeAbove/);
+  assert.match(anchoredPopoverSource, /contains\(event\.target\)/);
+  assert.doesNotMatch(anchoredPopoverSource, /Math\.max\(180, placeAbove/);
+  assert.match(settingsPopoverSource, /className="video-settings-scroll-region"/);
+  assert.match(generationControlsStyles, /\.video-settings-scroll-region\s*\{[\s\S]*overflow-y:\s*auto/);
+  assert.match(generationControlsStyles, /\.video-settings-footer\s*\{[\s\S]*flex:\s*0 0 auto/);
+  assert.match(modelPopoverSource, /尚未配置/);
+  assert.doesNotMatch(modelPopoverSource, /预计生成时间|约\d+分钟/);
+  assert.match(generationControlsStyles, /@container \(max-width: 680px\)/);
+  assert.match(generationControlsStyles, /@media \(max-width: 620px\)/);
+});
+
+test("derives compact output summaries and candidate choices from model capabilities", () => {
+  assert.equal(videoOutputSummary({
+    aspectRatio: "9:16",
+    candidateCount: 2,
+    duration: 5,
+    resolution: "720P",
+  }), "9:16 · 720P · 5秒 · 2个");
+  assert.deepEqual(
+    videoCandidateCountOptions({ capabilities: { max_candidates: 3 } }),
+    [1, 2, 3],
+  );
+  assert.deepEqual(
+    videoCandidateCountOptions({ capabilities: { max_candidates: 9 } }),
+    [1, 2, 3, 4],
+  );
 });
 
 test("uses one prompt editor role in image and video workspaces", () => {
@@ -109,11 +168,11 @@ test("distills repeated candidate metadata and progressively reveals negative co
 });
 
 test("associates the duration label, output and help text with the range input", () => {
-  assert.match(workspaceSource, /<label htmlFor=\{durationControlId\}>生成时长<\/label>/);
-  assert.match(workspaceSource, /<output htmlFor=\{durationControlId\}>/);
-  assert.match(workspaceSource, /id=\{durationControlId\}/);
-  assert.match(workspaceSource, /aria-describedby=\{durationHelpId\}/);
-  assert.match(workspaceSource, /className="shot-video-duration-meta"/);
+  assert.match(settingsPopoverSource, /<label htmlFor=\{durationControlId\}>视频时长<\/label>/);
+  assert.match(settingsPopoverSource, /<output htmlFor=\{durationControlId\}>/);
+  assert.match(settingsPopoverSource, /id=\{durationControlId\}/);
+  assert.match(settingsPopoverSource, /aria-describedby=\{durationHelpId\}/);
+  assert.match(settingsPopoverSource, /className="video-duration-help"/);
 });
 
 test("constrains portrait media inside the preview so native video controls stay visible", () => {
@@ -134,16 +193,29 @@ test("constrains portrait media inside the preview so native video controls stay
 
 test("keeps candidate actions compact and overlays download on the video", () => {
   assert.match(workspaceSource, /className="shot-video-download-button"/);
-  assert.match(workspaceSource, /className="shot-video-cost-summary"/);
+  assert.match(generationControlsSource, /className="shot-video-command-cost"/);
   assert.doesNotMatch(workspaceSource, /className=\{`shot-video-run-card/);
   assert.doesNotMatch(workspaceSource, />下载<\/a>/);
 
   const downloadRule = cssRule(".shot-video-download-button");
-  const actionRule = cssRule(".shot-video-prompt-actions");
+  const actionRule = cssRule(".shot-video-command-actions", generationControlsStyles);
   assert.match(downloadRule, /position:\s*absolute/);
   assert.match(downloadRule, /top:\s*9px/);
   assert.match(downloadRule, /right:\s*9px/);
-  assert.match(actionRule, /flex-wrap:\s*wrap/);
+  assert.match(actionRule, /display:\s*flex/);
+  assert.match(actionRule, /justify-content:\s*flex-end/);
+});
+
+test("auto-saves changed prompts with the returned revision before generating", () => {
+  assert.match(productionWorkflowSource, /function videoPromptChangesFromDraft/);
+  assert.match(
+    productionWorkflowSource,
+    /persistedShotDetail = await request\(`\/production-shots\/\$\{shotDetail\.plan\.id\}`[\s\S]*expectedRevisionId = persistedShotDetail\.current_revision_id[\s\S]*\/video-runs/,
+  );
+  assert.match(generationControlsSource, /生成前会自动保存当前提示词/);
+  assert.doesNotMatch(generationControlsSource, /保存提示词/);
+  assert.doesNotMatch(workspaceSource, /onSave/);
+  assert.doesNotMatch(productionWorkflowSource, /async function saveVideoPrompt/);
 });
 
 test("shows actionable provider failures and hides unsafe direct retry", () => {
@@ -153,7 +225,7 @@ test("shows actionable provider failures and hides unsafe direct retry", () => {
   assert.match(workspaceSource, /技术详情/);
   assert.match(workspaceSource, /复制诊断信息/);
   assert.match(workspaceSource, /latestFailure\.retryable/);
-  assert.match(workspaceSource, /latestRun\?\.status === "cancelled"/);
+  assert.match(generationControlsSource, /latestRun\?\.status === "cancelled"/);
   assert.match(workflowStyles, /\.shot-video-generation-error\s*\{/);
 });
 
@@ -308,7 +380,8 @@ test("offers only models that declare ordered multi-image capability", () => {
   assert.match(workspaceSource, /capability\?\.multi_image_reference/);
   assert.match(workspaceSource, /capability\?\.ordered_reference_images/);
   assert.match(workspaceSource, /videoModels\.filter\(supportsOrderedMultiImage\)/);
-  assert.match(workspaceSource, /compatibleVideoModels\.map/);
+  assert.match(modelPopoverSource, /configuredModels\.map/);
+  assert.match(modelPopoverSource, /unconfiguredModels\.map/);
   assert.doesNotMatch(workspaceSource, /\{videoModels\.map\(/);
   assert.match(workspaceSource, /preferredVideoResolution\(model, current\.resolution\)/);
 });

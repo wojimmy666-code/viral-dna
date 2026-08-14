@@ -5221,6 +5221,35 @@ button:disabled {
   line-height: 1.5;
 }
 
+.app-toast .app-toast-action {
+  width: fit-content;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 4px 9px;
+  border: 1px solid #d8d2fb;
+  border-radius: 7px;
+  color: #5e50c8;
+  background: #f5f2ff;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
+}
+
+.app-toast .app-toast-action:hover:not(:disabled) {
+  border-color: #b8adef;
+  background: #ece8ff;
+}
+
+.app-toast .app-toast-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .app-toast > button {
   width: 24px;
   height: 24px;

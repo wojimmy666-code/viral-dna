@@ -638,6 +638,8 @@ export function App() {
           title: notice.message && notice.title ? notice.title : "",
           type: notice.type || notice.level || "success",
           duration: notice.duration,
+          actionLabel: notice.actionLabel,
+          onAction: notice.onAction,
         };
     const id = `toast-${Date.now()}-${toastSequenceRef.current += 1}`;
     setToasts((current) => [...current.slice(-2), { id, ...normalized }]);

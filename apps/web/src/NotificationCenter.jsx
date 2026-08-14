@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Check,
@@ -33,18 +33,43 @@ function formatNotificationTime(value) {
 }
 
 function ToastItem({ toast, onDismiss }) {
+  const [actionBusy, setActionBusy] = useState(false);
+
   useEffect(() => {
+    if (actionBusy) return undefined;
     const timer = window.setTimeout(() => onDismiss(toast.id), toast.duration || 4200);
     return () => window.clearTimeout(timer);
-  }, [onDismiss, toast.duration, toast.id]);
+  }, [actionBusy, onDismiss, toast.duration, toast.id]);
+
+  async function runAction() {
+    if (!toast.onAction || actionBusy) return;
+    setActionBusy(true);
+    try {
+      await toast.onAction();
+      onDismiss(toast.id);
+    } catch {
+      setActionBusy(false);
+    }
+  }
 
   const role = toast.type === "error" ? "alert" : "status";
   return (
     <article className={`app-toast ${toast.type || "success"}`} role={role}>
       <span className="app-toast-icon">{notificationIcon({ level: toast.type }, 19)}</span>
-      <div>
+      <div className="app-toast-copy">
         {toast.title && <strong>{toast.title}</strong>}
         <p>{toast.message}</p>
+        {toast.actionLabel && toast.onAction && (
+          <button
+            className="app-toast-action"
+            disabled={actionBusy}
+            onClick={runAction}
+            type="button"
+          >
+            {actionBusy ? <CircleNotch className="spin" size={14} /> : null}
+            {actionBusy ? "正在恢复" : toast.actionLabel}
+          </button>
+        )}
       </div>
       <button aria-label="关闭提示" onClick={() => onDismiss(toast.id)} type="button">
         <X size={15} />

@@ -20,8 +20,18 @@ from uuid import UUID, uuid4
 from PIL import Image, ImageOps
 from pydantic import ValidationError
 
+from .candidate_lifecycle import (
+    archive_candidate_records,
+    is_user_deleted_candidate,
+    restore_candidate_records,
+)
 from .chinese import to_simplified
 from .image_generation import ImageGenerationGateway, ImageGenerationGatewayError
+from .image_generation.identity_policy import (
+    IdentityPolicyViolation,
+    validate_identity_bindings,
+    validate_identity_generation,
+)
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
     AnalysisJob,
@@ -40,7 +50,6 @@ from .models import (
     EditingHandoffClip,
     EditingHandoffManifest,
     GenerationCandidate,
-    GenerationCandidateArchiveReason,
     GenerationCandidateResponse,
     GenerationCandidateStatus,
     GenerationCostSource,
@@ -1315,23 +1324,25 @@ class ProductionService:
         *,
         affected_count: int,
         restored: bool,
+        kind: GenerationKind,
     ) -> None:
         if self.notification_publisher is None:
             return
         action = "恢复" if restored else "移入回收站"
+        kind_label = "图片" if kind == GenerationKind.IMAGE else "视频"
         try:
             await self.notification_publisher.publish(
                 category="production",
                 level="success",
                 status="succeeded",
-                title=f"已{action} {affected_count} 个视频候选",
+                title=f"已{action} {affected_count} 个{kind_label}候选",
                 message=(
                     f"分镜 {plan.index} 的候选已恢复为可采用状态。"
                     if restored
                     else f"分镜 {plan.index} 的候选文件仍会保留，可从回收站恢复。"
                 ),
                 event_key=(
-                    f"video-candidates:{project.current_revision_id}:"
+                    f"{kind.value}-candidates:{project.current_revision_id}:"
                     f"{'restore' if restored else 'archive'}"
                 ),
                 action_kind="production_shot",
@@ -4676,6 +4687,21 @@ class ProductionService:
             raise _fail(409, "image_prompt_required", "请先填写图片提示词")
         if beat.image_status == WorkflowItemStatus.APPROVED:
             raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
+        bindings = await self.repository.list_reference_bindings(plan.id)
+        assets = await self._list_reference_assets(project.id)
+        gateway_plan = _shot_for_visual_beat(plan, beat)
+        try:
+            identity_policy = validate_identity_bindings(bindings, assets)
+            validate_identity_generation(
+                state=identity_policy,
+                input_mode=payload.input_mode,
+                source_present=bool(
+                    gateway_plan.source_keyframe_url
+                    or gateway_plan.source_keyframe_relative_path
+                ),
+            )
+        except IdentityPolicyViolation as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
         active_statuses = {
             ProductionRunStatus.QUEUED,
             ProductionRunStatus.RUNNING,
@@ -4744,7 +4770,7 @@ class ProductionService:
             provider="pending",
             model="pending",
             model_snapshot="pending",
-            prompt_version="shot-image-v2",
+            prompt_version="shot-image-v3",
             schema_version="viral-dna-image-job/v1",
             pricing_version="pending",
             request_fingerprint=fingerprint,
@@ -5120,8 +5146,8 @@ class ProductionService:
                 raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
 
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
-            bindings = await self.repository.list_reference_bindings(plan.id) if uses_images else []
-            assets = await self._list_reference_assets(project.id) if uses_images else []
+            bindings = await self.repository.list_reference_bindings(plan.id)
+            assets = await self._list_reference_assets(project.id)
             assets_by_id = {item.id: item for item in assets}
             for binding in bindings:
                 asset = assets_by_id.get(binding.reference_asset_id)
@@ -5134,7 +5160,9 @@ class ProductionService:
                 if not asset.rights_confirmed:
                     raise _fail(409, "reference_rights_required", "分镜参考资产尚未完成权利确认")
             source_path = (
-                self._resolve_source_keyframe(project, gateway_plan) if uses_images else None
+                self._resolve_source_keyframe(project, gateway_plan)
+                if uses_images
+                else None
             )
             try:
                 run, candidates = await self.image_gateway.generate(
@@ -5428,6 +5456,218 @@ class ProductionService:
         await self._require_project(run.project_id)
         return await self._run_response(run)
 
+    async def archive_generation_candidates(
+        self,
+        payload: CandidateBatchLifecycleRequest,
+        *,
+        actor_account_id: UUID | None = None,
+    ) -> CandidateBatchLifecycleResponse:
+        candidate = await self._require_candidate(payload.candidate_ids[0])
+        run = await self._require_run(candidate.generation_run_id)
+        if run.kind == GenerationKind.IMAGE:
+            return await self.archive_image_candidates(
+                payload,
+                actor_account_id=actor_account_id,
+            )
+        return await self.archive_video_candidates(
+            payload,
+            actor_account_id=actor_account_id,
+        )
+
+    async def restore_generation_candidates(
+        self,
+        payload: CandidateBatchLifecycleRequest,
+    ) -> CandidateBatchLifecycleResponse:
+        candidate = await self._require_candidate(payload.candidate_ids[0])
+        run = await self._require_run(candidate.generation_run_id)
+        if run.kind == GenerationKind.IMAGE:
+            return await self.restore_image_candidates(payload)
+        return await self.restore_video_candidates(payload)
+
+    async def archive_image_candidates(
+        self,
+        payload: CandidateBatchLifecycleRequest,
+        *,
+        actor_account_id: UUID | None = None,
+    ) -> CandidateBatchLifecycleResponse:
+        first_candidate = await self._require_candidate(payload.candidate_ids[0])
+        first_run = await self._require_run(first_candidate.generation_run_id)
+        lock = await self._project_lock(first_run.project_id)
+        async with lock:
+            project, plan, beat, candidates = await self._load_image_candidate_batch(
+                payload.candidate_ids
+            )
+            self._require_expected_revision(project, payload.expected_revision_id)
+
+            if any(item.id == beat.approved_image_candidate_id for item in candidates):
+                raise _fail(
+                    409,
+                    "approved_image_candidate_archive_forbidden",
+                    "已采用的图片不能删除，请先取消采用或改用其他图片",
+                )
+            unavailable = [
+                item
+                for item in candidates
+                if item.status == GenerationCandidateStatus.REJECTED
+                or is_user_deleted_candidate(item)
+            ]
+            if unavailable:
+                raise _fail(
+                    409,
+                    "image_candidate_archive_unavailable",
+                    "所选图片包含已退回或已删除候选，请刷新后重试",
+                )
+
+            now = utc_now()
+            revision_id = uuid4()
+            candidate_ids = {item.id for item in candidates}
+            updated_candidates = archive_candidate_records(
+                candidates,
+                actor_account_id=actor_account_id,
+                archived_at=now,
+            )
+
+            remaining_candidates: list[GenerationCandidate] = []
+            for run in await self.repository.list_generation_runs(project.id, plan.id):
+                if run.kind != GenerationKind.IMAGE or not _run_matches_visual_beat(
+                    run,
+                    plan,
+                    beat.id,
+                ):
+                    continue
+                remaining_candidates.extend(
+                    item
+                    for item in await self.repository.list_generation_candidates(run.id)
+                    if item.id not in candidate_ids
+                    and item.status != GenerationCandidateStatus.REJECTED
+                    and not is_user_deleted_candidate(item)
+                )
+
+            selected_deleted = any(
+                item.status == GenerationCandidateStatus.SELECTED for item in candidates
+            )
+            updated_beat = beat
+            if selected_deleted and beat.image_status not in {
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }:
+                updated_beat = beat.model_copy(
+                    update={
+                        "image_status": (
+                            WorkflowItemStatus.REVIEW_REQUIRED
+                            if remaining_candidates
+                            else WorkflowItemStatus.READY
+                        ),
+                        "updated_at": now,
+                    }
+                )
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
+                revision_id=revision_id,
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            next_project = project.model_copy(update={"updated_at": now})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.IMAGE_CANDIDATES_ARCHIVED,
+                f"删除分镜 {plan.index} 画面 {beat.index} 的 {len(candidates)} 个图片候选",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=updated_candidates,
+            )
+
+        await self._notify_candidate_lifecycle(
+            next_project,
+            updated_plan,
+            affected_count=len(updated_candidates),
+            restored=False,
+            kind=GenerationKind.IMAGE,
+        )
+        return CandidateBatchLifecycleResponse(
+            project_id=next_project.id,
+            shot_plan_id=updated_plan.id,
+            current_revision_id=next_project.current_revision_id,
+            candidates=[self._candidate_response(item) for item in updated_candidates],
+            affected_count=len(updated_candidates),
+        )
+
+    async def restore_image_candidates(
+        self,
+        payload: CandidateBatchLifecycleRequest,
+    ) -> CandidateBatchLifecycleResponse:
+        first_candidate = await self._require_candidate(payload.candidate_ids[0])
+        first_run = await self._require_run(first_candidate.generation_run_id)
+        lock = await self._project_lock(first_run.project_id)
+        async with lock:
+            project, plan, beat, candidates = await self._load_image_candidate_batch(
+                payload.candidate_ids
+            )
+            self._require_expected_revision(project, payload.expected_revision_id)
+            if not all(is_user_deleted_candidate(item) for item in candidates):
+                raise _fail(
+                    409,
+                    "image_candidate_restore_unavailable",
+                    "仅能恢复由用户删除的图片候选",
+                )
+
+            now = utc_now()
+            revision_id = uuid4()
+            updated_candidates = restore_candidate_records(candidates)
+            updated_beat = beat
+            if beat.image_status not in {
+                WorkflowItemStatus.APPROVED,
+                WorkflowItemStatus.STALE,
+            }:
+                updated_beat = beat.model_copy(
+                    update={
+                        "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                        "updated_at": now,
+                    }
+                )
+            updated_plan = _sync_shot_visual_beats(
+                plan,
+                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
+                revision_id=revision_id,
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            next_project = project.model_copy(update={"updated_at": now})
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.IMAGE_CANDIDATES_RESTORED,
+                f"恢复分镜 {plan.index} 画面 {beat.index} 的 {len(candidates)} 个图片候选",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_candidates=updated_candidates,
+            )
+
+        await self._notify_candidate_lifecycle(
+            next_project,
+            updated_plan,
+            affected_count=len(updated_candidates),
+            restored=True,
+            kind=GenerationKind.IMAGE,
+        )
+        return CandidateBatchLifecycleResponse(
+            project_id=next_project.id,
+            shot_plan_id=updated_plan.id,
+            current_revision_id=next_project.current_revision_id,
+            candidates=[self._candidate_response(item) for item in updated_candidates],
+            affected_count=len(updated_candidates),
+        )
+
     async def archive_video_candidates(
         self,
         payload: CandidateBatchLifecycleRequest,
@@ -5469,23 +5709,11 @@ class ProductionService:
             now = utc_now()
             revision_id = uuid4()
             candidate_ids = {item.id for item in candidates}
-            updated_candidates: list[GenerationCandidate] = []
-            for candidate in candidates:
-                quality_report = dict(candidate.quality_report)
-                quality_report["archive_reason"] = (
-                    GenerationCandidateArchiveReason.USER_DELETED.value
-                )
-                updated_candidates.append(
-                    candidate.model_copy(
-                        update={
-                            "status": GenerationCandidateStatus.ARCHIVED,
-                            "archived_at": now,
-                            "archived_by_account_id": actor_account_id,
-                            "archive_reason": (GenerationCandidateArchiveReason.USER_DELETED),
-                            "quality_report": quality_report,
-                        }
-                    )
-                )
+            updated_candidates = archive_candidate_records(
+                candidates,
+                actor_account_id=actor_account_id,
+                archived_at=now,
+            )
 
             remaining_candidates: list[GenerationCandidate] = []
             for run in await self.repository.list_generation_runs(project.id, plan.id):
@@ -5541,6 +5769,7 @@ class ProductionService:
             updated_plan,
             affected_count=len(updated_candidates),
             restored=False,
+            kind=GenerationKind.VIDEO,
         )
         return CandidateBatchLifecycleResponse(
             project_id=next_project.id,
@@ -5563,15 +5792,7 @@ class ProductionService:
             )
             self._require_expected_revision(project, payload.expected_revision_id)
 
-            restorable = all(
-                item.status == GenerationCandidateStatus.ARCHIVED
-                and (
-                    item.archive_reason == GenerationCandidateArchiveReason.USER_DELETED
-                    or item.quality_report.get("archive_reason")
-                    == GenerationCandidateArchiveReason.USER_DELETED.value
-                )
-                for item in candidates
-            )
+            restorable = all(is_user_deleted_candidate(item) for item in candidates)
             if not restorable:
                 raise _fail(
                     409,
@@ -5581,21 +5802,7 @@ class ProductionService:
 
             now = utc_now()
             revision_id = uuid4()
-            updated_candidates: list[GenerationCandidate] = []
-            for candidate in candidates:
-                quality_report = dict(candidate.quality_report)
-                quality_report.pop("archive_reason", None)
-                updated_candidates.append(
-                    candidate.model_copy(
-                        update={
-                            "status": GenerationCandidateStatus.READY,
-                            "archived_at": None,
-                            "archived_by_account_id": None,
-                            "archive_reason": None,
-                            "quality_report": quality_report,
-                        }
-                    )
-                )
+            updated_candidates = restore_candidate_records(candidates)
 
             next_video_status = plan.video_status
             if plan.video_status not in {
@@ -5632,6 +5839,7 @@ class ProductionService:
             updated_plan,
             affected_count=len(updated_candidates),
             restored=True,
+            kind=GenerationKind.VIDEO,
         )
         return CandidateBatchLifecycleResponse(
             project_id=next_project.id,
@@ -5666,7 +5874,10 @@ class ProductionService:
                 )
             if candidate.status == GenerationCandidateStatus.REJECTED or (
                 candidate.status == GenerationCandidateStatus.ARCHIVED
-                and run.kind != GenerationKind.IMAGE
+                and (
+                    run.kind != GenerationKind.IMAGE
+                    or is_user_deleted_candidate(candidate)
+                )
             ):
                 raise _fail(409, "candidate_unavailable", "该候选已退回或归档")
             beat = (
@@ -5844,7 +6055,9 @@ class ProductionService:
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
             if candidate.status == GenerationCandidateStatus.REJECTED:
                 raise _fail(409, "candidate_unavailable", "已退回候选不能审批")
-            if candidate.status == GenerationCandidateStatus.ARCHIVED and not direct_image_approval:
+            if candidate.status == GenerationCandidateStatus.ARCHIVED and (
+                not direct_image_approval or is_user_deleted_candidate(candidate)
+            ):
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
             if target_status == WorkflowItemStatus.STALE and not direct_image_approval:
                 raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
@@ -8400,6 +8613,10 @@ class ProductionService:
                     ),
                 )
             )
+        try:
+            validate_identity_bindings(bindings, assets.values())
+        except IdentityPolicyViolation as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
         return bindings
 
     async def _all_bindings(
@@ -8474,6 +8691,7 @@ class ProductionService:
                 run.provider_request_id or (failed_task.provider_task_id if failed_task else None)
             ),
             capability_snapshot=run.capability_snapshot,
+            execution_summary=run.execution_summary,
             cost_source=run.cost_source,
             cost_estimate_known=run.cost_estimate_known,
             actual_cost_known=run.actual_cost_known,
@@ -8982,6 +9200,49 @@ class ProductionService:
         plan = await self._require_shot(next(iter(shot_plan_ids)))
         self._ensure_shot_active(plan)
         return project, plan, candidates
+
+    async def _load_image_candidate_batch(
+        self,
+        candidate_ids: list[UUID],
+    ) -> tuple[
+        ProductionProject,
+        ShotPlan,
+        ShotVisualBeat,
+        list[GenerationCandidate],
+    ]:
+        candidates: list[GenerationCandidate] = []
+        runs: list[GenerationRun] = []
+        for candidate_id in candidate_ids:
+            candidate = await self._require_candidate(candidate_id)
+            run = await self._require_run(candidate.generation_run_id)
+            if candidate.kind != run.kind or run.kind != GenerationKind.IMAGE:
+                raise _fail(
+                    409,
+                    "image_candidate_batch_required",
+                    "批量操作仅支持图片候选",
+                )
+            candidates.append(candidate)
+            runs.append(run)
+
+        project_ids = {run.project_id for run in runs}
+        shot_plan_ids = {run.shot_plan_id for run in runs}
+        if len(project_ids) != 1 or len(shot_plan_ids) != 1:
+            raise _fail(
+                409,
+                "image_candidate_batch_scope_mismatch",
+                "一次只能处理同一分镜画面中的图片候选",
+            )
+        project = await self._require_project(next(iter(project_ids)))
+        plan = await self._require_shot(next(iter(shot_plan_ids)))
+        self._ensure_shot_active(plan)
+        beats = [_visual_beat(plan, run.visual_beat_id) for run in runs]
+        if len({item.id for item in beats}) != 1:
+            raise _fail(
+                409,
+                "image_candidate_batch_visual_beat_mismatch",
+                "一次只能处理同一画面的图片候选",
+            )
+        return project, plan, beats[0], candidates
 
     async def _completed_analysis(
         self,
@@ -9628,6 +9889,8 @@ class ProductionService:
             project_id=asset.project_id,
             type=asset.type,
             name=asset.name,
+            folder_id=asset.folder_id,
+            folder_name=asset.folder_name,
             description=asset.description,
             mime_type=asset.mime_type,
             width=asset.width,

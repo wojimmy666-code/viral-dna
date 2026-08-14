@@ -12,6 +12,7 @@ import {
   FloppyDisk,
   ImageSquare,
   MagicWand,
+  MagnifyingGlassPlus,
   Plus,
   Trash,
   VideoCamera,
@@ -20,11 +21,12 @@ import {
 } from "@phosphor-icons/react";
 import {
   REFERENCE_ROLE_OPTIONS,
-  SHOT_LOCK_OPTIONS,
   duplicateVisualBeatSourceIds,
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
   imageGenerationModeLabel,
+  imageGenerationInputManifest,
+  imageIdentityPolicy,
   imageGenerationRunLabel,
   imageQualityLabel,
   isAiImageGenerationRun,
@@ -34,7 +36,19 @@ import {
   workflowStatusClass,
   workflowStatusLabel,
 } from "./production-ui.js";
+import { MediaLightbox } from "./MediaLightbox.jsx";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
+import {
+  assetDirectoryLabel,
+  assetMentionLabel,
+  assetMentionSearchText,
+  assetMentionToken,
+  isUserDeletedCandidate,
+  isVisibleImageCandidate,
+  mentionToken,
+  normalizePromptMentionDraft,
+  removeMentionFromPrompt,
+} from "./shot-image-ui.js";
 
 const DEFAULT_ROLE_BY_TYPE = Object.freeze({
   person: "identity",
@@ -339,6 +353,7 @@ export function ShotImageWorkspace({
   onCreateVisualBeat,
   onDeleteVisualBeat,
   onDiscardShot,
+  onArchiveCandidate,
   onSelectCandidate,
   onApprove,
   onRevokeApproval,
@@ -357,6 +372,7 @@ export function ShotImageWorkspace({
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [visualChoice, setVisualChoice] = useState("source");
   const [candidateHistoryExpanded, setCandidateHistoryExpanded] = useState(false);
+  const [lightboxCandidateId, setLightboxCandidateId] = useState(null);
   const [mentionMenu, setMentionMenu] = useState(null);
   const promptRef = useRef(null);
   const shotPlan = shotDetail?.plan;
@@ -403,6 +419,29 @@ export function ShotImageWorkspace({
     [shots],
   );
   const generationRuns = shotDetail?.generation_runs || [];
+  const assetsById = useMemo(
+    () => new Map(assets.map((asset) => [asset.id, asset])),
+    [assets],
+  );
+  const identityPolicy = useMemo(
+    () => imageIdentityPolicy(draft.referenceBindings, assets),
+    [assets, draft.referenceBindings],
+  );
+  const generationInputManifest = useMemo(
+    () => imageGenerationInputManifest({
+      inputMode: identityPolicy.enabled ? "keyframe_edit" : generationInputMode,
+      sourceUrl: plan?.source_keyframe_url || "",
+      referenceBindings: draft.referenceBindings,
+      assets,
+    }),
+    [
+      assets,
+      draft.referenceBindings,
+      generationInputMode,
+      identityPolicy.enabled,
+      plan?.source_keyframe_url,
+    ],
+  );
   const visualBeatPreviews = useMemo(() => {
     const previews = new Map();
     for (const beat of visualBeats) {
@@ -447,7 +486,7 @@ export function ShotImageWorkspace({
       .map((run) => ({
         run,
         candidates: (run.candidates || [])
-          .filter((candidate) => candidate.status !== "rejected")
+          .filter(isVisibleImageCandidate)
           .sort((left, right) => left.ordinal - right.ordinal)
           .map((candidate) => ({ ...candidate, generationRun: run })),
       }))
@@ -457,6 +496,16 @@ export function ShotImageWorkspace({
   const candidates = useMemo(
     () => candidateGroups.flatMap((group) => group.candidates),
     [candidateGroups],
+  );
+  const lightboxItems = useMemo(
+    () => candidates.map((candidate) => ({
+      id: candidate.id,
+      src: resolveUrl(candidate.content_url || candidate.thumbnail_url),
+      title: `分镜 ${plan?.index || ""} · AI 生成图`,
+      meta: `${candidate.generationRun?.model_display_name || candidate.generationRun?.model || "未记录模型"} · ${formatCandidateBatchTime(candidate.generationRun?.completed_at || candidate.generationRun?.created_at)}`,
+      alt: `分镜 ${plan?.index || ""} 的 AI 图片候选`,
+    })),
+    [candidates, plan?.index, resolveUrl],
   );
   const allImageCandidateEntries = useMemo(
     () => imageRuns.flatMap((run) => (run.candidates || []).map((candidate) => ({
@@ -597,6 +646,11 @@ export function ShotImageWorkspace({
         : remoteConfigured
     ),
   );
+  const identityGenerationBlocker = !identityPolicy.valid
+    ? identityPolicy.blocker
+    : identityPolicy.enabled && !plan?.source_keyframe_url
+      ? "人物身份替换需要先选择原视频关键帧"
+      : "";
   const ignoredSimulation = Boolean(
     latestRun
     && (
@@ -633,20 +687,38 @@ export function ShotImageWorkspace({
 
   useEffect(() => {
     setCandidateHistoryExpanded(false);
+    setLightboxCandidateId(null);
   }, [activeVisualBeat?.id, plan?.id]);
 
   useEffect(() => {
-    if (plan?.source_kind === "blank") setGenerationInputMode("text_to_image");
-  }, [plan?.id, plan?.source_kind, setGenerationInputMode]);
+    setDraft((state) => {
+      const normalized = normalizePromptMentionDraft(
+        state.imagePrompt,
+        state.imagePromptMentions,
+        assets,
+      );
+      return normalized.changed
+        ? {
+            ...state,
+            imagePrompt: normalized.imagePrompt,
+            imagePromptMentions: normalized.imagePromptMentions,
+          }
+        : state;
+    });
+  }, [activeVisualBeat?.id, assets, plan?.id, setDraft]);
 
-  function toggleLock(lockId) {
-    setDraft((state) => ({
-      ...state,
-      locks: state.locks.includes(lockId)
-        ? state.locks.filter((item) => item !== lockId)
-        : [...state.locks, lockId],
-    }));
-  }
+  useEffect(() => {
+    if (identityPolicy.enabled) {
+      setGenerationInputMode("keyframe_edit");
+    } else if (plan?.source_kind === "blank") {
+      setGenerationInputMode("text_to_image");
+    }
+  }, [
+    identityPolicy.enabled,
+    plan?.id,
+    plan?.source_kind,
+    setGenerationInputMode,
+  ]);
 
   function toggleBinding(asset) {
     setDraft((state) => {
@@ -656,6 +728,13 @@ export function ShotImageWorkspace({
       const mention = state.imagePromptMentions.find(
         (item) => item.reference_asset_id === asset.id,
       );
+      const currentIdentity = state.referenceBindings.find(
+        (item) => item.role === "identity" && item.reference_asset_id !== asset.id,
+      );
+      const defaultRole = DEFAULT_ROLE_BY_TYPE[asset.type] || "layout";
+      const nextRole = defaultRole === "identity" && currentIdentity
+        ? "layout"
+        : defaultRole;
       return {
         ...state,
         referenceBindings: exists
@@ -666,7 +745,7 @@ export function ShotImageWorkspace({
             ...state.referenceBindings,
             {
               reference_asset_id: asset.id,
-              role: DEFAULT_ROLE_BY_TYPE[asset.type] || "layout",
+              role: nextRole,
               weight: 1,
             },
           ],
@@ -676,9 +755,7 @@ export function ShotImageWorkspace({
           )
           : state.imagePromptMentions,
         imagePrompt: exists
-          ? state.imagePrompt
-            .replaceAll("@" + (mention?.label || asset.name), "")
-            .replace(/\s{2,}/g, " ")
+          ? removeMentionFromPrompt(state.imagePrompt, mention || {}, asset)
           : state.imagePrompt,
       };
     });
@@ -720,6 +797,18 @@ export function ShotImageWorkspace({
     setVisualChoice("source");
   }
 
+  function manifestRoleLabel(item) {
+    if (item.kind === "source_keyframe") return "构图、姿态、动作和机位";
+    if (item.identity_source) return "唯一人物身份来源";
+    return {
+      product: "产品外观与结构",
+      wardrobe: "服装款式与材质",
+      scene: "场景环境",
+      style: "视觉风格",
+      layout: "道具与布局",
+    }[item.role] || "参考资产";
+  }
+
   function moveVisualBeat(visualBeatId, offset) {
     const currentIndex = visualBeats.findIndex((item) => item.id === visualBeatId);
     const targetIndex = currentIndex + offset;
@@ -737,6 +826,7 @@ export function ShotImageWorkspace({
     if (
       plan?.image_status !== "approved"
       && ["ready", "archived"].includes(candidate.status)
+      && !isUserDeletedCandidate(candidate)
     ) {
       onSelectCandidate(candidate.id);
     }
@@ -782,29 +872,53 @@ export function ShotImageWorkspace({
                   ? "历史"
                   : "候选";
             return (
-              <button
-                aria-label={`${title}，第 ${index + 1} 张，共 ${group.candidates.length} 张，${stateLabel}`}
-                aria-pressed={isChosen}
-                className={[
-                  "shot-candidate-tile",
-                  isPreviewing ? "previewing" : "",
-                  isChosen ? "active" : "",
-                  isApproved ? "approved" : "",
-                ].filter(Boolean).join(" ")}
-                disabled={busy}
-                key={candidate.id}
-                onClick={() => chooseCandidate(candidate)}
-                title={`${modelLabel} · ${batchTime} · ${qualityLabel}`}
-                type="button"
-              >
-                <span className="shot-candidate-thumb">
-                  <MediaPreview
-                    alt={`${title}第 ${index + 1} 张图片候选`}
-                    emptyLabel="候选图不可用"
-                    src={resolveUrl(candidate.thumbnail_url || candidate.content_url)}
-                  />
+              <div className="shot-candidate-tile-shell" key={candidate.id}>
+                <button
+                  aria-label={`${title}，第 ${index + 1} 张，共 ${group.candidates.length} 张，${stateLabel}`}
+                  aria-pressed={isChosen}
+                  className={[
+                    "shot-candidate-tile",
+                    isPreviewing ? "previewing" : "",
+                    isChosen ? "active" : "",
+                    isApproved ? "approved" : "",
+                  ].filter(Boolean).join(" ")}
+                  disabled={busy}
+                  onClick={() => chooseCandidate(candidate)}
+                  title={`${modelLabel} · ${batchTime} · ${qualityLabel}`}
+                  type="button"
+                >
+                  <span className="shot-candidate-thumb">
+                    <MediaPreview
+                      alt={`${title}第 ${index + 1} 张图片候选`}
+                      emptyLabel="候选图不可用"
+                      src={resolveUrl(candidate.thumbnail_url || candidate.content_url)}
+                    />
+                  </span>
+                </button>
+                <span className="shot-candidate-tile-actions">
+                  <button
+                    aria-label="放大查看图片候选"
+                    disabled={busy}
+                    onClick={() => setLightboxCandidateId(candidate.id)}
+                    title="放大查看"
+                    type="button"
+                  >
+                    <MagnifyingGlassPlus size={14} />
+                  </button>
+                  {!isApproved && (
+                    <button
+                      aria-label="删除图片候选"
+                      className="danger"
+                      disabled={busy}
+                      onClick={() => onArchiveCandidate?.(candidate.id)}
+                      title="删除候选（可撤销）"
+                      type="button"
+                    >
+                      <Trash size={14} />
+                    </button>
+                  )}
                 </span>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -816,12 +930,16 @@ export function ShotImageWorkspace({
     const value = event.target.value;
     const cursor = event.target.selectionStart ?? value.length;
     const prefix = value.slice(0, cursor);
-    const match = prefix.match(/@([^@\s]*)$/);
+    const match = prefix.match(/@([^@\n,，。；;]*)$/);
     setDraft((state) => ({
       ...state,
       imagePrompt: value,
       imagePromptMentions: state.imagePromptMentions.filter(
-        (item) => value.includes("@" + item.label),
+        (item) => {
+          const asset = assetsById.get(item.reference_asset_id);
+          return value.includes(mentionToken(item, asset))
+            || value.includes(mentionToken(item));
+        },
       ),
     }));
     setMentionMenu(match ? { start: cursor - match[1].length - 1, end: cursor, query: match[1] } : null);
@@ -830,7 +948,7 @@ export function ShotImageWorkspace({
   function insertMention(asset) {
     if (!mentionMenu) return;
     setDraft((state) => {
-      const token = "@" + asset.name;
+      const token = assetMentionToken(asset);
       const nextPrompt = (
         state.imagePrompt.slice(0, mentionMenu.start)
         + token
@@ -843,19 +961,28 @@ export function ShotImageWorkspace({
       const hasBinding = state.referenceBindings.some(
         (item) => item.reference_asset_id === asset.id,
       );
+      const hasOtherIdentity = state.referenceBindings.some(
+        (item) => item.role === "identity" && item.reference_asset_id !== asset.id,
+      );
+      const defaultRole = DEFAULT_ROLE_BY_TYPE[asset.type] || "layout";
       return {
         ...state,
         imagePrompt: nextPrompt,
         imagePromptMentions: hasMention
           ? state.imagePromptMentions
-          : [...state.imagePromptMentions, { reference_asset_id: asset.id, label: asset.name }],
+          : [
+              ...state.imagePromptMentions,
+              { reference_asset_id: asset.id, label: assetMentionLabel(asset) },
+            ],
         referenceBindings: hasBinding
           ? state.referenceBindings
           : [
             ...state.referenceBindings,
             {
               reference_asset_id: asset.id,
-              role: DEFAULT_ROLE_BY_TYPE[asset.type] || "layout",
+              role: defaultRole === "identity" && hasOtherIdentity
+                ? "layout"
+                : defaultRole,
               weight: 1,
             },
           ],
@@ -868,7 +995,9 @@ export function ShotImageWorkspace({
   const mentionAssets = mentionMenu
     ? assets.filter((asset) => (
       !mentionMenu.query
-      || asset.name.toLowerCase().includes(mentionMenu.query.toLowerCase())
+      || assetMentionSearchText(asset).includes(
+        mentionMenu.query.trim().toLocaleLowerCase("zh-CN"),
+      )
     ))
     : [];
 
@@ -1274,6 +1403,20 @@ export function ShotImageWorkspace({
                       emptyLabel="点击下方按钮生成候选"
                       src={displayedCandidate ? resolveUrl(displayedCandidate.content_url) : ""}
                     />
+                    {displayedCandidate && (
+                      <button
+                        aria-label="放大查看当前 AI 生成图"
+                        className="shot-media-zoom-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setLightboxCandidateId(displayedCandidate.id);
+                        }}
+                        title="放大查看"
+                        type="button"
+                      >
+                        <MagnifyingGlassPlus size={17} />
+                      </button>
+                    )}
                   </div>
                   {displayedCandidate && (
                     <small
@@ -1369,7 +1512,9 @@ export function ShotImageWorkspace({
                       value={generationInputMode}
                     >
                       <option value="keyframe_edit">关键帧编辑（文字 + 图片）</option>
-                      <option value="text_to_image">纯文生图（仅文字）</option>
+                      <option disabled={identityPolicy.enabled} value="text_to_image">
+                        纯文生图（仅文字）{identityPolicy.enabled ? "（人物身份资产已绑定）" : ""}
+                      </option>
                     </select>
                   </label>
                   <label>
@@ -1397,6 +1542,46 @@ export function ShotImageWorkspace({
                     </select>
                   </label>
                 </div>
+                {generationInputManifest.length > 0 && (
+                  <section className={`shot-input-manifest${identityPolicy.enabled ? " identity-locked" : ""}`}>
+                    <header>
+                      <div>
+                        <strong>本次将发送给模型</strong>
+                        <small>保存并生成时会固化为任务输入快照</small>
+                      </div>
+                      {identityPolicy.enabled && <span>身份来源已锁定</span>}
+                    </header>
+                    <ol>
+                      {generationInputManifest.map((item) => (
+                        <li className={item.identity_source ? "identity" : ""} key={`${item.input_index}-${item.asset_id || "source"}`}>
+                          <span className="shot-input-manifest-thumb">
+                            <MediaPreview
+                              alt={`${item.label}输入缩略图`}
+                              emptyLabel="无预览"
+                              src={resolveUrl(item.thumbnail_url)}
+                            />
+                          </span>
+                          <span>
+                            <b>图像 {item.input_index}</b>
+                            <strong>{item.label}</strong>
+                            <small>{manifestRoleLabel(item)}</small>
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                    {identityPolicy.enabled && (
+                      <p>
+                        图像 1 只保留姿态、构图和动作；人物年龄、五官、脸型、肤色与身份只取自图像 2。
+                      </p>
+                    )}
+                  </section>
+                )}
+                {identityGenerationBlocker && (
+                  <p className="shot-identity-blocker" role="alert">
+                    <WarningCircle size={15} />
+                    {identityGenerationBlocker}
+                  </p>
+                )}
                 <p>
                   {generationInputMode === "text_to_image"
                     ? "纯文生图不会发送当前关键帧或已绑定参考图。"
@@ -1437,6 +1622,7 @@ export function ShotImageWorkspace({
                     || latestRunBusy
                     || plan.image_status === "approved"
                     || !generationAvailable
+                    || Boolean(identityGenerationBlocker)
                   }
                   onClick={() => (
                     latestRunRetryable
@@ -1525,7 +1711,10 @@ export function ShotImageWorkspace({
                         type="button"
                       >
                         <AssetThumbnail asset={asset} resolveUrl={resolveUrl} />
-                        <span><strong>@{asset.name}</strong><small>{asset.type}</small></span>
+                        <span>
+                          <strong>{assetMentionToken(asset)}</strong>
+                          <small>{assetDirectoryLabel(asset)} · {asset.type}</small>
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -1539,24 +1728,33 @@ export function ShotImageWorkspace({
                       key={mention.reference_asset_id}
                       onClick={() => setDraft((state) => ({
                         ...state,
-                        imagePrompt: state.imagePrompt
-                          .replaceAll("@" + mention.label, "")
-                          .replace(/\s{2,}/g, " "),
+                        imagePrompt: removeMentionFromPrompt(
+                          state.imagePrompt,
+                          mention,
+                          assetsById.get(mention.reference_asset_id),
+                        ),
                         imagePromptMentions: state.imagePromptMentions.filter(
                           (item) => item.reference_asset_id !== mention.reference_asset_id,
                         ),
                       }))}
                       type="button"
                     >
-                      @{mention.label}<X size={11} />
+                      {mentionToken(
+                        mention,
+                        assetsById.get(mention.reference_asset_id),
+                      )}<X size={11} />
                     </button>
                   ))}
                 </span>
               )}
             </label>
-            <label className="production-field">
-              <span>负面约束</span>
+            <details
+              className="production-field shot-image-negative-constraints"
+              key={activeVisualBeat?.id || plan?.id}
+            >
+              <summary>负面约束（可选）</summary>
               <textarea
+                aria-label="图片负面约束"
                 className="prompt-editor-textarea"
                 maxLength={4000}
                 onChange={(event) => setDraft((state) => ({ ...state, negativeConstraints: event.target.value }))}
@@ -1564,22 +1762,7 @@ export function ShotImageWorkspace({
                 rows={4}
                 value={draft.negativeConstraints}
               />
-            </label>
-            <fieldset className="shot-lock-field">
-              <legend>锁定原视频要素</legend>
-              <div>
-                {SHOT_LOCK_OPTIONS.map((item) => (
-                  <label key={item.id}>
-                    <input
-                      checked={draft.locks.includes(item.id)}
-                      onChange={() => toggleLock(item.id)}
-                      type="checkbox"
-                    />
-                    <span>{item.label}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
+            </details>
             <fieldset className="shot-reference-field">
               <legend>参考资产绑定</legend>
               {assets.length === 0 ? (
@@ -1611,7 +1794,17 @@ export function ShotImageWorkspace({
                             value={binding.role}
                           >
                             {REFERENCE_ROLE_OPTIONS.map((option) => (
-                              <option key={option.id} value={option.id}>{option.label}</option>
+                              <option
+                                disabled={
+                                  option.id === "identity"
+                                  && identityPolicy.primaryBinding
+                                  && identityPolicy.primaryBinding.reference_asset_id !== asset.id
+                                }
+                                key={option.id}
+                                value={option.id}
+                              >
+                                {option.label}
+                              </option>
                             ))}
                           </select>
                         )}
@@ -1635,6 +1828,12 @@ export function ShotImageWorkspace({
           </form>
         </aside>
       </div>
+      <MediaLightbox
+        activeId={lightboxCandidateId}
+        items={lightboxItems}
+        onActiveChange={setLightboxCandidateId}
+        onClose={() => setLightboxCandidateId(null)}
+      />
       {keyframePickerOpen && plan && (
         <KeyframePicker
           busy={busy}

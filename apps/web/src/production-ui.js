@@ -39,6 +39,8 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   shot_structure_changed: "调整分镜结构",
   source_keyframe_changed: "更换分镜关键帧",
   image_candidate_selected: "选择图片候选",
+  image_candidates_archived: "删除图片候选",
+  image_candidates_restored: "恢复图片候选",
   image_approved: "确认分镜图片",
   image_approval_revoked: "取消采用分镜图片",
   image_rejected: "退回图片候选",
@@ -64,14 +66,82 @@ export const REFERENCE_ROLE_OPTIONS = Object.freeze([
   { id: "layout", label: "构图" },
 ]);
 
-export const SHOT_LOCK_OPTIONS = Object.freeze([
-  { id: "timing", label: "时间" },
-  { id: "camera", label: "运镜" },
-  { id: "composition", label: "构图" },
-  { id: "action", label: "动作" },
-  { id: "lighting", label: "灯光" },
-  { id: "audio", label: "声音" },
-]);
+const IMAGE_REFERENCE_ROLE_ORDER = Object.freeze({
+  identity: 0,
+  product: 1,
+  wardrobe: 2,
+  scene: 3,
+  style: 4,
+  layout: 5,
+});
+
+export function imageIdentityPolicy(referenceBindings = [], assets = []) {
+  const assetsById = new Map((assets || []).map((asset) => [asset.id, asset]));
+  const identityBindings = (referenceBindings || []).filter(
+    (binding) => binding.role === "identity",
+  );
+  const primaryBinding = identityBindings.length === 1 ? identityBindings[0] : null;
+  const primaryAsset = primaryBinding
+    ? assetsById.get(primaryBinding.reference_asset_id) || null
+    : null;
+  let blocker = "";
+  if (identityBindings.length > 1) {
+    blocker = "每个分镜只能指定一个人物身份资产";
+  } else if (primaryBinding && !primaryAsset) {
+    blocker = "人物身份资产不存在或已不可用";
+  } else if (primaryAsset && primaryAsset.type !== "person") {
+    blocker = "人物身份来源必须使用人物类型资产";
+  }
+  return {
+    enabled: identityBindings.length > 0,
+    valid: !blocker,
+    blocker,
+    identityCount: identityBindings.length,
+    primaryBinding,
+    primaryAsset,
+  };
+}
+
+export function imageGenerationInputManifest({
+  inputMode = "keyframe_edit",
+  sourceUrl = "",
+  referenceBindings = [],
+  assets = [],
+} = {}) {
+  if (inputMode === "text_to_image") return [];
+  const assetsById = new Map((assets || []).map((asset) => [asset.id, asset]));
+  const references = [...(referenceBindings || [])]
+    .sort((left, right) => (
+      (IMAGE_REFERENCE_ROLE_ORDER[left.role] ?? 99)
+      - (IMAGE_REFERENCE_ROLE_ORDER[right.role] ?? 99)
+      || Number(right.weight || 0) - Number(left.weight || 0)
+    ));
+  const manifest = sourceUrl ? [{
+    input_index: 1,
+    kind: "source_keyframe",
+    label: "原视频关键帧",
+    responsibility: "composition_pose_action_camera",
+    identity_source: false,
+    thumbnail_url: sourceUrl,
+  }] : [];
+  const startIndex = sourceUrl ? 2 : 1;
+  references.forEach((binding, offset) => {
+    const asset = assetsById.get(binding.reference_asset_id);
+    manifest.push({
+      input_index: startIndex + offset,
+      kind: "reference_asset",
+      asset_id: binding.reference_asset_id,
+      label: asset?.name || "参考资产",
+      role: binding.role,
+      responsibility: binding.role === "identity"
+        ? "exclusive_person_identity_source"
+        : `${binding.role}_reference`,
+      identity_source: binding.role === "identity",
+      thumbnail_url: asset?.thumbnail_url || asset?.content_url || "",
+    });
+  });
+  return manifest;
+}
 
 export function workflowStatusLabel(value) {
   return {

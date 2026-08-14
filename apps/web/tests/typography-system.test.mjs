@@ -7,6 +7,10 @@ const workflowStyles = readFileSync(
   new URL("../src/production-workflow.css", import.meta.url),
   "utf8",
 );
+const videoGenerationStyles = readFileSync(
+  new URL("../src/shot-video-generation-controls.css", import.meta.url),
+  "utf8",
+);
 const assetStyles = readFileSync(
   new URL("../src/asset-library.css", import.meta.url),
   "utf8",
@@ -76,14 +80,15 @@ test("uses the same explicit prompt editor role for image and video", () => {
 
 test("binds responsive video controls to the real editor pane", () => {
   const editorRule = cssRule(workflowStyles, ".shot-video-editor", { last: true });
+  const commandRule = cssRule(videoGenerationStyles, ".shot-video-generation-command");
+  const commandBarRule = cssRule(videoGenerationStyles, ".shot-video-command-bar");
 
   assert.match(editorRule, /container-type:\s*inline-size/);
-  assert.match(
-    workflowStyles,
-    /\.shot-video-generation-options \{\s*grid-template-columns:\s*minmax\(15rem, 1\.2fr\)\s*minmax\(9rem, 0\.7fr\)\s*minmax\(20rem, 1\.6fr\)/,
-  );
-  assert.match(workflowStyles, /@container \(max-width: 980px\)/);
-  assert.match(workflowStyles, /@container \(max-width: 620px\)/);
+  assert.match(commandRule, /container-type:\s*inline-size/);
+  assert.match(commandBarRule, /grid-template-areas:\s*"model summary cost actions"/);
+  assert.match(videoGenerationStyles, /@container \(max-width: 680px\)/);
+  assert.match(videoGenerationStyles, /@container \(max-width: 480px\)/);
+  assert.match(videoGenerationStyles, /@media \(max-width: 620px\)/);
 });
 
 test("keeps essential export values visible instead of ellipsizing them", () => {

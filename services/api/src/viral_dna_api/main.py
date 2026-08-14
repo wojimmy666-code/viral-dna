@@ -1440,12 +1440,12 @@ async def retry_production_generation_run(run_id: UUID) -> GenerationRunResponse
     f"{API_PREFIX}/generation-candidates/batch-archive",
     response_model=CandidateBatchLifecycleResponse,
 )
-async def archive_production_video_candidates(
+async def archive_production_generation_candidates(
     payload: CandidateBatchLifecycleRequest,
 ) -> CandidateBatchLifecycleResponse:
     try:
         context = await account_context_service.ensure_current()
-        return await production_service.archive_video_candidates(
+        return await production_service.archive_generation_candidates(
             payload,
             actor_account_id=context.account.id,
         )
@@ -1457,11 +1457,11 @@ async def archive_production_video_candidates(
     f"{API_PREFIX}/generation-candidates/batch-restore",
     response_model=CandidateBatchLifecycleResponse,
 )
-async def restore_production_video_candidates(
+async def restore_production_generation_candidates(
     payload: CandidateBatchLifecycleRequest,
 ) -> CandidateBatchLifecycleResponse:
     try:
-        return await production_service.restore_video_candidates(payload)
+        return await production_service.restore_generation_candidates(payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

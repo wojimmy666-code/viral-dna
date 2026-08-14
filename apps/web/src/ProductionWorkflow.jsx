@@ -161,6 +161,62 @@ function videoDraftFromDetail(
   };
 }
 
+function videoPromptChangesFromDraft(
+  detail,
+  draft,
+  settings = DEFAULT_PRODUCTION_VIDEO_SETTINGS,
+) {
+  if (!detail?.plan) return {};
+  const original = videoDraftFromDetail(detail, settings);
+  const nextConstraints = constraintsFromText(draft.negativeConstraints);
+  const currentConstraints = constraintsFromText(original.negativeConstraints);
+  const changes = {};
+  if (draft.videoPrompt.trim() !== original.videoPrompt.trim()) {
+    changes.video_prompt = draft.videoPrompt.trim();
+  }
+  if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
+    changes.video_negative_constraints = nextConstraints;
+  }
+  return changes;
+}
+
+function shotDraftPatch(detail, visualBeatId, draft) {
+  const activeBeat = visualBeatFromDetail(detail, visualBeatId);
+  if (!detail?.plan || !activeBeat) {
+    return { activeBeat: null, beatChanges: {}, shotChanges: {} };
+  }
+  const original = shotDraftFromDetail(detail, activeBeat.id);
+  const nextConstraints = constraintsFromText(draft.negativeConstraints);
+  const currentConstraints = constraintsFromText(original.negativeConstraints);
+  const beatChanges = {};
+  const shotChanges = {};
+  if (draft.imagePrompt.trim() !== original.imagePrompt.trim()) {
+    beatChanges.image_prompt = draft.imagePrompt.trim();
+  }
+  if (
+    JSON.stringify(draft.imagePromptMentions)
+    !== JSON.stringify(original.imagePromptMentions)
+  ) {
+    beatChanges.image_prompt_mentions = draft.imagePromptMentions;
+  }
+  if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
+    beatChanges.image_negative_constraints = nextConstraints;
+  }
+  if (JSON.stringify(draft.locks) !== JSON.stringify(original.locks)) {
+    shotChanges.locks = draft.locks;
+  }
+  if (draft.required !== original.required) {
+    beatChanges.required = draft.required;
+  }
+  if (
+    JSON.stringify(draft.referenceBindings)
+    !== JSON.stringify(original.referenceBindings)
+  ) {
+    shotChanges.reference_bindings = draft.referenceBindings;
+  }
+  return { activeBeat, beatChanges, shotChanges };
+}
+
 function useObjectUrl(file) {
   const url = useMemo(() => (file ? URL.createObjectURL(file) : ""), [file]);
   useEffect(() => {
@@ -1506,37 +1562,12 @@ export function ProductionHub({
 
   async function submitShot(event) {
     event.preventDefault();
-    const activeBeat = visualBeatFromDetail(shotDetail, selectedVisualBeatId);
+    const { activeBeat, beatChanges, shotChanges } = shotDraftPatch(
+      shotDetail,
+      selectedVisualBeatId,
+      shotDraft,
+    );
     if (!shotDetail?.plan || !activeBeat) return;
-    const original = shotDraftFromDetail(shotDetail, activeBeat.id);
-    const nextConstraints = constraintsFromText(shotDraft.negativeConstraints);
-    const currentConstraints = constraintsFromText(original.negativeConstraints);
-    const beatChanges = {};
-    const shotChanges = {};
-    if (shotDraft.imagePrompt.trim() !== original.imagePrompt.trim()) {
-      beatChanges.image_prompt = shotDraft.imagePrompt.trim();
-    }
-    if (
-      JSON.stringify(shotDraft.imagePromptMentions)
-      !== JSON.stringify(original.imagePromptMentions)
-    ) {
-      beatChanges.image_prompt_mentions = shotDraft.imagePromptMentions;
-    }
-    if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
-      beatChanges.image_negative_constraints = nextConstraints;
-    }
-    if (JSON.stringify(shotDraft.locks) !== JSON.stringify(original.locks)) {
-      shotChanges.locks = shotDraft.locks;
-    }
-    if (shotDraft.required !== original.required) {
-      beatChanges.required = shotDraft.required;
-    }
-    if (
-      JSON.stringify(shotDraft.referenceBindings)
-      !== JSON.stringify(original.referenceBindings)
-    ) {
-      shotChanges.reference_bindings = shotDraft.referenceBindings;
-    }
     if (
       Object.keys(beatChanges).length === 0
       && Object.keys(shotChanges).length === 0
@@ -1545,33 +1576,12 @@ export function ProductionHub({
       return;
     }
     const apply = async (confirmStale) => {
-      let expectedRevisionId = detail.project.current_revision_id;
-      if (Object.keys(beatChanges).length > 0) {
-        const updated = await request(
-          `/production-shots/${shotDetail.plan.id}/visual-beats/${activeBeat.id}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              expected_revision_id: expectedRevisionId,
-              confirm_stale: confirmStale,
-              ...beatChanges,
-            }),
-          },
-        );
-        expectedRevisionId = updated.current_revision_id;
-      }
-      if (Object.keys(shotChanges).length > 0) {
-        await request(`/production-shots/${shotDetail.plan.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision_id: expectedRevisionId,
-            confirm_stale: confirmStale,
-            ...shotChanges,
-          }),
-        });
-      }
+      await persistShotDraftChanges({
+        activeBeat,
+        beatChanges,
+        shotChanges,
+        confirmStale,
+      });
       await Promise.all([
         refreshProject(detail.project.id, shotDetail.plan.id, activeBeat.id),
         onProjectsChanged(),
@@ -1678,7 +1688,11 @@ export function ProductionHub({
   }
 
   async function generateShotCandidates() {
-    const activeBeat = visualBeatFromDetail(shotDetail, selectedVisualBeatId);
+    const { activeBeat, beatChanges, shotChanges } = shotDraftPatch(
+      shotDetail,
+      selectedVisualBeatId,
+      shotDraft,
+    );
     if (!shotDetail?.plan || !activeBeat) return;
     const candidateCount = Math.min(
       4,
@@ -1702,18 +1716,28 @@ export function ProductionHub({
       return;
     }
     await executeAction(async () => {
+      const draftChanged = Object.keys(beatChanges).length > 0
+        || Object.keys(shotChanges).length > 0;
+      const expectedRevisionId = await persistShotDraftChanges({
+        activeBeat,
+        beatChanges,
+        shotChanges,
+      });
+      const effectiveInputMode = shotDraft.referenceBindings.some(
+        (binding) => binding.role === "identity",
+      )
+        ? "keyframe_edit"
+        : generationInputMode;
       const run = await request(
         `/production-shots/${shotDetail.plan.id}/image-runs`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
+            expected_revision_id: expectedRevisionId,
             visual_beat_id: activeBeat.id,
             candidate_count: candidateCount,
-            input_mode: activeBeat.source_frame_url
-              ? generationInputMode
-              : "text_to_image",
+            input_mode: effectiveInputMode,
             execution_mode: executionMode,
             allow_unknown_cost: acceptsUnknownCost,
             generation_intent: imageGenerationIntentForShot(shotDetail),
@@ -1723,7 +1747,7 @@ export function ProductionHub({
       setShotDetail((current) => upsertGenerationRun(current, run));
       await onProjectsChanged();
       onNotice(
-        `分镜 ${shotDetail.plan.index} 画面 ${activeBeat.index} 的图片任务已加入队列`,
+        `${draftChanged ? "当前提示词与参考资产已自动保存；" : ""}分镜 ${shotDetail.plan.index} 画面 ${activeBeat.index} 的图片任务已加入队列`,
       );
     });
   }
@@ -1890,6 +1914,43 @@ export function ProductionHub({
     } else {
       await executeAction(() => apply(false));
     }
+  }
+
+  async function persistShotDraftChanges({
+    activeBeat,
+    beatChanges,
+    shotChanges,
+    confirmStale = false,
+  }) {
+    let expectedRevisionId = detail.project.current_revision_id;
+    if (Object.keys(beatChanges).length > 0) {
+      const updated = await request(
+        `/production-shots/${shotDetail.plan.id}/visual-beats/${activeBeat.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: expectedRevisionId,
+            confirm_stale: confirmStale,
+            ...beatChanges,
+          }),
+        },
+      );
+      expectedRevisionId = updated.current_revision_id;
+    }
+    if (Object.keys(shotChanges).length > 0) {
+      const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: expectedRevisionId,
+          confirm_stale: confirmStale,
+          ...shotChanges,
+        }),
+      });
+      expectedRevisionId = updated.current_revision_id;
+    }
+    return expectedRevisionId;
   }
 
   async function syncAnalysisPrompts() {
@@ -2102,51 +2163,6 @@ export function ProductionHub({
     });
   }
 
-  async function saveVideoPrompt() {
-    if (!shotDetail?.plan) return;
-    const original = videoDraftFromDetail(shotDetail, videoGenerationSettings);
-    const nextConstraints = constraintsFromText(videoDraft.negativeConstraints);
-    const currentConstraints = constraintsFromText(original.negativeConstraints);
-    const changes = {};
-    if (videoDraft.videoPrompt.trim() !== original.videoPrompt.trim()) {
-      changes.video_prompt = videoDraft.videoPrompt.trim();
-    }
-    if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
-      changes.video_negative_constraints = nextConstraints;
-    }
-    if (Object.keys(changes).length === 0) {
-      onNotice("当前视频提示词没有需要保存的修改");
-      return;
-    }
-    const confirmStale = shotDetail.plan.video_status === "approved";
-    if (
-      confirmStale
-      && !window.confirm("修改视频提示词会使当前已采用视频过期。是否继续？")
-    ) {
-      return;
-    }
-    await executeAction(async () => {
-      await request(`/production-shots/${shotDetail.plan.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_revision_id: detail.project.current_revision_id,
-          confirm_stale: confirmStale,
-          ...changes,
-        }),
-      });
-      await Promise.all([
-        refreshProject(
-          detail.project.id,
-          shotDetail.plan.id,
-          selectedVisualBeatId,
-        ),
-        onProjectsChanged(),
-      ]);
-      onNotice(`分镜 ${shotDetail.plan.index} 的视频提示词已保存`);
-    });
-  }
-
   async function generateVideoCandidates() {
     if (!shotDetail?.plan) return;
     const candidateCount = Math.min(
@@ -2162,6 +2178,19 @@ export function ProductionHub({
     );
     const costUnknown = !selectedModel
       || ["unknown", "provider_usage_tokens"].includes(selectedModel.pricing?.kind);
+    const promptChanges = videoPromptChangesFromDraft(
+      shotDetail,
+      videoDraft,
+      videoGenerationSettings,
+    );
+    const promptChanged = Object.keys(promptChanges).length > 0;
+    const confirmStale = promptChanged && shotDetail.plan.video_status === "approved";
+    if (
+      confirmStale
+      && !window.confirm("生成前会自动保存当前提示词，并使已采用视频过期。是否继续？")
+    ) {
+      return;
+    }
     if (
       costUnknown
       && !window.confirm("该模型需要按 Provider 实际用量结算，提交前无法给出可靠金额。是否继续？")
@@ -2169,13 +2198,48 @@ export function ProductionHub({
       return;
     }
     await executeAction(async () => {
+      let expectedRevisionId = detail.project.current_revision_id;
+      let persistedShotDetail = null;
+      if (promptChanged) {
+        persistedShotDetail = await request(`/production-shots/${shotDetail.plan.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: expectedRevisionId,
+            confirm_stale: confirmStale,
+            ...promptChanges,
+          }),
+        });
+        expectedRevisionId = persistedShotDetail.current_revision_id;
+        setDetail((current) => current ? ({
+          ...current,
+          project: {
+            ...current.project,
+            active_step: "shot_videos",
+            current_revision_id: expectedRevisionId,
+          },
+        }) : current);
+        setShots((current) => current.map((item) => (
+          item.plan.id === persistedShotDetail.plan.id
+            ? {
+              ...item,
+              current_revision_id: expectedRevisionId,
+              image_preview: persistedShotDetail.image_preview,
+              plan: persistedShotDetail.plan,
+              reference_bindings: persistedShotDetail.reference_bindings,
+              video_preview: persistedShotDetail.video_preview,
+            }
+            : item
+        )));
+        setShotDetail(persistedShotDetail);
+      }
       const run = await request(
         `/production-shots/${shotDetail.plan.id}/video-runs`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
+            expected_revision_id: expectedRevisionId,
             candidate_count: candidateCount,
             input_mode: "multi_image_to_video",
             execution_mode: "remote_api",
@@ -2189,10 +2253,15 @@ export function ProductionHub({
           }),
         },
       );
-      setShotDetail((current) => upsertGenerationRun(current, run));
+      setShotDetail((current) => upsertGenerationRun(
+        persistedShotDetail || current,
+        run,
+      ));
       await onProjectsChanged();
       await onNotificationsChanged?.();
-      onNotice(`分镜 ${shotDetail.plan.index} 的 ${selectedModel?.label || "视频"} 任务已加入队列`);
+      onNotice(promptChanged
+        ? `提示词已自动保存，分镜 ${shotDetail.plan.index} 的 ${selectedModel?.label || "视频"} 任务已加入队列`
+        : `分镜 ${shotDetail.plan.index} 的 ${selectedModel?.label || "视频"} 任务已加入队列`);
     });
   }
 
@@ -2282,6 +2351,77 @@ export function ProductionHub({
       ]);
       onNotice("视频候选已选择，请继续人工确认");
     });
+  }
+
+  async function restoreImageCandidate(candidateId, expectedRevisionId) {
+    setBusy(true);
+    setActionError("");
+    try {
+      await request("/generation-candidates/batch-restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: expectedRevisionId,
+          candidate_ids: [candidateId],
+        }),
+      });
+      await Promise.all([
+        refreshProject(
+          detail.project.id,
+          selectedShotId,
+          selectedVisualBeatId,
+        ),
+        onProjectsChanged(),
+        onNotificationsChanged?.(),
+      ]);
+      onNotice("图片候选已恢复");
+    } catch (requestError) {
+      setActionError(requestError.message);
+      onNotice({
+        type: "error",
+        title: "恢复失败",
+        message: requestError.message,
+      });
+      throw requestError;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function archiveImageCandidate(candidateId) {
+    if (!candidateId) return false;
+    let succeeded = false;
+    await executeAction(async () => {
+      const response = await request("/generation-candidates/batch-archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          candidate_ids: [candidateId],
+        }),
+      });
+      await Promise.all([
+        refreshProject(
+          detail.project.id,
+          selectedShotId,
+          selectedVisualBeatId,
+        ),
+        onProjectsChanged(),
+        onNotificationsChanged?.(),
+      ]);
+      onNotice({
+        type: "success",
+        message: "图片候选已删除，源文件仍保留",
+        duration: 9000,
+        actionLabel: "撤销",
+        onAction: () => restoreImageCandidate(
+          candidateId,
+          response.current_revision_id,
+        ),
+      });
+      succeeded = true;
+    });
+    return succeeded;
   }
 
   async function approveVideoCandidate(candidateId) {
@@ -2847,6 +2987,7 @@ export function ProductionHub({
                 onCreateVisualBeat={createVisualBeat}
                 onDeleteVisualBeat={deleteVisualBeat}
                 onDiscardShot={discardShot}
+                onArchiveCandidate={archiveImageCandidate}
                 onGenerate={generateShotCandidates}
                 onRevokeApproval={revokeImageApproval}
                 onReorderShots={reorderShots}
@@ -2893,7 +3034,6 @@ export function ProductionHub({
                 onRunContinuity={runContinuityCheck}
                 onRestoreCandidates={restoreVideoCandidates}
                 onRevokeApproval={revokeVideoApproval}
-                onSave={saveVideoPrompt}
                 onSelectCandidate={selectVideoCandidate}
                 onSelectShot={selectShot}
                 project={detail.project}

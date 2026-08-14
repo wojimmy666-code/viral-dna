@@ -2,15 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   CheckCircle,
-  CircleNotch,
   Copy,
   DownloadSimple,
   FilmStrip,
-  FloppyDisk,
   Gear,
   MagicWand,
   PlayCircle,
-  Prohibit,
   WarningCircle,
 } from "@phosphor-icons/react";
 import {
@@ -19,7 +16,6 @@ import {
   normalizeVideoDuration,
   preferredVideoResolution,
   videoGenerationDiagnosticText,
-  videoDurationConstraintLabel,
   videoDurationOptions,
   videoGenerationFailureDetails,
   videoGenerationRunLabel,
@@ -29,6 +25,7 @@ import {
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import { VideoCandidateLibrary } from "./VideoCandidateLibrary.jsx";
 import { ContinuityQualityPanel } from "./ContinuityQualityPanel.jsx";
+import { ShotVideoGenerationControls } from "./ShotVideoGenerationControls.jsx";
 
 const ACTIVE_RUN_STATUSES = new Set([
   "queued",
@@ -146,7 +143,6 @@ export function ShotVideoWorkspace({
   onRetryRun,
   onRestoreCandidates,
   onRevokeApproval,
-  onSave,
   onSelectCandidate,
   onSelectShot,
   project,
@@ -621,126 +617,44 @@ export function ShotVideoWorkspace({
                 value={videoDraft.negativeConstraints}
               />
             </details>
-            <div className="shot-video-generation-options">
-              <label className="shot-video-generation-field">
-                <span className="shot-video-field-heading">视频模型</span>
-                <select
-                  ref={modelSelectRef}
-                  onChange={(event) => selectVideoModel(event.target.value)}
-                  value={videoDraft.modelAlias}
-                >
-                  {compatibleVideoModels.length === 0 ? (
-                    <option value="">暂无兼容模型</option>
-                  ) : compatibleVideoModels.map((model) => (
-                    <option key={model.alias} value={model.alias}>
-                      {model.label}
-                      {latestFailure && latestRun?.model_alias === model.alias ? " · 需处理" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="shot-video-generation-field">
-                <span className="shot-video-field-heading">分辨率</span>
-                <select
-                  onChange={(event) => setVideoDraft((current) => ({
-                    ...current,
-                    resolution: event.target.value,
-                  }))}
-                  value={videoDraft.resolution}
-                >
-                  {supportedResolutions.map((resolution) => (
-                    <option key={resolution} value={resolution}>{resolution}</option>
-                  ))}
-                </select>
-              </label>
-              <div className="shot-video-generation-field shot-video-duration-option">
-                <div className="shot-video-field-heading shot-video-duration-heading">
-                  <label htmlFor={durationControlId}>生成时长</label>
-                  <output htmlFor={durationControlId}>{formatVideoDuration(durationNumber)} 秒</output>
-                </div>
-                <div className="shot-video-duration-control">
-                  <input
-                    aria-describedby={durationHelpId}
-                    aria-label="生成时长"
-                    aria-valuetext={`${formatVideoDuration(durationNumber)} 秒`}
-                    disabled={!selectedModel || durationOptions.length <= 1}
-                    id={durationControlId}
-                    max={Math.max(0, durationOptions.length - 1)}
-                    min={0}
-                    onChange={(event) => selectDuration(event.target.value)}
-                    step={1}
-                    type="range"
-                    value={durationIndex}
-                  />
-                  <span className="shot-video-duration-scale" aria-hidden="true">
-                    {durationScaleValues.map((duration) => (
-                      <small key={duration}>{formatVideoDuration(duration)} 秒</small>
-                    ))}
-                  </span>
-                </div>
-                <div className="shot-video-duration-meta">
-                  <small className="shot-video-duration-help" id={durationHelpId}>
-                    {selectedModel
-                      ? `${selectedModel.label}：${videoDurationConstraintLabel(selectedModel)}`
-                      : "选择模型后显示可用时长"}
-                  </small>
-                  {durationAdjustmentMessage && (
-                    <small className="shot-video-duration-adjustment" role="status">
-                      {durationAdjustmentMessage}
-                    </small>
-                  )}
-                </div>
-              </div>
-              <label className="shot-video-generation-field">
-                <span className="shot-video-field-heading">候选数量</span>
-                <select
-                  onChange={(event) => setVideoDraft((current) => ({
-                    ...current,
-                    candidateCount: Number(event.target.value),
-                  }))}
-                  value={videoDraft.candidateCount}
-                >
-                  {[1, 2, 3, 4].map((count) => <option key={count} value={count}>{count} 个</option>)}
-                </select>
-              </label>
-            </div>
-            <div className="shot-video-prompt-actions">
-              <div className="shot-video-cost-summary">
-                <span>预计 <strong>{estimatedCostLabel}</strong></span>
-                <small>
-                  {providerSettings?.label || selectedModel?.provider || "未选择 Provider"}
-                  {providerSettings?.api_key_configured ? " · Key 已配置" : " · Key 未配置"}
-                </small>
-              </div>
-              {activeRun && (
-                <button className="text-button compact" disabled={busy} onClick={() => onCancelRun(activeRun.id)} type="button">
-                  <Prohibit size={15} />取消任务
-                </button>
-              )}
-              {!activeRun && latestRun?.status === "cancelled" && (
-                <button className="secondary-button compact" disabled={busy} onClick={() => onRetryRun(latestRun.id)} type="button">
-                  重试上次任务
-                </button>
-              )}
-              <button className="secondary-button compact" disabled={busy} onClick={onSave} type="button">
-                <FloppyDisk size={16} />保存提示词
-              </button>
-              <button
-                className="primary-button compact"
-                disabled={busy || Boolean(activeRun) || !allReferencesApproved || !videoDraft.videoPrompt.trim() || Boolean(generationBlockedReason)}
-                onClick={onGenerate}
-                title={generationBlockedReason || ""}
-                type="button"
-              >
-                {activeRun ? <CircleNotch className="spin" size={16} /> : <MagicWand size={16} weight="fill" />}
-                {activeRun ? "正在生成" : `生成 ${videoDraft.candidateCount} 个视频候选`}
-              </button>
-            </div>
-            {generationBlockedReason && (
-              <div className="production-inline-error" role="status">
-                <WarningCircle size={17} />{generationBlockedReason}，请到“模型与设置”完成配置。
-              </div>
-            )}
+            <ShotVideoGenerationControls
+              activeRun={activeRun}
+              allReferencesApproved={allReferencesApproved}
+              busy={busy}
+              compatibleVideoModels={compatibleVideoModels}
+              durationAdjustmentMessage={durationAdjustmentMessage}
+              durationControlId={durationControlId}
+              durationHelpId={durationHelpId}
+              durationIndex={durationIndex}
+              durationNumber={durationNumber}
+              durationOptions={durationOptions}
+              durationScaleValues={durationScaleValues}
+              estimatedCostKnown={estimatedCostMicros != null}
+              estimatedCostLabel={estimatedCostLabel}
+              generationBlockedReason={generationBlockedReason}
+              latestFailure={latestFailure}
+              latestRun={latestRun}
+              modelSelectRef={modelSelectRef}
+              onCancelRun={onCancelRun}
+              onCandidateCountChange={(candidateCount) => setVideoDraft((current) => ({
+                ...current,
+                candidateCount,
+              }))}
+              onDurationChange={selectDuration}
+              onGenerate={onGenerate}
+              onModelChange={selectVideoModel}
+              onOpenModelSettings={onOpenModelSettings}
+              onResolutionChange={(resolution) => setVideoDraft((current) => ({
+                ...current,
+                resolution,
+              }))}
+              onRetryRun={onRetryRun}
+              project={project}
+              providerOptions={videoGenerationSettings?.providers || []}
+              selectedModel={selectedModel}
+              supportedResolutions={supportedResolutions}
+              videoDraft={videoDraft}
+            />
           </div>
 
           {displayedCandidate && (
@@ -778,7 +692,6 @@ export function ShotVideoWorkspace({
           <WarningCircle size={17} />{gate.blocker_messages.join("；")}
         </div>
       )}
-      <span className="shot-video-project-meta">输出画幅 {project.output_aspect_ratio} · {project.output_width} × {project.output_height}</span>
     </section>
   );
 }

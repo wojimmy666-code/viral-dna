@@ -13,6 +13,8 @@ import {
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
   imageGenerationIntentForShot,
+  imageGenerationInputManifest,
+  imageIdentityPolicy,
   imageGenerationModeLabel,
   imageGenerationRunLabel,
   imageQualityLabel,
@@ -41,6 +43,64 @@ import {
   workflowStatusLabel,
 } from "../src/production-ui.js";
 
+test("locks one person asset as the second and exclusive identity input", () => {
+  const assets = [
+    { id: "person-1", name: "Betty", type: "person", thumbnail_url: "/betty.webp" },
+    { id: "scene-1", name: "庭院", type: "scene", thumbnail_url: "/scene.webp" },
+  ];
+  const bindings = [
+    { reference_asset_id: "scene-1", role: "scene", weight: 2 },
+    { reference_asset_id: "person-1", role: "identity", weight: 0.1 },
+  ];
+  const policy = imageIdentityPolicy(bindings, assets);
+  const manifest = imageGenerationInputManifest({
+    sourceUrl: "/source.webp",
+    referenceBindings: bindings,
+    assets,
+  });
+
+  assert.equal(policy.enabled, true);
+  assert.equal(policy.valid, true);
+  assert.equal(policy.primaryAsset.name, "Betty");
+  assert.equal(manifest[0].responsibility, "composition_pose_action_camera");
+  assert.equal(manifest[0].identity_source, false);
+  assert.equal(manifest[1].input_index, 2);
+  assert.equal(manifest[1].asset_id, "person-1");
+  assert.equal(manifest[1].responsibility, "exclusive_person_identity_source");
+  assert.equal(manifest[2].asset_id, "scene-1");
+});
+
+test("blocks ambiguous or invalid identity assets in the image workspace", () => {
+  const person = { id: "person-1", name: "人物", type: "person" };
+  const scene = { id: "scene-1", name: "场景", type: "scene" };
+  assert.match(
+    imageIdentityPolicy([
+      { reference_asset_id: person.id, role: "identity" },
+      { reference_asset_id: "person-2", role: "identity" },
+    ], [person]).blocker,
+    /只能指定一个人物身份/,
+  );
+  assert.match(
+    imageIdentityPolicy([
+      { reference_asset_id: scene.id, role: "identity" },
+    ], [scene]).blocker,
+    /必须使用人物类型资产/,
+  );
+});
+
+test("does not present image inputs for pure text generation", () => {
+  assert.deepEqual(imageGenerationInputManifest({
+    inputMode: "text_to_image",
+    sourceUrl: "/source.webp",
+    referenceBindings: [
+      { reference_asset_id: "person-1", role: "identity", weight: 1 },
+    ],
+    assets: [
+      { id: "person-1", name: "人物", type: "person", thumbnail_url: "/person.webp" },
+    ],
+  }), []);
+});
+
 const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
   "utf8",
@@ -64,6 +124,8 @@ test("detects analysis updates and synchronizes only selected prompt fields", ()
 });
 
 test("labels video candidate recycle-bin revisions", () => {
+  assert.equal(productionChangeLabel("image_candidates_archived"), "删除图片候选");
+  assert.equal(productionChangeLabel("image_candidates_restored"), "恢复图片候选");
   assert.equal(productionChangeLabel("video_candidates_archived"), "视频候选移入回收站");
   assert.equal(productionChangeLabel("video_candidates_restored"), "恢复视频候选");
 });
