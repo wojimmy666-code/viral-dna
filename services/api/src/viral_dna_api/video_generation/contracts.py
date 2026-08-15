@@ -15,8 +15,8 @@ from ..models import (
     VideoProviderTaskStatus,
 )
 
-VIDEO_REQUEST_SCHEMA_VERSION = "viral-dna-video-generation/v2"
-VIDEO_PROMPT_VERSION = "shot-video-multi-image-v2"
+VIDEO_REQUEST_SCHEMA_VERSION = "viral-dna-video-generation/v4"
+VIDEO_PROMPT_VERSION = "shot-video-reference-policy-v4"
 VIDEO_ADAPTER_PROTOCOL_VERSION = "viral-dna-video-adapter/v2"
 MAX_GENERATED_VIDEO_BYTES = 500 * 1024 * 1024
 
@@ -63,6 +63,32 @@ class OrderedReferenceFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderedReferenceVideo:
+    proxy_asset_id: UUID
+    visual_beat_id: UUID
+    ordinal: int
+    title: str
+    path: Path
+    relative_path: str
+    sha256: str
+    role: str = "motion"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderManagedAssetReference:
+    binding_id: UUID
+    provider: str
+    asset_id: str
+    group_id: str | None
+    kind: str
+    role: str
+    name: str
+    media_type: str
+    project_name: str
+    uri: str
+
+
+@dataclass(frozen=True, slots=True)
 class VideoGenerationRequest:
     project: ProductionProject
     shot: ShotPlan
@@ -75,6 +101,9 @@ class VideoGenerationRequest:
     resolution: str | None = None
     allow_unknown_cost: bool = False
     seed: int | None = None
+    managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
+    reference_videos: tuple[OrderedReferenceVideo, ...] = ()
+    reference_manifest: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +121,9 @@ class VideoAdapterRequest:
     negative_prompt: str
     seed: int | None
     capability: VideoGenerationCapability
+    managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
+    reference_videos: tuple[OrderedReferenceVideo, ...] = ()
+    reference_manifest: dict[str, Any] = field(default_factory=dict)
     cancel_event: Event | None = None
 
 
@@ -174,6 +206,9 @@ class ProviderVideoRequest:
     aspect_ratio: str
     width: int
     height: int
+    managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
+    reference_videos: tuple[OrderedReferenceVideo, ...] = ()
+    reference_manifest: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
 
 

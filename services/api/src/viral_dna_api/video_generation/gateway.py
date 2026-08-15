@@ -28,6 +28,14 @@ from ..models import (
     VideoGenerationCapability,
     VideoGenerationInputMode,
 )
+from ..video_references.domain import (
+    VideoReferenceMediaType,
+    VideoReferenceSourceKind,
+)
+from ..video_references.planner import (
+    VideoReferencePolicyError,
+    resolve_video_reference_plan,
+)
 from ..workspace import WorkspaceManager
 from .contracts import (
     MAX_GENERATED_VIDEO_BYTES,
@@ -36,6 +44,8 @@ from .contracts import (
     VIDEO_REQUEST_SCHEMA_VERSION,
     GeneratedVideo,
     OrderedReferenceFrame,
+    OrderedReferenceVideo,
+    ProviderManagedAssetReference,
     VideoAdapterIdentity,
     VideoAdapterRequest,
     VideoAdapterResult,
@@ -120,12 +130,22 @@ def _compiled_dimensions(
 def _positive_prompt(
     shot: ShotPlan,
     reference_frames: tuple[OrderedReferenceFrame, ...],
+    managed_asset_references: tuple[ProviderManagedAssetReference, ...] = (),
 ) -> str:
-    lines = [
-        "使用下列有序参考图生成一段连续视频；图号顺序就是画面出现顺序。",
-        f"动作与运镜要求：{shot.video_prompt.strip()}",
-        "保持各参考图之间的人物身份、服装、产品结构、动作承接、空间位置、画幅和光影连续。",
-    ]
+    lines = [f"动作与运镜要求：{shot.video_prompt.strip()}"]
+    if managed_asset_references:
+        names = "、".join(item.name for item in managed_asset_references)
+        lines.append(
+            f"人物身份只使用已绑定的 Provider 托管演员（{names}）；"
+            "不要从本地动作、构图或场景参考中继承年龄、五官或可识别身份。"
+        )
+    if reference_frames:
+        lines.extend(
+            [
+                "使用下列有序安全参考画面生成连续视频；图号顺序就是画面出现顺序。",
+                "保持服装、产品结构、动作承接、空间位置、画幅和光影连续。",
+            ]
+        )
     for frame in reference_frames:
         lines.append(
             f"图{frame.ordinal}（{frame.title}）位于视频进度 "
@@ -297,6 +317,85 @@ class VideoGenerationGateway:
         ):
             self.remote_orchestrator = RemoteVideoOrchestrator(settings_service, repository)
 
+    def _proxy_references(
+        self,
+        shot: ShotPlan,
+    ) -> tuple[tuple[OrderedReferenceFrame, ...], tuple[OrderedReferenceVideo, ...]]:
+        assets = {item.id: item for item in shot.reference_proxy_assets}
+        selected = [
+            binding
+            for binding in shot.video_reference_bindings
+            if binding.enabled
+            and binding.source_kind == VideoReferenceSourceKind.GENERATED_PROXY
+            and binding.proxy_asset_id is not None
+        ]
+        selected.sort(key=lambda item: item.order)
+        proxy_frames: list[OrderedReferenceFrame] = []
+        proxy_videos: list[OrderedReferenceVideo] = []
+        for binding in selected:
+            proxy = assets.get(binding.proxy_asset_id)
+            if proxy is None:
+                raise VideoGenerationGatewayError(
+                    422,
+                    "video_reference_proxy_missing",
+                    "已选择的动作代理资产不存在，请重新生成或解除绑定",
+                )
+            if not proxy.usable_for_generation:
+                raise VideoGenerationGatewayError(
+                    422,
+                    "video_reference_proxy_not_ready",
+                    "动作代理尚未同时通过身份去除与姿态质量校验，不能提交给视频模型",
+                )
+            path = self.workspace.resolve(proxy.relative_path)
+            if not path.is_file():
+                raise VideoGenerationGatewayError(
+                    404,
+                    "video_reference_proxy_file_missing",
+                    "动作代理文件不存在，请重新生成",
+                )
+            beat = next(
+                (item for item in shot.visual_beats if item.id == proxy.visual_beat_id),
+                None,
+            )
+            title = f"动作代理 · {beat.title if beat is not None else '分镜画面'}"
+            if proxy.media_type == VideoReferenceMediaType.IMAGE:
+                proxy_frames.append(
+                    OrderedReferenceFrame(
+                        visual_beat_id=proxy.visual_beat_id,
+                        ordinal=binding.order,
+                        title=title,
+                        candidate_id=proxy.id,
+                        path=path,
+                        relative_path=proxy.relative_path,
+                        sha256=proxy.sha256,
+                        start_ratio=beat.start_ratio if beat is not None else 0,
+                        end_ratio=beat.end_ratio if beat is not None else 1,
+                        transition_to_next_type=(
+                            beat.transition_to_next_type if beat is not None else "cut"
+                        ),
+                        transition_to_next_duration_seconds=(
+                            beat.transition_to_next_duration_seconds if beat is not None else 0
+                        ),
+                        transition_to_next_prompt=(
+                            beat.transition_to_next_prompt if beat is not None else ""
+                        ),
+                    )
+                )
+            elif proxy.media_type == VideoReferenceMediaType.VIDEO:
+                proxy_videos.append(
+                    OrderedReferenceVideo(
+                        proxy_asset_id=proxy.id,
+                        visual_beat_id=proxy.visual_beat_id,
+                        ordinal=binding.order,
+                        title=title,
+                        path=path,
+                        relative_path=proxy.relative_path,
+                        sha256=proxy.sha256,
+                        role=binding.role.value,
+                    )
+                )
+        return tuple(proxy_frames), tuple(proxy_videos)
+
     def validate_execution_mode(self, mode: ImageExecutionMode) -> None:
         if mode == ImageExecutionMode.LOCAL_TOOL:
             raise VideoGenerationGatewayError(
@@ -437,18 +536,91 @@ class VideoGenerationGateway:
                 "video_ordered_multi_image_required",
                 "当前流程只允许支持有序多图参考的视频模型",
             )
-        ordered_frames = tuple(sorted(reference_frames, key=lambda item: item.ordinal))
-        if [item.ordinal for item in ordered_frames] != list(
-            range(1, len(ordered_frames) + 1)
+        source_ordered_frames = tuple(sorted(reference_frames, key=lambda item: item.ordinal))
+        if [item.ordinal for item in source_ordered_frames] != list(
+            range(1, len(source_ordered_frames) + 1)
         ):
             raise VideoGenerationGatewayError(
                 422,
                 "video_reference_order_invalid",
                 "参考图序号必须连续",
             )
+        managed_references = tuple(
+            ProviderManagedAssetReference(
+                binding_id=binding.id,
+                provider=binding.provider,
+                asset_id=binding.asset_id,
+                group_id=binding.group_id,
+                kind=binding.kind.value,
+                role=binding.role.value,
+                name=binding.name,
+                media_type=binding.media_type.value,
+                project_name=binding.project_name,
+                uri=f"asset://{binding.asset_id}",
+            )
+            for binding in shot.managed_asset_bindings
+        )
+        managed_capability = capability.managed_assets
+        if managed_references and not managed_capability.supported:
+            raise VideoGenerationGatewayError(
+                422,
+                "video_managed_assets_unsupported",
+                "当前视频模型不支持供应商托管人物资产，请切换到支持该能力的 Seedance 模型",
+            )
+        if len(managed_references) > managed_capability.maximum_bindings:
+            raise VideoGenerationGatewayError(
+                422,
+                "video_managed_asset_count_unsupported",
+                f"当前视频模型最多绑定 {managed_capability.maximum_bindings} 个托管资产",
+            )
+        for binding, reference in zip(shot.managed_asset_bindings, managed_references, strict=True):
+            if binding.provider != managed_capability.provider:
+                raise VideoGenerationGatewayError(
+                    422,
+                    "video_managed_asset_provider_mismatch",
+                    "所选托管资产与当前视频模型不属于同一个 Provider",
+                )
+            if binding.kind not in managed_capability.asset_kinds:
+                raise VideoGenerationGatewayError(
+                    422,
+                    "video_managed_asset_kind_unsupported",
+                    "当前视频模型不支持所选托管资产类型",
+                )
+            if binding.role not in managed_capability.roles:
+                raise VideoGenerationGatewayError(
+                    422,
+                    "video_managed_asset_role_unsupported",
+                    "当前视频模型不支持所选托管资产角色",
+                )
+            transport_supported = managed_capability.reference_transport == "asset_uri"
+            uri_supported = reference.uri.startswith("asset://")
+            if not transport_supported or not uri_supported:
+                raise VideoGenerationGatewayError(
+                    422,
+                    "video_managed_asset_transport_unsupported",
+                    "当前视频模型无法使用该托管资产引用协议",
+                )
+        proxy_reference_frames, proxy_reference_videos = self._proxy_references(shot)
+        try:
+            reference_plan = resolve_video_reference_plan(
+                capability=capability,
+                shot=shot,
+                reference_frames=source_ordered_frames,
+                managed_asset_references=managed_references,
+                proxy_reference_frames=proxy_reference_frames,
+                proxy_reference_videos=proxy_reference_videos,
+            )
+        except VideoReferencePolicyError as exc:
+            raise VideoGenerationGatewayError(422, exc.code, str(exc)) from exc
+        ordered_frames = reference_plan.reference_frames
+        reference_videos = reference_plan.reference_videos
+        managed_references = reference_plan.managed_asset_references
+        total_reference_count = (
+            len(ordered_frames) + len(reference_videos) + len(managed_references)
+        )
         if not (
             capability.minimum_reference_images
-            <= len(ordered_frames)
+            <= total_reference_count
             <= capability.maximum_reference_images
         ):
             raise VideoGenerationGatewayError(
@@ -456,7 +628,9 @@ class VideoGenerationGateway:
                 "video_reference_count_unsupported",
                 (
                     f"当前模型支持 {capability.minimum_reference_images}～"
-                    f"{capability.maximum_reference_images} 张有序参考图"
+                    f"{capability.maximum_reference_images} 个参考输入；"
+                    f"当前包含 {len(managed_references)} 个托管资产和 "
+                    f"{len(ordered_frames)} 张安全参考图、{len(reference_videos)} 个动作代理视频"
                 ),
             )
         if candidate_count < 1 or candidate_count > capability.max_candidates:
@@ -495,7 +669,7 @@ class VideoGenerationGateway:
         _filesystem_path(run_root).mkdir(parents=True, exist_ok=True)
         selected_resolution = resolved_remote.resolution if resolved_remote else resolution
         width, height = _compiled_dimensions(project, capability, selected_resolution)
-        prompt = _positive_prompt(shot, ordered_frames)
+        prompt = _positive_prompt(shot, ordered_frames, managed_references)
         negative_prompt = _negative_prompt(shot)
         request = VideoGenerationRequest(
             project=project,
@@ -509,6 +683,9 @@ class VideoGenerationGateway:
             resolution=selected_resolution,
             allow_unknown_cost=allow_unknown_cost,
             seed=seed,
+            managed_asset_references=managed_references,
+            reference_videos=reference_videos,
+            reference_manifest=reference_plan.manifest(),
         )
         input_payload = self._input_payload(
             request,
@@ -537,6 +714,9 @@ class VideoGenerationGateway:
                 negative_prompt=negative_prompt,
                 seed=seed,
                 capability=capability,
+                managed_asset_references=managed_references,
+                reference_videos=reference_videos,
+                reference_manifest=reference_plan.manifest(),
                 cancel_event=cancel_event,
             )
             if resolved_remote is not None:
@@ -553,6 +733,8 @@ class VideoGenerationGateway:
                     shot_plan_id=shot.id,
                     run_root=run_root,
                     reference_frames=ordered_frames,
+                    reference_videos=reference_videos,
+                    managed_asset_references=managed_references,
                     candidate_count=candidate_count,
                     duration_seconds=duration_seconds,
                     aspect_ratio=project.output_aspect_ratio,
@@ -562,6 +744,7 @@ class VideoGenerationGateway:
                     negative_prompt=negative_prompt,
                     seed=seed,
                     cancel_event=cancel_event,
+                    reference_manifest=reference_plan.manifest(),
                 )
             else:
                 if adapter is None:  # pragma: no cover
@@ -731,6 +914,34 @@ class VideoGenerationGateway:
                 }
                 for frame in request.reference_frames
             ],
+            "reference_videos": [
+                {
+                    "proxy_asset_id": str(video.proxy_asset_id),
+                    "visual_beat_id": str(video.visual_beat_id),
+                    "ordinal": video.ordinal,
+                    "title": video.title,
+                    "relative_path": video.relative_path,
+                    "sha256": video.sha256,
+                    "role": video.role,
+                }
+                for video in request.reference_videos
+            ],
+            "managed_asset_references": [
+                {
+                    "binding_id": str(reference.binding_id),
+                    "provider": reference.provider,
+                    "asset_id": reference.asset_id,
+                    "group_id": reference.group_id,
+                    "kind": reference.kind,
+                    "role": reference.role,
+                    "name": reference.name,
+                    "media_type": reference.media_type,
+                    "project_name": reference.project_name,
+                    "uri": reference.uri,
+                }
+                for reference in request.managed_asset_references
+            ],
+            "reference_policy": request.reference_manifest,
             "locks": [item.value for item in request.shot.locks],
             "cost": {
                 "estimated_cost_micros": identity.estimated_cost_micros,
@@ -788,7 +999,14 @@ class VideoGenerationGateway:
         duration = generated.duration_seconds or request.duration_seconds
         sha256 = _sha256_file(resolved)
         thumbnail_path = run_root / f"candidate_{ordinal:03d}.webp"
-        self._write_thumbnail(request.reference_frames[0].path, thumbnail_path)
+        if request.reference_frames:
+            self._write_thumbnail(request.reference_frames[0].path, thumbnail_path)
+        else:
+            self._write_placeholder_thumbnail(
+                thumbnail_path,
+                width=width,
+                height=height,
+            )
         quality_report = {
             "schema_version": "viral-dna-video-quality/v1",
             "status": "manual_review_required",
@@ -868,4 +1086,23 @@ class VideoGenerationGateway:
         image.thumbnail((640, 640), Image.Resampling.LANCZOS)
         output = BytesIO()
         image.save(output, format="WEBP", quality=84, method=4)
+        _write_atomic(destination, output.getvalue())
+
+    @staticmethod
+    def _write_placeholder_thumbnail(
+        destination: Path,
+        *,
+        width: int,
+        height: int,
+    ) -> None:
+        ratio = max(width, 1) / max(height, 1)
+        if ratio >= 1:
+            canvas_width = 640
+            canvas_height = max(180, round(canvas_width / ratio))
+        else:
+            canvas_height = 640
+            canvas_width = max(180, round(canvas_height * ratio))
+        image = Image.new("RGB", (canvas_width, canvas_height), "#24232c")
+        output = BytesIO()
+        image.save(output, format="WEBP", quality=82, method=4)
         _write_atomic(destination, output.getvalue())

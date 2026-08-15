@@ -3,6 +3,25 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
+from ..managed_assets.service import (
+    ACCESS_KEY_ENV as MANAGED_ASSET_ACCESS_KEY_ENV,
+)
+from ..managed_assets.service import (
+    PROJECT_ENV as MANAGED_ASSET_PROJECT_ENV,
+)
+from ..managed_assets.service import (
+    REGION_ENV as MANAGED_ASSET_REGION_ENV,
+)
+from ..managed_assets.service import (
+    SECRET_KEY_ENV as MANAGED_ASSET_SECRET_KEY_ENV,
+)
+from ..managed_assets.service import (
+    VALIDATED_ENV as MANAGED_ASSET_VALIDATED_ENV,
+)
+from ..managed_assets.service import (
+    ManagedAssetCatalogService,
+    ManagedAssetServiceError,
+)
 from ..models import (
     VideoCostEstimateRequest,
     VideoCostEstimateResponse,
@@ -134,8 +153,13 @@ def normalize_provider_base_url(provider: str, value: str) -> str:
 
 
 class VideoGenerationSettingsService:
-    def __init__(self, registry: VideoProviderRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: VideoProviderRegistry | None = None,
+        managed_assets: ManagedAssetCatalogService | None = None,
+    ) -> None:
         self.registry = registry or VideoProviderRegistry()
+        self.managed_assets = managed_assets or ManagedAssetCatalogService()
 
     def api_key(self, provider: str) -> str:
         try:
@@ -178,6 +202,7 @@ class VideoGenerationSettingsService:
         except ValueError:
             timeout = 900
         provider_settings: list[VideoProviderSettingsResponse] = []
+        managed_asset_status = self.managed_assets.status()
         for provider in ("bailian", "volc_ark", "minimax"):
             key = self.api_key(provider)
             validated_at = _parse_time(get_config_value(VALIDATED_ENV[provider], ""))
@@ -198,6 +223,33 @@ class VideoGenerationSettingsService:
                         else "尚未校验"
                         if key
                         else "未配置 API Key"
+                    ),
+                    managed_asset_catalog_supported=provider == "volc_ark",
+                    managed_asset_credentials_configured=(
+                        managed_asset_status.credentials_configured
+                        if provider == "volc_ark"
+                        else False
+                    ),
+                    managed_asset_access_key_hint=(
+                        managed_asset_status.access_key_hint
+                        if provider == "volc_ark"
+                        else None
+                    ),
+                    managed_asset_region=(
+                        managed_asset_status.region if provider == "volc_ark" else None
+                    ),
+                    managed_asset_project_name=(
+                        managed_asset_status.project_name if provider == "volc_ark" else None
+                    ),
+                    managed_asset_validation_status=(
+                        managed_asset_status.validation_status
+                        if provider == "volc_ark"
+                        else "not_supported"
+                    ),
+                    managed_asset_validation_message=(
+                        managed_asset_status.validation_message
+                        if provider == "volc_ark"
+                        else None
                     ),
                 )
             )
@@ -286,22 +338,86 @@ class VideoGenerationSettingsService:
             if item.clear_api_key:
                 updates[KEY_ENV[item.provider]] = ""
                 updates[VALIDATED_ENV[item.provider]] = ""
-                continue
-            if not new_key:
-                continue
-            result = await self.validate_provider(
-                item.provider,
-                VideoProviderValidationRequest(api_key=new_key, base_url=base_url),
-            )
-            if not result.valid:
-                error_code = result.error_code or "video_api_key_invalid"
-                raise _fail(
-                    VALIDATION_ERROR_STATUS.get(error_code, 502),
-                    error_code,
-                    result.message,
+            elif not new_key:
+                pass
+            else:
+                result = await self.validate_provider(
+                    item.provider,
+                    VideoProviderValidationRequest(api_key=new_key, base_url=base_url),
                 )
-            updates[KEY_ENV[item.provider]] = new_key
-            updates[VALIDATED_ENV[item.provider]] = datetime.now(UTC).isoformat()
+                if not result.valid:
+                    error_code = result.error_code or "video_api_key_invalid"
+                    raise _fail(
+                        VALIDATION_ERROR_STATUS.get(error_code, 502),
+                        error_code,
+                        result.message,
+                    )
+                updates[KEY_ENV[item.provider]] = new_key
+                updates[VALIDATED_ENV[item.provider]] = datetime.now(UTC).isoformat()
+
+            managed_fields = {
+                "managed_asset_access_key",
+                "managed_asset_secret_key",
+                "managed_asset_region",
+                "managed_asset_project_name",
+                "clear_managed_asset_credentials",
+            }
+            if item.provider != "volc_ark" or not (item.model_fields_set & managed_fields):
+                continue
+            current_assets = self.managed_assets.settings()
+            region = item.managed_asset_region or current_assets.region
+            project_name = (
+                item.managed_asset_project_name or current_assets.project_name
+            ).strip()
+            if item.clear_managed_asset_credentials:
+                updates.update(
+                    {
+                        MANAGED_ASSET_ACCESS_KEY_ENV: "",
+                        MANAGED_ASSET_SECRET_KEY_ENV: "",
+                        MANAGED_ASSET_REGION_ENV: region,
+                        MANAGED_ASSET_PROJECT_ENV: project_name,
+                        MANAGED_ASSET_VALIDATED_ENV: "",
+                    }
+                )
+                continue
+            access_key = (
+                item.managed_asset_access_key.get_secret_value().strip()
+                if item.managed_asset_access_key is not None
+                else current_assets.access_key
+            )
+            secret_key = (
+                item.managed_asset_secret_key.get_secret_value().strip()
+                if item.managed_asset_secret_key is not None
+                else current_assets.secret_key
+            )
+            if bool(access_key) != bool(secret_key):
+                raise _fail(
+                    422,
+                    "managed_asset_credentials_incomplete",
+                    "火山方舟资产目录必须同时填写 Access Key 和 Secret Key",
+                )
+            proposed = self.managed_assets.proposed_settings(
+                access_key=access_key,
+                secret_key=secret_key,
+                region=region,
+                project_name=project_name,
+            )
+            try:
+                if proposed.configured:
+                    await self.managed_assets.validate_credentials(proposed)
+            except ManagedAssetServiceError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            updates.update(
+                {
+                    MANAGED_ASSET_ACCESS_KEY_ENV: access_key,
+                    MANAGED_ASSET_SECRET_KEY_ENV: secret_key,
+                    MANAGED_ASSET_REGION_ENV: region,
+                    MANAGED_ASSET_PROJECT_ENV: project_name,
+                    MANAGED_ASSET_VALIDATED_ENV: (
+                        datetime.now(UTC).isoformat() if proposed.configured else ""
+                    ),
+                }
+            )
         try:
             persist_config_values(updates)
         except RuntimeConfigError as exc:

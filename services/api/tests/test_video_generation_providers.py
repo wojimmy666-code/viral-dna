@@ -34,6 +34,7 @@ from viral_dna_api.video_generation.contracts import (
 from viral_dna_api.video_generation.costing import estimate_video_cost
 from viral_dna_api.video_generation.errors import (
     VideoProviderError,
+    classify_video_provider_failure,
     sanitize_provider_error_message,
 )
 from viral_dna_api.video_generation.orchestrator import RemoteVideoOrchestrator
@@ -868,6 +869,8 @@ def test_ambiguous_submission_is_not_repeated(
                     "end_ratio": 1,
                 }
             ],
+            "reference_videos": [],
+            "reference_policy": {},
         }
         import hashlib
         import json
@@ -910,3 +913,18 @@ def test_ambiguous_submission_is_not_repeated(
         assert provider.submit_calls == 0
 
     asyncio.run(scenario())
+
+
+def test_seedance_real_person_rejection_points_to_managed_identity_strategy() -> None:
+    failure = classify_video_provider_failure(
+        provider="volc_ark",
+        code="video_provider_content_rejected",
+        message="The input image 'content[2]' may contain real person.",
+        provider_code="InputImageSensitiveContentDetected.PrivacyInformation",
+    )
+
+    assert failure.code == "video_provider_content_rejected"
+    assert failure.category == "person_reference_policy"
+    assert failure.title == "检测到未托管真人参考"
+    assert failure.suggested_action == "review_person_references"
+    assert "图片／视频白模" in failure.message

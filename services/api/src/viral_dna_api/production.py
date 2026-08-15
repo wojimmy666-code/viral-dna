@@ -32,6 +32,7 @@ from .image_generation.identity_policy import (
     validate_identity_bindings,
     validate_identity_generation,
 )
+from .managed_assets.service import ManagedAssetCatalogService, ManagedAssetServiceError
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
     AnalysisJob,
@@ -141,6 +142,15 @@ from .video_generation import (
     VideoGenerationGatewayError,
 )
 from .video_generation.errors import classify_video_provider_failure
+from .video_references.domain import (
+    PersonContentClass,
+    VideoReferenceBinding,
+    VideoReferenceMediaType,
+    VideoReferenceRole,
+    VideoReferenceSourceKind,
+)
+from .video_references.models import ReferenceProxyCreate, ReferenceProxyCreateResponse
+from .video_references.proxies import ReferenceProxyService, ReferenceProxyServiceError
 from .workspace import WorkspaceError, WorkspaceManager
 
 MAX_REFERENCE_IMAGE_BYTES = 15 * 1024 * 1024
@@ -1150,6 +1160,8 @@ class ProductionService:
         notification_publisher: NotificationPublisher | None = None,
         video_inspector: VideoInspector | None = None,
         continuity_service: ContinuityService | None = None,
+        managed_asset_service: ManagedAssetCatalogService | None = None,
+        reference_proxy_service: ReferenceProxyService | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
@@ -1166,6 +1178,8 @@ class ProductionService:
         self.notification_publisher = notification_publisher
         self.video_inspector = video_inspector or ProductionVideoInspector(self.media_processor)
         self.continuity = continuity_service or ContinuityService(repository)
+        self.managed_assets = managed_asset_service
+        self.reference_proxies = reference_proxy_service
         self._lock_guard = asyncio.Lock()
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -2797,6 +2811,153 @@ class ProductionService:
             ),
         )
 
+    async def create_reference_proxy(
+        self,
+        shot_plan_id: UUID,
+        payload: ReferenceProxyCreate,
+    ) -> ReferenceProxyCreateResponse:
+        if self.reference_proxies is None:
+            raise _fail(
+                409,
+                "reference_proxy_service_unavailable",
+                "动作代理服务尚未配置",
+            )
+        plan = await self._require_shot(shot_plan_id)
+        project = await self._require_project(plan.project_id)
+        self._require_expected_revision(project, payload.expected_revision_id)
+        if not any(item.id == payload.visual_beat_id for item in plan.visual_beats):
+            raise _fail(404, "visual_beat_not_found", "动作代理所属画面不存在")
+        candidate: GenerationCandidate | None = None
+        source_path_override: Path | None = None
+        source_video_id: UUID | None = None
+        start_seconds: float | None = None
+        end_seconds: float | None = None
+        if payload.source_kind == "source_shot_video":
+            video = await self.repository.get_video(project.video_id)
+            if video is None:
+                raise _fail(404, "source_video_not_found", "创作方案原视频不存在")
+            try:
+                if video.stored_relative_path:
+                    source_path_override = self.workspace.resolve(video.stored_relative_path)
+                elif video.stored_path:
+                    def resolve_legacy_video_path() -> Path:
+                        resolved = Path(video.stored_path).expanduser().resolve()
+                        resolved.relative_to(self.workspace.root)
+                        return resolved
+
+                    source_path_override = await asyncio.to_thread(
+                        resolve_legacy_video_path
+                    )
+                else:
+                    raise ValueError("missing source path")
+            except (OSError, ValueError, WorkspaceError) as exc:
+                raise _fail(409, "source_video_path_invalid", "原视频文件路径无效") from exc
+            if not await asyncio.to_thread(source_path_override.is_file):
+                raise _fail(404, "source_video_missing", "原视频文件不存在")
+            source_video_id = video.id
+            start_seconds = plan.start_seconds
+            end_seconds = plan.end_seconds
+        else:
+            assert payload.source_candidate_id is not None
+            candidate = await self.repository.get_generation_candidate(
+                payload.source_candidate_id
+            )
+            if candidate is None:
+                raise _fail(404, "generation_candidate_not_found", "动作代理源候选不存在")
+            run = await self.repository.get_generation_run(candidate.generation_run_id)
+            if run is None or run.shot_plan_id != plan.id:
+                raise _fail(
+                    422,
+                    "reference_proxy_source_mismatch",
+                    "动作代理源候选不属于当前分镜",
+                )
+        try:
+            proxy = await self.reference_proxies.generate(
+                project=project,
+                shot=plan,
+                source_candidate=candidate,
+                source_path_override=source_path_override,
+                source_video_id=source_video_id,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
+                kind=payload.kind,
+                visual_beat_id=payload.visual_beat_id,
+                order=payload.order,
+            )
+        except ReferenceProxyServiceError as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+
+        lock = await self._project_lock(project.id)
+        async with lock:
+            project = await self._require_project(project.id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            plan = await self._require_shot(plan.id)
+            revision_id = uuid4()
+            binding = VideoReferenceBinding(
+                role=VideoReferenceRole.MOTION,
+                source_kind=VideoReferenceSourceKind.GENERATED_PROXY,
+                media_type=VideoReferenceMediaType(proxy.media_type),
+                visual_beat_id=proxy.visual_beat_id,
+                proxy_asset_id=proxy.id,
+                person_class=PersonContentClass.NON_PHOTOREAL_PROXY,
+                rights_state="confirmed",
+                order=proxy.order,
+                enabled=proxy.usable_for_generation,
+            )
+            prior_bindings = [
+                item.model_copy(update={"enabled": False})
+                if (
+                    proxy.usable_for_generation
+                    and item.enabled
+                    and item.source_kind
+                    == VideoReferenceSourceKind.GENERATED_PROXY
+                    and item.media_type == binding.media_type
+                )
+                else item
+                for item in plan.video_reference_bindings
+            ]
+            has_prior_video = plan.approved_video_candidate_id is not None
+            updated = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "reference_proxy_assets": [*plan.reference_proxy_assets, proxy],
+                    "video_reference_bindings": [*prior_bindings, binding],
+                    "video_status": (
+                        WorkflowItemStatus.STALE
+                        if has_prior_video
+                        else WorkflowItemStatus.DRAFT
+                    ),
+                    "approved_video_candidate_id": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated if item.id == updated.id else item for item in plans]
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "active_step": ProductionStep.SHOT_VIDEOS,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.REFERENCE_CHANGED,
+                f"为分镜 {updated.index} 生成无身份动作代理",
+                revision_id=revision_id,
+                shot_plans=next_plans,
+                reference_bindings=await self._all_bindings(next_plans),
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated],
+            )
+        return ReferenceProxyCreateResponse(
+            current_revision_id=revision_id,
+            proxy=proxy,
+        )
+
     async def preview_analysis_update(
         self,
         project_id: UUID,
@@ -3797,6 +3958,8 @@ class ProductionService:
                 & {
                     "video_prompt",
                     "video_negative_constraints",
+                    "managed_asset_bindings",
+                    "video_reference_bindings",
                     "locks",
                 }
             )
@@ -3823,6 +3986,25 @@ class ProductionService:
                 )
                 normalized_payload = payload.model_copy(
                     update={"image_prompt_mentions": normalized_mentions}
+                )
+            if "managed_asset_bindings" in fields:
+                requested_bindings = payload.managed_asset_bindings or []
+                if requested_bindings and self.managed_assets is None:
+                    raise _fail(
+                        409,
+                        "managed_asset_service_unavailable",
+                        "供应商托管资产目录服务尚未配置",
+                    )
+                verified_bindings = []
+                for binding in requested_bindings:
+                    try:
+                        verified_bindings.append(
+                            await self.managed_assets.verify_binding(binding)  # type: ignore[union-attr]
+                        )
+                    except ManagedAssetServiceError as exc:
+                        raise _fail(exc.status_code, exc.code, str(exc)) from exc
+                normalized_payload = normalized_payload.model_copy(
+                    update={"managed_asset_bindings": verified_bindings}
                 )
             if "reference_bindings" in fields or "image_prompt_mentions" in fields:
                 binding_inputs = (
@@ -3924,8 +4106,16 @@ class ProductionService:
                 raise _fail(409, "shot_discarded", "已舍弃分镜需要先恢复后才能修改")
 
             impacted_approved = any(
-                plans_by_id[item.shot_plan_id].image_status == WorkflowItemStatus.APPROVED
-                and self._image_fields_changed(item)
+                (
+                    plans_by_id[item.shot_plan_id].image_status
+                    == WorkflowItemStatus.APPROVED
+                    and self._image_fields_changed(item)
+                )
+                or (
+                    plans_by_id[item.shot_plan_id].video_status
+                    == WorkflowItemStatus.APPROVED
+                    and self._video_fields_changed(item)
+                )
                 for item in payload.updates
             )
             if impacted_approved and not payload.confirm_stale:
@@ -3951,6 +4141,25 @@ class ProductionService:
                     )
                     normalized_item = item.model_copy(
                         update={"image_prompt_mentions": normalized_mentions}
+                    )
+                if "managed_asset_bindings" in fields:
+                    requested_bindings = item.managed_asset_bindings or []
+                    if requested_bindings and self.managed_assets is None:
+                        raise _fail(
+                            409,
+                            "managed_asset_service_unavailable",
+                            "供应商托管资产目录服务尚未配置",
+                        )
+                    verified_bindings = []
+                    for binding in requested_bindings:
+                        try:
+                            verified_bindings.append(
+                                await self.managed_assets.verify_binding(binding)  # type: ignore[union-attr]
+                            )
+                        except ManagedAssetServiceError as exc:
+                            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+                    normalized_item = normalized_item.model_copy(
+                        update={"managed_asset_bindings": verified_bindings}
                     )
                 if "reference_bindings" in fields or "image_prompt_mentions" in fields:
                     previous = [
@@ -3999,10 +4208,18 @@ class ProductionService:
                 changed_plans.append(updated)
 
             next_plans = [plans_by_id[item.id] for item in plans]
+            any_image_change = any(self._image_fields_changed(item) for item in payload.updates)
+            any_video_change = any(self._video_fields_changed(item) for item in payload.updates)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": (
+                        ProductionStep.SHOT_IMAGES
+                        if any_image_change
+                        else ProductionStep.SHOT_VIDEOS
+                        if any_video_change
+                        else project.active_step
+                    ),
                     "updated_at": utc_now(),
                 }
             )
@@ -8321,6 +8538,8 @@ class ProductionService:
             & {
                 "video_prompt",
                 "video_negative_constraints",
+                "managed_asset_bindings",
+                "video_reference_bindings",
                 "locks",
             }
         )
@@ -8422,6 +8641,28 @@ class ProductionService:
             if payload.locks is None:
                 raise _fail(422, "invalid_shot_plan", "锁定项不能为 null")
             updates["locks"] = payload.locks
+        if "managed_asset_bindings" in fields:
+            if payload.managed_asset_bindings is None:
+                raise _fail(422, "invalid_shot_plan", "托管资产绑定不能为 null")
+            updates["managed_asset_bindings"] = payload.managed_asset_bindings
+        if "video_reference_bindings" in fields:
+            if payload.video_reference_bindings is None:
+                raise _fail(422, "invalid_shot_plan", "视频参考绑定不能为 null")
+            proxy_assets = {item.id: item for item in plan.reference_proxy_assets}
+            for binding in payload.video_reference_bindings:
+                if (
+                    binding.enabled
+                    and binding.source_kind == VideoReferenceSourceKind.GENERATED_PROXY
+                    and binding.proxy_asset_id is not None
+                ):
+                    proxy = proxy_assets.get(binding.proxy_asset_id)
+                    if proxy is None or not proxy.usable_for_generation:
+                        raise _fail(
+                            422,
+                            "reference_proxy_quality_not_passed",
+                            "动作代理尚未通过姿态质量校验，不能启用",
+                        )
+            updates["video_reference_bindings"] = payload.video_reference_bindings
         if "required" in fields:
             if payload.required is None:
                 raise _fail(422, "invalid_shot_plan", "必需分镜不能为 null")

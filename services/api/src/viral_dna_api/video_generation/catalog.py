@@ -4,9 +4,20 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from ..models import VideoGenerationCapability, VideoGenerationModelOption
+from ..models import (
+    ManagedAssetKind,
+    ManagedAssetRole,
+    ProviderManagedAssetCapability,
+    VideoGenerationCapability,
+    VideoGenerationModelOption,
+)
+from ..video_references.domain import (
+    PersonReferenceCapability,
+    PersonReferencePolicy,
+    VideoReferenceRole,
+)
 
-CATALOG_VERSION = "video-model-catalog-2026-08-10.5"
+CATALOG_VERSION = "video-model-catalog-2026-08-14.1"
 PRICING_VERSION = "video-pricing-cn-2026-08-10"
 
 
@@ -86,6 +97,9 @@ def _capability(
     seed: bool = True,
     ordered_multi_image: bool = False,
     maximum_reference_images: int = 1,
+    managed_assets: bool = False,
+    person_policy: PersonReferencePolicy = PersonReferencePolicy.RAW_SUPPORTED,
+    supports_motion_proxy_video: bool = False,
 ) -> VideoGenerationCapability:
     return VideoGenerationCapability(
         image_to_video=True,
@@ -114,6 +128,50 @@ def _capability(
         supported_resolutions=resolutions,
         supported_aspect_ratios=["16:9", "9:16", "1:1", "4:3", "3:4"],
         maximum_prompt_characters=prompt_characters,
+        managed_assets=(
+            ProviderManagedAssetCapability(
+                supported=True,
+                provider="volc_ark",
+                catalog_browsing=True,
+                asset_kinds=[
+                    ManagedAssetKind.VIRTUAL_PERSON,
+                    ManagedAssetKind.VERIFIED_PERSON,
+                ],
+                roles=[ManagedAssetRole.ACTOR_IDENTITY],
+                maximum_bindings=1,
+                reference_transport="asset_uri",
+                requires_same_project=True,
+            )
+            if managed_assets
+            else ProviderManagedAssetCapability()
+        ),
+        person_references=PersonReferenceCapability(
+            policy=person_policy,
+            allow_raw_photoreal_person=(
+                person_policy
+                in {
+                    PersonReferencePolicy.RAW_SUPPORTED,
+                    PersonReferencePolicy.MANAGED_OPTIONAL,
+                }
+            ),
+            allow_provider_managed_identity=managed_assets,
+            allow_asset_only_generation=(
+                person_policy == PersonReferencePolicy.MANAGED_REQUIRED
+            ),
+            supports_pose_proxy_image=True,
+            supports_motion_proxy_video=supports_motion_proxy_video,
+            supported_roles=[
+                VideoReferenceRole.ACTOR_IDENTITY,
+                VideoReferenceRole.MOTION,
+                VideoReferenceRole.COMPOSITION,
+                VideoReferenceRole.SCENE,
+                VideoReferenceRole.PRODUCT,
+                VideoReferenceRole.WARDROBE,
+                VideoReferenceRole.FIRST_FRAME,
+                VideoReferenceRole.LAST_FRAME,
+                VideoReferenceRole.TRANSITION,
+            ],
+        ),
     )
 
 
@@ -157,6 +215,9 @@ _MODELS = (
             default_duration=5,
             ordered_multi_image=True,
             maximum_reference_images=9,
+            managed_assets=True,
+            person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
+            supports_motion_proxy_video=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -178,6 +239,9 @@ _MODELS = (
             default_duration=5,
             ordered_multi_image=True,
             maximum_reference_images=9,
+            managed_assets=True,
+            person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
+            supports_motion_proxy_video=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -199,6 +263,9 @@ _MODELS = (
             default_duration=5,
             ordered_multi_image=True,
             maximum_reference_images=9,
+            managed_assets=True,
+            person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
+            supports_motion_proxy_video=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",

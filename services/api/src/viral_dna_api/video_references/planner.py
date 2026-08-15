@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass, replace
+
+from ..models import ShotPlan, VideoGenerationCapability
+from ..video_generation.contracts import (
+    OrderedReferenceFrame,
+    OrderedReferenceVideo,
+    ProviderManagedAssetReference,
+)
+from .domain import (
+    PersonContentClass,
+    PersonReferencePolicy,
+    VideoReferenceBinding,
+    VideoReferenceSourceKind,
+)
+
+
+class VideoReferencePolicyError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class ExcludedVideoReference:
+    candidate_id: str
+    title: str
+    person_class: str
+    reason_code: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedVideoReferencePlan:
+    policy: PersonReferencePolicy
+    strategy: str
+    reference_frames: tuple[OrderedReferenceFrame, ...]
+    reference_videos: tuple[OrderedReferenceVideo, ...]
+    managed_asset_references: tuple[ProviderManagedAssetReference, ...]
+    excluded_references: tuple[ExcludedVideoReference, ...]
+    warnings: tuple[str, ...]
+    policy_version: str
+    fingerprint: str
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "policy": self.policy.value,
+            "strategy": self.strategy,
+            "policy_version": self.policy_version,
+            "fingerprint": self.fingerprint,
+            "submitted_local_references": [
+                {
+                    "candidate_id": str(frame.candidate_id),
+                    "ordinal": frame.ordinal,
+                    "title": frame.title,
+                    "sha256": frame.sha256,
+                }
+                for frame in self.reference_frames
+            ],
+            "submitted_managed_assets": [
+                {
+                    "binding_id": str(item.binding_id),
+                    "provider": item.provider,
+                    "asset_id": item.asset_id,
+                    "role": item.role,
+                }
+                for item in self.managed_asset_references
+            ],
+            "submitted_proxy_videos": [
+                {
+                    "proxy_asset_id": str(item.proxy_asset_id),
+                    "ordinal": item.ordinal,
+                    "title": item.title,
+                    "sha256": item.sha256,
+                    "role": item.role,
+                }
+                for item in self.reference_videos
+            ],
+            "excluded_references": [asdict(item) for item in self.excluded_references],
+            "warnings": list(self.warnings),
+        }
+
+
+def _binding_for_frame(
+    frame: OrderedReferenceFrame,
+    bindings: list[VideoReferenceBinding],
+) -> VideoReferenceBinding | None:
+    return next(
+        (
+            binding
+            for binding in bindings
+            if binding.enabled
+            and binding.source_kind == VideoReferenceSourceKind.LOCAL_ORIGINAL
+            and binding.image_candidate_id == frame.candidate_id
+        ),
+        None,
+    )
+
+
+def _content_class(binding: VideoReferenceBinding | None) -> PersonContentClass:
+    return binding.person_class if binding is not None else PersonContentClass.UNKNOWN
+
+
+def _renumber(
+    frames: list[OrderedReferenceFrame],
+) -> tuple[OrderedReferenceFrame, ...]:
+    return tuple(replace(frame, ordinal=index) for index, frame in enumerate(frames, start=1))
+
+
+def _fingerprint(payload: dict[str, object]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def resolve_video_reference_plan(
+    *,
+    capability: VideoGenerationCapability,
+    shot: ShotPlan,
+    reference_frames: tuple[OrderedReferenceFrame, ...],
+    managed_asset_references: tuple[ProviderManagedAssetReference, ...],
+    proxy_reference_frames: tuple[OrderedReferenceFrame, ...] = (),
+    proxy_reference_videos: tuple[OrderedReferenceVideo, ...] = (),
+) -> ResolvedVideoReferencePlan:
+    """Compile creative references into the exact provider input set.
+
+    This is the final safety boundary. Provider adapters only receive references
+    returned by this function; frontend choices cannot bypass model policy.
+    """
+
+    person_capability = capability.person_references
+    policy = person_capability.policy
+    ordered = sorted(reference_frames, key=lambda item: item.ordinal)
+    selected: list[OrderedReferenceFrame] = []
+    excluded: list[ExcludedVideoReference] = []
+    warnings: list[str] = []
+    selected_videos: tuple[OrderedReferenceVideo, ...] = ()
+
+    if policy in {
+        PersonReferencePolicy.RAW_SUPPORTED,
+        PersonReferencePolicy.MANAGED_OPTIONAL,
+    }:
+        selected = ordered
+        strategy = "raw_references"
+        if managed_asset_references:
+            strategy = "managed_identity_with_raw_references"
+    elif policy == PersonReferencePolicy.MANAGED_REQUIRED:
+        if not managed_asset_references:
+            raise VideoReferencePolicyError(
+                "video_managed_identity_required",
+                "当前模型不接收原始真人身份素材；请先绑定 Provider 托管演员身份，"
+                "或切换到支持原始素材的模型",
+            )
+        strategy = "managed_identity_only"
+        for frame in ordered:
+            binding = _binding_for_frame(frame, shot.video_reference_bindings)
+            content_class = _content_class(binding)
+            if content_class in {
+                PersonContentClass.NO_PERSON,
+                PersonContentClass.NON_PHOTOREAL_PROXY,
+            }:
+                selected.append(frame)
+                strategy = "managed_identity_with_safe_references"
+                continue
+            excluded.append(
+                ExcludedVideoReference(
+                    candidate_id=str(frame.candidate_id),
+                    title=frame.title,
+                    person_class=content_class.value,
+                    reason_code="local_identity_reference_excluded",
+                    reason=(
+                        "托管演员是唯一人物身份来源；原始或身份不明的本地画面不会提交给当前模型"
+                    ),
+                )
+            )
+        if excluded:
+            warnings.append(f"已按模型策略排除 {len(excluded)} 张本地人物/身份不明参考画面")
+        if proxy_reference_frames:
+            selected.extend(proxy_reference_frames)
+            strategy = "managed_identity_with_safe_references"
+        if proxy_reference_videos:
+            if not person_capability.supports_motion_proxy_video:
+                raise VideoReferencePolicyError(
+                    "video_motion_proxy_unsupported",
+                    "当前模型不支持视频动作代理，请改用图片动作代理或切换模型",
+                )
+            selected_videos = tuple(
+                replace(item, ordinal=index)
+                for index, item in enumerate(proxy_reference_videos, start=1)
+            )
+            strategy = "managed_identity_with_motion_proxy"
+    elif policy == PersonReferencePolicy.NO_PERSON:
+        for frame in ordered:
+            binding = _binding_for_frame(frame, shot.video_reference_bindings)
+            content_class = _content_class(binding)
+            if content_class != PersonContentClass.NO_PERSON:
+                raise VideoReferencePolicyError(
+                    "video_person_reference_not_allowed",
+                    "当前模型不允许人物参考；请移除人物素材或切换模型",
+                )
+            selected.append(frame)
+        if managed_asset_references:
+            raise VideoReferencePolicyError(
+                "video_managed_person_not_allowed",
+                "当前模型不允许托管人物身份",
+            )
+        strategy = "person_free_references"
+    else:
+        selected = ordered
+        strategy = "legacy_unclassified_references"
+        warnings.append("当前模型未声明人物参考策略，已按兼容模式提交；建议补齐模型能力声明")
+
+    selected_frames = _renumber(selected)
+    manifest_seed: dict[str, object] = {
+        "policy": policy.value,
+        "strategy": strategy,
+        "policy_version": shot.reference_policy_version,
+        "local": [
+            {"candidate_id": str(item.candidate_id), "sha256": item.sha256}
+            for item in selected_frames
+        ],
+        "managed": [
+            {
+                "binding_id": str(item.binding_id),
+                "provider": item.provider,
+                "asset_id": item.asset_id,
+            }
+            for item in managed_asset_references
+        ],
+        "proxy_videos": [
+            {"proxy_asset_id": str(item.proxy_asset_id), "sha256": item.sha256}
+            for item in selected_videos
+        ],
+        "excluded": [asdict(item) for item in excluded],
+    }
+    return ResolvedVideoReferencePlan(
+        policy=policy,
+        strategy=strategy,
+        reference_frames=selected_frames,
+        reference_videos=selected_videos,
+        managed_asset_references=managed_asset_references,
+        excluded_references=tuple(excluded),
+        warnings=tuple(warnings),
+        policy_version=shot.reference_policy_version,
+        fingerprint=_fingerprint(manifest_seed),
+    )

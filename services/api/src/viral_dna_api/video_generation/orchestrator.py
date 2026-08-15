@@ -26,6 +26,8 @@ from .catalog import (
 from .contracts import (
     GeneratedVideo,
     OrderedReferenceFrame,
+    OrderedReferenceVideo,
+    ProviderManagedAssetReference,
     ProviderVideoRequest,
     VideoAdapterIdentity,
     VideoAdapterResult,
@@ -179,6 +181,7 @@ class RemoteVideoOrchestrator:
         shot_plan_id: UUID,
         run_root: Path,
         reference_frames: tuple[OrderedReferenceFrame, ...],
+        reference_videos: tuple[OrderedReferenceVideo, ...] = (),
         candidate_count: int,
         duration_seconds: float,
         aspect_ratio: str,
@@ -188,6 +191,8 @@ class RemoteVideoOrchestrator:
         negative_prompt: str,
         seed: int | None,
         cancel_event: Event | None,
+        managed_asset_references: tuple[ProviderManagedAssetReference, ...] = (),
+        reference_manifest: dict[str, object] | None = None,
     ) -> VideoAdapterResult:
         provider = self.registry.get(execution.spec.provider)
         existing = {
@@ -227,7 +232,34 @@ class RemoteVideoOrchestrator:
                     }
                     for frame in reference_frames
                 ],
+                "reference_videos": [
+                    {
+                        "proxy_asset_id": str(video.proxy_asset_id),
+                        "visual_beat_id": str(video.visual_beat_id),
+                        "ordinal": video.ordinal,
+                        "sha256": video.sha256,
+                        "role": video.role,
+                    }
+                    for video in reference_videos
+                ],
+                "reference_policy": reference_manifest or {},
             }
+            if managed_asset_references:
+                request_snapshot["managed_asset_references"] = [
+                    {
+                        "binding_id": str(reference.binding_id),
+                        "provider": reference.provider,
+                        "asset_id": reference.asset_id,
+                        "group_id": reference.group_id,
+                        "kind": reference.kind,
+                        "role": reference.role,
+                        "name": reference.name,
+                        "media_type": reference.media_type,
+                        "project_name": reference.project_name,
+                        "uri": reference.uri,
+                    }
+                    for reference in managed_asset_references
+                ]
             submission_fingerprint = _fingerprint(request_snapshot)
             if task is not None and task.submission_fingerprint != submission_fingerprint:
                 raise VideoProviderError(
@@ -266,6 +298,9 @@ class RemoteVideoOrchestrator:
                             prompt=positive_prompt,
                             negative_prompt=negative_prompt,
                             reference_frames=reference_frames,
+                            reference_videos=reference_videos,
+                            managed_asset_references=managed_asset_references,
+                            reference_manifest=reference_manifest or {},
                             duration_seconds=duration_seconds,
                             resolution=execution.resolution,
                             aspect_ratio=aspect_ratio,

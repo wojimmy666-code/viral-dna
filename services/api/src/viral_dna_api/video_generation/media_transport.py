@@ -11,6 +11,7 @@ from .contracts import MAX_GENERATED_VIDEO_BYTES
 from .errors import VideoProviderError
 
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_PROVIDER_REFERENCE_VIDEO_BYTES = 100 * 1024 * 1024
 
 
 def image_data_url(path: Path) -> str:
@@ -30,6 +31,32 @@ def image_data_url(path: Path) -> str:
     if media_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise VideoProviderError(
             422, "video_start_frame_format_invalid", "起始帧必须是 JPEG、PNG 或 WebP"
+        )
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
+
+
+def video_data_url(path: Path) -> str:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise VideoProviderError(
+            409,
+            "video_reference_proxy_missing",
+            "动作代理视频文件不存在",
+        ) from exc
+    if not payload or len(payload) > MAX_PROVIDER_REFERENCE_VIDEO_BYTES:
+        raise VideoProviderError(
+            422,
+            "video_reference_proxy_size_invalid",
+            "动作代理视频为空或超过远程视频模型允许的 100MB 安全限制",
+        )
+    media_type = mimetypes.guess_type(path.name)[0] or "video/mp4"
+    if media_type not in {"video/mp4", "video/webm", "video/quicktime"}:
+        raise VideoProviderError(
+            422,
+            "video_reference_proxy_format_invalid",
+            "动作代理视频必须是 MP4、WebM 或 MOV",
         )
     encoded = base64.b64encode(payload).decode("ascii")
     return f"data:{media_type};base64,{encoded}"

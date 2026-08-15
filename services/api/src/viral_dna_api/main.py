@@ -29,6 +29,8 @@ from .image_generation import (
     ImageGenerationSettingsServiceError,
 )
 from .link_ingestion import LinkIngestionError, identify_platform
+from .managed_assets import ManagedAssetCatalogService
+from .managed_assets.routes import create_managed_asset_router
 from .media import get_analysis_artifact_root
 from .model_settings import ModelSettingsService, ModelSettingsServiceError
 from .models import (
@@ -183,6 +185,8 @@ from .video_generation.settings import (
     VideoGenerationSettingsService,
     VideoGenerationSettingsServiceError,
 )
+from .video_references.proxies import ReferenceProxyService
+from .video_references.routes import create_video_reference_router
 from .viral_insights.publisher import ProductionConceptPublisher
 from .viral_insights.routes import create_viral_insight_router
 from .viral_insights.service import ViralInsightService
@@ -256,7 +260,11 @@ app.add_middleware(
 
 model_settings_service = ModelSettingsService()
 image_generation_settings_service = ImageGenerationSettingsService()
-video_generation_settings_service = VideoGenerationSettingsService()
+managed_asset_service = ManagedAssetCatalogService()
+reference_proxy_service = ReferenceProxyService(workspace_manager)
+video_generation_settings_service = VideoGenerationSettingsService(
+    managed_assets=managed_asset_service
+)
 record_service = RecordService(store)
 export_service = ExportService(store)
 image_generation_gateway = ImageGenerationGateway(
@@ -273,6 +281,7 @@ account_context_service = create_account_context_service(workspace_manager)
 platform_connection_service = create_platform_connection_service(account_context_service)
 pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
 notification_service = create_notification_service(account_context_service)
+reference_proxy_service.notification_publisher = notification_service
 storage_manager = StorageManager(store, workspace_manager)
 asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
 project_asset_service = ProjectAssetService(
@@ -287,6 +296,8 @@ production_service = ProductionService(
     video_gateway=video_generation_gateway,
     notification_publisher=notification_service,
     continuity_service=continuity_service,
+    managed_asset_service=managed_asset_service,
+    reference_proxy_service=reference_proxy_service,
 )
 viral_insight_service = ViralInsightService(
     store,
@@ -307,6 +318,11 @@ timeline_export_service = TimelineExportService(
     on_export_succeeded=production_service.mark_export_completed,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
+app.include_router(create_managed_asset_router(managed_asset_service), prefix=API_PREFIX)
+app.include_router(
+    create_video_reference_router(production_service, reference_proxy_service),
+    prefix=API_PREFIX,
+)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 

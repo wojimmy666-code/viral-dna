@@ -146,6 +146,27 @@ def classify_video_provider_failure(
             provider_code=raw_code,
             technical_message=sanitize_provider_error_message(raw_message),
         )
+    if provider == "volc_ark" and any(
+        token in lowered
+        for token in (
+            "inputimagesensitivecontentdetected.privacyinformation",
+            "privacyinformation",
+            "may contain real person",
+        )
+    ):
+        return VideoProviderFailure(
+            code="video_provider_content_rejected",
+            category="person_reference_policy",
+            title="检测到未托管真人参考",
+            message=(
+                "Seedance 仍检测到可能包含真人身份的输入。请确认已绑定 Provider 托管演员，"
+                "并只启用身份去除校验通过的图片／视频白模；不要重试提交原始人物素材。"
+            ),
+            suggested_action="review_person_references",
+            retryable=False,
+            provider_code=raw_code or normalized_code,
+            technical_message=sanitize_provider_error_message(raw_message),
+        )
     if any(
         token in lowered
         for token in ("content policy", "content moderation", "sensitive", "risk", "审核")

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   CheckCircle,
@@ -26,6 +26,10 @@ import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import { VideoCandidateLibrary } from "./VideoCandidateLibrary.jsx";
 import { ContinuityQualityPanel } from "./ContinuityQualityPanel.jsx";
 import { ShotVideoGenerationControls } from "./ShotVideoGenerationControls.jsx";
+import { ManagedAssetPicker } from "./managed-assets/ManagedAssetPicker.jsx";
+import { VideoReferenceStrategyBar } from "./video-references/VideoReferenceStrategyBar.jsx";
+import "./managed-assets/managed-assets.css";
+import "./video-references/video-references.css";
 
 const ACTIVE_RUN_STATUSES = new Set([
   "queued",
@@ -60,6 +64,21 @@ function supportsOrderedMultiImage(model) {
     model?.available
     && capability?.multi_image_reference
     && capability?.ordered_reference_images,
+  );
+}
+
+function referenceProxyUsable(item) {
+  return Boolean(
+    item?.status === "ready"
+    && item?.identity_removed
+    && item?.validation_status === "passed"
+    && item?.semantic_validation_status === "passed"
+    && item?.quality_score != null
+    && item?.relative_path
+    && item?.sha256
+    && item?.manifest_relative_path
+    && item?.quality_report_relative_path
+    && item?.model_sha256,
   );
 }
 
@@ -135,8 +154,14 @@ export function ShotVideoWorkspace({
   onApprove,
   onArchiveCandidates,
   onCancelRun,
+  onCreateReferenceProxy,
   onDecideContinuity,
+  onDisableReferenceProxy,
+  onEnableReferenceProxy,
   onGenerate,
+  onManagedAssetChange,
+  onNotice,
+  onNotificationsChanged,
   onRunContinuity,
   onOpenModelSettings,
   onReject,
@@ -146,6 +171,7 @@ export function ShotVideoWorkspace({
   onSelectCandidate,
   onSelectShot,
   project,
+  request,
   resolveUrl,
   selectedShotId,
   setVideoDraft,
@@ -157,7 +183,15 @@ export function ShotVideoWorkspace({
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [durationAdjustmentMessage, setDurationAdjustmentMessage] = useState("");
   const [diagnosticCopyState, setDiagnosticCopyState] = useState("");
+  const [managedAssetPickerOpen, setManagedAssetPickerOpen] = useState(false);
+  const [proxyEngineCapabilities, setProxyEngineCapabilities] = useState([]);
+  const [proxyEngineLoadBusy, setProxyEngineLoadBusy] = useState(false);
+  const [proxyEngineLoadError, setProxyEngineLoadError] = useState("");
+  const [proxyEngineInstallBusy, setProxyEngineInstallBusy] = useState(false);
+  const [proxyEngineInstallError, setProxyEngineInstallError] = useState("");
+  const [proxyEngineInstallJob, setProxyEngineInstallJob] = useState(null);
   const modelSelectRef = useRef(null);
+  const proxyEngineInstallPollRef = useRef(0);
   const plan = shotDetail?.plan;
   const generationRuns = shotDetail?.generation_runs || [];
   const videoRuns = useMemo(
@@ -251,6 +285,148 @@ export function ShotVideoWorkspace({
   const selectedModel = compatibleVideoModels.find(
     (item) => item.alias === videoDraft.modelAlias,
   );
+  const managedAssetBinding = (plan?.managed_asset_bindings || []).find(
+    (item) => item.role === "actor_identity",
+  ) || null;
+  const selectedManagedAssetCapability = selectedModel?.capabilities?.managed_assets;
+  const personReferenceCapability = selectedModel?.capabilities?.person_references || {};
+  const managedIdentityRequired = personReferenceCapability.policy === "managed_required";
+  const usableProxyIds = new Set(
+    (plan?.reference_proxy_assets || [])
+      .filter(referenceProxyUsable)
+      .map((item) => item.id),
+  );
+  const selectedProxyCount = (plan?.video_reference_bindings || []).filter(
+    (item) => (
+      item.enabled
+      && item.source_kind === "generated_proxy"
+      && usableProxyIds.has(item.proxy_asset_id)
+    ),
+  ).length;
+
+  const requestProxyEngineCapabilities = useCallback(
+    () => request("/video-references/proxy-engines"),
+    [request],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!managedIdentityRequired) {
+      setProxyEngineCapabilities([]);
+      setProxyEngineLoadError("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setProxyEngineLoadError("");
+    requestProxyEngineCapabilities()
+      .then((items) => {
+        if (!cancelled) setProxyEngineCapabilities(Array.isArray(items) ? items : []);
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setProxyEngineCapabilities([]);
+          setProxyEngineLoadError(
+            loadError?.message || "无法读取 DWPose 能力，请确认 API 已启动",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [managedIdentityRequired, requestProxyEngineCapabilities]);
+
+  async function refreshProxyEngines() {
+    if (proxyEngineLoadBusy) return;
+    setProxyEngineLoadBusy(true);
+    setProxyEngineLoadError("");
+    try {
+      const items = await requestProxyEngineCapabilities();
+      setProxyEngineCapabilities(Array.isArray(items) ? items : []);
+    } catch (loadError) {
+      setProxyEngineCapabilities([]);
+      setProxyEngineLoadError(
+        loadError?.message || "无法读取 DWPose 能力，请确认 API 已启动",
+      );
+    } finally {
+      setProxyEngineLoadBusy(false);
+    }
+  }
+
+  async function installProxyEngine(engineName) {
+    if (!engineName || proxyEngineInstallBusy) return;
+    const pollToken = proxyEngineInstallPollRef.current + 1;
+    proxyEngineInstallPollRef.current = pollToken;
+    setProxyEngineInstallBusy(true);
+    setProxyEngineInstallError("");
+    setProxyEngineInstallJob(null);
+    onNotice?.({
+      type: "info",
+      title: "开始安装 DWPose WholeBody",
+      message: "模型将在后台下载并校验，可在人物参考策略中查看进度。",
+    });
+    try {
+      let installation = await request(
+        `/video-references/proxy-engines/${encodeURIComponent(engineName)}/installations`,
+        { method: "POST" },
+      );
+      setProxyEngineInstallJob(installation);
+      while (
+        proxyEngineInstallPollRef.current === pollToken
+        && ["queued", "running"].includes(installation.status)
+      ) {
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+        installation = await request(
+          `/video-references/proxy-engines/installations/${installation.id}`,
+        );
+        if (proxyEngineInstallPollRef.current !== pollToken) return;
+        setProxyEngineInstallJob(installation);
+      }
+      if (installation.status === "failed") {
+        throw new Error(installation.message || "DWPose WholeBody 模型安装失败");
+      }
+      if (installation.status !== "succeeded") return;
+      if (installation.capability) {
+        setProxyEngineCapabilities((current) => {
+          const next = current.filter(
+            (item) => item.engine !== installation.capability.engine,
+          );
+          return [installation.capability, ...next];
+        });
+      } else {
+        await refreshProxyEngines();
+      }
+      onNotice?.({
+        type: "success",
+        title: "DWPose WholeBody 安装成功",
+        message: "图片白模和视频白模现在可以使用。",
+      });
+      await onNotificationsChanged?.({ announce: false });
+    } catch (installError) {
+      const message = installError?.message || "DWPose WholeBody 模型安装失败，请稍后重试";
+      setProxyEngineInstallError(message);
+      onNotice?.({
+        type: "error",
+        title: "DWPose WholeBody 安装失败",
+        message,
+      });
+      await onNotificationsChanged?.({ announce: false });
+    } finally {
+      if (proxyEngineInstallPollRef.current === pollToken) {
+        setProxyEngineInstallBusy(false);
+      }
+    }
+  }
+
+  useEffect(() => () => {
+    proxyEngineInstallPollRef.current += 1;
+  }, []);
+  const managedAssetCompatible = !managedAssetBinding || Boolean(
+    selectedManagedAssetCapability?.supported
+    && selectedManagedAssetCapability.provider === managedAssetBinding.provider
+    && (selectedManagedAssetCapability.asset_kinds || []).includes(managedAssetBinding.kind)
+    && (selectedManagedAssetCapability.roles || []).includes(managedAssetBinding.role),
+  );
   const providerSettings = (videoGenerationSettings?.providers || []).find(
     (item) => item.provider === selectedModel?.provider,
   );
@@ -293,9 +469,12 @@ export function ShotVideoWorkspace({
       );
     }
   }
+  const totalReferenceCount = managedIdentityRequired
+    ? (managedAssetBinding ? 1 : 0) + selectedProxyCount
+    : referenceFrames.length + (managedAssetBinding ? 1 : 0);
   const referenceLimitExceeded = Boolean(
     selectedModel
-    && referenceFrames.length > Number(
+    && totalReferenceCount > Number(
       selectedModel.capabilities?.maximum_reference_images || 0,
     ),
   );
@@ -305,12 +484,16 @@ export function ShotVideoWorkspace({
       ? "没有已开放且支持有序多图参考的视频模型"
     : !selectedModel
       ? "请选择支持有序多图参考的视频模型"
-      : referenceFrames.length === 0
+      : !managedAssetCompatible
+        ? "当前模型不支持已绑定的 Provider 托管人物资产，请切换到 Seedance 2.0 系列"
+      : managedIdentityRequired && !managedAssetBinding
+        ? "当前模型不接收原始真人身份素材，请先绑定 Provider 托管演员"
+      : !managedIdentityRequired && referenceFrames.length === 0
         ? "当前分镜还没有可用于视频生成的画面"
-        : !allReferencesApproved
+        : !managedIdentityRequired && !allReferencesApproved
           ? `请先确认全部必需画面（${approvedReferenceCount}/${referenceFrames.length}）`
           : referenceLimitExceeded
-            ? `${selectedModel.label} 最多接收 ${selectedModel.capabilities.maximum_reference_images} 张参考图`
+            ? `${selectedModel.label} 最多接收 ${selectedModel.capabilities.maximum_reference_images} 个参考输入；当前策略将提交 ${totalReferenceCount} 个安全参考输入`
             : !providerSettings?.api_key_configured
               ? `尚未配置 ${providerSettings?.label || selectedModel.provider} API Key`
               : null;
@@ -340,6 +523,22 @@ export function ShotVideoWorkspace({
       resolution: preferredVideoResolution(fallback, current.resolution),
     }));
   }, [compatibleVideoModels, plan?.duration_seconds, selectedModel, setVideoDraft]);
+
+  useEffect(() => {
+    if (!managedAssetBinding || managedAssetCompatible) return;
+    const fallback = compatibleVideoModels.find((model) => (
+      model.capabilities?.managed_assets?.supported
+      && model.capabilities.managed_assets.provider === managedAssetBinding.provider
+      && (model.capabilities.managed_assets.asset_kinds || []).includes(
+        managedAssetBinding.kind,
+      )
+    ));
+    if (fallback) selectVideoModel(fallback.alias);
+  }, [
+    compatibleVideoModels,
+    managedAssetBinding,
+    managedAssetCompatible,
+  ]);
 
   if (!plan) {
     return (
@@ -589,6 +788,34 @@ export function ShotVideoWorkspace({
                 </div>
               </section>
             )}
+            <VideoReferenceStrategyBar
+              busy={busy || proxyEngineInstallBusy || proxyEngineLoadBusy}
+              managedAssetBinding={managedAssetBinding}
+              model={selectedModel}
+              onCreateImageProxy={({ sourceCandidateId, visualBeatId }) => onCreateReferenceProxy?.({
+                kind: "pose_proxy_image",
+                sourceKind: "image_candidate",
+                sourceCandidateId,
+                visualBeatId,
+              })}
+              onCreateVideoProxy={({ visualBeatId }) => onCreateReferenceProxy?.({
+                kind: "motion_proxy_video",
+                sourceKind: "source_shot_video",
+                visualBeatId,
+              })}
+              onDisableProxy={onDisableReferenceProxy}
+              onEnableProxy={onEnableReferenceProxy}
+              onInstallProxyEngine={installProxyEngine}
+              onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
+              onRefreshProxyEngines={refreshProxyEngines}
+              plan={plan}
+              proxyEngineCapabilities={proxyEngineCapabilities}
+              proxyEngineInstallError={proxyEngineInstallError}
+              proxyEngineInstallJob={proxyEngineInstallJob}
+              proxyEngineLoadError={proxyEngineLoadError}
+              referenceFrames={referenceFrames}
+              resolveUrl={resolveUrl}
+            />
             <label>
               <span>视频提示词</span>
               <textarea
@@ -619,7 +846,7 @@ export function ShotVideoWorkspace({
             </details>
             <ShotVideoGenerationControls
               activeRun={activeRun}
-              allReferencesApproved={allReferencesApproved}
+              allReferencesApproved={managedIdentityRequired ? Boolean(managedAssetBinding) : allReferencesApproved}
               busy={busy}
               compatibleVideoModels={compatibleVideoModels}
               durationAdjustmentMessage={durationAdjustmentMessage}
@@ -691,6 +918,18 @@ export function ShotVideoWorkspace({
         <div className="shot-video-gate-blockers">
           <WarningCircle size={17} />{gate.blocker_messages.join("；")}
         </div>
+      )}
+      {managedAssetPickerOpen && (
+        <ManagedAssetPicker
+          currentBinding={managedAssetBinding}
+          onClose={() => setManagedAssetPickerOpen(false)}
+          onOpenModelSettings={onOpenModelSettings}
+          onSelect={async (binding) => {
+            const saved = await onManagedAssetChange?.(binding);
+            if (saved !== false) setManagedAssetPickerOpen(false);
+          }}
+          request={request}
+        />
       )}
     </section>
   );

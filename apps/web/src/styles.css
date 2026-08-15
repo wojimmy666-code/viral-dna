@@ -3300,6 +3300,20 @@ button:disabled {
   margin-top: 0;
 }
 
+.managed-asset-settings-panel {
+  display: grid;
+  gap: 13px;
+  margin-top: 2px;
+  padding-top: 14px;
+  border-top: 1px solid #e4e1ee;
+}
+
+.managed-asset-settings-note {
+  color: #777482;
+  font-size: var(--type-caption-size);
+  line-height: 1.55;
+}
+
 .settings-section-heading.compact-heading {
   margin-bottom: 0;
 }

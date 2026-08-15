@@ -169,16 +169,15 @@ def test_video_gateway_creates_persistent_simulated_candidates(
         input_payload = json.loads(
             filesystem_path(workspace.resolve(run.input_snapshot_relative_path)).read_text("utf-8")
         )
-        assert input_payload["schema_version"] == "viral-dna-video-generation/v2"
+        assert input_payload["schema_version"] == "viral-dna-video-generation/v4"
         assert [item["ordinal"] for item in input_payload["reference_images"]] == [1, 2]
         assert input_payload["reference_images"][0]["candidate_id"] == str(
             references[0].candidate_id
         )
         assert input_payload["reference_images"][1]["sha256"] == "b" * 64
         assert input_payload["output"]["native_audio"] is False
-        assert input_payload["prompt"]["positive"].startswith(
-            "使用下列有序参考图生成一段连续视频"
-        )
+        assert input_payload["prompt"]["positive"].startswith("动作与运镜要求")
+        assert "使用下列有序安全参考画面" in input_payload["prompt"]["positive"]
         assert "图1到图2" in input_payload["prompt"]["positive"]
 
     asyncio.run(scenario())

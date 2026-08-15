@@ -10,6 +10,11 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
 
 from .schema import WORKSPACE_SCHEMA_VERSION
+from .video_references.domain import (
+    PersonReferenceCapability,
+    ReferenceProxyAsset,
+    VideoReferenceBinding,
+)
 
 
 def utc_now() -> datetime:
@@ -385,6 +390,44 @@ class ImageGenerationCapability(BaseModel):
     supports_seed: bool = True
 
 
+class ManagedAssetKind(StrEnum):
+    VIRTUAL_PERSON = "virtual_person"
+    VERIFIED_PERSON = "verified_person"
+
+
+class ManagedAssetRole(StrEnum):
+    ACTOR_IDENTITY = "actor_identity"
+
+
+class ManagedAssetMediaType(StrEnum):
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+
+
+class ProviderManagedAssetCapability(BaseModel):
+    supported: bool = False
+    provider: str | None = Field(default=None, max_length=80)
+    catalog_browsing: bool = False
+    asset_kinds: list[ManagedAssetKind] = Field(default_factory=list, max_length=20)
+    roles: list[ManagedAssetRole] = Field(default_factory=list, max_length=20)
+    maximum_bindings: int = Field(default=0, ge=0, le=20)
+    reference_transport: Literal["none", "asset_uri"] = "none"
+    requires_same_project: bool = False
+
+    @model_validator(mode="after")
+    def validate_supported_capability(self) -> ProviderManagedAssetCapability:
+        if not self.supported:
+            return self
+        if not self.provider or not self.catalog_browsing:
+            raise ValueError("供应商托管资产能力必须声明目录 Provider")
+        if not self.asset_kinds or not self.roles or self.maximum_bindings < 1:
+            raise ValueError("供应商托管资产能力必须声明类型、角色和数量上限")
+        if self.reference_transport == "none":
+            raise ValueError("供应商托管资产能力必须声明请求传输协议")
+        return self
+
+
 class VideoGenerationCapability(BaseModel):
     image_to_video: bool = True
     multi_image_reference: bool = False
@@ -408,6 +451,12 @@ class VideoGenerationCapability(BaseModel):
     supported_resolutions: list[str] = Field(default_factory=list, max_length=20)
     supported_aspect_ratios: list[str] = Field(default_factory=list, max_length=20)
     maximum_prompt_characters: int = Field(default=2000, ge=1, le=100_000)
+    managed_assets: ProviderManagedAssetCapability = Field(
+        default_factory=ProviderManagedAssetCapability
+    )
+    person_references: PersonReferenceCapability = Field(
+        default_factory=PersonReferenceCapability
+    )
 
     @model_validator(mode="after")
     def validate_reference_image_limits(self) -> VideoGenerationCapability:
@@ -439,6 +488,29 @@ class VideoProviderCredentialUpdate(BaseModel):
     api_key: SecretStr | None = Field(default=None, max_length=2048)
     base_url: str | None = Field(default=None, max_length=500)
     clear_api_key: bool = False
+    managed_asset_access_key: SecretStr | None = Field(default=None, max_length=256)
+    managed_asset_secret_key: SecretStr | None = Field(default=None, max_length=512)
+    managed_asset_region: Literal["cn-beijing", "cn-shanghai"] | None = None
+    managed_asset_project_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    clear_managed_asset_credentials: bool = False
+
+    @model_validator(mode="after")
+    def validate_managed_asset_fields(self) -> VideoProviderCredentialUpdate:
+        managed_fields_set = bool(
+            self.managed_asset_access_key
+            or self.managed_asset_secret_key
+            or self.managed_asset_region
+            or self.managed_asset_project_name
+            or self.clear_managed_asset_credentials
+        )
+        if managed_fields_set and self.provider != "volc_ark":
+            raise ValueError("只有火山方舟 Provider 支持托管资产目录配置")
+        return self
 
 
 class VideoGenerationSettingsUpdate(BaseModel):
@@ -478,6 +550,19 @@ class VideoProviderSettingsResponse(BaseModel):
     balance_known: bool = False
     balance_micros: int | None = Field(default=None, ge=0)
     currency: str = "CNY"
+    managed_asset_catalog_supported: bool = False
+    managed_asset_credentials_configured: bool = False
+    managed_asset_access_key_hint: str | None = None
+    managed_asset_region: Literal["cn-beijing", "cn-shanghai"] | None = None
+    managed_asset_project_name: str | None = None
+    managed_asset_validation_status: Literal[
+        "not_supported",
+        "not_configured",
+        "valid",
+        "invalid",
+        "unknown",
+    ] = "not_supported"
+    managed_asset_validation_message: str | None = None
 
 
 class VideoGenerationSettingsResponse(BaseModel):
@@ -1714,6 +1799,23 @@ class ShotVisualBeat(BaseModel):
         return self
 
 
+class ProviderManagedAssetBinding(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    provider: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_-]+$")
+    asset_id: str = Field(min_length=1, max_length=256)
+    group_id: str | None = Field(default=None, max_length=256)
+    kind: ManagedAssetKind
+    role: ManagedAssetRole = ManagedAssetRole.ACTOR_IDENTITY
+    name: str = Field(min_length=1, max_length=120)
+    group_name: str | None = Field(default=None, max_length=120)
+    media_type: ManagedAssetMediaType
+    project_name: str = Field(min_length=1, max_length=128)
+    status: Literal["active"] = "active"
+    preview_url: str | None = Field(default=None, max_length=8192)
+    bound_at: datetime = Field(default_factory=utc_now)
+    last_verified_at: datetime = Field(default_factory=utc_now)
+
+
 class ShotPlan(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
@@ -1743,6 +1845,23 @@ class ShotPlan(BaseModel):
     image_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     video_prompt: str = Field(default="", max_length=8000)
     video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    managed_asset_bindings: list[ProviderManagedAssetBinding] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+    video_reference_bindings: list[VideoReferenceBinding] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    reference_proxy_assets: list[ReferenceProxyAsset] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    reference_policy_version: str = Field(
+        default="video-reference-policy/v1",
+        min_length=1,
+        max_length=80,
+    )
     locks: list[ShotLock] = Field(
         default_factory=lambda: [
             ShotLock.TIMING,
@@ -1781,6 +1900,39 @@ class ShotPlan(BaseModel):
         ids = [item.reference_asset_id for item in values]
         if len(ids) != len(set(ids)):
             raise ValueError("同一参考资产不能在提示词中重复关联")
+        return values
+
+    @field_validator("managed_asset_bindings")
+    @classmethod
+    def require_unique_managed_asset_roles(
+        cls,
+        values: list[ProviderManagedAssetBinding],
+    ) -> list[ProviderManagedAssetBinding]:
+        keys = [(item.provider, item.role) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("同一 Provider 的托管资产角色不能重复绑定")
+        return values
+
+    @field_validator("video_reference_bindings")
+    @classmethod
+    def require_unique_video_reference_ids(
+        cls,
+        values: list[VideoReferenceBinding],
+    ) -> list[VideoReferenceBinding]:
+        ids = [item.id for item in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("视频参考绑定 ID 不能重复")
+        return values
+
+    @field_validator("reference_proxy_assets")
+    @classmethod
+    def require_unique_proxy_asset_ids(
+        cls,
+        values: list[ReferenceProxyAsset],
+    ) -> list[ReferenceProxyAsset]:
+        ids = [item.id for item in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("动作代理资产 ID 不能重复")
         return values
 
     @field_validator("source_keyframe_relative_path")
@@ -2387,6 +2539,14 @@ class ShotPlanFieldsUpdate(BaseModel):
     image_negative_constraints: list[str] | None = Field(default=None, max_length=40)
     video_prompt: str | None = Field(default=None, max_length=8000)
     video_negative_constraints: list[str] | None = Field(default=None, max_length=40)
+    managed_asset_bindings: list[ProviderManagedAssetBinding] | None = Field(
+        default=None,
+        max_length=20,
+    )
+    video_reference_bindings: list[VideoReferenceBinding] | None = Field(
+        default=None,
+        max_length=100,
+    )
     locks: list[ShotLock] | None = Field(default=None, max_length=6)
     required: bool | None = None
     reference_bindings: list[ReferenceBindingInput] | None = Field(default=None, max_length=20)
@@ -2426,6 +2586,32 @@ class ShotPlanFieldsUpdate(BaseModel):
         ids = [item.reference_asset_id for item in values]
         if len(ids) != len(set(ids)):
             raise ValueError("同一参考资产不能在提示词中重复关联")
+        return values
+
+    @field_validator("managed_asset_bindings")
+    @classmethod
+    def require_unique_managed_binding_roles(
+        cls,
+        values: list[ProviderManagedAssetBinding] | None,
+    ) -> list[ProviderManagedAssetBinding] | None:
+        if values is None:
+            return values
+        keys = [(item.provider, item.role) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("同一 Provider 的托管资产角色不能重复绑定")
+        return values
+
+    @field_validator("video_reference_bindings")
+    @classmethod
+    def require_unique_video_reference_binding_ids(
+        cls,
+        values: list[VideoReferenceBinding] | None,
+    ) -> list[VideoReferenceBinding] | None:
+        if values is None:
+            return values
+        ids = [item.id for item in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("视频参考绑定 ID 不能重复")
         return values
 
 

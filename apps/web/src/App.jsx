@@ -449,6 +449,7 @@ function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
     server.default_resolution
     || DEFAULT_VIDEO_GENERATION_SETTINGS.default_resolution
   );
+  const managedAssetProvider = providers.find((item) => item.provider === "volc_ark");
   return {
     videoEnabled: server.enabled !== false,
     videoDefaultModelAlias: selectedModel?.alias || preferredAlias,
@@ -462,6 +463,11 @@ function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
     videoProviderBaseUrls: Object.fromEntries(
       providers.map((item) => [item.provider, item.base_url]),
     ),
+    videoManagedAssetAccessKey: "",
+    videoManagedAssetSecretKey: "",
+    videoManagedAssetRegion: managedAssetProvider?.managed_asset_region || "cn-beijing",
+    videoManagedAssetProjectName:
+      managedAssetProvider?.managed_asset_project_name || "default",
   };
 }
 
@@ -1413,16 +1419,45 @@ export function App() {
           default_resolution: settingsDraft.videoDefaultResolution,
           poll_interval_seconds: Number(settingsDraft.videoPollIntervalSeconds || 5),
           task_timeout_seconds: Number(settingsDraft.videoTaskTimeoutSeconds || 900),
-          providers: (serverVideoSettings.providers || []).map((provider) => ({
-            provider: provider.provider,
-            api_key:
-              String(settingsDraft.videoProviderKeys?.[provider.provider] || "").trim()
-              || null,
-            base_url:
-              settingsDraft.videoProviderBaseUrls?.[provider.provider]
-              || provider.base_url,
-            clear_api_key: false,
-          })),
+          providers: (serverVideoSettings.providers || []).map((provider) => {
+            const managedAccessKey = String(
+              settingsDraft.videoManagedAssetAccessKey || "",
+            ).trim();
+            const managedSecretKey = String(
+              settingsDraft.videoManagedAssetSecretKey || "",
+            ).trim();
+            const managedRegionChanged = provider.provider === "volc_ark" && (
+              settingsDraft.videoManagedAssetRegion
+              !== (provider.managed_asset_region || "cn-beijing")
+            );
+            const managedProjectChanged = provider.provider === "volc_ark" && (
+              String(settingsDraft.videoManagedAssetProjectName || "default").trim()
+              !== (provider.managed_asset_project_name || "default")
+            );
+            const managedChanged = provider.provider === "volc_ark" && (
+              managedAccessKey
+              || managedSecretKey
+              || managedRegionChanged
+              || managedProjectChanged
+            );
+            return {
+              provider: provider.provider,
+              api_key:
+                String(settingsDraft.videoProviderKeys?.[provider.provider] || "").trim()
+                || null,
+              base_url:
+                settingsDraft.videoProviderBaseUrls?.[provider.provider]
+                || provider.base_url,
+              clear_api_key: false,
+              ...(managedChanged ? {
+                managed_asset_access_key: managedAccessKey || null,
+                managed_asset_secret_key: managedSecretKey || null,
+                managed_asset_region: settingsDraft.videoManagedAssetRegion,
+                managed_asset_project_name:
+                  String(settingsDraft.videoManagedAssetProjectName || "default").trim(),
+              } : {}),
+            };
+          }),
         }),
       });
       setServerVideoSettings(videoRemote);
@@ -1446,6 +1481,16 @@ export function App() {
         apiKey: "",
         videoProviderKeys: Object.fromEntries(
           (videoRemote.providers || []).map((provider) => [provider.provider, ""]),
+        ),
+        videoManagedAssetAccessKey: "",
+        videoManagedAssetSecretKey: "",
+        videoManagedAssetRegion: (
+          videoRemote.providers?.find((provider) => provider.provider === "volc_ark")
+            ?.managed_asset_region || "cn-beijing"
+        ),
+        videoManagedAssetProjectName: (
+          videoRemote.providers?.find((provider) => provider.provider === "volc_ark")
+            ?.managed_asset_project_name || "default"
         ),
       }));
       setSettingsOpen(false);
@@ -4026,6 +4071,79 @@ function ModelSettingsDialog({
                       </small>
                     </label>
                   </div>
+                  {provider.managed_asset_catalog_supported && (
+                    <section className="managed-asset-settings-panel" aria-label="火山方舟托管资产目录">
+                      <div className="settings-section-heading compact-heading">
+                        <div>
+                          <strong>托管虚拟资产目录</strong>
+                          <p>
+                            {provider.managed_asset_credentials_configured
+                              ? `${provider.managed_asset_access_key_hint || "AK 已保存"} · ${provider.managed_asset_validation_status === "valid" ? "已校验" : "待校验"}`
+                              : "视频 API Key 不能读取目录；请另行配置火山 Access Key / Secret Key。"}
+                          </p>
+                        </div>
+                        <span className={`image-settings-state ${provider.managed_asset_validation_status === "valid" ? "enabled" : ""}`}>
+                          {provider.managed_asset_validation_status === "valid" ? "目录已连接" : "目录未连接"}
+                        </span>
+                      </div>
+                      <div className="settings-field-grid">
+                        <label className="settings-field">
+                          <span>Access Key</span>
+                          <input
+                            autoComplete="off"
+                            disabled={saving}
+                            onChange={(event) => onChange({
+                              videoManagedAssetAccessKey: event.target.value,
+                            })}
+                            placeholder={provider.managed_asset_access_key_hint || "火山账号 Access Key"}
+                            type="password"
+                            value={draft.videoManagedAssetAccessKey || ""}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>Secret Key</span>
+                          <input
+                            autoComplete="off"
+                            disabled={saving}
+                            onChange={(event) => onChange({
+                              videoManagedAssetSecretKey: event.target.value,
+                            })}
+                            placeholder={provider.managed_asset_credentials_configured ? "留空表示不修改" : "火山账号 Secret Key"}
+                            type="password"
+                            value={draft.videoManagedAssetSecretKey || ""}
+                          />
+                        </label>
+                        <label className="settings-field">
+                          <span>资产区域</span>
+                          <select
+                            disabled={saving}
+                            onChange={(event) => onChange({
+                              videoManagedAssetRegion: event.target.value,
+                            })}
+                            value={draft.videoManagedAssetRegion || "cn-beijing"}
+                          >
+                            <option value="cn-beijing">华北（北京）</option>
+                            <option value="cn-shanghai">华东（上海）</option>
+                          </select>
+                        </label>
+                        <label className="settings-field">
+                          <span>ProjectName</span>
+                          <input
+                            disabled={saving}
+                            onChange={(event) => onChange({
+                              videoManagedAssetProjectName: event.target.value,
+                            })}
+                            placeholder="default"
+                            spellCheck="false"
+                            value={draft.videoManagedAssetProjectName || "default"}
+                          />
+                        </label>
+                      </div>
+                      <small className="managed-asset-settings-note">
+                        保存时会调用官方目录接口校验 AK/SK。IAM 需具备 ark:*Asset* 权限；ProjectName 必须与视频推理 API Key 一致。目录资产将在分镜中可视化选择，不需要手动输入资产 ID。
+                      </small>
+                    </section>
+                  )}
                 </article>
               ))}
             </div>

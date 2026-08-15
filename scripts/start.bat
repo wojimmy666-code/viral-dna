@@ -149,6 +149,13 @@ if errorlevel 1 (
   if errorlevel 1 exit /b 1
 )
 
+"%PYTHON_EXE%" -c "from importlib.metadata import version; import cv2, numpy, onnxruntime; assert int(numpy.__version__.split('.')[0]) ^< 3; assert tuple(map(int, version('onnxruntime').split('.')[:2])) ^< (1, 28)" >nul 2>&1
+if errorlevel 1 (
+  echo [ViralDNA] Installing or repairing privacy proxy dependencies...
+  "%PYTHON_EXE%" -m pip install --upgrade -e "%PROJECT_ROOT%\services\api[reference-proxy]"
+  if errorlevel 1 exit /b 1
+)
+
 set "LOCAL_AI_REQUIRED=0"
 if /I "%VIRAL_DNA_ASR_PROVIDER%"=="faster-whisper" set "LOCAL_AI_REQUIRED=1"
 if /I "%VIRAL_DNA_ASR_PROVIDER%"=="faster_whisper" set "LOCAL_AI_REQUIRED=1"

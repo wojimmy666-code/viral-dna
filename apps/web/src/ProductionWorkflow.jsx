@@ -2265,6 +2265,140 @@ export function ProductionHub({
     });
   }
 
+  async function updateManagedAssetBinding(binding) {
+    if (!shotDetail?.plan || !detail?.project) return false;
+    if (
+      shotDetail.plan.video_status === "approved"
+      && !window.confirm("更改演员身份会使当前已采用视频过期。是否继续？")
+    ) {
+      return false;
+    }
+    let succeeded = false;
+    await executeAction(async () => {
+      const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          confirm_stale: shotDetail.plan.video_status === "approved",
+          managed_asset_bindings: binding ? [binding] : [],
+        }),
+      });
+      await Promise.all([
+        refreshProject(
+          detail.project.id,
+          updated.plan.id,
+          selectedVisualBeatId,
+        ),
+        onProjectsChanged(),
+      ]);
+      onNotice(
+        binding
+          ? `已将 ${binding.name} 绑定为分镜 ${shotDetail.plan.index} 的演员身份`
+          : `已解除分镜 ${shotDetail.plan.index} 的演员身份绑定`,
+      );
+      succeeded = true;
+    });
+    return succeeded;
+  }
+
+  async function createReferenceProxy({
+    kind,
+    sourceKind,
+    sourceCandidateId = null,
+    visualBeatId,
+  }) {
+    if (!shotDetail?.plan || !detail?.project || !visualBeatId) return false;
+    let succeeded = false;
+    await executeAction(async () => {
+      const response = await request(
+        `/video-references/shots/${shotDetail.plan.id}/proxies`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            source_kind: sourceKind,
+            source_candidate_id: sourceCandidateId,
+            visual_beat_id: visualBeatId,
+            kind,
+            order: 1,
+          }),
+        },
+      );
+      await Promise.all([
+        refreshProject(
+          detail.project.id,
+          shotDetail.plan.id,
+          visualBeatId,
+        ),
+        onProjectsChanged(),
+      ]);
+      const proxyLabel = response.proxy.media_type === "video"
+        ? "视频动作白模"
+        : "图片姿态白模";
+      onNotice(
+        response.proxy.semantic_validation_status === "passed"
+          ? `${proxyLabel}已通过校验并自动启用`
+          : `${proxyLabel}已生成，但姿态质量需要复核，暂未启用`,
+      );
+      succeeded = true;
+    });
+    return succeeded;
+  }
+
+  async function disableReferenceProxy(proxyAssetId) {
+    return setReferenceProxyEnabled(proxyAssetId, false);
+  }
+
+  async function enableReferenceProxy(proxyAssetId) {
+    return setReferenceProxyEnabled(proxyAssetId, true);
+  }
+
+  async function setReferenceProxyEnabled(proxyAssetId, enabled) {
+    if (!shotDetail?.plan || !detail?.project || !proxyAssetId) return false;
+    const target = (shotDetail.plan.reference_proxy_assets || []).find(
+      (item) => item.id === proxyAssetId,
+    );
+    if (!target) return false;
+    const nextBindings = (shotDetail.plan.video_reference_bindings || []).map((binding) => {
+      if (binding.proxy_asset_id === proxyAssetId) {
+        return { ...binding, enabled };
+      }
+      if (
+        enabled
+        && binding.source_kind === "generated_proxy"
+        && binding.media_type === target.media_type
+      ) {
+        return { ...binding, enabled: false };
+      }
+      return binding;
+    });
+    let succeeded = false;
+    await executeAction(async () => {
+      const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          confirm_stale: shotDetail.plan.video_status === "approved",
+          video_reference_bindings: nextBindings,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, updated.plan.id, selectedVisualBeatId),
+        onProjectsChanged(),
+      ]);
+      onNotice(
+        enabled
+          ? `${target.media_type === "video" ? "视频" : "图片"}白模已启用`
+          : "白模已从当前生成策略停用；历史派生资产仍保留",
+      );
+      succeeded = true;
+    });
+    return succeeded;
+  }
+
   async function cancelVideoGeneration(runId) {
     if (!runId) return;
     await executeAction(async () => {
@@ -3026,8 +3160,14 @@ export function ProductionHub({
                 onApprove={approveVideoCandidate}
                 onArchiveCandidates={archiveVideoCandidates}
                 onCancelRun={cancelVideoGeneration}
+                onCreateReferenceProxy={createReferenceProxy}
                 onDecideContinuity={decideContinuityFinding}
+                onDisableReferenceProxy={disableReferenceProxy}
+                onEnableReferenceProxy={enableReferenceProxy}
                 onGenerate={generateVideoCandidates}
+                onManagedAssetChange={updateManagedAssetBinding}
+                onNotice={onNotice}
+                onNotificationsChanged={onNotificationsChanged}
                 onOpenModelSettings={onOpenModelSettings}
                 onReject={rejectVideoCandidate}
                 onRetryRun={retryVideoGeneration}
@@ -3037,6 +3177,7 @@ export function ProductionHub({
                 onSelectCandidate={selectVideoCandidate}
                 onSelectShot={selectShot}
                 project={detail.project}
+                request={request}
                 resolveUrl={resolveUrl}
                 selectedShotId={selectedShotId}
                 selectedVisualBeatId={selectedVisualBeatId}
