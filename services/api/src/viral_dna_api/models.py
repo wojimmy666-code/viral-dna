@@ -2783,6 +2783,39 @@ class VideoGenerationCreate(BaseModel):
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
 
 
+class ShotVideoGenerationDraft(BaseModel):
+    schema_version: Literal["viral-dna-shot-video-draft/v1"] = (
+        "viral-dna-shot-video-draft/v1"
+    )
+    project_id: UUID
+    shot_plan_id: UUID
+    model_alias: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
+    resolution: str = Field(pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    duration_seconds: float = Field(ge=0.1, le=60)
+    candidate_count: int = Field(default=1, ge=1, le=4)
+    draft_version: int = Field(default=1, ge=1)
+    origin: Literal["global_default", "latest_run", "user"] = "global_default"
+    updated_by_account_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ShotVideoGenerationDraftUpdate(BaseModel):
+    expected_draft_version: int = Field(ge=1)
+    model_alias: str = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
+    resolution: str = Field(pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    duration_seconds: float = Field(ge=0.1, le=60)
+    candidate_count: int = Field(default=1, ge=1, le=4)
+
+
 class ShotKeyframeSelectRequest(BaseModel):
     expected_revision_id: UUID
     visual_beat_id: UUID | None = None

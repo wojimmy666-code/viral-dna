@@ -6,6 +6,10 @@ import {
   videoModelCatalogUiState,
   videoOutputSummary,
 } from "../src/video-generation-controls/video-generation-ui.js";
+import {
+  videoDraftFromDetail,
+  videoDraftParameters,
+} from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
 
 const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
@@ -21,6 +25,13 @@ const productionWorkflowSource = readFileSync(
 );
 const generationControlsSource = readFileSync(
   new URL("../src/ShotVideoGenerationControls.jsx", import.meta.url),
+  "utf8",
+);
+const generationDraftSource = readFileSync(
+  new URL(
+    "../src/video-generation-controls/useShotVideoGenerationDraft.js",
+    import.meta.url,
+  ),
   "utf8",
 );
 const generationControlsStyles = readFileSync(
@@ -176,6 +187,70 @@ test("distinguishes a model catalog outage from a real empty catalog or missing 
   });
   assert.equal(missingKey.missingProviderKey, true);
   assert.match(missingKey.subtitle, /Key 未配置/);
+
+  const unavailable = videoModelCatalogUiState({
+    models: [selectedModel],
+    providers: [{ provider: "volc_ark", api_key_configured: true }],
+    selectedAlias: "minimax_h3",
+    selectedModel: null,
+    status: "ready",
+  });
+  assert.equal(unavailable.unavailableSelection, true);
+  assert.equal(unavailable.title, "minimax_h3");
+  assert.match(unavailable.subtitle, /已保存模型当前不可用/);
+});
+
+test("persists each shot video model instead of reapplying the global default", () => {
+  const detail = {
+    plan: {
+      duration_seconds: 4,
+      video_prompt: "测试提示词",
+      video_negative_constraints: ["不要抖动"],
+    },
+  };
+  const settings = {
+    default_model_alias: "bailian_wan_2_7_r2v",
+    default_resolution: "720P",
+    models: [{ alias: "bailian_wan_2_7_r2v" }],
+  };
+  const persisted = {
+    model_alias: "seedance_2_0_fast",
+    resolution: "1080P",
+    duration_seconds: 5,
+    candidate_count: 2,
+    draft_version: 3,
+  };
+
+  const restored = videoDraftFromDetail(detail, settings, persisted);
+  assert.equal(restored.modelAlias, "seedance_2_0_fast");
+  assert.equal(restored.resolution, "1080P");
+  assert.equal(restored.durationSeconds, "5");
+  assert.equal(restored.candidateCount, 2);
+  assert.deepEqual(videoDraftParameters(restored), {
+    model_alias: "seedance_2_0_fast",
+    resolution: "1080P",
+    duration_seconds: 5,
+    candidate_count: 2,
+  });
+
+  assert.match(productionWorkflowSource, /useShotVideoGenerationDraft/);
+  assert.match(productionWorkflowSource, /video-generation-draft/);
+  assert.match(
+    productionWorkflowSource,
+    /flushVideoDraft\(shotDetail\.plan\.id\)[\s\S]*\/video-runs/,
+  );
+  assert.match(generationDraftSource, /expected_draft_version/);
+  assert.match(generationDraftSource, /window\.setTimeout\([\s\S]*400/);
+  assert.match(generationDraftSource, /pendingRef\.current/);
+  assert.doesNotMatch(workspaceSource, /compatibleVideoModels\[0\]/);
+  assert.doesNotMatch(
+    workspaceSource,
+    /managedAssetCompatible[\s\S]{0,500}selectVideoModel\(fallback\.alias\)/,
+  );
+  assert.doesNotMatch(
+    productionWorkflowSource,
+    /modelAlias:\s*"bailian_wan_2_7_r2v"/,
+  );
 });
 
 test("recovers the video model catalog and exposes an actionable retry state", () => {

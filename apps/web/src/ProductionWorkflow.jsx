@@ -30,7 +30,6 @@ import {
   dimensionsForRatio,
   imageGenerationIntentForShot,
   imageGenerationModeLabel,
-  normalizeVideoDuration,
   resolveImageExecutionMode,
   formatProductionDate,
   normalizeReferenceTags,
@@ -44,6 +43,9 @@ import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
 import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
 import { VideoEditorWorkspace } from "./video-editor/index.js";
 import { ProductionExportWorkspace } from "./ProductionExportWorkspace.jsx";
+import {
+  useShotVideoGenerationDraft,
+} from "./video-generation-controls/useShotVideoGenerationDraft.js";
 import "./production-workflow.css";
 import "./video-candidate-library.css";
 
@@ -71,15 +73,6 @@ const EMPTY_SHOT_DRAFT = Object.freeze({
   locks: [],
   required: true,
   referenceBindings: [],
-});
-
-const EMPTY_VIDEO_DRAFT = Object.freeze({
-  videoPrompt: "",
-  negativeConstraints: "",
-  durationSeconds: "",
-  candidateCount: 1,
-  modelAlias: "bailian_wan_2_7_r2v",
-  resolution: "720P",
 });
 
 const DEFAULT_PRODUCTION_IMAGE_SETTINGS = Object.freeze({
@@ -133,45 +126,15 @@ function shotDraftFromDetail(detail, visualBeatId = null) {
   };
 }
 
-function videoDraftFromDetail(
-  detail,
-  settings = DEFAULT_PRODUCTION_VIDEO_SETTINGS,
-) {
-  const modelAlias = settings.default_model_alias;
-  const selectedModel = (settings.models || []).find(
-    (item) => item.alias === modelAlias,
-  );
-  const durationSeconds = normalizeVideoDuration(
-    detail?.plan?.duration_seconds,
-    selectedModel,
-  );
-  if (!detail?.plan) return {
-    ...EMPTY_VIDEO_DRAFT,
-    durationSeconds: String(durationSeconds),
-    modelAlias,
-    resolution: settings.default_resolution,
-  };
-  return {
-    videoPrompt: detail.plan.video_prompt || "",
-    negativeConstraints: (detail.plan.video_negative_constraints || []).join("\n"),
-    durationSeconds: String(durationSeconds),
-    candidateCount: 1,
-    modelAlias,
-    resolution: settings.default_resolution,
-  };
-}
-
 function videoPromptChangesFromDraft(
   detail,
   draft,
-  settings = DEFAULT_PRODUCTION_VIDEO_SETTINGS,
 ) {
   if (!detail?.plan) return {};
-  const original = videoDraftFromDetail(detail, settings);
   const nextConstraints = constraintsFromText(draft.negativeConstraints);
-  const currentConstraints = constraintsFromText(original.negativeConstraints);
+  const currentConstraints = detail.plan.video_negative_constraints || [];
   const changes = {};
-  if (draft.videoPrompt.trim() !== original.videoPrompt.trim()) {
+  if (draft.videoPrompt.trim() !== (detail.plan.video_prompt || "").trim()) {
     changes.video_prompt = draft.videoPrompt.trim();
   }
   if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
@@ -1180,7 +1143,13 @@ export function ProductionHub({
   const [selectedVisualBeatId, setSelectedVisualBeatId] = useState(null);
   const [shotDetail, setShotDetail] = useState(null);
   const [shotDraft, setShotDraft] = useState({ ...EMPTY_SHOT_DRAFT });
-  const [videoDraft, setVideoDraft] = useState({ ...EMPTY_VIDEO_DRAFT });
+  const {
+    flushVideoDraft,
+    hydrateVideoDraft,
+    resetVideoDraft,
+    setVideoDraft,
+    videoDraft,
+  } = useShotVideoGenerationDraft({ request, onNotice });
   const [impactReview, setImpactReview] = useState(null);
   const [activeSection, setActiveSection] = useState("project_setup");
   const [contentLoading, setContentLoading] = useState(false);
@@ -1280,7 +1249,7 @@ export function ProductionHub({
     setSelectedVisualBeatId(null);
     setShotDetail(null);
     setShotDraft({ ...EMPTY_SHOT_DRAFT });
-    setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
+    resetVideoDraft();
     setImpactReview(null);
     setActiveSection("project_setup");
     setCreateOpen(false);
@@ -1412,7 +1381,10 @@ export function ProductionHub({
       )?.plan?.id || null;
     setSelectedShotId(targetShotId);
     if (targetShotId) {
-      const nextShotDetail = await request(`/production-shots/${targetShotId}`);
+      const [nextShotDetail, persistedVideoDraft] = await Promise.all([
+        request(`/production-shots/${targetShotId}`),
+        request(`/production-shots/${targetShotId}/video-generation-draft`),
+      ]);
       const targetVisualBeat = visualBeatFromDetail(
         nextShotDetail,
         preferredVisualBeatId,
@@ -1420,12 +1392,17 @@ export function ProductionHub({
       setShotDetail(nextShotDetail);
       setSelectedVisualBeatId(targetVisualBeat?.id || null);
       setShotDraft(shotDraftFromDetail(nextShotDetail, targetVisualBeat?.id));
-      setVideoDraft(videoDraftFromDetail(nextShotDetail, videoGenerationSettings));
+      hydrateVideoDraft({
+        shotPlanId: targetShotId,
+        detail: nextShotDetail,
+        settings: videoGenerationSettings,
+        persistedDraft: persistedVideoDraft,
+      });
     } else {
       setShotDetail(null);
       setSelectedVisualBeatId(null);
       setShotDraft({ ...EMPTY_SHOT_DRAFT });
-      setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
+      resetVideoDraft();
     }
     await refreshAnalysisUpdate(projectId);
     return nextDetail;
@@ -1467,7 +1444,7 @@ export function ProductionHub({
     setSelectedShotId(null);
     setSelectedVisualBeatId(null);
     setShotDetail(null);
-    setVideoDraft({ ...EMPTY_VIDEO_DRAFT });
+    resetVideoDraft();
     setImpactReview(null);
     setAnalysisUpdatePreview(null);
     setAnalysisUpdateOpen(false);
@@ -1483,17 +1460,26 @@ export function ProductionHub({
   }
 
   async function selectShot(shotPlanId) {
+    await flushVideoDraft().catch(() => undefined);
     setSelectedShotId(shotPlanId);
     setActionError("");
     setImpactReview(null);
     setShotDetail(null);
     try {
-      const nextShotDetail = await request(`/production-shots/${shotPlanId}`);
+      const [nextShotDetail, persistedVideoDraft] = await Promise.all([
+        request(`/production-shots/${shotPlanId}`),
+        request(`/production-shots/${shotPlanId}/video-generation-draft`),
+      ]);
       const firstVisualBeat = visualBeatFromDetail(nextShotDetail);
       setShotDetail(nextShotDetail);
       setSelectedVisualBeatId(firstVisualBeat?.id || null);
       setShotDraft(shotDraftFromDetail(nextShotDetail, firstVisualBeat?.id));
-      setVideoDraft(videoDraftFromDetail(nextShotDetail, videoGenerationSettings));
+      hydrateVideoDraft({
+        shotPlanId,
+        detail: nextShotDetail,
+        settings: videoGenerationSettings,
+        persistedDraft: persistedVideoDraft,
+      });
     } catch (requestError) {
       setActionError(requestError.message);
     }
@@ -2181,11 +2167,7 @@ export function ProductionHub({
     );
     const costUnknown = !selectedModel
       || ["unknown", "provider_usage_tokens"].includes(selectedModel.pricing?.kind);
-    const promptChanges = videoPromptChangesFromDraft(
-      shotDetail,
-      videoDraft,
-      videoGenerationSettings,
-    );
+    const promptChanges = videoPromptChangesFromDraft(shotDetail, videoDraft);
     const promptChanged = Object.keys(promptChanges).length > 0;
     const confirmStale = promptChanged && shotDetail.plan.video_status === "approved";
     if (
@@ -2201,6 +2183,7 @@ export function ProductionHub({
       return;
     }
     await executeAction(async () => {
+      await flushVideoDraft(shotDetail.plan.id);
       let expectedRevisionId = detail.project.current_revision_id;
       let persistedShotDetail = null;
       if (promptChanged) {

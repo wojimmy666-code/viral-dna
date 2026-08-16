@@ -31,6 +31,7 @@ from .models import (
     ReferenceBinding,
     ReplacementVersion,
     ShotPlan,
+    ShotVideoGenerationDraft,
     Video,
     VideoClipPreparation,
     VideoProviderTask,
@@ -150,6 +151,16 @@ _VIRAL_INSIGHT_INDEXES = (
     ("idx_viral_concept_sets_analysis_id", "viral_concept_sets", "analysis_id"),
 )
 
+_VIDEO_GENERATION_DRAFT_TABLES = frozenset({"shot_video_generation_drafts"})
+
+_VIDEO_GENERATION_DRAFT_INDEXES = (
+    (
+        "idx_shot_video_generation_drafts_project_id",
+        "shot_video_generation_drafts",
+        "project_id",
+    ),
+)
+
 
 class SQLiteSchemaError(RuntimeError):
     """Raised when the durable database schema cannot be migrated safely."""
@@ -165,6 +176,7 @@ class SQLiteStore:
         | _PROJECT_ASSET_TABLES
         | _QUALITY_TABLES
         | _VIRAL_INSIGHT_TABLES
+        | _VIDEO_GENERATION_DRAFT_TABLES
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -242,6 +254,11 @@ class SQLiteStore:
                 self._create_viral_insight_indexes(connection)
                 if 8 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (8)")
+
+                self._create_json_tables(connection, _VIDEO_GENERATION_DRAFT_TABLES)
+                self._create_video_generation_draft_indexes(connection)
+                if 9 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (9)")
             except Exception:
                 connection.rollback()
                 raise
@@ -297,6 +314,16 @@ class SQLiteStore:
     @staticmethod
     def _create_quality_indexes(connection: sqlite3.Connection) -> None:
         for index_name, table, payload_field in _QUALITY_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_video_generation_draft_indexes(
+        connection: sqlite3.Connection,
+    ) -> None:
+        for index_name, table, payload_field in _VIDEO_GENERATION_DRAFT_INDEXES:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
@@ -828,6 +855,63 @@ class SQLiteStore:
         if shot_plan_id is not None:
             filtered = [run for run in filtered if run.shot_plan_id == shot_plan_id]
         return sorted(filtered, key=lambda run: run.created_at)
+
+    def _compare_and_swap_video_generation_draft(
+        self,
+        draft: ShotVideoGenerationDraft,
+        expected_draft_version: int,
+    ) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT payload FROM shot_video_generation_drafts "
+                    "WHERE record_key = ?",
+                    (str(draft.shot_plan_id),),
+                ).fetchone()
+                current_version = 0
+                if row is not None:
+                    current = ShotVideoGenerationDraft.model_validate_json(str(row[0]))
+                    current_version = current.draft_version
+                if current_version != expected_draft_version:
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    "INSERT INTO shot_video_generation_drafts "
+                    "(record_key, payload, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(record_key) DO UPDATE SET "
+                    "payload = excluded.payload, updated_at = CURRENT_TIMESTAMP",
+                    (str(draft.shot_plan_id), self._serialize(draft)),
+                )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+                return True
+
+    async def get_video_generation_draft(
+        self,
+        shot_plan_id: UUID,
+    ) -> ShotVideoGenerationDraft | None:
+        return await self._get(
+            "shot_video_generation_drafts",
+            shot_plan_id,
+            ShotVideoGenerationDraft,
+        )
+
+    async def compare_and_swap_video_generation_draft(
+        self,
+        draft: ShotVideoGenerationDraft,
+        expected_draft_version: int,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._compare_and_swap_video_generation_draft,
+                draft,
+                expected_draft_version,
+            )
 
     async def save_generation_candidate(
         self,

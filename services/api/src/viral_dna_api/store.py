@@ -30,6 +30,7 @@ from .models import (
     ReferenceBinding,
     ReplacementVersion,
     ShotPlan,
+    ShotVideoGenerationDraft,
     Video,
     VideoClipPreparation,
     VideoProviderTask,
@@ -78,6 +79,7 @@ class InMemoryStore:
         self.continuity_reports: dict[UUID, ContinuityReport] = {}
         self.viral_insights: dict[UUID, ViralInsightReport] = {}
         self.viral_concept_sets: dict[UUID, ViralConceptSet] = {}
+        self.shot_video_generation_drafts: dict[UUID, ShotVideoGenerationDraft] = {}
 
     async def add_video(self, video: Video) -> Video:
         async with self._lock:
@@ -469,6 +471,25 @@ class InMemoryStore:
         if shot_plan_id is not None:
             runs = [run for run in runs if run.shot_plan_id == shot_plan_id]
         return sorted(runs, key=lambda run: run.created_at)
+
+    async def get_video_generation_draft(
+        self,
+        shot_plan_id: UUID,
+    ) -> ShotVideoGenerationDraft | None:
+        return self.shot_video_generation_drafts.get(shot_plan_id)
+
+    async def compare_and_swap_video_generation_draft(
+        self,
+        draft: ShotVideoGenerationDraft,
+        expected_draft_version: int,
+    ) -> bool:
+        async with self._lock:
+            current = self.shot_video_generation_drafts.get(draft.shot_plan_id)
+            current_version = current.draft_version if current is not None else 0
+            if current_version != expected_draft_version:
+                return False
+            self.shot_video_generation_drafts[draft.shot_plan_id] = draft
+            return True
 
     async def save_generation_candidate(
         self,

@@ -26,6 +26,7 @@ export function videoModelCatalogUiState({
   error = "",
   models = [],
   providers = [],
+  selectedAlias = "",
   selectedModel = null,
   status = "ready",
 } = {}) {
@@ -38,6 +39,7 @@ export function videoModelCatalogUiState({
     selectedModel && isVideoModelConfigured(selectedModel, providers),
   );
   const missingProviderKey = Boolean(selectedModel && !providerReady);
+  const unavailableSelection = Boolean(selectedAlias && !selectedModel && hasModels);
 
   let title = selectedModel?.label || "选择视频模型";
   let subtitle = "请选择一个可用模型";
@@ -52,6 +54,9 @@ export function videoModelCatalogUiState({
     subtitle = providerReady
       ? providerLabel
       : `${providerLabel} · Key 未配置`;
+  } else if (unavailableSelection) {
+    title = selectedAlias;
+    subtitle = "已保存模型当前不可用，请明确选择其他模型";
   } else if (!hasModels) {
     subtitle = "暂无具备可用参考素材路由的模型";
   } else if (usingCachedCatalog) {
@@ -68,6 +73,7 @@ export function videoModelCatalogUiState({
     shouldReload: failed || usingCachedCatalog,
     subtitle,
     title,
+    unavailableSelection,
     usingCachedCatalog,
   };
 }

@@ -586,36 +586,6 @@ export function ShotVideoWorkspace({
     setDiagnosticCopyState("");
   }, [initialCandidateId, latestRun?.id, plan?.id]);
 
-  useEffect(() => {
-    if (compatibleVideoModels.length === 0 || selectedModel) return;
-    const fallback = compatibleVideoModels[0];
-    setVideoDraft((current) => ({
-      ...current,
-      modelAlias: fallback.alias,
-      durationSeconds: String(normalizeVideoDuration(
-        current.durationSeconds || plan?.duration_seconds,
-        fallback,
-      )),
-      resolution: preferredVideoResolution(fallback, current.resolution),
-    }));
-  }, [compatibleVideoModels, plan?.duration_seconds, selectedModel, setVideoDraft]);
-
-  useEffect(() => {
-    if (!managedAssetBinding || managedAssetCompatible) return;
-    const fallback = compatibleVideoModels.find((model) => (
-      model.capabilities?.managed_assets?.supported
-      && model.capabilities.managed_assets.provider === managedAssetBinding.provider
-      && (model.capabilities.managed_assets.asset_kinds || []).includes(
-        managedAssetBinding.kind,
-      )
-    ));
-    if (fallback) selectVideoModel(fallback.alias);
-  }, [
-    compatibleVideoModels,
-    managedAssetBinding,
-    managedAssetCompatible,
-  ]);
-
   if (!plan) {
     return (
       <div className="production-empty-state shot-video-empty">

@@ -183,6 +183,8 @@ from .thumbnails import thumbnail_etag, thumbnail_service
 from .timeline import TimelineService, TimelineServiceError
 from .timeline_export import TimelineExportService, TimelineExportServiceError
 from .video_generation import VideoGenerationGateway
+from .video_generation.draft_routes import create_video_generation_draft_router
+from .video_generation.drafts import ShotVideoGenerationDraftService
 from .video_generation.settings import (
     VideoGenerationSettingsService,
     VideoGenerationSettingsServiceError,
@@ -278,6 +280,10 @@ video_generation_gateway = VideoGenerationGateway(
     settings_service=video_generation_settings_service,
     repository=store,
 )
+video_generation_draft_service = ShotVideoGenerationDraftService(
+    store,
+    video_generation_settings_service,
+)
 reference_proxy_service = ReferenceProxyService(
     workspace_manager,
     image_gateway=image_generation_gateway,
@@ -326,6 +332,13 @@ timeline_export_service = TimelineExportService(
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 app.include_router(create_managed_asset_router(managed_asset_service), prefix=API_PREFIX)
+app.include_router(
+    create_video_generation_draft_router(
+        video_generation_draft_service,
+        account_context_service,
+    ),
+    prefix=API_PREFIX,
+)
 app.include_router(
     create_video_reference_router(production_service, reference_proxy_service),
     prefix=API_PREFIX,

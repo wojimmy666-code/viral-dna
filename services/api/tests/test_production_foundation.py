@@ -118,7 +118,7 @@ def test_workspace_initializes_production_layout(
     assert metadata["schema_version"] == WORKSPACE_SCHEMA_VERSION
 
 
-def test_sqlite_migrates_v1_to_v2_without_losing_existing_rows(
+def test_sqlite_migrates_legacy_database_without_losing_existing_rows(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "workspace.db"
@@ -168,7 +168,7 @@ def test_sqlite_migrates_v1_to_v2_without_losing_existing_rows(
             ("legacy-video",),
         ).fetchone()
 
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert versions == list(range(1, WORKSPACE_SCHEMA_VERSION + 1))
     assert {
         "production_projects",
         "production_revisions",
@@ -180,11 +180,13 @@ def test_sqlite_migrates_v1_to_v2_without_losing_existing_rows(
         "video_clip_preparations",
         "approval_events",
         "continuity_reports",
+        "shot_video_generation_drafts",
     }.issubset(tables)
     assert "idx_production_projects_record_id" in indexes
     assert "idx_generation_runs_shot_plan_id" in indexes
     assert "idx_video_clip_preparations_project_id" in indexes
     assert "idx_continuity_reports_project_id" in indexes
+    assert "idx_shot_video_generation_drafts_project_id" in indexes
     assert legacy_payload == ('{"legacy":true}',)
 
 

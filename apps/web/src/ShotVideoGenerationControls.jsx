@@ -64,6 +64,7 @@ export function ShotVideoGenerationControls({
     error: modelCatalogError,
     models: compatibleVideoModels,
     providers: providerOptions,
+    selectedAlias: videoDraft.modelAlias,
     selectedModel,
     status: modelCatalogStatus,
   });
@@ -125,7 +126,7 @@ export function ShotVideoGenerationControls({
         <button
           aria-controls={modelPopoverId}
           aria-expanded={modelOpen}
-          className={`shot-video-model-trigger${modelCatalog.loading ? " loading" : ""}${modelCatalog.failed || modelCatalog.missingProviderKey ? " missing" : ""}`}
+          className={`shot-video-model-trigger${modelCatalog.loading ? " loading" : ""}${modelCatalog.failed || modelCatalog.missingProviderKey || modelCatalog.unavailableSelection ? " missing" : ""}`}
           disabled={controlsDisabled}
           onClick={toggleModelPopover}
           ref={setModelAnchor}
@@ -141,7 +142,7 @@ export function ShotVideoGenerationControls({
           </span>
           {modelCatalog.loading
             ? <CircleNotch className="spin shot-video-model-warning" size={17} />
-            : (modelCatalog.failed || modelCatalog.missingProviderKey) && (
+            : (modelCatalog.failed || modelCatalog.missingProviderKey || modelCatalog.unavailableSelection) && (
               <WarningCircle className="shot-video-model-warning" size={17} weight="fill" />
             )}
           <CaretUp aria-hidden="true" size={16} />
