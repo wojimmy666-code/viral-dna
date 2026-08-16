@@ -2,10 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   CheckCircle,
-  Copy,
   DownloadSimple,
   FilmStrip,
-  Gear,
   MagicWand,
   PlayCircle,
   WarningCircle,
@@ -15,9 +13,7 @@ import {
   latestRunByKind,
   normalizeVideoDuration,
   preferredVideoResolution,
-  videoGenerationDiagnosticText,
   videoDurationOptions,
-  videoGenerationFailureDetails,
   videoGenerationRunLabel,
   workflowStatusClass,
   workflowStatusLabel,
@@ -154,6 +150,7 @@ export function ShotVideoWorkspace({
   onApprove,
   onArchiveCandidates,
   onCancelRun,
+  onClearError,
   onCreateReferenceProxy,
   onDecideContinuity,
   onDeleteReferenceProxy,
@@ -186,7 +183,6 @@ export function ShotVideoWorkspace({
 }) {
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [durationAdjustmentMessage, setDurationAdjustmentMessage] = useState("");
-  const [diagnosticCopyState, setDiagnosticCopyState] = useState("");
   const [managedAssetPickerOpen, setManagedAssetPickerOpen] = useState(false);
   const [proxyEngineCapabilities, setProxyEngineCapabilities] = useState([]);
   const [proxyEngineLoadBusy, setProxyEngineLoadBusy] = useState(false);
@@ -196,7 +192,6 @@ export function ShotVideoWorkspace({
   const [proxyEngineInstallJob, setProxyEngineInstallJob] = useState(null);
   const [referenceStrategy, setReferenceStrategy] = useState(null);
   const [referenceStrategyError, setReferenceStrategyError] = useState("");
-  const modelSelectRef = useRef(null);
   const proxyEngineInstallPollRef = useRef(0);
   const plan = shotDetail?.plan;
   const generationRuns = shotDetail?.generation_runs || [];
@@ -205,9 +200,9 @@ export function ShotVideoWorkspace({
     [generationRuns],
   );
   const latestRun = latestRunByKind(videoRuns, "video");
-  const latestFailure = useMemo(
-    () => videoGenerationFailureDetails(latestRun),
-    [latestRun],
+  const latestFailedVideoRun = useMemo(
+    () => videoRuns.find((run) => ["failed", "blocked"].includes(run.status)) || null,
+    [videoRuns],
   );
   const candidateSequenceById = useMemo(() => {
     const sequence = new Map();
@@ -603,6 +598,7 @@ export function ShotVideoWorkspace({
   }
 
   function selectVideoModel(modelAlias) {
+    onClearError?.();
     const model = compatibleVideoModels.find((item) => item.alias === modelAlias);
     const nextDuration = normalizeVideoDuration(
       videoDraft.durationSeconds || plan?.duration_seconds,
@@ -631,22 +627,6 @@ export function ShotVideoWorkspace({
       durationSeconds: String(nextDuration),
     }));
     setDurationAdjustmentMessage("");
-  }
-
-  function focusModelSelector() {
-    modelSelectRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    window.setTimeout(() => modelSelectRef.current?.focus(), 180);
-  }
-
-  async function copyFailureDiagnostics() {
-    const diagnostic = videoGenerationDiagnosticText(latestFailure);
-    if (!diagnostic) return;
-    try {
-      await navigator.clipboard.writeText(diagnostic);
-      setDiagnosticCopyState("已复制");
-    } catch {
-      setDiagnosticCopyState("复制失败，请手动选择文本");
-    }
   }
 
   return (
@@ -787,53 +767,6 @@ export function ShotVideoWorkspace({
           />
 
           <div className="shot-video-prompt-panel">
-            {latestFailure && !activeRun && (
-              <section className="shot-video-generation-error" role="alert">
-                <span className="shot-video-generation-error-icon" aria-hidden="true">
-                  <WarningCircle size={20} weight="fill" />
-                </span>
-                <div className="shot-video-generation-error-copy">
-                  <strong>{latestFailure.title}</strong>
-                  <p>{latestFailure.message}</p>
-                  <div className="shot-video-generation-error-actions">
-                    {latestFailure.action === "open_model_settings" && onOpenModelSettings && (
-                      <button className="secondary-button compact" onClick={onOpenModelSettings} type="button">
-                        <Gear size={15} />打开模型设置
-                      </button>
-                    )}
-                    {compatibleVideoModels.length > 1 && (
-                      <button className="secondary-button compact" onClick={focusModelSelector} type="button">
-                        切换模型
-                      </button>
-                    )}
-                    {latestFailure.retryable && (
-                      <button className="secondary-button compact" disabled={busy} onClick={() => onRetryRun(latestRun.id)} type="button">
-                        重试生成
-                      </button>
-                    )}
-                  </div>
-                  <details className="shot-video-generation-error-details">
-                    <summary>技术详情</summary>
-                    <dl>
-                      <div><dt>错误码</dt><dd>{latestFailure.code}</dd></div>
-                      {latestFailure.providerCode && (
-                        <div><dt>Provider 错误码</dt><dd>{latestFailure.providerCode}</dd></div>
-                      )}
-                      <div><dt>模型</dt><dd>{latestFailure.modelLabel}</dd></div>
-                      {latestFailure.providerRequestId && (
-                        <div><dt>任务编号</dt><dd>{latestFailure.providerRequestId}</dd></div>
-                      )}
-                      {latestFailure.technicalMessage && (
-                        <div className="technical-message"><dt>技术信息</dt><dd>{latestFailure.technicalMessage}</dd></div>
-                      )}
-                    </dl>
-                    <button className="text-button compact" onClick={copyFailureDiagnostics} type="button">
-                      <Copy size={14} />{diagnosticCopyState || "复制诊断信息"}
-                    </button>
-                  </details>
-                </div>
-              </section>
-            )}
             <VideoReferenceStrategyBar
               busy={busy || proxyEngineInstallBusy || proxyEngineLoadBusy}
               managedAssetBinding={managedAssetBinding}
@@ -907,11 +840,10 @@ export function ShotVideoWorkspace({
               estimatedCostKnown={estimatedCostMicros != null}
               estimatedCostLabel={estimatedCostLabel}
               generationBlockedReason={generationBlockedReason}
-              latestFailure={latestFailure}
+              failureAlias={latestFailedVideoRun?.model_alias || ""}
               latestRun={latestRun}
               modelCatalogError={videoGenerationSettingsError}
               modelCatalogStatus={videoGenerationSettingsStatus}
-              modelSelectRef={modelSelectRef}
               onCancelRun={onCancelRun}
               onCandidateCountChange={(candidateCount) => setVideoDraft((current) => ({
                 ...current,

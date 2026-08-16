@@ -529,6 +529,8 @@ class VideoGenerationSettingsUpdate(BaseModel):
     default_resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K)$")
     poll_interval_seconds: float = Field(default=5, ge=0.2, le=60)
     task_timeout_seconds: int = Field(default=900, ge=30, le=7200)
+    public_media_base_url: str | None = Field(default=None, max_length=1000)
+    public_media_ttl_seconds: int = Field(default=3600, ge=900, le=604800)
     providers: list[VideoProviderCredentialUpdate] = Field(default_factory=list, max_length=3)
 
     @field_validator("providers")
@@ -576,6 +578,10 @@ class VideoGenerationSettingsResponse(BaseModel):
     default_resolution: str = "720P"
     poll_interval_seconds: float = 5
     task_timeout_seconds: int = 900
+    public_media_base_url: str | None = None
+    public_media_ttl_seconds: int = 3600
+    public_media_transport_ready: bool = False
+    public_media_validation_message: str | None = None
     catalog_version: str
     pricing_version: str
     providers: list[VideoProviderSettingsResponse] = Field(default_factory=list)

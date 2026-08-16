@@ -161,6 +161,7 @@ def resolve_video_reference_plan(
     managed_asset_references: tuple[ProviderManagedAssetReference, ...],
     proxy_reference_frames: tuple[OrderedReferenceFrame, ...] = (),
     proxy_reference_videos: tuple[OrderedReferenceVideo, ...] = (),
+    public_media_transport_ready: bool = False,
 ) -> ResolvedVideoReferencePlan:
     """Compile creative references into the exact provider input set.
 
@@ -183,7 +184,7 @@ def resolve_video_reference_plan(
         has_raw_reference_image=bool(ordered),
         has_pose_proxy_image=bool(proxy_reference_frames),
         has_motion_proxy_video=bool(proxy_reference_videos),
-        public_media_transport_ready=False,
+        public_media_transport_ready=public_media_transport_ready,
     )
     if not route.generation_allowed:
         raise VideoReferencePolicyError(

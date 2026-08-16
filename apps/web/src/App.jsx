@@ -169,6 +169,10 @@ const DEFAULT_VIDEO_GENERATION_SETTINGS = Object.freeze({
   default_resolution: "720P",
   poll_interval_seconds: 5,
   task_timeout_seconds: 900,
+  public_media_base_url: null,
+  public_media_ttl_seconds: 3600,
+  public_media_transport_ready: false,
+  public_media_validation_message: null,
   catalog_version: "",
   pricing_version: "",
   providers: [
@@ -459,6 +463,8 @@ function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
     ),
     videoPollIntervalSeconds: Number(server.poll_interval_seconds || 5),
     videoTaskTimeoutSeconds: Number(server.task_timeout_seconds || 900),
+    videoPublicMediaBaseUrl: server.public_media_base_url || "",
+    videoPublicMediaTtlSeconds: Number(server.public_media_ttl_seconds || 3600),
     videoProviderKeys: Object.fromEntries(providers.map((item) => [item.provider, ""])),
     videoProviderBaseUrls: Object.fromEntries(
       providers.map((item) => [item.provider, item.base_url]),
@@ -1494,6 +1500,11 @@ export function App() {
           default_resolution: settingsDraft.videoDefaultResolution,
           poll_interval_seconds: Number(settingsDraft.videoPollIntervalSeconds || 5),
           task_timeout_seconds: Number(settingsDraft.videoTaskTimeoutSeconds || 900),
+          public_media_base_url:
+            String(settingsDraft.videoPublicMediaBaseUrl || "").trim() || null,
+          public_media_ttl_seconds: Number(
+            settingsDraft.videoPublicMediaTtlSeconds || 3600,
+          ),
           providers: (serverVideoSettings.providers || []).map((provider) => {
             const managedAccessKey = String(
               settingsDraft.videoManagedAssetAccessKey || "",
@@ -4125,6 +4136,58 @@ function ModelSettingsDialog({
                 <small>分辨率直接影响计费；每次生成前会再次显示预计费用。</small>
               </label>
             </div>
+
+            <section className="managed-asset-settings-panel" aria-label="Provider 公网媒体暂存">
+              <div className="settings-section-heading compact-heading">
+                <div>
+                  <strong>参考视频公网暂存</strong>
+                  <p>
+                    为 Seedance、MiniMax H3 等模型签发短期 HTTPS 地址；本地路径和工作区结构不会暴露。
+                  </p>
+                </div>
+                <span className={`image-settings-state ${videoServerSettings.public_media_transport_ready ? "enabled" : ""}`}>
+                  {videoServerSettings.public_media_transport_ready ? "已配置" : "未配置"}
+                </span>
+              </div>
+              <div className="settings-field-grid">
+                <label className="settings-field settings-field-wide">
+                  <span>ViralDNA 公网 API 地址</span>
+                  <input
+                    disabled={saving}
+                    onChange={(event) => onChange({
+                      videoPublicMediaBaseUrl: event.target.value,
+                    })}
+                    placeholder="https://viraldna.example.com"
+                    spellCheck="false"
+                    type="url"
+                    value={draft.videoPublicMediaBaseUrl || ""}
+                  />
+                  <small>
+                    填写能从公网访问当前 ViralDNA API 的 HTTPS 域名或反向代理地址；
+                    不接受 localhost、内网 IP 或 HTTP。留空时会自动回退为图片白模与文字动作描述。
+                  </small>
+                </label>
+                <label className="settings-field">
+                  <span>链接有效期（秒）</span>
+                  <input
+                    disabled={saving}
+                    max="604800"
+                    min="900"
+                    onChange={(event) => onChange({
+                      videoPublicMediaTtlSeconds: event.target.value,
+                    })}
+                    step="300"
+                    type="number"
+                    value={draft.videoPublicMediaTtlSeconds || 3600}
+                  />
+                  <small>建议保持 3600 秒；只读地址到期后自动失效。</small>
+                </label>
+              </div>
+              <small className="managed-asset-settings-note">
+                {videoServerSettings.public_media_validation_message
+                  || "配置后，生成任务会把已启用的视频白模暂存为短期签名地址。"}
+              </small>
+            </section>
 
             <div className="video-provider-settings-list">
               {(videoServerSettings.providers || []).map((provider) => (

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ...contracts import ProviderVideoRequest
-from ...media_transport import image_data_url, video_data_url
+from ...media_transport import image_data_url, require_public_media_url
 
 
 def build_minimax_h3_request(request: ProviderVideoRequest) -> dict[str, object]:
@@ -41,7 +41,7 @@ def build_minimax_h3_request(request: ProviderVideoRequest) -> dict[str, object]
                 [
                     {
                         "type": "video_url",
-                        "video_url": {"url": video_data_url(video.path)},
+                        "video_url": {"url": require_public_media_url(video)},
                         "role": "reference_video",
                     }
                     for video in request.reference_videos

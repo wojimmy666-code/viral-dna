@@ -99,39 +99,36 @@ def resolve_reference_route(
     else:
         identity_source = "none"
 
-    if capability.requires_public_media_url and not public_media_transport_ready:
-        return ResolvedReferenceRoute(
-            route_id=route_id,
-            effective_route_id=route_id,
-            identity_transport=capability.identity_transport,
-            motion_transport=motion_transport,
-            motion_semantics=motion_semantics,
-            identity_source=identity_source,
-            motion_source="none",
-            fallback_applied=False,
-            generation_allowed=False,
-            blocker_code="video_public_media_transport_required",
-            blocker_message=(
-                "该模型要求 Provider 可访问的公网媒体 URL；"
-                "当前工作区尚未配置媒体暂存服务"
-            ),
-        )
-
     wants_video = motion_transport in {
         MotionReferenceTransport.REFERENCE_VIDEO,
         MotionReferenceTransport.CONTROL_VIDEO,
     }
-    if wants_video and capability.provider_verified and has_motion_proxy_video:
+    public_transport_missing = (
+        wants_video
+        and has_motion_proxy_video
+        and capability.requires_public_media_url
+        and not public_media_transport_ready
+    )
+    if (
+        wants_video
+        and capability.provider_verified
+        and has_motion_proxy_video
+        and not public_transport_missing
+    ):
         motion_source = "motion_proxy_video"
     elif wants_video:
         if capability.fallback_route_id is None:
             code = (
-                "video_motion_proxy_required"
+                "video_public_media_transport_required"
+                if public_transport_missing
+                else "video_motion_proxy_required"
                 if capability.provider_verified
                 else "video_reference_transport_unverified"
             )
             message = (
-                "请先生成并启用视频白模"
+                "该模型要求 Provider 可访问的公网媒体 URL；当前工作区尚未配置媒体暂存服务"
+                if public_transport_missing
+                else "请先生成并启用视频白模"
                 if capability.provider_verified
                 else "当前模型的视频参考通道尚未完成 Provider 验证"
             )
@@ -154,7 +151,9 @@ def resolve_reference_route(
         motion_semantics = MotionReferenceSemantics.SUGGESTIVE
         motion_source = "pose_proxy_image" if has_pose_proxy_image else "prompt_motion_description"
         reason = (
-            "未找到已启用的视频白模"
+            "当前工作区尚未配置 Provider 可访问的公网媒体 URL"
+            if public_transport_missing
+            else "未找到已启用的视频白模"
             if capability.provider_verified
             else "Provider 尚未验证视频参考输入"
         )

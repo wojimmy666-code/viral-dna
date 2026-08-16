@@ -4,12 +4,13 @@ import asyncio
 import ipaddress
 import json
 import os
+import re
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 from uuid import UUID
 
 from yt_dlp import YoutubeDL
@@ -29,6 +30,11 @@ PLATFORM_DOMAINS = {
     "xhslink.com": SourceType.XIAOHONGSHU,
     "rednote.com": SourceType.XIAOHONGSHU,
 }
+DOUYIN_CANONICAL_HOST = "www.douyin.com"
+DOUYIN_VIDEO_PATH = re.compile(
+    r"(?:^|/)video/(?P<video_id>[0-9]{1,30})(?:/|$)"
+)
+DOUYIN_VIDEO_ID = re.compile(r"^[0-9]{1,30}$")
 
 
 class LinkIngestionError(RuntimeError):
@@ -137,8 +143,31 @@ def identify_platform(url: str) -> SourceType:
 
 
 def normalize_platform_url(url: str) -> str:
-    identify_platform(url)
+    platform = identify_platform(url)
     parsed = urlsplit(url.strip())
+    if platform == SourceType.DOUYIN:
+        path_match = DOUYIN_VIDEO_PATH.search(parsed.path)
+        if path_match:
+            return (
+                f"https://{DOUYIN_CANONICAL_HOST}/video/"
+                f"{path_match.group('video_id')}"
+            )
+
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        modal_values = [
+            value.strip()
+            for key in ("modal_id", "aweme_id")
+            for value in query.get(key, [])
+        ]
+        if modal_values:
+            unique_ids = set(modal_values)
+            if len(unique_ids) != 1 or not DOUYIN_VIDEO_ID.fullmatch(modal_values[0]):
+                raise LinkIngestionError(
+                    "link_douyin_video_id_invalid",
+                    "抖音弹窗链接中的视频 ID 无效，请重新复制视频分享链接",
+                )
+            return f"https://{DOUYIN_CANONICAL_HOST}/video/{modal_values[0]}"
+
     hostname = (parsed.hostname or "").lower().rstrip(".")
     port = parsed.port
     include_port = port is not None and not (

@@ -173,6 +173,7 @@ from .production import (
 from .project_assets import ProjectAssetService
 from .prompt_engine.routes import create_prompt_draft_router
 from .prompt_engine.service import PromptDraftService
+from .public_media import PublicMediaStager, create_public_media_router
 from .quality.continuity_service import ContinuityService
 from .quality.routes import create_continuity_router
 from .real_pipeline import HybridAnalysisPipeline
@@ -275,10 +276,12 @@ image_generation_gateway = ImageGenerationGateway(
     image_generation_settings_service,
     repository=store,
 )
+public_media_stager = PublicMediaStager(workspace_manager)
 video_generation_gateway = VideoGenerationGateway(
     workspace_manager,
     settings_service=video_generation_settings_service,
     repository=store,
+    public_media_stager=public_media_stager,
 )
 video_generation_draft_service = ShotVideoGenerationDraftService(
     store,
@@ -340,9 +343,14 @@ app.include_router(
     prefix=API_PREFIX,
 )
 app.include_router(
-    create_video_reference_router(production_service, reference_proxy_service),
+    create_video_reference_router(
+        production_service,
+        reference_proxy_service,
+        public_media_stager,
+    ),
     prefix=API_PREFIX,
 )
+app.include_router(create_public_media_router(public_media_stager), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)

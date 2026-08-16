@@ -72,6 +72,7 @@ class OrderedReferenceVideo:
     relative_path: str
     sha256: str
     role: str = "motion"
+    public_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

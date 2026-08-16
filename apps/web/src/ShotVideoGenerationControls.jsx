@@ -1,4 +1,4 @@
-import { useCallback, useId, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
   CaretUp,
   CircleNotch,
@@ -30,12 +30,11 @@ export function ShotVideoGenerationControls({
   durationScaleValues,
   estimatedCostKnown,
   estimatedCostLabel,
+  failureAlias = "",
   generationBlockedReason,
-  latestFailure,
   latestRun,
   modelCatalogError = "",
   modelCatalogStatus = "ready",
-  modelSelectRef,
   onCancelRun,
   onCandidateCountChange,
   onDurationChange,
@@ -85,12 +84,6 @@ export function ShotVideoGenerationControls({
     || Boolean(generationBlockedReason)
   );
 
-  const setModelAnchor = useCallback((node) => {
-    localModelAnchorRef.current = node;
-    if (typeof modelSelectRef === "function") modelSelectRef(node);
-    else if (modelSelectRef) modelSelectRef.current = node;
-  }, [modelSelectRef]);
-
   function togglePopover(name) {
     setOpenPopover((current) => (current === name ? null : name));
   }
@@ -129,7 +122,7 @@ export function ShotVideoGenerationControls({
           className={`shot-video-model-trigger${modelCatalog.loading ? " loading" : ""}${modelCatalog.failed || modelCatalog.missingProviderKey || modelCatalog.unavailableSelection ? " missing" : ""}`}
           disabled={controlsDisabled}
           onClick={toggleModelPopover}
-          ref={setModelAnchor}
+          ref={localModelAnchorRef}
           title={modelCatalog.title}
           type="button"
         >
@@ -212,7 +205,7 @@ export function ShotVideoGenerationControls({
       <VideoModelPopover
         anchorRef={localModelAnchorRef}
         disabled={controlsDisabled}
-        failureAlias={latestFailure && latestRun?.model_alias}
+        failureAlias={failureAlias}
         loadError={modelCatalogError}
         loadStatus={modelCatalogStatus}
         models={compatibleVideoModels}

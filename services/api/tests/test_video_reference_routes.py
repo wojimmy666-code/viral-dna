@@ -44,6 +44,7 @@ def test_seedance_requires_managed_actor_and_never_uses_raw_identity() -> None:
         "seedance_2_0",
         has_managed_identity=True,
         has_motion_proxy_video=True,
+        public_media_transport_ready=True,
     )
     assert resolved.generation_allowed is True
     assert resolved.identity_transport == IdentityReferenceTransport.PROVIDER_MANAGED_ASSET
@@ -53,8 +54,12 @@ def test_seedance_requires_managed_actor_and_never_uses_raw_identity() -> None:
     assert resolved.motion_semantics == MotionReferenceSemantics.GUIDED_REFERENCE
 
 
-def test_minimax_h3_uses_video_when_present_and_falls_back_honestly() -> None:
-    primary = _resolve("minimax_h3", has_motion_proxy_video=True)
+def test_minimax_h3_uses_video_when_transport_is_ready_and_falls_back_honestly() -> None:
+    primary = _resolve(
+        "minimax_h3",
+        has_motion_proxy_video=True,
+        public_media_transport_ready=True,
+    )
     assert primary.generation_allowed is True
     assert primary.fallback_applied is False
     assert primary.motion_source == "motion_proxy_video"
@@ -67,6 +72,12 @@ def test_minimax_h3_uses_video_when_present_and_falls_back_honestly() -> None:
     assert fallback.motion_source == "prompt_motion_description"
     assert fallback.motion_semantics == MotionReferenceSemantics.SUGGESTIVE
     assert fallback.warnings
+
+    transport_fallback = _resolve("minimax_h3", has_motion_proxy_video=True)
+    assert transport_fallback.generation_allowed is True
+    assert transport_fallback.fallback_applied is True
+    assert transport_fallback.motion_source == "prompt_motion_description"
+    assert any("公网媒体 URL" in warning for warning in transport_fallback.warnings)
 
 
 def test_hailuo_never_exposes_video_proxy_transport() -> None:

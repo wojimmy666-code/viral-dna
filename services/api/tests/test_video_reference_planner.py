@@ -144,6 +144,7 @@ def test_seedance_can_use_video_motion_proxy_without_submitting_original_frames(
         reference_frames=(_frame(1),),
         managed_asset_references=(_managed(),),
         proxy_reference_videos=(proxy,),
+        public_media_transport_ready=True,
     )
 
     assert plan.strategy == "managed_identity_with_motion_proxy"

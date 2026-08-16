@@ -26,6 +26,7 @@ from viral_dna_api.video_generation.catalog import (
 )
 from viral_dna_api.video_generation.contracts import (
     OrderedReferenceFrame,
+    OrderedReferenceVideo,
     ProviderCredentialValidation,
     ProviderPollResult,
     ProviderSubmitResult,
@@ -294,6 +295,77 @@ def test_minimax_h3_uses_the_v2_multimodal_request(tmp_path: Path) -> None:
     ]
     assert payload["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     assert payload["content"][1]["image_url"]["url"] != payload["content"][2]["image_url"]["url"]
+
+
+def test_minimax_h3_reference_video_uses_a_public_https_url(tmp_path: Path) -> None:
+    frame = tmp_path / "identity.jpg"
+    frame.write_bytes(b"identity")
+    video = OrderedReferenceVideo(
+        proxy_asset_id=uuid4(),
+        visual_beat_id=uuid4(),
+        ordinal=1,
+        title="动作白模",
+        path=tmp_path / "motion.mp4",
+        relative_path="motion.mp4",
+        sha256="a" * 64,
+        public_url="https://media.example.test/motion.mp4",
+    )
+    payload = build_minimax_h3_request(
+        ProviderVideoRequest(
+            request_id=uuid4(),
+            ordinal=1,
+            model_alias="minimax_h3",
+            provider_model="MiniMax-H3",
+            prompt="人物完成参考动作",
+            negative_prompt="",
+            reference_frames=(
+                ordered_reference_frame(frame, ordinal=1, start_ratio=0, end_ratio=1),
+            ),
+            reference_videos=(video,),
+            duration_seconds=4,
+            resolution="2K",
+            aspect_ratio="9:16",
+            width=1440,
+            height=2560,
+            route_id="minimax_identity_image_motion_proxy",
+            effective_route_id="minimax_identity_image_motion_proxy",
+        )
+    )
+
+    reference_video = next(item for item in payload["content"] if item["type"] == "video_url")
+    assert reference_video["video_url"]["url"] == "https://media.example.test/motion.mp4"
+
+
+def test_seedance_rejects_an_unpublished_local_reference_video(tmp_path: Path) -> None:
+    video = OrderedReferenceVideo(
+        proxy_asset_id=uuid4(),
+        visual_beat_id=uuid4(),
+        ordinal=1,
+        title="动作白模",
+        path=tmp_path / "motion.mp4",
+        relative_path="motion.mp4",
+        sha256="b" * 64,
+    )
+    with pytest.raises(VideoProviderError) as captured:
+        build_seedance_request(
+            ProviderVideoRequest(
+                request_id=uuid4(),
+                ordinal=1,
+                model_alias="seedance_2_0",
+                provider_model="doubao-seedance-2-0-260128",
+                prompt="演员完成参考动作",
+                negative_prompt="",
+                reference_frames=(),
+                reference_videos=(video,),
+                duration_seconds=5,
+                resolution="720P",
+                aspect_ratio="9:16",
+                width=720,
+                height=1280,
+            )
+        )
+
+    assert captured.value.code == "video_public_media_url_invalid"
 
 
 def test_seedance_maps_every_reference_image_in_order(tmp_path: Path) -> None:

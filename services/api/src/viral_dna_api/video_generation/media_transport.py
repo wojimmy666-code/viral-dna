@@ -7,11 +7,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .contracts import MAX_GENERATED_VIDEO_BYTES
+from .contracts import MAX_GENERATED_VIDEO_BYTES, OrderedReferenceVideo
 from .errors import VideoProviderError
 
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_PROVIDER_REFERENCE_VIDEO_BYTES = 100 * 1024 * 1024
 
 
 def image_data_url(path: Path) -> str:
@@ -36,30 +35,31 @@ def image_data_url(path: Path) -> str:
     return f"data:{media_type};base64,{encoded}"
 
 
-def video_data_url(path: Path) -> str:
+def require_public_media_url(video: OrderedReferenceVideo) -> str:
+    raw = str(video.public_url or "").strip()
     try:
-        payload = path.read_bytes()
-    except OSError as exc:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
         raise VideoProviderError(
-            409,
-            "video_reference_proxy_missing",
-            "动作代理视频文件不存在",
+            422,
+            "video_public_media_url_invalid",
+            "参考视频的公网媒体地址格式无效",
         ) from exc
-    if not payload or len(payload) > MAX_PROVIDER_REFERENCE_VIDEO_BYTES:
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.fragment
+    ):
         raise VideoProviderError(
             422,
-            "video_reference_proxy_size_invalid",
-            "动作代理视频为空或超过远程视频模型允许的 100MB 安全限制",
+            "video_public_media_url_invalid",
+            "参考视频必须使用 Provider 可访问的 HTTPS 地址",
         )
-    media_type = mimetypes.guess_type(path.name)[0] or "video/mp4"
-    if media_type not in {"video/mp4", "video/webm", "video/quicktime"}:
-        raise VideoProviderError(
-            422,
-            "video_reference_proxy_format_invalid",
-            "动作代理视频必须是 MP4、WebM 或 MOV",
-        )
-    encoded = base64.b64encode(payload).decode("ascii")
-    return f"data:{media_type};base64,{encoded}"
+    return raw
 
 
 async def download_provider_video(

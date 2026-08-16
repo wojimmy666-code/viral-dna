@@ -285,6 +285,7 @@ def test_seedance_submits_managed_identity_before_identity_free_motion_proxy(
         path=proxy_path,
         relative_path=proxy_path.name,
         sha256="e" * 64,
+        public_url="https://media.example.test/motion-proxy.mp4",
     )
     payload = build_seedance_request(
         ProviderVideoRequest(
@@ -309,7 +310,9 @@ def test_seedance_submits_managed_identity_before_identity_free_motion_proxy(
     assert payload["content"][1]["image_url"]["url"] == "asset://asset-virtual-001"
     assert payload["content"][2]["type"] == "video_url"
     assert payload["content"][2]["role"] == "reference_video"
-    assert payload["content"][2]["video_url"]["url"].startswith("data:video/mp4;base64,")
+    assert payload["content"][2]["video_url"]["url"] == (
+        "https://media.example.test/motion-proxy.mp4"
+    )
     assert len(payload["content"]) == 3
     assert "唯一演员身份来源" in payload["content"][0]["text"]
     assert "无身份、无纹理的动作代理" in payload["content"][0]["text"]

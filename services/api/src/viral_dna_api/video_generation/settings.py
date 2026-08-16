@@ -31,6 +31,13 @@ from ..models import (
     VideoProviderValidationRequest,
     VideoProviderValidationResponse,
 )
+from ..public_media import (
+    PUBLIC_MEDIA_BASE_URL_ENV,
+    PUBLIC_MEDIA_TTL_SECONDS_ENV,
+    PublicMediaStagingError,
+    normalize_public_media_base_url,
+    public_media_configuration,
+)
 from ..runtime_config import RuntimeConfigError, get_config_value, persist_config_values
 from .catalog import (
     VideoModelCatalogError,
@@ -177,6 +184,7 @@ class VideoGenerationSettingsService:
 
     def get(self) -> VideoGenerationSettingsResponse:
         catalog = load_video_model_catalog()
+        public_media = public_media_configuration()
         alias = get_config_value(
             "VIRAL_DNA_VIDEO_DEFAULT_MODEL_ALIAS", DEFAULT_VIDEO_MODEL_ALIAS
         ).strip()
@@ -260,6 +268,10 @@ class VideoGenerationSettingsService:
             default_resolution=resolution,
             poll_interval_seconds=min(60, max(0.2, poll_interval)),
             task_timeout_seconds=min(7200, max(30, timeout)),
+            public_media_base_url=public_media.base_url,
+            public_media_ttl_seconds=public_media.ttl_seconds,
+            public_media_transport_ready=public_media.ready,
+            public_media_validation_message=public_media.validation_message,
             catalog_version=catalog.catalog_version,
             pricing_version=catalog.pricing_version,
             providers=provider_settings,
@@ -329,6 +341,16 @@ class VideoGenerationSettingsService:
             "VIRAL_DNA_VIDEO_POLL_INTERVAL_SECONDS": str(payload.poll_interval_seconds),
             "VIRAL_DNA_VIDEO_TASK_TIMEOUT_SECONDS": str(payload.task_timeout_seconds),
         }
+        if "public_media_base_url" in payload.model_fields_set:
+            try:
+                public_media_base_url = normalize_public_media_base_url(
+                    payload.public_media_base_url
+                )
+            except PublicMediaStagingError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            updates[PUBLIC_MEDIA_BASE_URL_ENV] = public_media_base_url or ""
+        if "public_media_ttl_seconds" in payload.model_fields_set:
+            updates[PUBLIC_MEDIA_TTL_SECONDS_ENV] = str(payload.public_media_ttl_seconds)
         for item in payload.providers:
             base_url = normalize_provider_base_url(
                 item.provider, item.base_url or self.base_url(item.provider)

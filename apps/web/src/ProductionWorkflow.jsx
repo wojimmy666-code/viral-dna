@@ -3213,6 +3213,7 @@ export function ProductionHub({
                 onApprove={approveVideoCandidate}
                 onArchiveCandidates={archiveVideoCandidates}
                 onCancelRun={cancelVideoGeneration}
+                onClearError={() => setActionError("")}
                 onCreateReferenceProxy={createReferenceProxy}
                 onDecideContinuity={decideContinuityFinding}
                 onDeleteReferenceProxy={deleteReferenceProxy}

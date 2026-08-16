@@ -345,15 +345,14 @@ test("auto-saves changed prompts with the returned revision before generating", 
   assert.doesNotMatch(productionWorkflowSource, /async function saveVideoPrompt/);
 });
 
-test("shows actionable provider failures and hides unsafe direct retry", () => {
-  assert.match(workspaceSource, /videoGenerationFailureDetails\(latestRun\)/);
-  assert.match(workspaceSource, /className="shot-video-generation-error" role="alert"/);
-  assert.match(workspaceSource, /打开模型设置/);
-  assert.match(workspaceSource, /技术详情/);
-  assert.match(workspaceSource, /复制诊断信息/);
-  assert.match(workspaceSource, /latestFailure\.retryable/);
+test("keeps provider failures in notifications and scopes model warnings", () => {
+  assert.match(workspaceSource, /const latestFailedVideoRun = useMemo/);
+  assert.match(workspaceSource, /failureAlias=\{latestFailedVideoRun\?\.model_alias \|\| ""\}/);
+  assert.match(generationControlsSource, /failureAlias=\{failureAlias\}/);
   assert.match(generationControlsSource, /latestRun\?\.status === "cancelled"/);
-  assert.match(workflowStyles, /\.shot-video-generation-error\s*\{/);
+  assert.doesNotMatch(workspaceSource, /videoGenerationFailureDetails\(latestRun\)/);
+  assert.doesNotMatch(workspaceSource, /className="shot-video-generation-error"/);
+  assert.doesNotMatch(workflowStyles, /\.shot-video-generation-error\s*\{/);
 });
 
 test("keeps video candidates from every generation batch selectable", () => {

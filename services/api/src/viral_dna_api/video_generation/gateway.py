@@ -6,6 +6,7 @@ import math
 import os
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -28,6 +29,7 @@ from ..models import (
     VideoGenerationCapability,
     VideoGenerationInputMode,
 )
+from ..public_media import PublicMediaStager, PublicMediaStagingError
 from ..reference_routes import IdentityReferenceTransport
 from ..video_references.domain import (
     VideoReferenceMediaType,
@@ -300,8 +302,10 @@ class VideoGenerationGateway:
         settings_service: VideoGenerationSettingsService | None = None,
         repository: object | None = None,
         remote_orchestrator: RemoteVideoOrchestrator | None = None,
+        public_media_stager: PublicMediaStager | None = None,
     ) -> None:
         self.workspace = workspace
+        self.public_media_stager = public_media_stager or PublicMediaStager(workspace)
         if adapters is None:
             simulated = SimulatedVideoAdapter(media_processor)
             self.adapters: dict[ImageExecutionMode, VideoGenerationAdapter] = {
@@ -609,11 +613,27 @@ class VideoGenerationGateway:
                 managed_asset_references=managed_references,
                 proxy_reference_frames=proxy_reference_frames,
                 proxy_reference_videos=proxy_reference_videos,
+                public_media_transport_ready=self.public_media_stager.ready,
             )
         except VideoReferencePolicyError as exc:
             raise VideoGenerationGatewayError(422, exc.code, str(exc)) from exc
         ordered_frames = reference_plan.reference_frames
         reference_videos = reference_plan.reference_videos
+        if reference_videos:
+            try:
+                reference_videos = tuple(
+                    replace(
+                        item,
+                        public_url=self.public_media_stager.stage(item.path).url,
+                    )
+                    for item in reference_videos
+                )
+            except PublicMediaStagingError as exc:
+                raise VideoGenerationGatewayError(
+                    exc.status_code,
+                    exc.code,
+                    str(exc),
+                ) from exc
         managed_references = reference_plan.managed_asset_references
         total_reference_count = (
             len(ordered_frames) + len(reference_videos) + len(managed_references)

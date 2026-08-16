@@ -4664,117 +4664,6 @@
   background: #fbfaff;
 }
 
-.shot-video-generation-error {
-  min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 11px 12px;
-  border: 1px solid #efc8cb;
-  border-radius: 9px;
-  color: #74343a;
-  background: #fff6f6;
-}
-
-.shot-video-generation-error-icon {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  color: #c44752;
-  background: #ffe5e7;
-}
-
-.shot-video-generation-error-copy {
-  min-width: 0;
-  flex: 1;
-  display: grid;
-  gap: 5px;
-}
-
-.shot-video-generation-error-copy > strong {
-  color: #54272c;
-  font-size: var(--type-caption-size);
-  line-height: 1.4;
-}
-
-.shot-video-generation-error-copy > p {
-  max-width: 72ch;
-  margin: 0;
-  color: #78484d;
-  font-size: var(--type-caption-size);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-
-.shot-video-generation-error-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 2px;
-}
-
-.shot-video-generation-error-actions .secondary-button.compact {
-  min-height: 32px;
-  padding: 6px 10px;
-  border-color: #dfb9bd;
-  color: #74343a;
-  background: #fff;
-}
-
-.shot-video-generation-error-details {
-  margin-top: 2px;
-  color: #6f4a4e;
-  font-size: var(--type-caption-size);
-}
-
-.shot-video-generation-error-details summary {
-  width: fit-content;
-  color: #6b4247;
-  cursor: pointer;
-  font-weight: 700;
-}
-
-.shot-video-generation-error-details dl {
-  display: grid;
-  gap: 5px;
-  margin: 8px 0;
-  padding: 8px 10px;
-  border-radius: 7px;
-  background: #fff;
-}
-
-.shot-video-generation-error-details dl > div {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  gap: 8px;
-}
-
-.shot-video-generation-error-details dt {
-  color: #9a6f73;
-}
-
-.shot-video-generation-error-details dd {
-  min-width: 0;
-  margin: 0;
-  color: #58383c;
-  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-  overflow-wrap: anywhere;
-}
-
-.shot-video-generation-error-details .technical-message dd {
-  white-space: pre-wrap;
-}
-
-.shot-video-generation-error-details .text-button.compact {
-  min-height: 28px;
-  padding: 4px 0;
-  color: #694047;
-}
-
 .shot-video-prompt-panel > label {
   display: grid;
   gap: 6px;
@@ -4993,14 +4882,6 @@
     width: 100%;
   }
 
-  .shot-video-generation-error-details dl > div {
-    grid-template-columns: 1fr;
-    gap: 2px;
-  }
-
-  .shot-video-generation-error-actions button {
-    flex: 1 1 150px;
-  }
 }
 
 /* Batch 4.6.6: final render and delivery */
@@ -5774,15 +5655,6 @@
 .shot-video-run-card small,
 .shot-video-run-card p {
   font-size: inherit;
-}
-
-.shot-video-generation-error-copy > strong {
-  font-size: var(--production-type-secondary);
-}
-
-.shot-video-generation-error-copy > p,
-.shot-video-generation-error-details {
-  font-size: var(--production-type-secondary);
 }
 
 .shot-video-review-actions {

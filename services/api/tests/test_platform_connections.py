@@ -270,6 +270,39 @@ async def test_browser_profile_configuration_requires_consent_and_stores_no_cook
         assert session.cookies_from_browser == ("chrome", "C:/browser/Default", None, None)
 
 
+@pytest.mark.asyncio
+async def test_connection_validation_normalizes_douyin_modal_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = FakeAccountContext()
+    service = PlatformConnectionService(
+        context,
+        InMemoryPlatformConnectionRepository(),
+        InMemoryPlatformSecretStore(),
+    )
+    await service.import_cookie_file(
+        PlatformKind.DOUYIN,
+        cookie_file(cookie_row(".douyin.com", "sid", "private-value")),
+    )
+    probed_urls: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "_probe_url",
+        lambda url, _session: probed_urls.append(url),
+    )
+
+    response = await service.validate(
+        PlatformKind.DOUYIN,
+        test_url=(
+            "https://www.douyin.com/user/self?from_tab_name=main&"
+            "modal_id=7665298660867001638&showTab=favorite_collection"
+        ),
+    )
+
+    assert response.connection.health == "valid"
+    assert probed_urls == ["https://www.douyin.com/video/7665298660867001638"]
+
+
 def test_platform_connection_api_imports_independent_cookie_files() -> None:
     payload = cookie_file(cookie_row(".douyin.com", "sid", "api-private-value"))
     with TestClient(app) as client:

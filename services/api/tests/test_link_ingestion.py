@@ -13,6 +13,7 @@ from viral_dna_api.link_ingestion import (
     LinkCredentialSession,
     LinkIngestionError,
     identify_platform,
+    normalize_platform_url,
 )
 from viral_dna_api.models import SourceType, Video
 
@@ -44,6 +45,46 @@ def test_identify_platform(url: str, expected: SourceType) -> None:
 def test_identify_platform_rejects_unsafe_url(url: str) -> None:
     with pytest.raises(LinkIngestionError):
         identify_platform(url)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://www.douyin.com/user/self?from_tab_name=main&"
+            "modal_id=7665298660867001638&showTab=favorite_collection",
+            "https://www.douyin.com/video/7665298660867001638",
+        ),
+        (
+            "https://www.douyin.com/video/7665298660867001638?previous_page=app_code_link",
+            "https://www.douyin.com/video/7665298660867001638",
+        ),
+        (
+            "https://www.iesdouyin.com/share/video/7665298660867001638/"
+            "?region=CN#share",
+            "https://www.douyin.com/video/7665298660867001638",
+        ),
+        (
+            "https://www.douyin.com/discover?aweme_id=7665298660867001638",
+            "https://www.douyin.com/video/7665298660867001638",
+        ),
+    ],
+)
+def test_normalize_douyin_video_links(url: str, expected: str) -> None:
+    assert normalize_platform_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.douyin.com/user/self?modal_id=not-a-video-id",
+        "https://www.douyin.com/user/self?modal_id=123&modal_id=456",
+    ],
+)
+def test_normalize_douyin_rejects_invalid_modal_video_ids(url: str) -> None:
+    with pytest.raises(LinkIngestionError) as caught:
+        normalize_platform_url(url)
+    assert caught.value.code == "link_douyin_video_id_invalid"
 
 
 def test_collect_persists_sanitized_metadata(
@@ -150,12 +191,13 @@ def test_collect_retries_auth_failure_with_platform_connection(
     collector = LinkCollector(resolver)
     video = Video(
         source_type=SourceType.DOUYIN,
-        source_url="https://www.douyin.com/video/123",
+        source_url="https://www.douyin.com/user/self?modal_id=123",
         title="抖音链接视频",
     )
     attempts: list[LinkCredentialSession | None] = []
 
     def fake_download(source_url, target_dir, _logger, credential_session=None):
+        assert source_url == "https://www.douyin.com/video/123"
         attempts.append(credential_session)
         if credential_session is None:
             raise DownloadError("Login required; fresh cookies needed")

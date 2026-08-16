@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import FileResponse
 
 from ..production import ProductionService, ProductionServiceError
+from ..public_media import PublicMediaStager
 from ..reference_routes import VideoReferenceRouteId, resolve_reference_route
 from ..video_generation.catalog import VideoModelCatalogError, load_video_model_catalog
 from .domain import PersonReferencePolicy, VideoReferenceSourceKind
@@ -83,6 +84,7 @@ def _raise_proxy(exc: ReferenceProxyServiceError) -> NoReturn:
 def create_video_reference_router(
     production: ProductionService,
     proxies: ReferenceProxyService,
+    public_media_stager: PublicMediaStager | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/video-references", tags=["video-references"])
 
@@ -168,6 +170,7 @@ def create_video_reference_router(
             and proxy.usable_for_generation
         ]
         route_capability = model.capability.reference_route
+        public_media_ready = bool(public_media_stager and public_media_stager.ready)
         route = resolve_reference_route(
             route_capability,
             has_managed_identity=managed_bound,
@@ -177,7 +180,7 @@ def create_video_reference_router(
             ),
             has_pose_proxy_image=any(item.media_type == "image" for item in selected_proxies),
             has_motion_proxy_video=any(item.media_type == "video" for item in selected_proxies),
-            public_media_transport_ready=False,
+            public_media_transport_ready=public_media_ready,
         )
         if policy == PersonReferencePolicy.MANAGED_REQUIRED:
             strategy = (
@@ -295,8 +298,12 @@ def create_video_reference_router(
                     kind="transport",
                     label="Provider 媒体传输",
                     source="public_media_url",
-                    status="ready" if route.generation_allowed else "blocked",
-                    detail="VACE 只接受 Provider 可访问的 HTTP/HTTPS/OSS 媒体 URL",
+                    status="ready" if public_media_ready else "fallback",
+                    detail=(
+                        "已配置短期签名 HTTPS 媒体地址，可提交视频白模"
+                        if public_media_ready
+                        else "未配置公网媒体地址；本次将回退为图片白模与文字动作描述"
+                    ),
                 )
             )
         return VideoReferenceStrategyResponse(

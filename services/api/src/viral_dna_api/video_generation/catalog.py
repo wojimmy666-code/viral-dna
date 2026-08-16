@@ -203,6 +203,7 @@ SEEDANCE_MANAGED_ROUTE = VideoReferenceRouteCapability(
     supports_pose_proxy_image=True,
     supports_motion_proxy_video=True,
     show_motion_proxy_controls=True,
+    requires_public_media_url=True,
     fallback_route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
     fallback_label="图片白模 + 文本动作描述",
 )
@@ -220,6 +221,7 @@ MINIMAX_H3_ROUTE = VideoReferenceRouteCapability(
     supports_pose_proxy_image=True,
     supports_motion_proxy_video=True,
     show_motion_proxy_controls=True,
+    requires_public_media_url=True,
     fallback_route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
     fallback_label="人物参考图 + 图片白模 + 文本动作描述",
     availability_note="MiniMax H3 全能参考入口支持图片与参考视频组合输入",

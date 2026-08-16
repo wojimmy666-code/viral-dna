@@ -15,6 +15,7 @@ from ..link_ingestion import (
     LinkCredentialError,
     LinkCredentialSession,
     identify_platform,
+    normalize_platform_url,
 )
 from ..models import SourceType
 from ..runtime_config import get_config_value
@@ -290,7 +291,8 @@ class PlatformConnectionService:
             metadata = await self._inspect_connection(connection)
             network_tested = False
             if test_url:
-                expected = identify_platform(test_url)
+                normalized_test_url = normalize_platform_url(test_url)
+                expected = identify_platform(normalized_test_url)
                 if expected.value != platform.value:
                     raise PlatformConnectionServiceError(
                         "platform_connection_test_url_mismatch",
@@ -298,7 +300,11 @@ class PlatformConnectionService:
                         platform=platform,
                     )
                 async with self.session_for(platform) as session:
-                    await asyncio.to_thread(self._probe_url, test_url, session)
+                    await asyncio.to_thread(
+                        self._probe_url,
+                        normalized_test_url,
+                        session,
+                    )
                 network_tested = True
         except PlatformConnectionServiceError:
             raise
