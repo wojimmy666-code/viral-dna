@@ -176,7 +176,8 @@ def test_catalog_freezes_profile_routes(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("VIRAL_DNA_VLM_PROVIDER", "dashscope")
     plan = load_model_plan(AnalysisProfile.ECONOMY)
     assert plan is not None
-    assert plan.catalog_version == "phase2-model-catalog-2026-08-11-r7"
+    assert plan.catalog_version == "phase2-model-catalog-2026-08-16-r8"
+    assert plan.targets_for(ModelTask.SHOT_FACTS)[0].prompt_version == "shot-facts-v3"
     assert PriceCatalog().catalog_version == plan.pricing_version
     targets = plan.targets_for(ModelTask.SHOT_FACTS)
     assert [target.model for target in targets] == [
@@ -298,7 +299,9 @@ def test_shot_facts_normalize_clip_relative_motion_and_transition_conflicts() ->
     assert normalized.outgoing_transition.start_seconds == pytest.approx(8.9)
     assert normalized.outgoing_transition.end_seconds == pytest.approx(9.6)
     assert normalized.outgoing_transition.description != "无出场转场"
-    assert "时序运镜" in normalized.replication_prompt
+    assert "【时间轴】" in normalized.replication_prompt
+    assert "【出场转场】" in normalized.replication_prompt
+    assert normalized.replication_prompt.count("检测到出场转场窗口") == 1
     assert "硬切" not in normalized.replication_prompt
     assert "画面切换为" not in normalized.replication_prompt
 
@@ -392,6 +395,89 @@ async def test_retryable_failure_creates_linked_run_before_success(
     runs = await repository.list_model_runs(analysis.id)
     assert [run.status for run in runs] == [ModelRunStatus.FAILED, ModelRunStatus.COMPLETED]
     assert runs[1].retry_of_run_id == runs[0].id
+
+
+@pytest.mark.asyncio
+async def test_english_shot_facts_are_retried_with_a_chinese_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video, analysis, evidence, timeline = _build_media_inputs(tmp_path, monkeypatch)
+    repository = InMemoryStore()
+    await repository.add_video(video)
+    await repository.add_analysis(analysis)
+    successful_provider = FakeVisionProvider()
+
+    class EnglishOnceProvider:
+        provider_id = "dashscope"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.retry_prompt = ""
+
+        async def generate(self, request, response_schema):
+            self.calls += 1
+            if self.calls > 1:
+                self.retry_prompt = request.user_prompt
+                return await successful_provider.generate(request, response_schema)
+            facts = response_schema(
+                title="Girl standing on a rooftop",
+                subjects=["A girl with long black hair"],
+                action="Standing still, hair and skirt blowing in wind",
+                scene="Rooftop terrace overlooking a city",
+                camera="Static / Locked-off",
+                composition="Cinematic wide shot",
+                lighting="Twilight light",
+                color="Deep blue and warm yellow",
+                transition="None",
+                narrative_role="Quiet ending",
+                replication_prompt="A girl stands on a rooftop at twilight.",
+                confidence=0.8,
+                visual_beats=[
+                    ShotVisualBeatFact(
+                        index=1,
+                        title="Rooftop girl",
+                        start_seconds=0.2,
+                        end_seconds=1.8,
+                        source_timestamp_seconds=1,
+                        image_prompt="A girl stands on a rooftop at twilight.",
+                    )
+                ],
+            )
+            usage = ModelUsage(
+                input_tokens=1000,
+                output_tokens=500,
+                total_tokens=1500,
+                image_count=3,
+            )
+            return ProviderResult(
+                data=facts,
+                usage=usage,
+                requested_model=request.target.model,
+                resolved_model=request.target.model,
+                provider_request_id="english-response",
+                latency_ms=80,
+                raw_content=facts.model_dump_json(),
+            )
+
+    provider = EnglishOnceProvider()
+    service = ShotFactsService(
+        repository,
+        router=ModelRouter({"dashscope": provider}),
+    )
+    outcome = await service.analyze(
+        analysis=analysis,
+        video=video,
+        evidence=evidence,
+        timeline=timeline,
+    )
+
+    assert outcome.facts["shot_001"].title == "人物展示产品"
+    assert provider.calls == 2
+    assert "上一次输出未通过中文校验" in provider.retry_prompt
+    runs = await repository.list_model_runs(analysis.id)
+    assert [run.status for run in runs] == [ModelRunStatus.FAILED, ModelRunStatus.COMPLETED]
+    assert runs[0].error_code == "model_language_invalid"
 
 
 @pytest.mark.asyncio

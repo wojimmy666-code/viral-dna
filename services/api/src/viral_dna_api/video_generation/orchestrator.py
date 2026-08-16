@@ -70,6 +70,22 @@ def _fingerprint(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _legacy_reference_route_fingerprint(payload: dict[str, object]) -> str:
+    """Build the fingerprint used before reference-route metadata was added.
+
+    Provider tasks may survive an application upgrade.  Route metadata is
+    descriptive for legacy ordered-image requests, so its introduction must
+    not make an already-submitted task look like a different paid request.
+    """
+
+    legacy_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"route_id", "effective_route_id", "motion_semantics"}
+    }
+    return _fingerprint(legacy_payload)
+
+
 class RemoteVideoOrchestrator:
     def __init__(
         self,
@@ -221,6 +237,9 @@ class RemoteVideoOrchestrator:
                 "prompt": positive_prompt,
                 "negative_prompt": negative_prompt,
                 "seed": seed,
+                "route_id": (reference_manifest or {}).get("route_id"),
+                "effective_route_id": (reference_manifest or {}).get("effective_route_id"),
+                "motion_semantics": (reference_manifest or {}).get("motion_semantics"),
                 "reference_images": [
                     {
                         "visual_beat_id": str(frame.visual_beat_id),
@@ -262,11 +281,20 @@ class RemoteVideoOrchestrator:
                 ]
             submission_fingerprint = _fingerprint(request_snapshot)
             if task is not None and task.submission_fingerprint != submission_fingerprint:
-                raise VideoProviderError(
-                    409,
-                    "video_provider_task_input_changed",
-                    "恢复上游任务时检测到输入已变化，已阻止重复计费",
+                is_legacy_route_snapshot = not any(
+                    key in task.request_snapshot
+                    for key in ("route_id", "effective_route_id", "motion_semantics")
                 )
+                legacy_fingerprint = _legacy_reference_route_fingerprint(request_snapshot)
+                if not (
+                    is_legacy_route_snapshot
+                    and task.submission_fingerprint == legacy_fingerprint
+                ):
+                    raise VideoProviderError(
+                        409,
+                        "video_provider_task_input_changed",
+                        "恢复上游任务时检测到输入已变化，已阻止重复计费",
+                    )
             if task is None:
                 task = VideoProviderTask(
                     generation_run_id=run_id,
@@ -306,6 +334,23 @@ class RemoteVideoOrchestrator:
                             aspect_ratio=aspect_ratio,
                             width=width,
                             height=height,
+                            route_id=str(
+                                (reference_manifest or {}).get("route_id")
+                                or "ordered_multi_image"
+                            ),
+                            effective_route_id=str(
+                                (reference_manifest or {}).get("effective_route_id")
+                                or "ordered_multi_image"
+                            ),
+                            motion_semantics=str(
+                                (reference_manifest or {}).get("motion_semantics") or "none"
+                            ),
+                            control_condition=(
+                                "posebody"
+                                if (reference_manifest or {}).get("route_id")
+                                == "wan_vace_posebody_repaint"
+                                else None
+                            ),
                             seed=seed,
                         ),
                         api_key=execution.api_key,

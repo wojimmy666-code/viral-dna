@@ -65,12 +65,24 @@ from viral_dna_api.pipeline import build_simulated_report
 from viral_dna_api.production import (
     ProductionService,
     ProductionServiceError,
+    _filesystem_path,
     inspect_reference_image,
 )
 from viral_dna_api.production_media import VideoInspectionResult
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
 from viral_dna_api.video_generation import VideoGenerationGateway
+from viral_dna_api.video_references.domain import (
+    PersonContentClass,
+    ReferenceProxyAsset,
+    ReferenceProxyKind,
+    ReferenceProxyStatus,
+    VideoReferenceBinding,
+    VideoReferenceMediaType,
+    VideoReferenceRole,
+    VideoReferenceSourceKind,
+)
+from viral_dna_api.video_references.proxies.service import ReferenceProxyService
 from viral_dna_api.workspace import WorkspaceManager
 
 
@@ -487,6 +499,103 @@ def test_project_default_output_follows_source_video_ratio(
         assert detail.project.output_aspect_ratio == "16:9"
         assert detail.project.output_width == 1920
         assert detail.project.output_height == 1080
+
+    asyncio.run(scenario())
+
+
+def test_delete_reference_proxy_requires_unused_asset_and_removes_local_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, repository = isolated_service(tmp_path, monkeypatch)
+        service.reference_proxies = ReferenceProxyService(
+            service.workspace,
+            engines=[],
+        )
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        detail = await service.create_project(
+            record.id,
+            ProductionProjectCreate(base_analysis_id=analysis.id),
+        )
+        plan = (await service.list_shots(detail.project.id))[0].plan
+        proxy_id = uuid4()
+        proxy_root = (
+            service.workspace.production_shot_root(record.id, detail.project.id, plan.id)
+            / "reference-proxies"
+            / str(proxy_id)
+        )
+        _filesystem_path(proxy_root).mkdir(parents=True)
+        content_path = proxy_root / "proxy.png"
+        thumbnail_path = proxy_root / "thumbnail.png"
+        _filesystem_path(content_path).write_bytes(b"unused-proxy")
+        _filesystem_path(thumbnail_path).write_bytes(b"unused-proxy-thumbnail")
+        proxy = ReferenceProxyAsset(
+            id=proxy_id,
+            visual_beat_id=plan.visual_beats[0].id,
+            kind=ReferenceProxyKind.POSE_PROXY_IMAGE,
+            media_type=VideoReferenceMediaType.IMAGE,
+            status=ReferenceProxyStatus.READY,
+            source_image_candidate_id=uuid4(),
+            relative_path=service.workspace.relative(content_path),
+            thumbnail_relative_path=service.workspace.relative(thumbnail_path),
+            sha256="a" * 64,
+            engine="test_proxy",
+            engine_version="1",
+            identity_removed=True,
+            validation_status="passed",
+        )
+        binding = VideoReferenceBinding(
+            role=VideoReferenceRole.MOTION,
+            source_kind=VideoReferenceSourceKind.GENERATED_PROXY,
+            media_type=VideoReferenceMediaType.IMAGE,
+            visual_beat_id=proxy.visual_beat_id,
+            proxy_asset_id=proxy.id,
+            person_class=PersonContentClass.NON_PHOTOREAL_PROXY,
+            enabled=True,
+        )
+        await repository.save_shot_plan(
+            plan.model_copy(
+                update={
+                    "reference_proxy_assets": [proxy],
+                    "video_reference_bindings": [binding],
+                }
+            )
+        )
+
+        with pytest.raises(ProductionServiceError) as active_error:
+            await service.delete_reference_proxy(
+                plan.id,
+                proxy.id,
+                detail.project.current_revision_id,
+            )
+        assert active_error.value.code == "reference_proxy_in_use"
+        assert _filesystem_path(proxy_root).is_dir()
+
+        await repository.save_shot_plan(
+            plan.model_copy(
+                update={
+                    "reference_proxy_assets": [proxy],
+                    "video_reference_bindings": [
+                        binding.model_copy(update={"enabled": False})
+                    ],
+                }
+            )
+        )
+        deleted = await service.delete_reference_proxy(
+            plan.id,
+            proxy.id,
+            detail.project.current_revision_id,
+        )
+
+        refreshed = await service.get_shot(plan.id)
+        assert deleted.proxy_asset_id == proxy.id
+        assert deleted.media_type == "image"
+        assert deleted.local_content_removed is True
+        assert deleted.cleanup_warning is None
+        assert refreshed.plan.reference_proxy_assets == []
+        assert refreshed.plan.video_reference_bindings == []
+        assert not _filesystem_path(proxy_root).exists()
 
     asyncio.run(scenario())
 

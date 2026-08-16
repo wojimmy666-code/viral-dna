@@ -155,15 +155,45 @@ def test_seedance_can_use_video_motion_proxy_without_submitting_original_frames(
     )
 
 
-def test_minimax_and_bailian_keep_original_reference_frames() -> None:
+def test_minimax_uses_one_identity_frame_and_honest_fallback() -> None:
     frames = (_frame(1), _frame(2))
-    for alias in ("minimax_h3", "bailian_wan_2_7_r2v"):
-        plan = resolve_video_reference_plan(
-            capability=load_video_model_catalog().option(alias).capability,
-            shot=_shot(),
-            reference_frames=frames,
-            managed_asset_references=(),
-        )
-        assert plan.strategy == "raw_references"
-        assert plan.reference_frames == frames
-        assert plan.excluded_references == ()
+    plan = resolve_video_reference_plan(
+        capability=load_video_model_catalog().option("minimax_h3").capability,
+        shot=_shot(),
+        reference_frames=frames,
+        managed_asset_references=(),
+    )
+
+    assert plan.strategy == "identity_image_with_pose_text_fallback"
+    assert plan.reference_frames == (frames[0],)
+    assert plan.fallback_applied is True
+    assert plan.motion_semantics == "suggestive"
+    assert len(plan.excluded_references) == 1
+
+
+def test_bailian_wan_r2v_keeps_ordered_reference_frames() -> None:
+    frames = (_frame(1), _frame(2))
+    plan = resolve_video_reference_plan(
+        capability=load_video_model_catalog().option("bailian_wan_2_7_r2v").capability,
+        shot=_shot(),
+        reference_frames=frames,
+        managed_asset_references=(),
+    )
+
+    assert plan.strategy == "raw_references"
+    assert plan.reference_frames == frames
+    assert plan.excluded_references == ()
+
+
+def test_non_managed_route_never_submits_an_unrelated_provider_actor() -> None:
+    frame = _frame(1)
+    plan = resolve_video_reference_plan(
+        capability=load_video_model_catalog().option("minimax_h3").capability,
+        shot=_shot(),
+        reference_frames=(frame,),
+        managed_asset_references=(_managed(),),
+    )
+
+    assert plan.managed_asset_references == ()
+    assert plan.reference_frames == (frame,)
+    assert any("托管演员绑定未提交" in warning for warning in plan.warnings)

@@ -6,6 +6,10 @@ const strategySource = readFileSync(
   new URL("../src/video-references/VideoReferenceStrategyBar.jsx", import.meta.url),
   "utf8",
 );
+const strategyStyles = readFileSync(
+  new URL("../src/video-references/video-references.css", import.meta.url),
+  "utf8",
+);
 const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
   "utf8",
@@ -15,11 +19,32 @@ const workflowSource = readFileSync(
   "utf8",
 );
 
-test("separates managed-required and raw-reference model strategies", () => {
+test("renders model-specific identity and motion routes", () => {
   assert.match(strategySource, /policy !== "managed_required"/);
-  assert.match(strategySource, /人物参考 · 原始素材可用/);
-  assert.match(strategySource, /人物参考 · 托管演员 \+ 无身份动作/);
-  assert.match(strategySource, /原始人物关键帧不会提交给 Seedance/);
+  assert.match(strategySource, /人物与动作来源/);
+  assert.match(strategySource, /routeCapability\.show_motion_proxy_controls/);
+  assert.match(strategySource, /strategy\?\.motion_semantics === "structural_control"/);
+  assert.match(strategySource, /生成依据与中间过程/);
+  assert.match(strategySource, /已回退 · 动作还原较弱/);
+});
+
+test("keeps full-width route details from crushing the strategy summary", () => {
+  assert.match(
+    strategyStyles,
+    /\.video-reference-strategy\s*\{[^}]*flex-wrap:\s*wrap;/s,
+  );
+  assert.match(
+    strategyStyles,
+    /\.video-reference-strategy-copy\s*\{[^}]*flex:\s*1 1 320px;/s,
+  );
+  assert.match(
+    strategyStyles,
+    /\.video-reference-route-details\s*\{[^}]*flex:\s*1 0 100%;[^}]*width:\s*100%;/s,
+  );
+  assert.doesNotMatch(
+    strategyStyles,
+    /> div:not\(\.video-reference-strategy-actions\)/,
+  );
 });
 
 test("offers distinct image and source-video privacy proxies", () => {
@@ -89,4 +114,14 @@ test("keeps historical proxies selectable and only enables one proxy per media t
   assert.match(workflowSource, /async function enableReferenceProxy/);
   assert.match(workflowSource, /binding\.media_type === target\.media_type/);
   assert.match(workflowSource, /onEnableReferenceProxy=\{enableReferenceProxy\}/);
+});
+
+test("permanently deletes only unused image or video proxies", () => {
+  assert.match(strategySource, /onDeleteProxy/);
+  assert.match(strategySource, /!bound && \(/);
+  assert.match(strategySource, /<Trash size=\{17\}/);
+  assert.match(workflowSource, /async function deleteReferenceProxy/);
+  assert.match(workflowSource, /永久删除此\$\{label\}及其本地文件/);
+  assert.match(workflowSource, /method: "DELETE"/);
+  assert.match(workflowSource, /onDeleteReferenceProxy=\{deleteReferenceProxy\}/);
 });

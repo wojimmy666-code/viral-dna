@@ -38,6 +38,7 @@ from .models import (
     VideoStatus,
 )
 from .pipeline import SimulatedAnalysisPipeline
+from .prompt_engine.compiler import compile_prompt_draft, draft_from_shot
 from .records import (
     DEFAULT_LINK_RECORD_NAMES,
     normalize_record_name,
@@ -381,6 +382,19 @@ def build_media_evidence_report(
         )
 
     model_count = len(visual_facts)
+    prompt_shots: list[PromptShot] = []
+    for shot in shots:
+        draft = draft_from_shot(shot)
+        prompt_shots.append(
+            PromptShot(
+                shot_id=shot.id,
+                duration_seconds=round(shot.end_seconds - shot.start_seconds, 3),
+                prompt=compile_prompt_draft(draft, video.target_model),
+                negative_constraints=[],
+                draft=draft,
+                source_draft=draft.model_copy(deep=True),
+            )
+        )
     prompt_package = PromptPackage(
         target_model=video.target_model,
         aspect_ratio=evidence.metadata.aspect_ratio,
@@ -391,15 +405,7 @@ def build_media_evidence_report(
         ),
         continuity_locks=[],
         entities={},
-        shots=[
-            PromptShot(
-                shot_id=shot.id,
-                duration_seconds=round(shot.end_seconds - shot.start_seconds, 3),
-                prompt=shot.prompt,
-                negative_constraints=[],
-            )
-            for shot in shots
-        ],
+        shots=prompt_shots,
         negative_constraints=[],
     )
     metadata = evidence.metadata

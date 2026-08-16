@@ -7,6 +7,7 @@ import {
   ImageSquare,
   PersonSimpleRun,
   ShieldCheck,
+  Trash,
   VideoCamera,
   WarningCircle,
   X,
@@ -78,6 +79,7 @@ export function VideoReferenceStrategyBar({
   onCreateImageProxy,
   onCreateVideoProxy,
   onDisableProxy,
+  onDeleteProxy,
   onEnableProxy,
   onInstallProxyEngine,
   onOpenManagedAssets,
@@ -89,10 +91,14 @@ export function VideoReferenceStrategyBar({
   proxyEngineLoadError = "",
   referenceFrames,
   resolveUrl,
+  strategy,
+  strategyError = "",
 }) {
   const [lightboxProxyId, setLightboxProxyId] = useState(null);
   const capability = policyOf(model);
   const policy = capability.policy || "unknown";
+  const routeCapability = model?.capabilities?.reference_route || {};
+  const routeWantsProxy = Boolean(routeCapability.show_motion_proxy_controls);
   const boundProxyIds = new Set(
     (plan?.video_reference_bindings || [])
       .filter((item) => item.enabled && item.source_kind === "generated_proxy")
@@ -128,6 +134,9 @@ export function VideoReferenceStrategyBar({
   const installationProgress = Number(proxyEngineInstallJob?.progress_percent || 0);
   const imageProxyCount = allProxies.filter((item) => item.media_type === "image").length;
   const videoProxyCount = allProxies.filter((item) => item.media_type === "video").length;
+  const identityReady = policy === "managed_required"
+    ? Boolean(managedAssetBinding)
+    : Boolean(firstImageSource?.candidate);
   const lightboxItems = allProxies
     .filter((item) => item.media_type === "image")
     .map((item, index) => ({
@@ -138,15 +147,40 @@ export function VideoReferenceStrategyBar({
       alt: "去除人物身份后的图片白模",
     }));
 
-  if (policy !== "managed_required") {
+  if (policy !== "managed_required" && !routeWantsProxy) {
     return (
       <section className="video-reference-strategy raw" aria-label="人物参考策略">
         <span className="video-reference-strategy-icon"><ShieldCheck size={20} /></span>
-        <div>
-          <strong>人物参考 · 原始素材可用</strong>
-          <small>{model?.label || "当前模型"} 会直接使用已确认的图片素材；不会强制转换为白模。</small>
+        <div className="video-reference-strategy-copy">
+          <strong>人物与动作来源 · {strategy?.route_label || routeCapability.label || "原始素材"}</strong>
+          <small>
+            {strategy?.description
+              || `${model?.label || "当前模型"} 会直接使用已确认的目标人物画面；视频白模不会提交。`}
+          </small>
+          {strategy?.fallback_applied && (
+            <span className="video-reference-route-badge fallback">已安全回退</span>
+          )}
         </div>
-        <span className="video-reference-strategy-state ready">直接提交</span>
+        <span className={`video-reference-strategy-state${strategy?.generation_allowed === false ? " blocked" : " ready"}`}>
+          {strategy?.generation_allowed === false ? "未就绪" : "可生成"}
+        </span>
+        {(strategy?.plan_steps?.length > 0 || strategyError) && (
+          <details className="video-reference-route-details">
+            <summary>查看生成输入计划</summary>
+            {strategyError ? (
+              <p className="video-reference-route-error">{strategyError}</p>
+            ) : (
+              <ul>
+                {strategy.plan_steps.map((step) => (
+                  <li data-status={step.status} key={`${step.kind}-${step.source}`}>
+                    <strong>{step.label}</strong>
+                    <span>{step.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
+        )}
       </section>
     );
   }
@@ -155,12 +189,31 @@ export function VideoReferenceStrategyBar({
     <section className="video-reference-strategy managed" aria-label="人物参考策略">
       <span className="video-reference-strategy-icon"><PersonSimpleRun size={20} /></span>
       <div className="video-reference-strategy-copy">
-        <strong>人物参考 · 托管演员 + 无身份动作</strong>
+        <strong>人物与动作来源 · {strategy?.route_label || routeCapability.label || "托管演员 + 无身份动作"}</strong>
         <small>
-          {managedAssetBinding
-            ? `${managedAssetBinding.name} 是唯一身份来源；${referenceFrames.length} 张原始人物关键帧不会提交给 Seedance。`
-            : "Seedance 不接收原始真人身份素材；生成前必须绑定 Provider 托管演员。"}
+          {strategy?.description || (
+            policy === "managed_required"
+              ? managedAssetBinding
+                ? `${managedAssetBinding.name} 是唯一身份来源；${referenceFrames.length} 张原始人物关键帧不会提交给 Seedance。`
+                : "Seedance 不接收原始真人身份素材；生成前必须绑定 Provider 托管演员。"
+              : "目标人物参考图提供身份；白模只提供动作、姿态、位置和镜头运动。"
+          )}
         </small>
+        <div className="video-reference-route-badges">
+          <span className="video-reference-route-badge">
+            {strategy?.motion_semantics === "structural_control"
+              ? "结构控制"
+              : strategy?.motion_semantics === "guided_reference"
+                ? "动作参考"
+                : "提示词引导"}
+          </span>
+          {strategy?.fallback_applied && (
+            <span className="video-reference-route-badge fallback">已回退 · 动作还原较弱</span>
+          )}
+          {routeCapability.support_level === "experimental" && (
+            <span className="video-reference-route-badge experimental">实验能力</span>
+          )}
+        </div>
         {(imageProxy || videoProxy) && (
           <div className="video-reference-proxy-chips">
             {imageProxy && (
@@ -195,10 +248,12 @@ export function VideoReferenceStrategyBar({
         )}
       </div>
       <div className="video-reference-strategy-actions">
-        <button className="secondary-button compact" disabled={busy} onClick={onOpenManagedAssets} type="button">
-          <IdentificationCard size={16} />{managedAssetBinding ? "更换演员" : "绑定演员"}
-        </button>
-        {managedAssetBinding
+        {policy === "managed_required" && (
+          <button className="secondary-button compact" disabled={busy} onClick={onOpenManagedAssets} type="button">
+            <IdentificationCard size={16} />{managedAssetBinding ? "更换演员" : "绑定演员"}
+          </button>
+        )}
+        {identityReady
           && capability.supports_pose_proxy_image
           && firstImageSource
           && !imageProxy
@@ -215,7 +270,7 @@ export function VideoReferenceStrategyBar({
             <ImageSquare size={16} />生成图片白模
           </button>
         )}
-        {managedAssetBinding
+        {identityReady
           && capability.supports_motion_proxy_video
           && !videoProxy
           && videoProxyEngineReady && (
@@ -231,7 +286,7 @@ export function VideoReferenceStrategyBar({
           </button>
         )}
       </div>
-      {managedAssetBinding
+      {identityReady
         && capability.supports_pose_proxy_image
         && !imageProxyEngineReady
         && !videoProxyEngineReady && (
@@ -286,13 +341,33 @@ export function VideoReferenceStrategyBar({
           </small>
         </div>
       )}
-      {!managedAssetBinding && (
+      {strategy?.generation_allowed === false && (
         <span className="video-reference-strategy-state blocked">
-          <WarningCircle size={14} weight="fill" />未就绪
+          <WarningCircle size={14} weight="fill" />{strategy.blocker_message || "未就绪"}
         </span>
       )}
+      {(strategy?.plan_steps?.length > 0 || strategyError) && (
+        <details className="video-reference-route-details">
+          <summary>生成依据与中间过程</summary>
+          {strategyError ? (
+            <p className="video-reference-route-error">{strategyError}</p>
+          ) : (
+            <ul>
+              {strategy.plan_steps.map((step) => (
+                <li data-status={step.status} key={`${step.kind}-${step.source}`}>
+                  <strong>{step.label}</strong>
+                  <span>{step.detail}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(strategy?.warnings || []).map((warning) => (
+            <p className="video-reference-route-warning" key={warning}>{warning}</p>
+          ))}
+        </details>
+      )}
       {allProxies.length > 0 && (
-        <details className="video-reference-proxy-preview" open>
+        <details className="video-reference-proxy-preview">
           <summary>
             <span>
               <strong>白模预览</strong>
@@ -399,6 +474,23 @@ export function VideoReferenceStrategyBar({
                           ? (usable ? "停用" : "解除旧绑定")
                           : (usable ? "启用" : "不可启用")}
                       </button>
+                      {!bound && (
+                        <button
+                          aria-label={`删除${image ? "图片" : "视频"}白模`}
+                          className="danger"
+                          disabled={busy}
+                          onClick={async () => {
+                            const deleted = await onDeleteProxy?.(proxy.id);
+                            if (deleted && lightboxProxyId === proxy.id) {
+                              setLightboxProxyId(null);
+                            }
+                          }}
+                          title="永久删除白模及其本地文件"
+                          type="button"
+                        >
+                          <Trash size={17} />
+                        </button>
+                      )}
                     </div>
                   </footer>
                 </article>

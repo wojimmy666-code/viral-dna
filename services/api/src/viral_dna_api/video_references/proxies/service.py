@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,6 +42,12 @@ class ProxyEngineInstallation:
     message: str = "等待开始安装"
     error_code: str | None = None
     capability: ProxyEngineCapability | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProxyContentDeletion:
+    original_root: Path
+    staged_root: Path | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -319,6 +326,95 @@ class ReferenceProxyService:
         suffix = ".png" if is_image else ".mp4"
         media_type = "image/png" if is_image else "video/mp4"
         return physical_path, media_type, f"reference-proxy-{asset.id}{suffix}"
+
+    def _proxy_content_root(self, asset: ReferenceProxyAsset) -> Path:
+        if not asset.relative_path:
+            raise ReferenceProxyServiceError(
+                409,
+                "reference_proxy_path_invalid",
+                "白模文件路径无效",
+            )
+        relative_root = Path(asset.relative_path).parent
+        if (
+            relative_root.name != str(asset.id)
+            or relative_root.parent.name != "reference-proxies"
+        ):
+            raise ReferenceProxyServiceError(
+                409,
+                "reference_proxy_path_invalid",
+                "白模文件目录不符合安全删除规则",
+            )
+        try:
+            return _filesystem_path(self.workspace.resolve(relative_root.as_posix()))
+        except (OSError, ValueError, WorkspaceError) as exc:
+            raise ReferenceProxyServiceError(
+                409,
+                "reference_proxy_path_invalid",
+                "白模文件路径无效",
+            ) from exc
+
+    async def stage_content_deletion(
+        self,
+        asset: ReferenceProxyAsset,
+    ) -> ProxyContentDeletion:
+        """Atomically hide a proxy directory before its metadata is removed."""
+
+        original_root = self._proxy_content_root(asset)
+        if not await asyncio.to_thread(original_root.exists):
+            return ProxyContentDeletion(original_root=original_root)
+        if not await asyncio.to_thread(original_root.is_dir):
+            raise ReferenceProxyServiceError(
+                409,
+                "reference_proxy_path_invalid",
+                "白模文件目录无效，无法安全删除",
+            )
+        staged_root = original_root.with_name(
+            f".deleting-{asset.id}-{uuid4().hex}"
+        )
+        try:
+            await asyncio.to_thread(os.replace, original_root, staged_root)
+        except OSError as exc:
+            raise ReferenceProxyServiceError(
+                500,
+                "reference_proxy_delete_failed",
+                f"无法准备删除白模文件：{exc}",
+            ) from exc
+        return ProxyContentDeletion(
+            original_root=original_root,
+            staged_root=staged_root,
+        )
+
+    async def restore_staged_content(
+        self,
+        deletion: ProxyContentDeletion,
+    ) -> None:
+        if deletion.staged_root is None:
+            return
+        try:
+            if await asyncio.to_thread(deletion.staged_root.exists):
+                await asyncio.to_thread(
+                    os.replace,
+                    deletion.staged_root,
+                    deletion.original_root,
+                )
+        except OSError as exc:
+            raise ReferenceProxyServiceError(
+                500,
+                "reference_proxy_delete_restore_failed",
+                f"删除事务失败后无法恢复白模文件：{exc}",
+            ) from exc
+
+    async def finalize_staged_content(
+        self,
+        deletion: ProxyContentDeletion,
+    ) -> bool:
+        if deletion.staged_root is None:
+            return True
+        try:
+            await asyncio.to_thread(shutil.rmtree, deletion.staged_root)
+        except OSError:
+            return False
+        return True
 
     async def generate(
         self,

@@ -376,20 +376,20 @@ test("submits approved visual beats as an explicit ordered storyboard", () => {
   assert.doesNotMatch(workflowStyles, /height:\s*min\(58vh, 360px\)/);
 });
 
-test("offers only models that declare ordered multi-image capability", () => {
-  assert.match(workspaceSource, /capability\?\.multi_image_reference/);
-  assert.match(workspaceSource, /capability\?\.ordered_reference_images/);
-  assert.match(workspaceSource, /videoModels\.filter\(supportsOrderedMultiImage\)/);
+test("offers only models that declare an enabled reference route", () => {
+  assert.match(workspaceSource, /capability\?\.image_to_video/);
+  assert.match(workspaceSource, /capability\?\.reference_route\?\.enabled !== false/);
+  assert.match(workspaceSource, /videoModels\.filter\(supportsReferenceRoute\)/);
   assert.match(modelPopoverSource, /configuredModels\.map/);
   assert.match(modelPopoverSource, /unconfiguredModels\.map/);
   assert.doesNotMatch(workspaceSource, /\{videoModels\.map\(/);
   assert.match(workspaceSource, /preferredVideoResolution\(model, current\.resolution\)/);
 });
 
-test("uses the same ordered multi-image gate in model settings", () => {
+test("uses the same reference-route gate in model settings", () => {
   assert.match(appSource, /function supportsProductionVideoWorkflow/);
-  assert.match(appSource, /model\.capabilities\?\.multi_image_reference/);
-  assert.match(appSource, /model\.capabilities\?\.ordered_reference_images/);
+  assert.match(appSource, /model\.capabilities\?\.image_to_video/);
+  assert.match(appSource, /model\.capabilities\?\.reference_route\?\.enabled !== false/);
   assert.match(appSource, /videoModelOptions\.filter\(/);
   assert.match(appSource, /selectableVideoModelOptions\.map/);
 });

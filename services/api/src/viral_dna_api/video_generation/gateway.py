@@ -28,6 +28,7 @@ from ..models import (
     VideoGenerationCapability,
     VideoGenerationInputMode,
 )
+from ..reference_routes import IdentityReferenceTransport
 from ..video_references.domain import (
     VideoReferenceMediaType,
     VideoReferenceSourceKind,
@@ -459,14 +460,12 @@ class VideoGenerationGateway:
                     str(exc),
                     retryable=exc.retryable,
                 ) from exc
-            if not (
-                resolved.identity.capability.multi_image_reference
-                and resolved.identity.capability.ordered_reference_images
-            ):
+            if not resolved.identity.capability.reference_route.enabled:
                 raise VideoGenerationGatewayError(
                     409,
-                    "video_ordered_multi_image_required",
-                    "当前流程只允许支持有序多图参考的视频模型",
+                    "video_reference_route_disabled",
+                    resolved.identity.capability.reference_route.availability_note
+                    or "当前模型的参考素材路由尚未开放",
                 )
             return resolved.identity, resolved
         adapter = self.adapters.get(mode)
@@ -476,14 +475,12 @@ class VideoGenerationGateway:
                 "video_adapter_not_configured",
                 "当前视频生成执行器尚未配置",
             )
-        if not (
-            adapter.identity.capability.multi_image_reference
-            and adapter.identity.capability.ordered_reference_images
-        ):
+        if not adapter.identity.capability.reference_route.enabled:
             raise VideoGenerationGatewayError(
                 409,
-                "video_ordered_multi_image_required",
-                "当前流程只允许支持有序多图参考的视频模型",
+                "video_reference_route_disabled",
+                adapter.identity.capability.reference_route.availability_note
+                or "当前模型的参考素材路由尚未开放",
             )
         return adapter.identity, None
 
@@ -526,15 +523,12 @@ class VideoGenerationGateway:
         )
         adapter = self.adapters.get(mode)
         capability = identity.capability
-        if not (
-            capability.image_to_video
-            and capability.multi_image_reference
-            and capability.ordered_reference_images
-        ):
+        if not (capability.image_to_video and capability.reference_route.enabled):
             raise VideoGenerationGatewayError(
                 409,
-                "video_ordered_multi_image_required",
-                "当前流程只允许支持有序多图参考的视频模型",
+                "video_reference_route_disabled",
+                capability.reference_route.availability_note
+                or "当前模型的参考素材路由尚未开放",
             )
         source_ordered_frames = tuple(sorted(reference_frames, key=lambda item: item.ordinal))
         if [item.ordinal for item in source_ordered_frames] != list(
@@ -545,7 +539,7 @@ class VideoGenerationGateway:
                 "video_reference_order_invalid",
                 "参考图序号必须连续",
             )
-        managed_references = tuple(
+        all_managed_references = tuple(
             ProviderManagedAssetReference(
                 binding_id=binding.id,
                 provider=binding.provider,
@@ -559,6 +553,12 @@ class VideoGenerationGateway:
                 uri=f"asset://{binding.asset_id}",
             )
             for binding in shot.managed_asset_bindings
+        )
+        managed_references = (
+            all_managed_references
+            if capability.reference_route.identity_transport
+            == IdentityReferenceTransport.PROVIDER_MANAGED_ASSET
+            else ()
         )
         managed_capability = capability.managed_assets
         if managed_references and not managed_capability.supported:

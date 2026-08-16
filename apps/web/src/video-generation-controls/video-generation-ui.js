@@ -29,6 +29,7 @@ export function videoModelCapabilitySummary(model, providers = []) {
     : "分辨率待确认";
   return [
     videoProviderLabel(model, providers),
+    model?.capabilities?.reference_route?.label || "参考路由待确认",
     videoDurationConstraintLabel(model),
     resolutionLabel,
   ].join(" · ");

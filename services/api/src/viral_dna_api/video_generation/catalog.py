@@ -11,13 +11,21 @@ from ..models import (
     VideoGenerationCapability,
     VideoGenerationModelOption,
 )
+from ..reference_routes.domain import (
+    IdentityReferenceTransport,
+    MotionReferenceSemantics,
+    MotionReferenceTransport,
+    RouteSupportLevel,
+    VideoReferenceRouteCapability,
+    VideoReferenceRouteId,
+)
 from ..video_references.domain import (
     PersonReferenceCapability,
     PersonReferencePolicy,
     VideoReferenceRole,
 )
 
-CATALOG_VERSION = "video-model-catalog-2026-08-14.1"
+CATALOG_VERSION = "video-model-catalog-2026-08-16.1"
 PRICING_VERSION = "video-pricing-cn-2026-08-10"
 
 
@@ -100,6 +108,7 @@ def _capability(
     managed_assets: bool = False,
     person_policy: PersonReferencePolicy = PersonReferencePolicy.RAW_SUPPORTED,
     supports_motion_proxy_video: bool = False,
+    reference_route: VideoReferenceRouteCapability | None = None,
 ) -> VideoGenerationCapability:
     return VideoGenerationCapability(
         image_to_video=True,
@@ -172,7 +181,78 @@ def _capability(
                 VideoReferenceRole.TRANSITION,
             ],
         ),
+        reference_route=(reference_route or VideoReferenceRouteCapability()),
     )
+
+
+ORDERED_IMAGE_ROUTE = VideoReferenceRouteCapability(
+    route_id=VideoReferenceRouteId.ORDERED_MULTI_IMAGE,
+    label="原始画面多图参考",
+    identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
+    accepts_raw_person_images=True,
+)
+
+SEEDANCE_MANAGED_ROUTE = VideoReferenceRouteCapability(
+    route_id=VideoReferenceRouteId.SEEDANCE_MANAGED_ACTOR_MOTION_PROXY,
+    label="托管演员 + 无身份动作视频",
+    identity_transport=IdentityReferenceTransport.PROVIDER_MANAGED_ASSET,
+    motion_transport=MotionReferenceTransport.REFERENCE_VIDEO,
+    motion_semantics=MotionReferenceSemantics.GUIDED_REFERENCE,
+    identity_required=True,
+    accepts_raw_person_images=False,
+    supports_pose_proxy_image=True,
+    supports_motion_proxy_video=True,
+    show_motion_proxy_controls=True,
+    fallback_route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
+    fallback_label="图片白模 + 文本动作描述",
+)
+
+MINIMAX_H3_ROUTE = VideoReferenceRouteCapability(
+    route_id=VideoReferenceRouteId.MINIMAX_IDENTITY_IMAGE_MOTION_PROXY,
+    label="人物参考图 + 动作视频",
+    support_level=RouteSupportLevel.VERIFIED,
+    identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
+    motion_transport=MotionReferenceTransport.REFERENCE_VIDEO,
+    motion_semantics=MotionReferenceSemantics.GUIDED_REFERENCE,
+    identity_required=True,
+    accepts_raw_person_images=True,
+    provider_verified=True,
+    supports_pose_proxy_image=True,
+    supports_motion_proxy_video=True,
+    show_motion_proxy_controls=True,
+    fallback_route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
+    fallback_label="人物参考图 + 图片白模 + 文本动作描述",
+    availability_note="MiniMax H3 全能参考入口支持图片与参考视频组合输入",
+)
+
+POSE_IMAGE_TEXT_ROUTE = VideoReferenceRouteCapability(
+    route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
+    label="人物参考图 + 文本动作描述",
+    identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
+    motion_transport=MotionReferenceTransport.POSE_IMAGE_TEXT,
+    motion_semantics=MotionReferenceSemantics.SUGGESTIVE,
+    identity_required=True,
+    accepts_raw_person_images=True,
+    supports_pose_proxy_image=True,
+    show_motion_proxy_controls=False,
+)
+
+WAN_VACE_ROUTE = VideoReferenceRouteCapability(
+    route_id=VideoReferenceRouteId.WAN_VACE_POSEBODY_REPAINT,
+    label="人物参考图 + PoseBody 控制视频",
+    enabled=False,
+    support_level=RouteSupportLevel.RESERVED,
+    identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
+    motion_transport=MotionReferenceTransport.CONTROL_VIDEO,
+    motion_semantics=MotionReferenceSemantics.STRUCTURAL_CONTROL,
+    identity_required=True,
+    accepts_raw_person_images=True,
+    supports_pose_proxy_image=True,
+    supports_motion_proxy_video=True,
+    show_motion_proxy_controls=True,
+    requires_public_media_url=True,
+    availability_note="已完成 VACE 请求结构预留；启用前需配置 Provider 可访问的公网媒体暂存服务",
+)
 
 
 _MODELS = (
@@ -191,6 +271,7 @@ _MODELS = (
             prompt_characters=5000,
             ordered_multi_image=True,
             maximum_reference_images=5,
+            reference_route=ORDERED_IMAGE_ROUTE,
         ),
         pricing={
             "kind": "per_second_by_resolution",
@@ -200,6 +281,31 @@ _MODELS = (
             "source_url": "https://help.aliyun.com/zh/model-studio/wan2-7-r2v",
         },
         recommended=True,
+    ),
+    VideoModelSpec(
+        alias="bailian_wan_vace_posebody",
+        provider="bailian",
+        model="wanx2.1-vace-plus",
+        label="阿里 Wan VACE · PoseBody",
+        description="以目标人物参考图替换身份，以无身份动作视频作为 PoseBody 结构控制。",
+        capability=_capability(
+            minimum=1,
+            maximum=5,
+            durations=[1, 2, 3, 4, 5],
+            resolutions=["720P"],
+            default_duration=5,
+            maximum_reference_images=2,
+            supports_motion_proxy_video=True,
+            reference_route=WAN_VACE_ROUTE,
+        ),
+        pricing={
+            "kind": "unknown",
+            "currency": "CNY",
+            "source": "阿里云百炼 VACE 实际用量",
+            "source_url": "https://help.aliyun.com/zh/model-studio/legacy-wanx-vace-api-reference",
+        },
+        available=False,
+        availability_note=WAN_VACE_ROUTE.availability_note,
     ),
     VideoModelSpec(
         alias="seedance_2_0",
@@ -218,6 +324,7 @@ _MODELS = (
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             supports_motion_proxy_video=True,
+            reference_route=SEEDANCE_MANAGED_ROUTE,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -242,6 +349,7 @@ _MODELS = (
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             supports_motion_proxy_video=True,
+            reference_route=SEEDANCE_MANAGED_ROUTE,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -266,6 +374,7 @@ _MODELS = (
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             supports_motion_proxy_video=True,
+            reference_route=SEEDANCE_MANAGED_ROUTE,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -309,6 +418,8 @@ _MODELS = (
             seed=False,
             ordered_multi_image=True,
             maximum_reference_images=9,
+            supports_motion_proxy_video=True,
+            reference_route=MINIMAX_H3_ROUTE,
         ),
         pricing={
             "kind": "per_second_by_resolution",
@@ -330,6 +441,7 @@ _MODELS = (
             durations=[6, 10],
             resolutions=["768P", "1080P"],
             seed=False,
+            reference_route=POSE_IMAGE_TEXT_ROUTE,
         ),
         pricing={
             "kind": "fixed_matrix",
@@ -341,8 +453,8 @@ _MODELS = (
             },
             "source": "MiniMax 开放平台历史模型刊例价",
         },
-        available=False,
-        availability_note="当前公开 API 不支持任意有序多图分镜参考，已按流程要求禁用",
+        available=True,
+        availability_note=None,
     ),
     VideoModelSpec(
         alias="minimax_hailuo_2_3_fast",
@@ -356,6 +468,7 @@ _MODELS = (
             durations=[6, 10],
             resolutions=["768P", "1080P"],
             seed=False,
+            reference_route=POSE_IMAGE_TEXT_ROUTE,
         ),
         pricing={
             "kind": "fixed_matrix",
@@ -367,8 +480,8 @@ _MODELS = (
             },
             "source": "MiniMax 开放平台历史模型刊例价",
         },
-        available=False,
-        availability_note="当前公开 API 不支持任意有序多图分镜参考，已按流程要求禁用",
+        available=True,
+        availability_note=None,
     ),
 )
 
@@ -386,10 +499,11 @@ class VideoModelCatalog:
             raise VideoModelCatalogError(f"未知的视频模型别名：{alias}") from exc
         if require_available and (not item.available or not item.model):
             raise VideoModelCatalogError(item.availability_note or "该视频模型暂不可调用")
-        if require_available and not (
-            item.capability.multi_image_reference and item.capability.ordered_reference_images
-        ):
-            raise VideoModelCatalogError("该模型不支持有序多图参考，不能用于当前流程")
+        if require_available and not item.capability.reference_route.enabled:
+            raise VideoModelCatalogError(
+                item.capability.reference_route.availability_note
+                or "该模型的参考素材路由尚未开放"
+            )
         return item
 
     def options(self) -> list[VideoGenerationModelOption]:

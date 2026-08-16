@@ -74,6 +74,22 @@ class ReferenceProxyCreateResponse(BaseModel):
     proxy: ReferenceProxyAsset
 
 
+class ReferenceProxyDeleteResponse(BaseModel):
+    current_revision_id: UUID
+    proxy_asset_id: UUID
+    media_type: Literal["image", "video"]
+    local_content_removed: bool = True
+    cleanup_warning: str | None = None
+
+
+class VideoReferencePlanStep(BaseModel):
+    kind: Literal["identity", "motion", "visual", "privacy", "transport"]
+    label: str = Field(min_length=1, max_length=160)
+    source: str = Field(min_length=1, max_length=120)
+    status: Literal["ready", "fallback", "optional", "blocked", "excluded"]
+    detail: str = Field(default="", max_length=500)
+
+
 class VideoReferenceStrategyResponse(BaseModel):
     model_alias: str
     model_label: str
@@ -96,3 +112,17 @@ class VideoReferenceStrategyResponse(BaseModel):
     excluded_local_reference_count: int = Field(default=0, ge=0)
     generation_allowed: bool
     blocker_message: str | None = None
+    route_id: str
+    route_label: str
+    effective_route_id: str
+    support_level: Literal["verified", "experimental", "reserved"]
+    identity_transport: str
+    motion_transport: str
+    motion_semantics: str
+    identity_source: str
+    motion_source: str
+    fallback_applied: bool = False
+    requires_public_media_url: bool = False
+    provider_verified: bool = True
+    warnings: list[str] = Field(default_factory=list)
+    plan_steps: list[VideoReferencePlanStep] = Field(default_factory=list)

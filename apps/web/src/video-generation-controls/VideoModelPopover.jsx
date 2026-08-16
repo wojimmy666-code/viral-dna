@@ -125,7 +125,7 @@ export function VideoModelPopover({
       <div className="video-popover-heading">
         <div>
           <h4 id={titleId}>视频生成模型</h4>
-          <p>仅显示支持有序多图参考的模型</p>
+          <p>按模型能力自动选择人物身份、动作和画面参考路由</p>
         </div>
         <span className="video-popover-count">{models.length} 个</span>
       </div>
@@ -172,7 +172,7 @@ export function VideoModelPopover({
         {models.length === 0 && (
           <div className="video-model-empty">
             <WarningCircle size={22} />
-            <span>暂无支持有序多图参考的视频模型。</span>
+            <span>暂无具备可用参考素材路由的视频模型。</span>
           </div>
         )}
       </div>

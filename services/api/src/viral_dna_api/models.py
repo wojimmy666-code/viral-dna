@@ -9,6 +9,8 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
 
+from .prompt_engine.contracts import PromptShotDraft
+from .reference_routes.domain import VideoReferenceRouteCapability
 from .schema import WORKSPACE_SCHEMA_VERSION
 from .video_references.domain import (
     PersonReferenceCapability,
@@ -456,6 +458,9 @@ class VideoGenerationCapability(BaseModel):
     )
     person_references: PersonReferenceCapability = Field(
         default_factory=PersonReferenceCapability
+    )
+    reference_route: VideoReferenceRouteCapability = Field(
+        default_factory=VideoReferenceRouteCapability
     )
 
     @model_validator(mode="after")
@@ -1178,6 +1183,9 @@ class PromptShot(BaseModel):
     duration_seconds: float
     prompt: str
     negative_constraints: list[str]
+    draft: PromptShotDraft | None = None
+    source_draft: PromptShotDraft | None = None
+    language_issues: list[str] = Field(default_factory=list, max_length=40)
 
 
 class PromptPackage(BaseModel):
@@ -1190,6 +1198,10 @@ class PromptPackage(BaseModel):
     entities: dict[str, str]
     shots: list[PromptShot]
     negative_constraints: list[str]
+    compiler_version: str = "prompt-ir-v2"
+    revision_id: UUID | None = None
+    revision_number: int = Field(default=0, ge=0)
+    updated_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

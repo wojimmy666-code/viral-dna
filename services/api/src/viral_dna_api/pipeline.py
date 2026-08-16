@@ -23,6 +23,7 @@ from .models import (
     VideoStatus,
     ViralFinding,
 )
+from .prompt_engine.compiler import compile_prompt_draft, draft_from_shot
 from .store import InMemoryStore
 
 
@@ -296,6 +297,20 @@ def build_simulated_report(video: Video, analysis: AnalysisJob) -> AnalysisRepor
         ),
     ]
 
+    prompt_shots: list[PromptShot] = []
+    for shot in shots:
+        shot_constraints = ["不要改变主体身份", "不要增加无关人物", "不要生成乱码字幕"]
+        draft = draft_from_shot(shot, negative_constraints=shot_constraints)
+        prompt_shots.append(
+            PromptShot(
+                shot_id=shot.id,
+                duration_seconds=round(shot.end_seconds - shot.start_seconds, 2),
+                prompt=compile_prompt_draft(draft, video.target_model),
+                negative_constraints=shot_constraints,
+                draft=draft,
+                source_draft=draft.model_copy(deep=True),
+            )
+        )
     prompt_package = PromptPackage(
         target_model=video.target_model,
         global_prompt=(
@@ -315,15 +330,7 @@ def build_simulated_report(video: Video, analysis: AnalysisJob) -> AnalysisRepor
             scene.id: scene.description,
             product.id: product.description,
         },
-        shots=[
-            PromptShot(
-                shot_id=shot.id,
-                duration_seconds=round(shot.end_seconds - shot.start_seconds, 2),
-                prompt=shot.prompt,
-                negative_constraints=["不要改变主体身份", "不要增加无关人物", "不要生成乱码字幕"],
-            )
-            for shot in shots
-        ],
+        shots=prompt_shots,
         negative_constraints=[
             "避免人物面部跨镜头漂移",
             "避免手指畸形和餐具穿模",

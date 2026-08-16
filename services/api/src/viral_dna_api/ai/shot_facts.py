@@ -14,6 +14,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from ..chinese import simplify_model
 from ..media import artifact_url, get_analysis_artifact_root
 from ..models import (
     AnalysisCostSummary,
@@ -33,6 +34,12 @@ from ..models import (
     ShotVisualFacts,
     Video,
 )
+from ..prompt_engine.compiler import compile_prompt_draft, draft_from_visual_facts
+from ..prompt_engine.language_policy import (
+    LANGUAGE_POLICY_MESSAGE,
+    find_shot_facts_language_issues,
+    summarize_language_issues,
+)
 from .billing import (
     PriceCatalog,
     PriceCatalogError,
@@ -45,7 +52,7 @@ from .contracts import ModelProviderError, ModelProviderUnavailable, ModelReques
 from .router import ModelRouter
 
 ProgressCallback = Callable[[int, int, str], Awaitable[None]]
-SHOT_FACTS_PROMPT_PATH = Path(__file__).with_name("prompts") / "shot_facts_v2.md"
+SHOT_FACTS_PROMPT_PATH = Path(__file__).with_name("prompts") / "shot_facts_v3.md"
 DEFAULT_OUTPUT_TOKEN_ESTIMATE = 3600
 MIN_NATIVE_VIDEO_SECONDS = 2.0
 MAX_INLINE_VIDEO_BYTES = 7_000_000
@@ -466,32 +473,22 @@ def _normalize_motion_facts(
             }
         )
 
-    prompt = facts.replication_prompt.split("。时序运镜：", 1)[0]
-    if facts.continuous_take:
-        prompt = prompt.replace("随后画面切换为", "随后镜头连续推进至")
-        prompt = prompt.replace("硬切", "连续过渡")
-    phase_prompt = "；".join(
-        f"{phase.start_seconds:g}-{phase.end_seconds:g}秒：{phase.description.rstrip('。；')}"
-        for phase in phases
-    )
-    transition_prompt = transition.generation_prompt or transition.description
-    compiled = f"{prompt.rstrip('。；')}。时序运镜：{phase_prompt}。"
-    if transition.kind != "none" and transition_prompt:
-        compiled += f"出场转场：{transition_prompt.rstrip('。；')}。"
-    compiled = compiled[:4000]
     transition_summary = transition.description if transition.kind != "none" else facts.transition
-    return facts.model_copy(
+    normalized = facts.model_copy(
         update={
             "motion_phases": phases,
             "outgoing_transition": transition,
-            "replication_prompt": compiled,
             "transition": transition_summary,
         }
     )
+    draft = draft_from_visual_facts(normalized)
+    compiled = compile_prompt_draft(draft, "seedance")[:4000]
+    return normalized.model_copy(update={"replication_prompt": compiled})
 
 
 def _normalize_shot_facts(shot: ShotEvidence, facts: ShotVisualFacts) -> ShotVisualFacts:
-    return _normalize_motion_facts(shot, _normalize_visual_beats(shot, facts))
+    simplified = simplify_model(facts)
+    return _normalize_motion_facts(shot, _normalize_visual_beats(shot, simplified))
 
 
 class ShotFactsService:
@@ -574,6 +571,7 @@ class ShotFactsService:
             shot_result: ShotVisualFacts | None = None
             previous_run_id: UUID | None = None
             attempt_number = 0
+            language_retry_required = False
             for target in targets:
                 fingerprint = await _request_fingerprint(
                     video=video,
@@ -589,13 +587,16 @@ class ShotFactsService:
                 cached = await self.repository.find_completed_model_run(fingerprint)
                 if cached and cached.result_payload:
                     try:
-                        shot_result = _normalize_shot_facts(
-                            shot,
-                            ShotVisualFacts.model_validate(cached.result_payload),
+                        cached_facts = simplify_model(
+                            ShotVisualFacts.model_validate(cached.result_payload)
                         )
+                        if find_shot_facts_language_issues(cached_facts):
+                            shot_result = None
+                        else:
+                            shot_result = _normalize_shot_facts(shot, cached_facts)
                     except ValidationError:
                         shot_result = None
-                    else:
+                    if shot_result is not None:
                         cached_run = ModelRun(
                             analysis_id=analysis.id,
                             video_id=video.id,
@@ -621,9 +622,17 @@ class ShotFactsService:
 
                 for _ in range(self.max_attempts):
                     attempt_number += 1
+                    attempt_user_prompt = user_prompt
+                    if language_retry_required:
+                        attempt_user_prompt += (
+                            "\n\n上一次输出未通过中文校验。"
+                            f"{LANGUAGE_POLICY_MESSAGE}"
+                            "不要输出 None、Unknown、Static、Locked-off 等英文描述；"
+                            "请将运镜和动作术语完整改写为简体中文后重新输出整个 JSON。"
+                        )
                     estimated_usage = ModelUsage(
                         input_tokens=(
-                            estimate_text_tokens(self.system_prompt + user_prompt)
+                            estimate_text_tokens(self.system_prompt + attempt_user_prompt)
                             + estimate_visual_tokens(
                                 image_count=visual_frame_count,
                                 width=estimated_frame_width,
@@ -706,7 +715,7 @@ class ShotFactsService:
                                 task=ModelTask.SHOT_FACTS,
                                 target=target,
                                 system_prompt=self.system_prompt,
-                                user_prompt=user_prompt,
+                                user_prompt=attempt_user_prompt,
                                 image_paths=image_paths,
                                 image_labels=image_labels,
                                 video_path=video_path,
@@ -715,6 +724,19 @@ class ShotFactsService:
                             ),
                             ShotVisualFacts,
                         )
+                        simplified_data = simplify_model(result.data)
+                        language_issues = find_shot_facts_language_issues(simplified_data)
+                        if language_issues:
+                            raise ModelProviderError(
+                                "model_language_invalid",
+                                summarize_language_issues(language_issues),
+                                retryable=True,
+                                provider_request_id=result.provider_request_id,
+                                usage=result.usage,
+                                resolved_model=result.resolved_model,
+                                latency_ms=result.latency_ms,
+                                raw_content=result.raw_content,
+                            )
                         try:
                             measured_price = self.price_catalog.snapshot_for(
                                 target.provider,
@@ -729,7 +751,7 @@ class ShotFactsService:
                             )
                         measured_cost = calculate_cost_micros(result.usage, measured_price)
                         await self.repository.save_price_snapshot(measured_price)
-                        normalized_data = _normalize_shot_facts(shot, result.data)
+                        normalized_data = _normalize_shot_facts(shot, simplified_data)
                         artifact_ref = await self._save_result_artifact(
                             analysis.id,
                             run.id,
@@ -755,6 +777,8 @@ class ShotFactsService:
                         shot_result = normalized_data
                         break
                     except ModelProviderError as exc:
+                        if exc.code == "model_language_invalid":
+                            language_retry_required = True
                         run.status = ModelRunStatus.FAILED
                         run.provider_request_id = exc.provider_request_id
                         run.resolved_model = exc.resolved_model

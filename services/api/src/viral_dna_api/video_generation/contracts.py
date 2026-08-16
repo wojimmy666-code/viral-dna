@@ -206,6 +206,10 @@ class ProviderVideoRequest:
     aspect_ratio: str
     width: int
     height: int
+    route_id: str = "ordered_multi_image"
+    effective_route_id: str = "ordered_multi_image"
+    motion_semantics: str = "none"
+    control_condition: str | None = None
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
     reference_videos: tuple[OrderedReferenceVideo, ...] = ()
     reference_manifest: dict[str, Any] = field(default_factory=dict)

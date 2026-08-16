@@ -149,7 +149,11 @@ from .video_references.domain import (
     VideoReferenceRole,
     VideoReferenceSourceKind,
 )
-from .video_references.models import ReferenceProxyCreate, ReferenceProxyCreateResponse
+from .video_references.models import (
+    ReferenceProxyCreate,
+    ReferenceProxyCreateResponse,
+    ReferenceProxyDeleteResponse,
+)
 from .video_references.proxies import ReferenceProxyService, ReferenceProxyServiceError
 from .workspace import WorkspaceError, WorkspaceManager
 
@@ -2956,6 +2960,117 @@ class ProductionService:
         return ReferenceProxyCreateResponse(
             current_revision_id=revision_id,
             proxy=proxy,
+        )
+
+    async def delete_reference_proxy(
+        self,
+        shot_plan_id: UUID,
+        proxy_asset_id: UUID,
+        expected_revision_id: UUID,
+    ) -> ReferenceProxyDeleteResponse:
+        if self.reference_proxies is None:
+            raise _fail(
+                409,
+                "reference_proxy_service_unavailable",
+                "动作代理服务尚未配置",
+            )
+        plan = await self._require_shot(shot_plan_id)
+        project = await self._require_project(plan.project_id)
+        lock = await self._project_lock(project.id)
+        staged_deletion = None
+        target = None
+        revision_id = uuid4()
+        async with lock:
+            project = await self._require_project(project.id)
+            self._require_expected_revision(project, expected_revision_id)
+            plan = await self._require_shot(plan.id)
+            target = next(
+                (
+                    item
+                    for item in plan.reference_proxy_assets
+                    if item.id == proxy_asset_id
+                ),
+                None,
+            )
+            if target is None:
+                raise _fail(404, "reference_proxy_not_found", "当前分镜中不存在该白模")
+            if any(
+                item.enabled and item.proxy_asset_id == proxy_asset_id
+                for item in plan.video_reference_bindings
+            ):
+                raise _fail(
+                    409,
+                    "reference_proxy_in_use",
+                    "该白模正在使用，请先停用后再删除",
+                )
+            try:
+                staged_deletion = await self.reference_proxies.stage_content_deletion(
+                    target
+                )
+            except ReferenceProxyServiceError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            updated = plan.model_copy(
+                update={
+                    "revision_id": revision_id,
+                    "reference_proxy_assets": [
+                        item
+                        for item in plan.reference_proxy_assets
+                        if item.id != proxy_asset_id
+                    ],
+                    "video_reference_bindings": [
+                        item
+                        for item in plan.video_reference_bindings
+                        if item.proxy_asset_id != proxy_asset_id
+                    ],
+                    "updated_at": utc_now(),
+                }
+            )
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated if item.id == updated.id else item for item in plans]
+            next_project = project.model_copy(update={"updated_at": utc_now()})
+            try:
+                next_project, revision = await self._prepare_revision(
+                    next_project,
+                    ProductionChangeKind.REFERENCE_CHANGED,
+                    (
+                        f"删除分镜 {updated.index} 的未启用"
+                        f"{'视频' if target.media_type.value == 'video' else '图片'}白模"
+                    ),
+                    revision_id=revision_id,
+                    shot_plans=next_plans,
+                    reference_bindings=await self._all_bindings(next_plans),
+                )
+                await self.repository.save_production_bundle(
+                    next_project,
+                    revision,
+                    shot_plans=[updated],
+                )
+            except Exception:
+                try:
+                    await self.reference_proxies.restore_staged_content(staged_deletion)
+                except ReferenceProxyServiceError as restore_error:
+                    raise _fail(
+                        restore_error.status_code,
+                        restore_error.code,
+                        str(restore_error),
+                    ) from restore_error
+                raise
+
+        assert target is not None
+        assert staged_deletion is not None
+        local_content_removed = await self.reference_proxies.finalize_staged_content(
+            staged_deletion
+        )
+        return ReferenceProxyDeleteResponse(
+            current_revision_id=revision_id,
+            proxy_asset_id=target.id,
+            media_type=target.media_type.value,
+            local_content_removed=local_content_removed,
+            cleanup_warning=(
+                None
+                if local_content_removed
+                else "白模已从方案中删除，但本地临时文件仍待清理"
+            ),
         )
 
     async def preview_analysis_update(

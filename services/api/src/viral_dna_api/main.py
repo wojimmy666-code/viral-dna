@@ -33,6 +33,8 @@ from .managed_assets import ManagedAssetCatalogService
 from .managed_assets.routes import create_managed_asset_router
 from .media import get_analysis_artifact_root
 from .model_settings import ModelSettingsService, ModelSettingsServiceError
+from .prompt_engine.routes import create_prompt_draft_router
+from .prompt_engine.service import PromptDraftService
 from .models import (
     AnalysisCostSummary,
     AnalysisCreate,
@@ -303,6 +305,7 @@ viral_insight_service = ViralInsightService(
     store,
     publisher=ProductionConceptPublisher(production_service),
 )
+prompt_draft_service = PromptDraftService(store)
 timeline_service = TimelineService(
     store,
     workspace_manager,
@@ -325,6 +328,7 @@ app.include_router(
 )
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
+app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)
 
 
 @app.get("/health", response_model=HealthResponse)

@@ -8,6 +8,8 @@ const REPLICATION_URL = new URL("../src/viral-report/ReplicationWorkspace.jsx", 
 const MECHANISM_URL = new URL("../src/viral-report/ViralMechanismWorkspace.jsx", import.meta.url);
 const SHOT_TRAFFIC_URL = new URL("../src/viral-report/ShotTrafficRoles.jsx", import.meta.url);
 const CONCEPT_URL = new URL("../src/viral-report/ConceptComparison.jsx", import.meta.url);
+const PROMPT_EDITOR_URL = new URL("../src/prompt-editor/PromptEditor.jsx", import.meta.url);
+const PROMPT_SHOT_URL = new URL("../src/prompt-editor/PromptShotEditor.jsx", import.meta.url);
 const UI_HELPERS_URL = new URL("../src/viral-report/viral-report-ui.js", import.meta.url);
 const CSS_URL = new URL("../src/viral-report/viral-report.css", import.meta.url);
 const STYLES_URL = new URL("../src/styles.css", import.meta.url);
@@ -61,6 +63,8 @@ test("long report content uses progressive disclosure", async () => {
   const mechanism = await readFile(MECHANISM_URL, "utf8");
   const traffic = await readFile(SHOT_TRAFFIC_URL, "utf8");
   const replication = await readFile(REPLICATION_URL, "utf8");
+  const promptEditor = await readFile(PROMPT_EDITOR_URL, "utf8");
+  const promptShot = await readFile(PROMPT_SHOT_URL, "utf8");
 
   assert.match(mechanism, /<details className="viral-mechanism-row"/);
   assert.match(mechanism, /open=\{index === 0\}/);
@@ -72,8 +76,8 @@ test("long report content uses progressive disclosure", async () => {
   assert.doesNotMatch(replication, /replication-empty/);
   assert.match(app, /<details className="shot-secondary-facts">/);
   assert.match(app, /<details className="prompt-box shot-prompt-disclosure">/);
-  assert.match(app, /promptPackage\.continuity_locks\.length > 0/);
-  assert.match(app, /<details key=\{shot\.shot_id\} open=\{index === 0\}>/);
+  assert.match(promptEditor, /workingPackage\.continuity_locks\?\.length > 0/);
+  assert.match(promptShot, /<details className="prompt-shot-editor" defaultOpen=\{index === 0\}>/);
 });
 
 test("concept details do not repeat already locked DNA", async () => {

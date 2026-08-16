@@ -58,12 +58,12 @@ function approvedVisualBeatFrames(detail) {
   });
 }
 
-function supportsOrderedMultiImage(model) {
+function supportsReferenceRoute(model) {
   const capability = model?.capabilities;
   return Boolean(
     model?.available
-    && capability?.multi_image_reference
-    && capability?.ordered_reference_images,
+    && capability?.image_to_video
+    && capability?.reference_route?.enabled !== false,
   );
 }
 
@@ -156,6 +156,7 @@ export function ShotVideoWorkspace({
   onCancelRun,
   onCreateReferenceProxy,
   onDecideContinuity,
+  onDeleteReferenceProxy,
   onDisableReferenceProxy,
   onEnableReferenceProxy,
   onGenerate,
@@ -190,6 +191,8 @@ export function ShotVideoWorkspace({
   const [proxyEngineInstallBusy, setProxyEngineInstallBusy] = useState(false);
   const [proxyEngineInstallError, setProxyEngineInstallError] = useState("");
   const [proxyEngineInstallJob, setProxyEngineInstallJob] = useState(null);
+  const [referenceStrategy, setReferenceStrategy] = useState(null);
+  const [referenceStrategyError, setReferenceStrategyError] = useState("");
   const modelSelectRef = useRef(null);
   const proxyEngineInstallPollRef = useRef(0);
   const plan = shotDetail?.plan;
@@ -279,7 +282,7 @@ export function ShotVideoWorkspace({
   const activeRun = videoRuns.find((run) => ACTIVE_RUN_STATUSES.has(run.status)) || null;
   const videoModels = videoGenerationSettings?.models || [];
   const compatibleVideoModels = useMemo(
-    () => videoModels.filter(supportsOrderedMultiImage),
+    () => videoModels.filter(supportsReferenceRoute),
     [videoModels],
   );
   const selectedModel = compatibleVideoModels.find(
@@ -290,7 +293,18 @@ export function ShotVideoWorkspace({
   ) || null;
   const selectedManagedAssetCapability = selectedModel?.capabilities?.managed_assets;
   const personReferenceCapability = selectedModel?.capabilities?.person_references || {};
+  const referenceRouteCapability = selectedModel?.capabilities?.reference_route || {};
+  const routeUsesManagedIdentity = (
+    referenceRouteCapability.identity_transport === "provider_managed_asset"
+  );
   const managedIdentityRequired = personReferenceCapability.policy === "managed_required";
+  const needsProxyTools = Boolean(
+    referenceRouteCapability.show_motion_proxy_controls
+    && (
+      referenceRouteCapability.supports_pose_proxy_image
+      || referenceRouteCapability.supports_motion_proxy_video
+    ),
+  );
   const usableProxyIds = new Set(
     (plan?.reference_proxy_assets || [])
       .filter(referenceProxyUsable)
@@ -311,7 +325,7 @@ export function ShotVideoWorkspace({
 
   useEffect(() => {
     let cancelled = false;
-    if (!managedIdentityRequired) {
+    if (!needsProxyTools) {
       setProxyEngineCapabilities([]);
       setProxyEngineLoadError("");
       return () => {
@@ -334,7 +348,43 @@ export function ShotVideoWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [managedIdentityRequired, requestProxyEngineCapabilities]);
+  }, [needsProxyTools, requestProxyEngineCapabilities]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!plan?.id || !selectedModel?.alias) {
+      setReferenceStrategy(null);
+      setReferenceStrategyError("");
+      return () => {
+        cancelled = true;
+      };
+    }
+    setReferenceStrategyError("");
+    request(
+      `/video-references/shots/${plan.id}/strategy?model_alias=${encodeURIComponent(selectedModel.alias)}`,
+    )
+      .then((payload) => {
+        if (!cancelled) setReferenceStrategy(payload);
+      })
+      .catch((strategyError) => {
+        if (!cancelled) {
+          setReferenceStrategy(null);
+          setReferenceStrategyError(
+            strategyError?.message || "无法解析当前模型的人物与动作参考路由",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    plan?.id,
+    request,
+    selectedModel?.alias,
+    selectedProxyCount,
+    managedAssetBinding?.id,
+    shotDetail?.current_revision_id,
+  ]);
 
   async function refreshProxyEngines() {
     if (proxyEngineLoadBusy) return;
@@ -421,7 +471,7 @@ export function ShotVideoWorkspace({
   useEffect(() => () => {
     proxyEngineInstallPollRef.current += 1;
   }, []);
-  const managedAssetCompatible = !managedAssetBinding || Boolean(
+  const managedAssetCompatible = !routeUsesManagedIdentity || !managedAssetBinding || Boolean(
     selectedManagedAssetCapability?.supported
     && selectedManagedAssetCapability.provider === managedAssetBinding.provider
     && (selectedManagedAssetCapability.asset_kinds || []).includes(managedAssetBinding.kind)
@@ -469,9 +519,16 @@ export function ShotVideoWorkspace({
       );
     }
   }
-  const totalReferenceCount = managedIdentityRequired
-    ? (managedAssetBinding ? 1 : 0) + selectedProxyCount
-    : referenceFrames.length + (managedAssetBinding ? 1 : 0);
+  const routeId = referenceRouteCapability.route_id || "ordered_multi_image";
+  const totalReferenceCount = routeId === "seedance_managed_actor_motion_proxy"
+    ? (managedAssetBinding ? 1 : 0) + Math.min(selectedProxyCount, 1)
+    : routeId === "minimax_identity_image_motion_proxy"
+      ? Math.min(approvedReferenceCount, 1) + Math.min(selectedProxyCount, 1)
+      : routeId === "wan_vace_posebody_repaint"
+        ? Math.min(approvedReferenceCount, 1) + Math.min(selectedProxyCount, 1)
+        : routeId === "pose_image_text_fallback"
+          ? Math.min(approvedReferenceCount, 1)
+          : approvedReferenceCount;
   const referenceLimitExceeded = Boolean(
     selectedModel
     && totalReferenceCount > Number(
@@ -481,13 +538,17 @@ export function ShotVideoWorkspace({
   const generationBlockedReason = !videoGenerationSettings?.enabled
     ? "视频生成尚未启用"
     : compatibleVideoModels.length === 0
-      ? "没有已开放且支持有序多图参考的视频模型"
+      ? "没有已开放且具备可用参考素材路由的视频模型"
     : !selectedModel
-      ? "请选择支持有序多图参考的视频模型"
+      ? "请选择具备可用参考素材路由的视频模型"
       : !managedAssetCompatible
         ? "当前模型不支持已绑定的 Provider 托管人物资产，请切换到 Seedance 2.0 系列"
       : managedIdentityRequired && !managedAssetBinding
         ? "当前模型不接收原始真人身份素材，请先绑定 Provider 托管演员"
+      : referenceStrategy && !referenceStrategy.generation_allowed
+        ? referenceStrategy.blocker_message || "当前人物与动作参考路由尚未就绪"
+      : referenceStrategyError
+        ? referenceStrategyError
       : !managedIdentityRequired && referenceFrames.length === 0
         ? "当前分镜还没有可用于视频生成的画面"
         : !managedIdentityRequired && !allReferencesApproved
@@ -804,6 +865,7 @@ export function ShotVideoWorkspace({
                 visualBeatId,
               })}
               onDisableProxy={onDisableReferenceProxy}
+              onDeleteProxy={onDeleteReferenceProxy}
               onEnableProxy={onEnableReferenceProxy}
               onInstallProxyEngine={installProxyEngine}
               onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
@@ -814,6 +876,8 @@ export function ShotVideoWorkspace({
               proxyEngineInstallJob={proxyEngineInstallJob}
               proxyEngineLoadError={proxyEngineLoadError}
               referenceFrames={referenceFrames}
+              strategy={referenceStrategy}
+              strategyError={referenceStrategyError}
               resolveUrl={resolveUrl}
             />
             <label>

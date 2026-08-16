@@ -12,7 +12,6 @@ import {
   ArrowClockwise,
   Archive,
   Bell,
-  BracketsCurly,
   CaretDown,
   CaretLeft,
   CaretRight,
@@ -53,6 +52,7 @@ import {
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
+import { PromptEditor } from "./prompt-editor/index.js";
 import {
   NotificationDrawer,
   ToastViewport,
@@ -429,8 +429,8 @@ function localProxySourceLabel(value) {
 function supportsProductionVideoWorkflow(model) {
   return Boolean(
     model?.available
-    && model.capabilities?.multi_image_reference
-    && model.capabilities?.ordered_reference_images,
+    && model.capabilities?.image_to_video
+    && model.capabilities?.reference_route?.enabled !== false,
   );
 }
 function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
@@ -1706,13 +1706,34 @@ export function App() {
 
   const currentPromptPackage = replacementVersion?.prompt_package || report?.prompt_package;
 
+  const updateCurrentPromptPackage = useCallback((nextPackage) => {
+    if (replacementVersion) return;
+    const promptByShotId = new Map(
+      (nextPackage?.shots || []).map((shot) => [shot.shot_id, shot.prompt]),
+    );
+    setReport((current) => current
+      ? {
+          ...current,
+          prompt_package: nextPackage,
+          shots: (current.shots || []).map((shot) => (
+            promptByShotId.has(shot.id)
+              ? { ...shot, prompt: promptByShotId.get(shot.id) }
+              : shot
+          )),
+        }
+      : current);
+  }, [replacementVersion]);
+
   async function copyText(text, message = "已复制") {
     await navigator.clipboard.writeText(text);
     showNotice(message);
   }
 
-  async function downloadPromptPackage() {
-    if (!currentPromptPackage) return;
+  async function downloadPromptPackage(packageOverride = null) {
+    const packageToDownload = Array.isArray(packageOverride?.shots)
+      ? packageOverride
+      : currentPromptPackage;
+    if (!packageToDownload) return;
     if (video?.record_id && report) {
       try {
         const artifacts = await apiRequest(`/records/${video.record_id}/exports`, {
@@ -1744,13 +1765,13 @@ export function App() {
         return;
       }
     }
-    const blob = new Blob([JSON.stringify(currentPromptPackage, null, 2)], {
+    const blob = new Blob([JSON.stringify(packageToDownload, null, 2)], {
       type: "application/json;charset=utf-8",
     });
     const href = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = href;
-    anchor.download = `viral-dna-prompt-v${currentPromptPackage.version}.json`;
+    anchor.download = `viral-dna-prompt-v${packageToDownload.version}.json`;
     anchor.click();
     URL.revokeObjectURL(href);
     showNotice("替换版提示词包已下载");
@@ -2266,10 +2287,15 @@ export function App() {
                     />
                   )}
                   {activeReportTab === "prompts" && (
-                    <PromptsTab
+                    <PromptEditor
+                      analysisId={report.analysis_id}
                       promptPackage={currentPromptPackage}
+                      request={apiRequest}
+                      readOnly={Boolean(replacementVersion)}
                       onCopy={copyText}
                       onDownload={downloadPromptPackage}
+                      onNotice={showNotice}
+                      onPromptPackageChange={updateCurrentPromptPackage}
                     />
                   )}
                     </div>
@@ -5310,76 +5336,6 @@ function Fact({ label, value }) {
     <div className="fact-card">
       <span>{label}</span>
       <p>{value}</p>
-    </div>
-  );
-}
-
-function PromptsTab({ promptPackage, onCopy, onDownload }) {
-  return (
-    <div className="prompts-layout">
-      <div className="prompt-global-card">
-        <div className="prompt-card-header">
-          <div>
-            <span className="eyebrow">全局视觉圣经</span>
-            <h3>{promptPackage.target_model} · Prompt v{promptPackage.version}</h3>
-          </div>
-          <button className="icon-button bordered" type="button" onClick={() => onCopy(promptPackage.global_prompt, "全局提示词已复制")} aria-label="复制全局提示词">
-            <Copy size={17} />
-          </button>
-        </div>
-        {hasReportableNarrativeStructure(promptPackage.global_prompt) && <p>{promptPackage.global_prompt}</p>}
-      </div>
-
-      {(promptPackage.continuity_locks.length > 0 || promptPackage.negative_constraints.length > 0) && <div className="prompt-two-column">
-        {promptPackage.continuity_locks.length > 0 && <details className="continuity-card">
-          <summary className="mini-heading">
-            <LockSimple size={17} />
-            <strong>连续性锁 · {promptPackage.continuity_locks.length} 项</strong><CaretDown size={15} />
-          </summary>
-          <ul>
-            {promptPackage.continuity_locks.map((lock) => <li key={lock}>{lock}</li>)}
-          </ul>
-        </details>}
-        {promptPackage.negative_constraints.length > 0 && <details className="continuity-card negative">
-          <summary className="mini-heading">
-            <ShieldCheck size={17} />
-            <strong>负面约束 · {promptPackage.negative_constraints.length} 项</strong><CaretDown size={15} />
-          </summary>
-          <ul>
-            {promptPackage.negative_constraints.map((constraint) => <li key={constraint}>{constraint}</li>)}
-          </ul>
-        </details>}
-      </div>}
-
-      <div className="prompt-shot-list">
-        {promptPackage.shots.map((shot, index) => (
-          <details key={shot.shot_id} open={index === 0}>
-            <summary>
-              <span>{String(index + 1).padStart(2, "0")}</span>
-              <div>
-                <strong>{shot.shot_id}</strong>
-                <small>{shot.duration_seconds.toFixed(1)} 秒</small>
-              </div>
-              <CaretDown className="prompt-shot-caret" size={16} />
-            </summary>
-            <div className="prompt-shot-body"><p>{shot.prompt}</p><button type="button" onClick={() => onCopy(shot.prompt, `${shot.shot_id} 已复制`)}><Copy size={16} />复制</button></div>
-          </details>
-        ))}
-      </div>
-
-      <div className="export-bar">
-        <div>
-          <BracketsCurly size={21} />
-          <span>
-            <strong>机器可读 Prompt Package</strong>
-            <small>包含实体、时间线、逐镜头指令与约束</small>
-          </span>
-        </div>
-        <button className="primary-button compact" type="button" onClick={onDownload}>
-          <DownloadSimple size={17} />
-          下载 JSON
-        </button>
-      </div>
     </div>
   );
 }

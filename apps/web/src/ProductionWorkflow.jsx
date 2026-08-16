@@ -2355,6 +2355,61 @@ export function ProductionHub({
     return setReferenceProxyEnabled(proxyAssetId, true);
   }
 
+  async function deleteReferenceProxy(proxyAssetId) {
+    if (!shotDetail?.plan || !detail?.project || !proxyAssetId) return false;
+    const target = (shotDetail.plan.reference_proxy_assets || []).find(
+      (item) => item.id === proxyAssetId,
+    );
+    if (!target) return false;
+    const inUse = (shotDetail.plan.video_reference_bindings || []).some(
+      (item) => item.enabled && item.proxy_asset_id === proxyAssetId,
+    );
+    if (inUse) {
+      onNotice({
+        type: "error",
+        title: "白模正在使用",
+        message: "请先停用该白模，再执行删除。",
+      });
+      return false;
+    }
+    const label = target.media_type === "video" ? "视频白模" : "图片白模";
+    if (
+      typeof window !== "undefined"
+      && !window.confirm(`永久删除此${label}及其本地文件？此操作无法恢复。`)
+    ) {
+      return false;
+    }
+    let succeeded = false;
+    await executeAction(async () => {
+      const query = new URLSearchParams({
+        expected_revision_id: detail.project.current_revision_id,
+      });
+      const response = await request(
+        `/video-references/shots/${shotDetail.plan.id}/proxies/${proxyAssetId}?${query}`,
+        { method: "DELETE" },
+      );
+      await Promise.all([
+        refreshProject(detail.project.id, shotDetail.plan.id, selectedVisualBeatId),
+        onProjectsChanged(),
+      ]);
+      onNotice(
+        response.local_content_removed
+          ? {
+              type: "success",
+              title: `${label}已删除`,
+              message: "方案记录与本地派生文件均已移除。",
+            }
+          : {
+              type: "warning",
+              title: `${label}已从方案删除`,
+              message: response.cleanup_warning || "本地临时文件仍待清理。",
+            },
+      );
+      succeeded = true;
+    });
+    return succeeded;
+  }
+
   async function setReferenceProxyEnabled(proxyAssetId, enabled) {
     if (!shotDetail?.plan || !detail?.project || !proxyAssetId) return false;
     const target = (shotDetail.plan.reference_proxy_assets || []).find(
@@ -3162,6 +3217,7 @@ export function ProductionHub({
                 onCancelRun={cancelVideoGeneration}
                 onCreateReferenceProxy={createReferenceProxy}
                 onDecideContinuity={decideContinuityFinding}
+                onDeleteReferenceProxy={deleteReferenceProxy}
                 onDisableReferenceProxy={disableReferenceProxy}
                 onEnableReferenceProxy={enableReferenceProxy}
                 onGenerate={generateVideoCandidates}

@@ -1,9 +1,9 @@
-catalog_version = "phase2-model-catalog-2026-08-11-r7"
+catalog_version = "phase2-model-catalog-2026-08-16-r8"
 pricing_version = "cn-list-price-2026-08-02"
 
 [prompts]
 shot_segmentation = "shot-segmentation-v5"
-shot_facts = "shot-facts-v2"
+shot_facts = "shot-facts-v3"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-reasoning-v1"
 prompt_generation = "seedance-prompt-v1"
