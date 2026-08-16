@@ -102,6 +102,81 @@ class FfmpegBrowserVideoEncoder:
                 pending.unlink(missing_ok=True)
         return destination_path
 
+    def encode_segment(
+        self,
+        source_path: Path,
+        destination_path: Path,
+        *,
+        duration_seconds: float,
+    ) -> Path:
+        """Normalize and trim a remote proxy result to the source-shot duration."""
+
+        if duration_seconds <= 0:
+            raise BrowserVideoEncodingError("视频白模目标时长无效")
+        executable = self._resolve_executable()
+        with self._lock, tempfile.TemporaryDirectory(prefix="viraldna-ai-white-model-") as root:
+            temp_root = Path(root)
+            input_suffix = source_path.suffix.lower() or ".mp4"
+            staged_source = temp_root / f"source{input_suffix}"
+            staged_output = temp_root / "browser.mp4"
+            shutil.copyfile(source_path, staged_source)
+            command = [
+                executable,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(staged_source),
+                "-t",
+                f"{duration_seconds:.3f}",
+                "-map_metadata",
+                "-1",
+                "-an",
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2:in_range=full:out_range=tv,"
+                "format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_range",
+                "tv",
+                "-movflags",
+                "+faststart",
+                str(staged_output),
+            ]
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    timeout=max(120, round(duration_seconds * 30)),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise BrowserVideoEncodingError(
+                    "FFmpeg 启动失败或处理超时，无法整理 AI 视频白模"
+                ) from exc
+            if result.returncode != 0 or not staged_output.is_file():
+                detail = result.stderr.decode("utf-8", errors="replace").strip()[-800:]
+                raise BrowserVideoEncodingError(
+                    f"FFmpeg 无法整理 AI 视频白模：{detail or '未知编码错误'}"
+                )
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            pending = destination_path.with_name(
+                f".{destination_path.stem}.{uuid4().hex}.tmp.mp4"
+            )
+            try:
+                shutil.copyfile(staged_output, pending)
+                os.replace(pending, destination_path)
+            finally:
+                pending.unlink(missing_ok=True)
+        return destination_path
+
     def ensure_cached_preview(self, source_path: Path, preview_path: Path) -> Path:
         """Create a derived H.264 preview for legacy mp4v proxy assets."""
 

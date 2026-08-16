@@ -6,14 +6,15 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import { PromptTimelineEditor } from "./PromptTimelineEditor.jsx";
+import { PromptVisualHelp } from "./PromptVisualHelp.jsx";
 import { promptDraftContainsUnlabeledEnglish } from "./prompt-editor-ui.js";
 
 const VISUAL_FIELDS = [
-  ["subjects", "主体与服装", "人物、产品、道具和服装，只描述需要出现在画面中的内容。"],
-  ["scene", "场景", "地点、背景和环境信息。"],
-  ["composition", "构图", "景别、主体位置和前中后景关系。"],
-  ["lighting", "光线", "光向、软硬、色温和对比度。"],
-  ["color", "色彩", "主色、辅色和整体色调。"],
+  ["subjects", "主体与服装"],
+  ["scene", "场景"],
+  ["composition", "构图"],
+  ["lighting", "光线"],
+  ["color", "色彩"],
 ];
 
 function updateTransition(draft, field, value) {
@@ -112,26 +113,22 @@ export function PromptShotEditor({
 
         <section className="prompt-editor-section">
           <div className="prompt-editor-section-heading">
-            <div>
-              <strong>基础画面</strong>
-              <span>只写静态视觉事实，动作和运镜放在时间轴中。</span>
-            </div>
+            <strong>基础画面</strong>
+            <PromptVisualHelp />
           </div>
           <div className="prompt-visual-fields">
-            {VISUAL_FIELDS.map(([field, label, hint]) => (
+            {VISUAL_FIELDS.map(([field, label]) => (
               <label className={field === "subjects" || field === "scene" ? "wide" : ""} key={field}>
                 <span>{label}</span>
                 <textarea
                   rows="2"
                   value={draft.visual[field] || ""}
                   disabled={disabled}
-                  aria-describedby={`${shot.shot_id}-${field}-hint`}
                   onChange={(event) => onChange({
                     ...draft,
                     visual: { ...draft.visual, [field]: event.target.value },
                   })}
                 />
-                <small id={`${shot.shot_id}-${field}-hint`}>{hint}</small>
               </label>
             ))}
           </div>

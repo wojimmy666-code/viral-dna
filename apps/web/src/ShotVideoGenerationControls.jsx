@@ -11,9 +11,8 @@ import {
 import { VideoGenerationSettingsPopover } from "./video-generation-controls/VideoGenerationSettingsPopover.jsx";
 import { VideoModelPopover } from "./video-generation-controls/VideoModelPopover.jsx";
 import {
-  isVideoModelConfigured,
   videoOutputSummary,
-  videoProviderLabel,
+  videoModelCatalogUiState,
 } from "./video-generation-controls/video-generation-ui.js";
 import "./shot-video-generation-controls.css";
 
@@ -34,6 +33,8 @@ export function ShotVideoGenerationControls({
   generationBlockedReason,
   latestFailure,
   latestRun,
+  modelCatalogError = "",
+  modelCatalogStatus = "ready",
   modelSelectRef,
   onCancelRun,
   onCandidateCountChange,
@@ -41,6 +42,7 @@ export function ShotVideoGenerationControls({
   onGenerate,
   onModelChange,
   onOpenModelSettings,
+  onReloadModels,
   onResolutionChange,
   onRetryRun,
   project,
@@ -58,8 +60,14 @@ export function ShotVideoGenerationControls({
   const controlsDisabled = busy || Boolean(activeRun);
   const candidateCount = Number(videoDraft.candidateCount || 1);
   const aspectRatio = project?.output_aspect_ratio || "未设置画幅";
-  const providerReady = isVideoModelConfigured(selectedModel, providerOptions);
-  const providerLabel = videoProviderLabel(selectedModel, providerOptions);
+  const modelCatalog = videoModelCatalogUiState({
+    error: modelCatalogError,
+    models: compatibleVideoModels,
+    providers: providerOptions,
+    selectedModel,
+    status: modelCatalogStatus,
+  });
+  const providerReady = modelCatalog.providerReady;
   const outputSummary = videoOutputSummary({
     aspectRatio,
     candidateCount,
@@ -86,6 +94,26 @@ export function ShotVideoGenerationControls({
     setOpenPopover((current) => (current === name ? null : name));
   }
 
+  function reloadModels() {
+    if (!onReloadModels) return;
+    Promise.resolve(onReloadModels()).catch(() => undefined);
+  }
+
+  function toggleModelPopover() {
+    if (modelOpen) {
+      setOpenPopover(null);
+      return;
+    }
+    setOpenPopover("model");
+    if (
+      modelCatalogStatus !== "loading"
+      && (
+        compatibleVideoModels.length === 0
+        || modelCatalogStatus === "error"
+      )
+    ) reloadModels();
+  }
+
   function openModelSettings() {
     setOpenPopover(null);
     onOpenModelSettings();
@@ -97,21 +125,25 @@ export function ShotVideoGenerationControls({
         <button
           aria-controls={modelPopoverId}
           aria-expanded={modelOpen}
-          className={`shot-video-model-trigger${providerReady ? "" : " missing"}`}
+          className={`shot-video-model-trigger${modelCatalog.loading ? " loading" : ""}${modelCatalog.failed || modelCatalog.missingProviderKey ? " missing" : ""}`}
           disabled={controlsDisabled}
-          onClick={() => togglePopover("model")}
+          onClick={toggleModelPopover}
           ref={setModelAnchor}
-          title={selectedModel?.label || "选择视频模型"}
+          title={modelCatalog.title}
           type="button"
         >
           <span className="shot-video-command-icon" aria-hidden="true">
             <VideoCamera size={18} weight="fill" />
           </span>
           <span className="shot-video-model-trigger-copy">
-            <strong>{selectedModel?.label || "选择视频模型"}</strong>
-            <small>{providerReady ? providerLabel : `${providerLabel} · Key 未配置`}</small>
+            <strong>{modelCatalog.title}</strong>
+            <small>{modelCatalog.subtitle}</small>
           </span>
-          {!providerReady && <WarningCircle className="shot-video-model-warning" size={17} weight="fill" />}
+          {modelCatalog.loading
+            ? <CircleNotch className="spin shot-video-model-warning" size={17} />
+            : (modelCatalog.failed || modelCatalog.missingProviderKey) && (
+              <WarningCircle className="shot-video-model-warning" size={17} weight="fill" />
+            )}
           <CaretUp aria-hidden="true" size={16} />
         </button>
 
@@ -180,9 +212,12 @@ export function ShotVideoGenerationControls({
         anchorRef={localModelAnchorRef}
         disabled={controlsDisabled}
         failureAlias={latestFailure && latestRun?.model_alias}
+        loadError={modelCatalogError}
+        loadStatus={modelCatalogStatus}
         models={compatibleVideoModels}
         onClose={() => setOpenPopover(null)}
         onOpenSettings={openModelSettings}
+        onRetry={reloadModels}
         onSelect={onModelChange}
         open={modelOpen}
         popoverId={modelPopoverId}
@@ -220,11 +255,15 @@ export function ShotVideoGenerationControls({
         <div className="production-inline-error shot-video-command-error" role="status">
           <WarningCircle size={17} />
           <span>{generationBlockedReason}</span>
-          {!providerReady && (
+          {modelCatalog.failed ? (
+            <button className="text-button compact" onClick={reloadModels} type="button">
+              重新加载模型
+            </button>
+          ) : modelCatalog.missingProviderKey ? (
             <button className="text-button compact" onClick={openModelSettings} type="button">
               打开模型设置
             </button>
-          )}
+          ) : null}
         </div>
       )}
     </section>

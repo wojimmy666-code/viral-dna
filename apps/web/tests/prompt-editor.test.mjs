@@ -5,6 +5,7 @@ import test from "node:test";
 const APP_URL = new URL("../src/App.jsx", import.meta.url);
 const EDITOR_URL = new URL("../src/prompt-editor/PromptEditor.jsx", import.meta.url);
 const SHOT_URL = new URL("../src/prompt-editor/PromptShotEditor.jsx", import.meta.url);
+const VISUAL_HELP_URL = new URL("../src/prompt-editor/PromptVisualHelp.jsx", import.meta.url);
 const TIMELINE_URL = new URL("../src/prompt-editor/PromptTimelineEditor.jsx", import.meta.url);
 const HELPERS_URL = new URL("../src/prompt-editor/prompt-editor-ui.js", import.meta.url);
 const CSS_URL = new URL("../src/prompt-editor/prompt-editor.css", import.meta.url);
@@ -26,6 +27,7 @@ test("prompt report uses the isolated structured editor", async () => {
 
 test("prompt editing separates visual facts, timeline, transition, and compiled input", async () => {
   const shot = await readFile(SHOT_URL, "utf8");
+  const visualHelp = await readFile(VISUAL_HELP_URL, "utf8");
   const timeline = await readFile(TIMELINE_URL, "utf8");
   const css = await readFile(CSS_URL, "utf8");
 
@@ -34,6 +36,22 @@ test("prompt editing separates visual facts, timeline, transition, and compiled 
   }
   assert.match(shot, /<textarea/);
   assert.match(shot, /defaultOpen=\{index === 0\}/);
+  assert.match(shot, /<PromptVisualHelp \/>/);
+  assert.doesNotMatch(shot, /aria-describedby=\{`\$\{shot\.shot_id\}-\$\{field\}-hint`\}/);
+  assert.doesNotMatch(shot, /<small id=\{`\$\{shot\.shot_id\}-\$\{field\}-hint`\}>/);
+  for (const alwaysHiddenHelp of [
+    "人物、产品、道具和服装",
+    "地点、背景和环境信息",
+    "景别、主体位置和前中后景关系",
+    "光向、软硬、色温和对比度",
+    "主色、辅色和整体色调",
+  ]) {
+    assert.doesNotMatch(shot, new RegExp(alwaysHiddenHelp));
+  }
+  assert.match(visualHelp, /popover="auto"/);
+  assert.match(visualHelp, /popoverTargetAction="toggle"/);
+  assert.match(visualHelp, /aria-label="关闭填写说明"/);
+  assert.match(visualHelp, /人物、产品、道具和服装/);
   assert.match(timeline, /新增阶段/);
   assert.match(timeline, /主体动作/);
   assert.match(timeline, /镜头运动/);

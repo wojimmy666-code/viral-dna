@@ -5,9 +5,10 @@ import hashlib
 import os
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from ...models import GenerationCandidate, GenerationKind, ProductionProject, ShotPlan
@@ -16,12 +17,25 @@ from ...workspace import WorkspaceError, WorkspaceManager
 from ..domain import (
     ReferenceProxyAsset,
     ReferenceProxyKind,
+    ReferenceProxyPrivacyMode,
+    ReferenceProxyRenderProfile,
     ReferenceProxyStatus,
 )
 from .browser_video import BrowserVideoEncodingError, FfmpegBrowserVideoEncoder
-from .contracts import ProxyEngineCapability, ReferenceProxyEngine
+from .contracts import (
+    ProxyEngineCapability,
+    ProxyEnhancementError,
+    ProxyEnhancementRequest,
+    ProxyGenerationOutput,
+    ReferenceProxyEngine,
+    ReferenceProxyEnhancer,
+)
 from .dwpose import DWPoseWholeBodyEngine
 from .opencv_silhouette import OpenCvSilhouetteEngine
+
+if TYPE_CHECKING:
+    from ...image_generation.gateway import ImageGenerationGateway
+    from ...video_generation.settings import VideoGenerationSettingsService
 
 
 class ReferenceProxyServiceError(RuntimeError):
@@ -71,18 +85,50 @@ def _filesystem_path(path: Path) -> Path:
     return Path(f"{prefix}{raw}")
 
 
+def _workspace_path(path: Path) -> Path:
+    """Remove a Windows device prefix before workspace-boundary validation.
+
+    Generators use Windows device paths for long-path-safe I/O, while ``Path.relative_to``
+    treats a device-prefixed path as a different drive from the canonical workspace
+    root.  Persisted metadata must always use the canonical workspace path.
+    """
+
+    if os.name != "nt":
+        return path
+    separator = chr(92)
+    raw = str(path)
+    prefix = f"{separator}{separator}?{separator}"
+    unc_prefix = f"{prefix}UNC{separator}"
+    if raw.startswith(unc_prefix):
+        return Path(f"{separator}{separator}{raw[len(unc_prefix):]}")
+    if raw.startswith(prefix):
+        return Path(raw[len(prefix):])
+    return path
+
+
 class ReferenceProxyService:
     def __init__(
         self,
         workspace: WorkspaceManager,
         *,
         engines: list[ReferenceProxyEngine] | None = None,
+        enhancers: list[ReferenceProxyEnhancer] | None = None,
+        image_gateway: ImageGenerationGateway | None = None,
+        video_settings: VideoGenerationSettingsService | None = None,
         browser_video_encoder: FfmpegBrowserVideoEncoder | None = None,
         notification_publisher: NotificationPublisher | None = None,
     ) -> None:
         self.workspace = workspace
         self.engines = engines if engines is not None else self._default_engines()
         self.browser_video_encoder = browser_video_encoder or FfmpegBrowserVideoEncoder()
+        self.image_gateway = image_gateway
+        self.video_settings = video_settings
+        self._owns_default_enhancers = enhancers is None
+        self.enhancers = (
+            enhancers
+            if enhancers is not None
+            else self._default_enhancers(image_gateway, video_settings)
+        )
         self.notification_publisher = notification_publisher
         self._install_lock = asyncio.Lock()
         self._installations: dict[UUID, ProxyEngineInstallation] = {}
@@ -98,9 +144,38 @@ class ReferenceProxyService:
         engines.append(OpenCvSilhouetteEngine())
         return engines
 
+    def _default_enhancers(
+        self,
+        image_gateway: ImageGenerationGateway | None,
+        video_settings: VideoGenerationSettingsService | None,
+    ) -> list[ReferenceProxyEnhancer]:
+        from .ai import QwenMannequinImageEnhancer, SeedanceMannequinVideoEnhancer
+
+        verifier = next(
+            (engine for engine in self.engines if isinstance(engine, DWPoseWholeBodyEngine)),
+            None,
+        )
+        if verifier is None:
+            return []
+        enhancers: list[ReferenceProxyEnhancer] = []
+        if image_gateway is not None:
+            enhancers.append(QwenMannequinImageEnhancer(image_gateway, verifier))
+        if video_settings is not None:
+            enhancers.append(
+                SeedanceMannequinVideoEnhancer(
+                    video_settings,
+                    verifier,
+                    video_encoder=self.browser_video_encoder,
+                )
+            )
+        return enhancers
+
     def capabilities(self) -> list[ProxyEngineCapability]:
-        if self.engines:
-            return [engine.capability for engine in self.engines]
+        if self.engines or self.enhancers:
+            return [
+                *[engine.capability for engine in self.engines],
+                *[enhancer.capability for enhancer in self.enhancers],
+            ]
         return [
             ProxyEngineCapability(
                 engine="opencv_silhouette",
@@ -185,6 +260,11 @@ class ReferenceProxyService:
                     f"DWPose WholeBody 模型安装失败：{exc}",
                 ) from exc
             self.engines[index] = refreshed
+            if self._owns_default_enhancers:
+                self.enhancers = self._default_enhancers(
+                    self.image_gateway,
+                    self.video_settings,
+                )
             return refreshed.capability
 
     async def _run_engine_installation(self, installation_id: UUID) -> None:
@@ -263,6 +343,114 @@ class ReferenceProxyService:
             409,
             "reference_proxy_engine_unavailable",
             "当前没有可用的动作代理引擎；请安装 local-ai 依赖或配置外部姿态代理引擎",
+        )
+
+    def _enhancer(
+        self,
+        kind: ReferenceProxyKind,
+        engine_name: str | None,
+    ) -> ReferenceProxyEnhancer:
+        matching = [
+            enhancer
+            for enhancer in self.enhancers
+            if kind in enhancer.capability.kinds
+            and (engine_name is None or enhancer.capability.engine == engine_name)
+        ]
+        if engine_name and not matching:
+            raise ReferenceProxyServiceError(
+                404,
+                "reference_proxy_enhancer_not_found",
+                "未找到指定的 AI 白模增强引擎",
+            )
+        for enhancer in matching:
+            if enhancer.capability.available and enhancer.capability.production_ready:
+                return enhancer
+        note = next(
+            (
+                enhancer.capability.availability_note
+                for enhancer in matching
+                if enhancer.capability.availability_note
+            ),
+            "当前没有可用的 AI 白模增强引擎",
+        )
+        raise ReferenceProxyServiceError(
+            409,
+            "reference_proxy_enhancer_unavailable",
+            note,
+        )
+
+    @staticmethod
+    def _fallback_output(
+        *,
+        base_output: ProxyGenerationOutput,
+        destination: Path,
+        thumbnail: Path,
+        privacy_mode: ReferenceProxyPrivacyMode,
+        enhancer: ReferenceProxyEnhancer | None,
+        error: Exception,
+    ) -> ProxyGenerationOutput:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(base_output.path, destination)
+        shutil.copy2(base_output.thumbnail_path, thumbnail)
+        manifest_path = destination.with_name("pose-manifest.json")
+        quality_path = destination.with_name("quality-report.json")
+        if base_output.manifest_path is not None:
+            shutil.copy2(base_output.manifest_path, manifest_path)
+        else:
+            manifest_path = None
+        if base_output.quality_report_path is not None:
+            shutil.copy2(base_output.quality_report_path, quality_path)
+        else:
+            quality_path = None
+        return replace(
+            base_output,
+            path=destination,
+            thumbnail_path=thumbnail,
+            manifest_path=manifest_path,
+            quality_report_path=quality_path,
+            requested_render_profile=ReferenceProxyRenderProfile.AI_ENHANCED,
+            effective_render_profile=ReferenceProxyRenderProfile.STRUCTURAL,
+            privacy_mode=privacy_mode,
+            base_engine=base_output.base_engine or "dwpose_wholebody_mannequin",
+            base_engine_version=base_output.base_engine_version or "1.0.0",
+            provider=(
+                error.provider
+                if isinstance(error, ProxyEnhancementError)
+                else enhancer.capability.provider if enhancer else None
+            ),
+            provider_model=(
+                error.provider_model
+                if isinstance(error, ProxyEnhancementError)
+                else enhancer.capability.model if enhancer else None
+            ),
+            provider_request_id=(
+                error.provider_request_id
+                if isinstance(error, ProxyEnhancementError)
+                else None
+            ),
+            raw_source_uploaded=False,
+            fallback_applied=True,
+            fallback_reason=str(error)[:1000],
+            estimated_cost_micros=(
+                error.estimated_cost_micros
+                if isinstance(error, ProxyEnhancementError)
+                else None
+            ),
+            actual_cost_micros=(
+                error.actual_cost_micros
+                if isinstance(error, ProxyEnhancementError)
+                else None
+            ),
+            cost_estimate_known=(
+                error.cost_estimate_known
+                if isinstance(error, ProxyEnhancementError)
+                else False
+            ),
+            actual_cost_known=(
+                error.actual_cost_known
+                if isinstance(error, ProxyEnhancementError)
+                else False
+            ),
         )
 
     async def resolve_content(
@@ -429,6 +617,13 @@ class ReferenceProxyService:
         kind: ReferenceProxyKind,
         visual_beat_id: UUID,
         order: int = 1,
+        render_profile: ReferenceProxyRenderProfile = (
+            ReferenceProxyRenderProfile.STRUCTURAL
+        ),
+        privacy_mode: ReferenceProxyPrivacyMode | None = None,
+        enhancer_engine: str | None = None,
+        fallback_to_structural: bool = True,
+        allow_unknown_cost: bool = False,
     ) -> ReferenceProxyAsset:
         expected_kind = (
             GenerationKind.IMAGE
@@ -469,6 +664,29 @@ class ReferenceProxyService:
                 "动作代理源文件不存在",
             )
         engine = self._engine(kind)
+        effective_privacy = privacy_mode or (
+            ReferenceProxyPrivacyMode.LOCAL_ONLY
+            if render_profile == ReferenceProxyRenderProfile.STRUCTURAL
+            else ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY
+        )
+        if (
+            render_profile == ReferenceProxyRenderProfile.STRUCTURAL
+            and effective_privacy != ReferenceProxyPrivacyMode.LOCAL_ONLY
+        ):
+            raise ReferenceProxyServiceError(
+                422,
+                "reference_proxy_privacy_mode_invalid",
+                "本机结构白模只能使用仅本机处理模式",
+            )
+        if (
+            render_profile == ReferenceProxyRenderProfile.AI_ENHANCED
+            and effective_privacy != ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY
+        ):
+            raise ReferenceProxyServiceError(
+                422,
+                "reference_proxy_privacy_mode_invalid",
+                "AI 增强白模只允许上传匿名结构稿，不允许上传原始人物素材",
+            )
         proxy_id = uuid4()
         root = (
             self.workspace.production_shot_root(project.record_id, project.id, shot.id)
@@ -478,17 +696,75 @@ class ReferenceProxyService:
         is_image = kind.value.endswith("_image")
         destination = root / ("proxy.png" if is_image else "proxy.mp4")
         thumbnail = root / "thumbnail.png"
+        base_root = (
+            root
+            if render_profile == ReferenceProxyRenderProfile.STRUCTURAL
+            else root / "base"
+        )
+        base_destination = base_root / ("proxy.png" if is_image else "proxy.mp4")
+        base_thumbnail = base_root / "thumbnail.png"
         try:
-            output = await asyncio.to_thread(
+            base_output = await asyncio.to_thread(
                 engine.generate,
                 source_path=physical_source,
-                destination_path=_filesystem_path(destination),
-                thumbnail_path=_filesystem_path(thumbnail),
+                destination_path=_filesystem_path(base_destination),
+                thumbnail_path=_filesystem_path(base_thumbnail),
                 kind=kind,
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
             )
+            base_output = replace(
+                base_output,
+                requested_render_profile=render_profile,
+                effective_render_profile=ReferenceProxyRenderProfile.STRUCTURAL,
+                privacy_mode=ReferenceProxyPrivacyMode.LOCAL_ONLY,
+                base_engine=engine.capability.engine,
+                base_engine_version=engine.capability.version,
+                raw_source_uploaded=False,
+            )
+            selected_enhancer: ReferenceProxyEnhancer | None = None
+            if render_profile == ReferenceProxyRenderProfile.AI_ENHANCED:
+                try:
+                    selected_enhancer = self._enhancer(kind, enhancer_engine)
+                    duration_seconds = (
+                        max(0.1, end_seconds - start_seconds)
+                        if start_seconds is not None and end_seconds is not None
+                        else None
+                    )
+                    output = await selected_enhancer.enhance(
+                        ProxyEnhancementRequest(
+                            request_id=proxy_id,
+                            project=project,
+                            shot=shot,
+                            kind=kind,
+                            base_output=base_output,
+                            destination_path=_filesystem_path(destination),
+                            thumbnail_path=_filesystem_path(thumbnail),
+                            run_root=_filesystem_path(root / "ai-enhancement"),
+                            duration_seconds=duration_seconds,
+                            privacy_mode=effective_privacy,
+                            allow_unknown_cost=allow_unknown_cost,
+                        )
+                    )
+                except (ReferenceProxyServiceError, RuntimeError) as exc:
+                    if not fallback_to_structural:
+                        raise
+                    output = await asyncio.to_thread(
+                        self._fallback_output,
+                        base_output=base_output,
+                        destination=_filesystem_path(destination),
+                        thumbnail=_filesystem_path(thumbnail),
+                        privacy_mode=effective_privacy,
+                        enhancer=selected_enhancer,
+                        error=exc,
+                    )
+            else:
+                output = base_output
+        except ReferenceProxyServiceError:
+            await asyncio.to_thread(shutil.rmtree, _filesystem_path(root), True)
+            raise
         except RuntimeError as exc:
+            await asyncio.to_thread(shutil.rmtree, _filesystem_path(root), True)
             raise ReferenceProxyServiceError(
                 422,
                 "reference_proxy_generation_failed",
@@ -523,8 +799,42 @@ class ReferenceProxyService:
             relative_path=self.workspace.relative(destination),
             thumbnail_relative_path=self.workspace.relative(thumbnail),
             sha256=_sha256(_filesystem_path(output.path)),
-            engine=engine.capability.engine,
-            engine_version=engine.capability.version,
+            engine=(
+                output.base_engine or engine.capability.engine
+                if output.effective_render_profile
+                == ReferenceProxyRenderProfile.STRUCTURAL
+                else enhancer_engine
+                or next(
+                    (
+                        item.capability.engine
+                        for item in self.enhancers
+                        if item.capability.provider == output.provider
+                        and item.capability.model == output.provider_model
+                    ),
+                    "ai_mannequin",
+                )
+            ),
+            engine_version=(
+                output.base_engine_version or engine.capability.version
+                if output.effective_render_profile
+                == ReferenceProxyRenderProfile.STRUCTURAL
+                else "1.0.0"
+            ),
+            requested_render_profile=output.requested_render_profile,
+            effective_render_profile=output.effective_render_profile,
+            privacy_mode=output.privacy_mode,
+            base_engine=output.base_engine,
+            base_engine_version=output.base_engine_version,
+            provider=output.provider,
+            provider_model=output.provider_model,
+            provider_request_id=output.provider_request_id,
+            raw_source_uploaded=output.raw_source_uploaded,
+            fallback_applied=output.fallback_applied,
+            fallback_reason=output.fallback_reason,
+            estimated_cost_micros=output.estimated_cost_micros,
+            actual_cost_micros=output.actual_cost_micros,
+            cost_estimate_known=output.cost_estimate_known,
+            actual_cost_known=output.actual_cost_known,
             identity_removed=True,
             validation_status="passed",
             validation_message=output.validation_message,
@@ -532,12 +842,12 @@ class ReferenceProxyService:
             quality_score=output.quality_score,
             quality_metrics=output.quality_metrics or {},
             manifest_relative_path=(
-                self.workspace.relative(root / output.manifest_path.name)
+                self.workspace.relative(_workspace_path(output.manifest_path))
                 if output.manifest_path is not None
                 else None
             ),
             quality_report_relative_path=(
-                self.workspace.relative(root / output.quality_report_path.name)
+                self.workspace.relative(_workspace_path(output.quality_report_path))
                 if output.quality_report_path is not None
                 else None
             ),

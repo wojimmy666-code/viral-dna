@@ -38,6 +38,13 @@ def _capability_response(
         hand_keypoints=item.hand_keypoints,
         video_tracking=item.video_tracking,
         runtime_provider=item.runtime_provider,
+        engine_class=item.engine_class,
+        render_profiles=list(item.render_profiles),
+        privacy_modes=list(item.privacy_modes),
+        provider=item.provider,
+        model=item.model,
+        estimated_unit_cost_micros=item.estimated_unit_cost_micros,
+        cost_estimate_known=item.cost_estimate_known,
     )
 
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowsOutSimple,
   CheckCircle,
@@ -72,6 +72,16 @@ function installBytes(value) {
   return `${(bytes / (1024 * 1024)).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
+function costLabel(item) {
+  if (item?.actual_cost_known) {
+    return `实际 ¥${(Number(item.actual_cost_micros || 0) / 1_000_000).toFixed(2)}`;
+  }
+  if (item?.cost_estimate_known) {
+    return `预计 ¥${(Number(item.estimated_cost_micros || 0) / 1_000_000).toFixed(2)}`;
+  }
+  return item?.effective_render_profile === "ai_enhanced" ? "费用待回传" : "本机免费";
+}
+
 export function VideoReferenceStrategyBar({
   busy,
   managedAssetBinding,
@@ -95,6 +105,10 @@ export function VideoReferenceStrategyBar({
   strategyError = "",
 }) {
   const [lightboxProxyId, setLightboxProxyId] = useState(null);
+  const [renderProfile, setRenderProfile] = useState("structural");
+  const [profileInitialized, setProfileInitialized] = useState(false);
+  const [fallbackToStructural, setFallbackToStructural] = useState(true);
+  const [allowUnknownCost, setAllowUnknownCost] = useState(false);
   const capability = policyOf(model);
   const policy = capability.policy || "unknown";
   const routeCapability = model?.capabilities?.reference_route || {};
@@ -125,6 +139,33 @@ export function VideoReferenceStrategyBar({
   );
   const imageProxyEngineReady = availableProxyKinds.has("pose_proxy_image");
   const videoProxyEngineReady = availableProxyKinds.has("motion_proxy_video");
+  const aiEnhancers = proxyEngineCapabilities.filter(
+    (item) => item.engine_class === "generative_remote",
+  );
+  const imageEnhancer = aiEnhancers.find(
+    (item) => (item.kinds || []).includes("pose_proxy_image"),
+  );
+  const videoEnhancer = aiEnhancers.find(
+    (item) => (item.kinds || []).includes("motion_proxy_video"),
+  );
+  const aiEnhancementAvailable = Boolean(imageEnhancer?.available || videoEnhancer?.available);
+  const videoCostApprovalRequired = Boolean(
+    renderProfile === "ai_enhanced"
+    && videoEnhancer?.available
+    && !videoEnhancer.cost_estimate_known
+    && !allowUnknownCost,
+  );
+  const imageCostApprovalRequired = Boolean(
+    renderProfile === "ai_enhanced"
+    && imageEnhancer?.available
+    && !imageEnhancer.cost_estimate_known
+    && !allowUnknownCost,
+  );
+  useEffect(() => {
+    if (profileInitialized || proxyEngineCapabilities.length < 1) return;
+    setRenderProfile(aiEnhancementAvailable ? "ai_enhanced" : "structural");
+    setProfileInitialized(true);
+  }, [aiEnhancementAvailable, profileInitialized, proxyEngineCapabilities.length]);
   const wholeBodyEngine = proxyEngineCapabilities.find(
     (item) => item.engine === "dwpose_wholebody_mannequin",
   );
@@ -146,6 +187,15 @@ export function VideoReferenceStrategyBar({
       meta: [proxyCreatedAt(item.created_at), item.engine].filter(Boolean).join(" · "),
       alt: "去除人物身份后的图片白模",
     }));
+  const proxyOptions = (enhancer) => ({
+    renderProfile,
+    privacyMode: renderProfile === "ai_enhanced"
+      ? "anonymous_structure_only"
+      : "local_only",
+    enhancerEngine: renderProfile === "ai_enhanced" ? enhancer?.engine || null : null,
+    fallbackToStructural,
+    allowUnknownCost,
+  });
 
   if (policy !== "managed_required" && !routeWantsProxy) {
     return (
@@ -260,14 +310,16 @@ export function VideoReferenceStrategyBar({
           && imageProxyEngineReady && (
           <button
             className="secondary-button compact"
-            disabled={busy}
+            disabled={busy || imageCostApprovalRequired}
             onClick={() => onCreateImageProxy?.({
               sourceCandidateId: firstImageSource.candidate.id,
               visualBeatId: firstImageSource.beat.id,
+              ...proxyOptions(imageEnhancer),
             })}
             type="button"
+            title={imageCostApprovalRequired ? "请先在白模生成质量中确认未知图片增强费用" : undefined}
           >
-            <ImageSquare size={16} />生成图片白模
+            <ImageSquare size={16} />{imageCostApprovalRequired ? "确认费用后生成图片白模" : "生成图片白模"}
           </button>
         )}
         {identityReady
@@ -276,16 +328,88 @@ export function VideoReferenceStrategyBar({
           && videoProxyEngineReady && (
           <button
             className="secondary-button compact"
-            disabled={busy}
+            disabled={busy || videoCostApprovalRequired}
             onClick={() => onCreateVideoProxy?.({
               visualBeatId: plan?.visual_beats?.[0]?.id,
+              ...proxyOptions(videoEnhancer),
             })}
             type="button"
+            title={videoCostApprovalRequired ? "请先在白模生成质量中确认未知视频增强费用" : undefined}
           >
-            <VideoCamera size={16} />生成原视频白模
+            <VideoCamera size={16} />{videoCostApprovalRequired ? "确认费用后生成视频白模" : "生成原视频白模"}
           </button>
         )}
       </div>
+      <details className="video-reference-quality-settings">
+        <summary>
+          <span>白模生成质量</span>
+          <strong>{renderProfile === "ai_enhanced" ? "AI 增强" : "本机结构"}</strong>
+        </summary>
+        <div className="video-reference-quality-body">
+          <div className="video-reference-quality-options" role="radiogroup" aria-label="白模生成质量">
+            <label className={renderProfile === "ai_enhanced" ? "selected" : ""}>
+              <input
+                checked={renderProfile === "ai_enhanced"}
+                name="reference-proxy-quality"
+                onChange={() => setRenderProfile("ai_enhanced")}
+                type="radio"
+              />
+              <span>
+                <strong>AI 增强</strong>
+                <small>先提取匿名结构，再由大模型渲染，完成后重新校验姿态与身份。</small>
+              </span>
+            </label>
+            <label className={renderProfile === "structural" ? "selected" : ""}>
+              <input
+                checked={renderProfile === "structural"}
+                name="reference-proxy-quality"
+                onChange={() => setRenderProfile("structural")}
+                type="radio"
+              />
+              <span>
+                <strong>本机结构</strong>
+                <small>DWPose 程序渲染，免费、稳定，适合作为安全回退。</small>
+              </span>
+            </label>
+          </div>
+          {renderProfile === "ai_enhanced" && (
+            <>
+              <div className="video-reference-enhancer-status">
+                {[imageEnhancer, videoEnhancer].filter(Boolean).map((item) => (
+                  <div data-available={item.available ? "true" : "false"} key={item.engine}>
+                    <strong>{(item.kinds || []).includes("pose_proxy_image") ? "图片" : "视频"} · {item.provider || "AI"}</strong>
+                    <span>{item.model || item.engine}</span>
+                    <small>{item.available ? "已就绪" : item.availability_note}</small>
+                  </div>
+                ))}
+              </div>
+              <p className="video-reference-privacy-note">
+                <ShieldCheck size={16} />远程模型只接收本机 DWPose 生成的匿名结构稿；原始人物图片和视频不会上传。
+              </p>
+              <label className="video-reference-quality-toggle">
+                <input
+                  checked={fallbackToStructural}
+                  onChange={(event) => setFallbackToStructural(event.target.checked)}
+                  type="checkbox"
+                />
+                AI 增强失败时自动保留本机结构白模
+              </label>
+              {[imageEnhancer, videoEnhancer].some(
+                (item) => item?.available && !item.cost_estimate_known,
+              ) && (
+                <label className="video-reference-quality-toggle warning">
+                  <input
+                    checked={allowUnknownCost}
+                    onChange={(event) => setAllowUnknownCost(event.target.checked)}
+                    type="checkbox"
+                  />
+                  允许 AI 增强费用由 Provider 完成后回传
+                </label>
+              )}
+            </>
+          )}
+        </div>
+      </details>
       {identityReady
         && capability.supports_pose_proxy_image
         && !imageProxyEngineReady
@@ -441,6 +565,11 @@ export function VideoReferenceStrategyBar({
                           proxy.identity_removed ? "身份已去除" : "身份未验证",
                           proxyQualityLabel(proxy),
                           proxyQualityScore(proxy),
+                          proxy.effective_render_profile === "ai_enhanced"
+                            ? `${proxy.provider || "AI"} 增强`
+                            : "本机结构",
+                          proxy.fallback_applied ? "已安全回退" : "",
+                          costLabel(proxy),
                           proxy.engine,
                         ]
                           .filter(Boolean)

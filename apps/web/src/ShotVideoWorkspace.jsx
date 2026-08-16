@@ -180,6 +180,9 @@ export function ShotVideoWorkspace({
   shots,
   videoDraft,
   videoGenerationSettings,
+  videoGenerationSettingsError = "",
+  videoGenerationSettingsStatus = "ready",
+  onReloadVideoGenerationSettings,
 }) {
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [durationAdjustmentMessage, setDurationAdjustmentMessage] = useState("");
@@ -284,6 +287,14 @@ export function ShotVideoWorkspace({
   const compatibleVideoModels = useMemo(
     () => videoModels.filter(supportsReferenceRoute),
     [videoModels],
+  );
+  const modelCatalogLoading = (
+    ["idle", "loading"].includes(videoGenerationSettingsStatus)
+    && compatibleVideoModels.length === 0
+  );
+  const modelCatalogFailed = (
+    videoGenerationSettingsStatus === "error"
+    && compatibleVideoModels.length === 0
   );
   const selectedModel = compatibleVideoModels.find(
     (item) => item.alias === videoDraft.modelAlias,
@@ -535,7 +546,11 @@ export function ShotVideoWorkspace({
       selectedModel.capabilities?.maximum_reference_images || 0,
     ),
   );
-  const generationBlockedReason = !videoGenerationSettings?.enabled
+  const generationBlockedReason = modelCatalogLoading
+    ? "正在读取视频模型目录，请稍候"
+    : modelCatalogFailed
+      ? "视频模型目录读取失败，请重新加载"
+    : !videoGenerationSettings?.enabled
     ? "视频生成尚未启用"
     : compatibleVideoModels.length === 0
       ? "没有已开放且具备可用参考素材路由的视频模型"
@@ -853,16 +868,15 @@ export function ShotVideoWorkspace({
               busy={busy || proxyEngineInstallBusy || proxyEngineLoadBusy}
               managedAssetBinding={managedAssetBinding}
               model={selectedModel}
-              onCreateImageProxy={({ sourceCandidateId, visualBeatId }) => onCreateReferenceProxy?.({
+              onCreateImageProxy={(options) => onCreateReferenceProxy?.({
+                ...options,
                 kind: "pose_proxy_image",
                 sourceKind: "image_candidate",
-                sourceCandidateId,
-                visualBeatId,
               })}
-              onCreateVideoProxy={({ visualBeatId }) => onCreateReferenceProxy?.({
+              onCreateVideoProxy={(options) => onCreateReferenceProxy?.({
+                ...options,
                 kind: "motion_proxy_video",
                 sourceKind: "source_shot_video",
-                visualBeatId,
               })}
               onDisableProxy={onDisableReferenceProxy}
               onDeleteProxy={onDeleteReferenceProxy}
@@ -925,6 +939,8 @@ export function ShotVideoWorkspace({
               generationBlockedReason={generationBlockedReason}
               latestFailure={latestFailure}
               latestRun={latestRun}
+              modelCatalogError={videoGenerationSettingsError}
+              modelCatalogStatus={videoGenerationSettingsStatus}
               modelSelectRef={modelSelectRef}
               onCancelRun={onCancelRun}
               onCandidateCountChange={(candidateCount) => setVideoDraft((current) => ({
@@ -935,6 +951,7 @@ export function ShotVideoWorkspace({
               onGenerate={onGenerate}
               onModelChange={selectVideoModel}
               onOpenModelSettings={onOpenModelSettings}
+              onReloadModels={onReloadVideoGenerationSettings}
               onResolutionChange={(resolution) => setVideoDraft((current) => ({
                 ...current,
                 resolution,

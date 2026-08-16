@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   videoCandidateCountOptions,
+  videoModelCatalogUiState,
   videoOutputSummary,
 } from "../src/video-generation-controls/video-generation-ui.js";
 
@@ -140,6 +141,57 @@ test("derives compact output summaries and candidate choices from model capabili
     videoCandidateCountOptions({ capabilities: { max_candidates: 9 } }),
     [1, 2, 3, 4],
   );
+});
+
+test("distinguishes a model catalog outage from a real empty catalog or missing key", () => {
+  const loading = videoModelCatalogUiState({ status: "loading" });
+  assert.equal(loading.loading, true);
+  assert.equal(loading.missingProviderKey, false);
+  assert.equal(loading.title, "正在读取视频模型");
+
+  const failed = videoModelCatalogUiState({
+    error: "API 暂时不可用",
+    status: "error",
+  });
+  assert.equal(failed.failed, true);
+  assert.equal(failed.missingProviderKey, false);
+  assert.equal(failed.subtitle, "API 暂时不可用");
+
+  const selectedModel = { alias: "seedance", label: "Seedance", provider: "volc_ark" };
+  const cached = videoModelCatalogUiState({
+    models: [selectedModel],
+    providers: [{ provider: "volc_ark", api_key_configured: true }],
+    selectedModel,
+    status: "error",
+  });
+  assert.equal(cached.usingCachedCatalog, true);
+  assert.equal(cached.providerReady, true);
+  assert.equal(cached.failed, false);
+
+  const missingKey = videoModelCatalogUiState({
+    models: [selectedModel],
+    providers: [{ provider: "volc_ark", api_key_configured: false }],
+    selectedModel,
+    status: "ready",
+  });
+  assert.equal(missingKey.missingProviderKey, true);
+  assert.match(missingKey.subtitle, /Key 未配置/);
+});
+
+test("recovers the video model catalog and exposes an actionable retry state", () => {
+  assert.match(appSource, /videoSettingsLoadedRef/);
+  assert.match(appSource, /async function loadVideoGenerationSettings/);
+  assert.match(appSource, /retryCount = 2/);
+  assert.match(appSource, /window\.addEventListener\("online", recoverVideoSettings\)/);
+  assert.match(appSource, /videoSettingsLoadState !== "error"[\s\S]*5000/);
+  assert.match(appSource, /videoGenerationSettingsStatus=\{videoSettingsLoadState\}/);
+  assert.match(productionWorkflowSource, /onReloadVideoGenerationSettings/);
+  assert.match(workspaceSource, /modelCatalogFailed/);
+  assert.match(workspaceSource, /onReloadModels=\{onReloadVideoGenerationSettings\}/);
+  assert.match(generationControlsSource, /modelCatalog\.missingProviderKey/);
+  assert.match(modelPopoverSource, /data-model-retry/);
+  assert.match(modelPopoverSource, /模型目录读取失败/);
+  assert.match(modelPopoverSource, /模型目录刷新失败/);
 });
 
 test("uses one prompt editor role in image and video workspaces", () => {

@@ -57,6 +57,26 @@ class ReferenceProxyKind(StrEnum):
     SILHOUETTE_VIDEO = "silhouette_video"
 
 
+class ReferenceProxyRenderProfile(StrEnum):
+    """Requested visual quality for an identity-free reference proxy."""
+
+    STRUCTURAL = "structural"
+    AI_ENHANCED = "ai_enhanced"
+
+
+class ReferenceProxyPrivacyMode(StrEnum):
+    """Which source class may cross a remote model boundary."""
+
+    LOCAL_ONLY = "local_only"
+    ANONYMOUS_STRUCTURE_ONLY = "anonymous_structure_only"
+    RAW_MEDIA_ALLOWED = "raw_media_allowed"
+
+
+class ReferenceProxyEngineClass(StrEnum):
+    DETERMINISTIC_LOCAL = "deterministic_local"
+    GENERATIVE_REMOTE = "generative_remote"
+
+
 class PersonContentClass(StrEnum):
     NO_PERSON = "no_person"
     REAL_PERSON = "real_person"
@@ -187,6 +207,25 @@ class ReferenceProxyAsset(BaseModel):
     sha256: str | None = Field(default=None, min_length=64, max_length=64)
     engine: str = Field(default="unassigned", min_length=1, max_length=80)
     engine_version: str = Field(default="unassigned", min_length=1, max_length=80)
+    requested_render_profile: ReferenceProxyRenderProfile = (
+        ReferenceProxyRenderProfile.STRUCTURAL
+    )
+    effective_render_profile: ReferenceProxyRenderProfile = (
+        ReferenceProxyRenderProfile.STRUCTURAL
+    )
+    privacy_mode: ReferenceProxyPrivacyMode = ReferenceProxyPrivacyMode.LOCAL_ONLY
+    base_engine: str | None = Field(default=None, max_length=80)
+    base_engine_version: str | None = Field(default=None, max_length=80)
+    provider: str | None = Field(default=None, max_length=80)
+    provider_model: str | None = Field(default=None, max_length=160)
+    provider_request_id: str | None = Field(default=None, max_length=300)
+    raw_source_uploaded: bool = False
+    fallback_applied: bool = False
+    fallback_reason: str | None = Field(default=None, max_length=1000)
+    estimated_cost_micros: int | None = Field(default=None, ge=0)
+    actual_cost_micros: int | None = Field(default=None, ge=0)
+    cost_estimate_known: bool = False
+    actual_cost_known: bool = False
     person_class: PersonContentClass = PersonContentClass.NON_PHOTOREAL_PROXY
     identity_removed: bool = False
     validation_status: Literal["pending", "passed", "failed"] = "pending"
@@ -227,6 +266,18 @@ class ReferenceProxyAsset(BaseModel):
                 raise ValueError("已就绪的动作代理必须包含文件路径和摘要")
             if not self.identity_removed or self.validation_status != "passed":
                 raise ValueError("动作代理只有在身份去除校验通过后才能标记为就绪")
+        if (
+            self.privacy_mode == ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY
+            and self.raw_source_uploaded
+        ):
+            raise ValueError("仅上传匿名结构稿时不得标记为已上传原始素材")
+        if self.effective_render_profile == ReferenceProxyRenderProfile.AI_ENHANCED:
+            if not self.provider or not self.provider_model:
+                raise ValueError("AI 增强白模必须记录 Provider 与模型")
+            if self.privacy_mode == ReferenceProxyPrivacyMode.LOCAL_ONLY:
+                raise ValueError("远程 AI 增强不能标记为仅本机处理")
+        if self.fallback_applied and not self.fallback_reason:
+            raise ValueError("白模发生回退时必须记录原因")
         return self
 
     @property

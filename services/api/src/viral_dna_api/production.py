@@ -2887,6 +2887,11 @@ class ProductionService:
                 kind=payload.kind,
                 visual_beat_id=payload.visual_beat_id,
                 order=payload.order,
+                render_profile=payload.render_profile,
+                privacy_mode=payload.privacy_mode,
+                enhancer_engine=payload.enhancer_engine,
+                fallback_to_structural=payload.fallback_to_structural,
+                allow_unknown_cost=payload.allow_unknown_cost,
             )
         except ReferenceProxyServiceError as exc:
             raise _fail(exc.status_code, exc.code, str(exc)) from exc
@@ -2941,6 +2946,13 @@ class ProductionService:
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
                     "active_step": ProductionStep.SHOT_VIDEOS,
+                    "estimated_cost_micros": (
+                        project.estimated_cost_micros
+                        + (proxy.estimated_cost_micros or 0)
+                    ),
+                    "actual_cost_micros": (
+                        project.actual_cost_micros + (proxy.actual_cost_micros or 0)
+                    ),
                     "updated_at": utc_now(),
                 }
             )

@@ -33,8 +33,6 @@ from .managed_assets import ManagedAssetCatalogService
 from .managed_assets.routes import create_managed_asset_router
 from .media import get_analysis_artifact_root
 from .model_settings import ModelSettingsService, ModelSettingsServiceError
-from .prompt_engine.routes import create_prompt_draft_router
-from .prompt_engine.service import PromptDraftService
 from .models import (
     AnalysisCostSummary,
     AnalysisCreate,
@@ -173,6 +171,8 @@ from .production import (
     ProductionServiceError,
 )
 from .project_assets import ProjectAssetService
+from .prompt_engine.routes import create_prompt_draft_router
+from .prompt_engine.service import PromptDraftService
 from .quality.continuity_service import ContinuityService
 from .quality.routes import create_continuity_router
 from .real_pipeline import HybridAnalysisPipeline
@@ -263,7 +263,6 @@ app.add_middleware(
 model_settings_service = ModelSettingsService()
 image_generation_settings_service = ImageGenerationSettingsService()
 managed_asset_service = ManagedAssetCatalogService()
-reference_proxy_service = ReferenceProxyService(workspace_manager)
 video_generation_settings_service = VideoGenerationSettingsService(
     managed_assets=managed_asset_service
 )
@@ -278,6 +277,11 @@ video_generation_gateway = VideoGenerationGateway(
     workspace_manager,
     settings_service=video_generation_settings_service,
     repository=store,
+)
+reference_proxy_service = ReferenceProxyService(
+    workspace_manager,
+    image_gateway=image_generation_gateway,
+    video_settings=video_generation_settings_service,
 )
 account_context_service = create_account_context_service(workspace_manager)
 platform_connection_service = create_platform_connection_service(account_context_service)

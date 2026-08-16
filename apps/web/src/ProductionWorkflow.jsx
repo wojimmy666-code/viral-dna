@@ -1146,11 +1146,14 @@ export function ProductionHub({
   resolveUrl,
   imageGenerationSettings = DEFAULT_PRODUCTION_IMAGE_SETTINGS,
   videoGenerationSettings = DEFAULT_PRODUCTION_VIDEO_SETTINGS,
+  videoGenerationSettingsError = "",
+  videoGenerationSettingsStatus = "ready",
   listSignal = 0,
   navigationTarget = null,
   onNavigationChange,
   onNotificationsChanged,
   onOpenModelSettings,
+  onReloadVideoGenerationSettings,
   onProjectsChanged,
   onNotice,
 }) {
@@ -2307,6 +2310,11 @@ export function ProductionHub({
     sourceKind,
     sourceCandidateId = null,
     visualBeatId,
+    renderProfile = "structural",
+    privacyMode = null,
+    enhancerEngine = null,
+    fallbackToStructural = true,
+    allowUnknownCost = false,
   }) {
     if (!shotDetail?.plan || !detail?.project || !visualBeatId) return false;
     let succeeded = false;
@@ -2323,6 +2331,11 @@ export function ProductionHub({
             visual_beat_id: visualBeatId,
             kind,
             order: 1,
+            render_profile: renderProfile,
+            privacy_mode: privacyMode,
+            enhancer_engine: enhancerEngine,
+            fallback_to_structural: fallbackToStructural,
+            allow_unknown_cost: allowUnknownCost,
           }),
         },
       );
@@ -2338,8 +2351,10 @@ export function ProductionHub({
         ? "视频动作白模"
         : "图片姿态白模";
       onNotice(
-        response.proxy.semantic_validation_status === "passed"
-          ? `${proxyLabel}已通过校验并自动启用`
+        response.proxy.fallback_applied
+          ? `${proxyLabel}的 AI 增强未通过，已安全回退到本机结构白模`
+          : response.proxy.semantic_validation_status === "passed"
+            ? `${proxyLabel}${response.proxy.effective_render_profile === "ai_enhanced" ? "已完成 AI 增强，" : ""}已通过校验并自动启用`
           : `${proxyLabel}已生成，但姿态质量需要复核，暂未启用`,
       );
       succeeded = true;
@@ -3225,6 +3240,7 @@ export function ProductionHub({
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}
                 onOpenModelSettings={onOpenModelSettings}
+                onReloadVideoGenerationSettings={onReloadVideoGenerationSettings}
                 onReject={rejectVideoCandidate}
                 onRetryRun={retryVideoGeneration}
                 onRunContinuity={runContinuityCheck}
@@ -3242,6 +3258,8 @@ export function ProductionHub({
                 shots={shots}
                 videoDraft={videoDraft}
                 videoGenerationSettings={videoGenerationSettings}
+                videoGenerationSettingsError={videoGenerationSettingsError}
+                videoGenerationSettingsStatus={videoGenerationSettingsStatus}
               />
             )}
             {activeSection === "editing" && (

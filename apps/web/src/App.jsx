@@ -535,6 +535,8 @@ export function App() {
   const [serverVideoSettings, setServerVideoSettings] = useState(
     DEFAULT_VIDEO_GENERATION_SETTINGS,
   );
+  const [videoSettingsLoadState, setVideoSettingsLoadState] = useState("idle");
+  const [videoSettingsLoadError, setVideoSettingsLoadError] = useState("");
   const [settingsDraft, setSettingsDraft] = useState({
     ...initialModelSettings,
     ...imageSettingsDraft(),
@@ -623,6 +625,9 @@ export function App() {
   const historyRequestIdRef = useRef(0);
   const recordRouteRequestIdRef = useRef(0);
   const productionRequestIdRef = useRef(0);
+  const videoSettingsRequestIdRef = useRef(0);
+  const videoSettingsLoadedRef = useRef(false);
+  const videoSettingsLoadStateRef = useRef("idle");
   const importSectionRef = useRef(null);
   const reportSectionRef = useRef(null);
   const videoRef = useRef(null);
@@ -702,6 +707,34 @@ export function App() {
     refreshHistory({ quiet: true }).catch(() => undefined);
     loadPlatformConnections({ quiet: true }).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const recoverVideoSettings = () => {
+      if (videoSettingsLoadStateRef.current === "loading") return;
+      if (
+        videoSettingsLoadedRef.current
+        && videoSettingsLoadStateRef.current !== "error"
+      ) return;
+      loadVideoGenerationSettings({ quiet: true, retryCount: 1 }).catch(() => undefined);
+    };
+    window.addEventListener("online", recoverVideoSettings);
+    window.addEventListener("focus", recoverVideoSettings);
+    return () => {
+      window.removeEventListener("online", recoverVideoSettings);
+      window.removeEventListener("focus", recoverVideoSettings);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      videoSettingsLoadState !== "error"
+      || videoSettingsLoadedRef.current
+    ) return undefined;
+    const timer = window.setTimeout(() => {
+      loadVideoGenerationSettings({ quiet: true, retryCount: 1 }).catch(() => undefined);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [videoSettingsLoadState]);
 
   useEffect(() => {
     if (activeNav !== "platform-connections") return;
@@ -796,17 +829,56 @@ export function App() {
     return next;
   }
 
+  function updateVideoSettingsLoadState(nextState) {
+    videoSettingsLoadStateRef.current = nextState;
+    setVideoSettingsLoadState(nextState);
+  }
+
+  async function loadVideoGenerationSettings({ quiet = false, retryCount = 2 } = {}) {
+    const requestId = ++videoSettingsRequestIdRef.current;
+    const hasCachedCatalog = videoSettingsLoadedRef.current;
+    if (!quiet || !hasCachedCatalog) updateVideoSettingsLoadState("loading");
+    setVideoSettingsLoadError("");
+
+    let lastError = null;
+    for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+      try {
+        const next = await apiRequest("/settings/video-generation");
+        if (requestId === videoSettingsRequestIdRef.current) {
+          setServerVideoSettings(next);
+          videoSettingsLoadedRef.current = true;
+          updateVideoSettingsLoadState("ready");
+          setVideoSettingsLoadError("");
+        }
+        return next;
+      } catch (requestError) {
+        lastError = requestError;
+        if (attempt < retryCount) {
+          await new Promise((resolve) => {
+            window.setTimeout(resolve, 250 * (2 ** attempt));
+          });
+        }
+      }
+    }
+
+    if (requestId === videoSettingsRequestIdRef.current) {
+      updateVideoSettingsLoadState("error");
+      setVideoSettingsLoadError(
+        lastError?.message || "视频模型目录读取失败，请重新加载",
+      );
+    }
+    throw lastError || new Error("视频模型目录读取失败");
+  }
+
   async function loadGenerationSettings() {
     const [imageResult, videoResult] = await Promise.allSettled([
       apiRequest("/settings/image-generation"),
-      apiRequest("/settings/video-generation"),
+      loadVideoGenerationSettings(),
     ]);
     if (imageResult.status === "fulfilled") {
       setServerImageSettings(imageResult.value);
     }
-    if (videoResult.status === "fulfilled") {
-      setServerVideoSettings(videoResult.value);
-    }
+    return { imageResult, videoResult };
   }
 
   function resetProductionWorkspace() {
@@ -1024,7 +1096,7 @@ export function App() {
       const [remote, imageRemote, videoRemote, nextWorkspace] = await Promise.all([
         apiRequest("/settings/model"),
         apiRequest("/settings/image-generation"),
-        apiRequest("/settings/video-generation"),
+        loadVideoGenerationSettings({ retryCount: 1 }),
         apiRequest("/workspace"),
       ]);
       setWorkspaceInfo(nextWorkspace);
@@ -1034,6 +1106,9 @@ export function App() {
       setServerModelSettings(remote);
       setServerImageSettings(imageRemote);
       setServerVideoSettings(videoRemote);
+      videoSettingsLoadedRef.current = true;
+      updateVideoSettingsLoadState("ready");
+      setVideoSettingsLoadError("");
       setSettingsDraft({
         targetModel,
         analysisProfile,
@@ -1460,7 +1535,11 @@ export function App() {
           }),
         }),
       });
+      videoSettingsRequestIdRef.current += 1;
       setServerVideoSettings(videoRemote);
+      videoSettingsLoadedRef.current = true;
+      updateVideoSettingsLoadState("ready");
+      setVideoSettingsLoadError("");
 
       const nextSettings = {
         targetModel: settingsDraft.targetModel,
@@ -2023,6 +2102,10 @@ export function App() {
     setRecordWorkspaceMode(mode);
     if (mode !== "production") setActiveProductionProjectName("");
     if (mode === "production" && video?.record_id) {
+      loadVideoGenerationSettings({
+        quiet: videoSettingsLoadedRef.current,
+        retryCount: 1,
+      }).catch(() => undefined);
       loadProductions(video.record_id, { quiet: productionProjects.length > 0 }).catch(() => undefined);
     }
   }
@@ -2306,6 +2389,8 @@ export function App() {
                     error={productionsError}
                     imageGenerationSettings={serverImageSettings}
                     videoGenerationSettings={serverVideoSettings}
+                    videoGenerationSettingsError={videoSettingsLoadError}
+                    videoGenerationSettingsStatus={videoSettingsLoadState}
                     listSignal={productionListSignal}
                     loading={productionsLoading}
                     navigationTarget={notificationTarget}
@@ -2313,6 +2398,9 @@ export function App() {
                     onNotificationsChanged={refreshNotifications}
                     onNotice={showNotice}
                     onOpenModelSettings={openModelSettings}
+                    onReloadVideoGenerationSettings={() => (
+                      loadVideoGenerationSettings({ retryCount: 1 })
+                    )}
                     onProjectsChanged={() => loadProductions(video.record_id, { quiet: true })}
                     projects={productionProjects}
                     recordId={video.record_id}

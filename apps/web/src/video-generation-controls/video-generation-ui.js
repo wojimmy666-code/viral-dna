@@ -22,6 +22,56 @@ export function isVideoModelConfigured(model, providers = []) {
   return Boolean(providerSettingForModel(model, providers)?.api_key_configured);
 }
 
+export function videoModelCatalogUiState({
+  error = "",
+  models = [],
+  providers = [],
+  selectedModel = null,
+  status = "ready",
+} = {}) {
+  const hasModels = models.length > 0;
+  const loading = ["idle", "loading"].includes(status) && !hasModels;
+  const refreshing = status === "loading" && hasModels;
+  const failed = status === "error" && !hasModels;
+  const usingCachedCatalog = status === "error" && hasModels;
+  const providerReady = Boolean(
+    selectedModel && isVideoModelConfigured(selectedModel, providers),
+  );
+  const missingProviderKey = Boolean(selectedModel && !providerReady);
+
+  let title = selectedModel?.label || "选择视频模型";
+  let subtitle = "请选择一个可用模型";
+  if (loading) {
+    title = "正在读取视频模型";
+    subtitle = "正在同步模型目录";
+  } else if (failed) {
+    title = "模型目录读取失败";
+    subtitle = error || "请重新加载视频模型目录";
+  } else if (selectedModel) {
+    const providerLabel = videoProviderLabel(selectedModel, providers);
+    subtitle = providerReady
+      ? providerLabel
+      : `${providerLabel} · Key 未配置`;
+  } else if (!hasModels) {
+    subtitle = "暂无具备可用参考素材路由的模型";
+  } else if (usingCachedCatalog) {
+    subtitle = "目录刷新失败，可继续使用上次结果";
+  }
+
+  return {
+    failed,
+    hasModels,
+    loading,
+    missingProviderKey,
+    providerReady,
+    refreshing,
+    shouldReload: failed || usingCachedCatalog,
+    subtitle,
+    title,
+    usingCachedCatalog,
+  };
+}
+
 export function videoModelCapabilitySummary(model, providers = []) {
   const resolutions = model?.capabilities?.supported_resolutions || [];
   const resolutionLabel = resolutions.length > 0

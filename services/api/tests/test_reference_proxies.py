@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+import pytest
 from fastapi import FastAPI
 
 from viral_dna_api.models import (
@@ -16,8 +17,11 @@ from viral_dna_api.models import (
 )
 from viral_dna_api.video_references.domain import (
     PersonContentClass,
+    ReferenceProxyEngineClass,
     ReferenceProxyKind,
+    ReferenceProxyPrivacyMode,
     ReferenceProxyQualityStatus,
+    ReferenceProxyRenderProfile,
     ReferenceProxyStatus,
     VideoReferenceBinding,
     VideoReferenceMediaType,
@@ -26,10 +30,15 @@ from viral_dna_api.video_references.domain import (
 )
 from viral_dna_api.video_references.proxies.contracts import (
     ProxyEngineCapability,
+    ProxyEnhancementError,
+    ProxyEnhancementRequest,
     ProxyGenerationOutput,
 )
 from viral_dna_api.video_references.proxies.dwpose.engine import DWPoseWholeBodyEngine
-from viral_dna_api.video_references.proxies.service import ReferenceProxyService
+from viral_dna_api.video_references.proxies.service import (
+    ReferenceProxyService,
+    ReferenceProxyServiceError,
+)
 from viral_dna_api.video_references.routes import create_video_reference_router
 from viral_dna_api.workspace import WorkspaceManager
 
@@ -83,6 +92,82 @@ class FakeBrowserVideoEncoder:
         self.calls.append((source_path, preview_path))
         preview_path.write_bytes(b"browser-compatible-h264-preview")
         return preview_path
+
+
+class FakeProxyEnhancer:
+    capability = ProxyEngineCapability(
+        engine="fake_ai_mannequin",
+        version="test",
+        kinds=(
+            ReferenceProxyKind.SILHOUETTE_IMAGE,
+            ReferenceProxyKind.SILHOUETTE_VIDEO,
+        ),
+        available=True,
+        production_ready=True,
+        engine_class=ReferenceProxyEngineClass.GENERATIVE_REMOTE,
+        render_profiles=(ReferenceProxyRenderProfile.AI_ENHANCED,),
+        privacy_modes=(ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY,),
+        provider="fake-provider",
+        model="fake-mannequin-v1",
+        estimated_unit_cost_micros=120_000,
+        cost_estimate_known=True,
+    )
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.requests: list[ProxyEnhancementRequest] = []
+
+    async def enhance(self, request: ProxyEnhancementRequest) -> ProxyGenerationOutput:
+        self.requests.append(request)
+        # The privacy boundary is observable in the test: the enhancer receives the
+        # locally anonymized base proxy, never the original person image.
+        assert request.base_output.path.read_bytes() == b"privacy-proxy-without-source-pixels"
+        assert request.privacy_mode == ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY
+        if self.fail:
+            raise ProxyEnhancementError(
+                "remote mannequin quality gate failed",
+                provider=self.capability.provider,
+                provider_model=self.capability.model,
+                provider_request_id="failed-provider-request",
+                estimated_cost_micros=120_000,
+                actual_cost_micros=110_000,
+                cost_estimate_known=True,
+                actual_cost_known=True,
+            )
+
+        request.destination_path.parent.mkdir(parents=True, exist_ok=True)
+        request.destination_path.write_bytes(b"ai-enhanced-anonymous-proxy")
+        request.thumbnail_path.write_bytes(b"ai-enhanced-thumbnail")
+        manifest_path = request.destination_path.with_name("pose-manifest.json")
+        quality_path = request.destination_path.with_name("quality-report.json")
+        manifest_path.write_text("{}", encoding="utf-8")
+        quality_path.write_text("{}", encoding="utf-8")
+        return ProxyGenerationOutput(
+            path=request.destination_path,
+            thumbnail_path=request.thumbnail_path,
+            media_type=request.base_output.media_type,
+            identity_removed=True,
+            validation_message="AI mannequin passed privacy and pose checks",
+            semantic_validation_status=ReferenceProxyQualityStatus.PASSED,
+            quality_score=0.97,
+            quality_metrics={"raw_source_uploaded": False},
+            manifest_path=manifest_path,
+            quality_report_path=quality_path,
+            model_sha256="c" * 64,
+            requested_render_profile=ReferenceProxyRenderProfile.AI_ENHANCED,
+            effective_render_profile=ReferenceProxyRenderProfile.AI_ENHANCED,
+            privacy_mode=request.privacy_mode,
+            base_engine=request.base_output.base_engine,
+            base_engine_version=request.base_output.base_engine_version,
+            provider=self.capability.provider,
+            provider_model=self.capability.model,
+            provider_request_id="fake-request-id",
+            raw_source_uploaded=False,
+            estimated_cost_micros=120_000,
+            actual_cost_micros=110_000,
+            cost_estimate_known=True,
+            actual_cost_known=True,
+        )
 
 
 class FakeInstallableModelManager:
@@ -302,6 +387,162 @@ def test_image_and_source_video_proxies_are_distinct_persistable_assets(
             )
             assert strategy_response.status_code == 200
             assert strategy_response.json()["selected_proxy_count"] == 1
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+def test_ai_enhanced_proxy_only_sends_anonymous_structure_and_records_cost(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+        workspace = WorkspaceManager()
+        enhancer = FakeProxyEnhancer()
+        service = ReferenceProxyService(
+            workspace,
+            engines=[FakeProxyEngine()],
+            enhancers=[enhancer],
+        )
+        project, shot = _project_and_shot()
+        source_image = workspace.root / "real-person-source.png"
+        source_image.write_bytes(b"raw-person-pixels-must-stay-local")
+        candidate = GenerationCandidate(
+            generation_run_id=uuid4(),
+            ordinal=1,
+            kind=GenerationKind.IMAGE,
+            relative_path=workspace.relative(source_image),
+            sha256="a" * 64,
+            metadata_relative_path="source-image.json",
+        )
+
+        proxy = await service.generate(
+            project=project,
+            shot=shot,
+            source_candidate=candidate,
+            kind=ReferenceProxyKind.SILHOUETTE_IMAGE,
+            visual_beat_id=shot.visual_beats[0].id,
+            render_profile=ReferenceProxyRenderProfile.AI_ENHANCED,
+            privacy_mode=ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY,
+            enhancer_engine="fake_ai_mannequin",
+        )
+
+        assert len(enhancer.requests) == 1
+        request = enhancer.requests[0]
+        assert request.base_output.path != _filesystem_path(source_image)
+        assert request.base_output.raw_source_uploaded is False
+        assert proxy.requested_render_profile == ReferenceProxyRenderProfile.AI_ENHANCED
+        assert proxy.effective_render_profile == ReferenceProxyRenderProfile.AI_ENHANCED
+        assert proxy.provider == "fake-provider"
+        assert proxy.provider_model == "fake-mannequin-v1"
+        assert proxy.provider_request_id == "fake-request-id"
+        assert proxy.raw_source_uploaded is False
+        assert proxy.fallback_applied is False
+        assert proxy.estimated_cost_micros == 120_000
+        assert proxy.actual_cost_micros == 110_000
+        assert proxy.usable_for_generation is True
+        assert _filesystem_path(workspace.resolve(proxy.relative_path)).read_bytes() == (
+            b"ai-enhanced-anonymous-proxy"
+        )
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+def test_ai_enhancer_failure_falls_back_to_structural_proxy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+        workspace = WorkspaceManager()
+        enhancer = FakeProxyEnhancer(fail=True)
+        service = ReferenceProxyService(
+            workspace,
+            engines=[FakeProxyEngine()],
+            enhancers=[enhancer],
+        )
+        project, shot = _project_and_shot()
+        source_image = workspace.root / "real-person-source.png"
+        source_image.write_bytes(b"raw-person-pixels-must-stay-local")
+        candidate = GenerationCandidate(
+            generation_run_id=uuid4(),
+            ordinal=1,
+            kind=GenerationKind.IMAGE,
+            relative_path=workspace.relative(source_image),
+            sha256="a" * 64,
+            metadata_relative_path="source-image.json",
+        )
+
+        proxy = await service.generate(
+            project=project,
+            shot=shot,
+            source_candidate=candidate,
+            kind=ReferenceProxyKind.SILHOUETTE_IMAGE,
+            visual_beat_id=shot.visual_beats[0].id,
+            render_profile=ReferenceProxyRenderProfile.AI_ENHANCED,
+            privacy_mode=ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY,
+            enhancer_engine="fake_ai_mannequin",
+            fallback_to_structural=True,
+        )
+
+        assert proxy.requested_render_profile == ReferenceProxyRenderProfile.AI_ENHANCED
+        assert proxy.effective_render_profile == ReferenceProxyRenderProfile.STRUCTURAL
+        assert proxy.fallback_applied is True
+        assert "quality gate failed" in proxy.fallback_reason
+        assert proxy.provider_request_id == "failed-provider-request"
+        assert proxy.estimated_cost_micros == 120_000
+        assert proxy.actual_cost_micros == 110_000
+        assert proxy.raw_source_uploaded is False
+        assert _filesystem_path(workspace.resolve(proxy.relative_path)).read_bytes() == (
+            b"privacy-proxy-without-source-pixels"
+        )
+
+    import asyncio
+
+    asyncio.run(scenario())
+
+
+def test_ai_enhancer_failure_can_be_configured_to_fail_closed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+        workspace = WorkspaceManager()
+        service = ReferenceProxyService(
+            workspace,
+            engines=[FakeProxyEngine()],
+            enhancers=[FakeProxyEnhancer(fail=True)],
+        )
+        project, shot = _project_and_shot()
+        source_image = workspace.root / "real-person-source.png"
+        source_image.write_bytes(b"raw-person-pixels-must-stay-local")
+        candidate = GenerationCandidate(
+            generation_run_id=uuid4(),
+            ordinal=1,
+            kind=GenerationKind.IMAGE,
+            relative_path=workspace.relative(source_image),
+            sha256="a" * 64,
+            metadata_relative_path="source-image.json",
+        )
+
+        with pytest.raises(ReferenceProxyServiceError) as exc_info:
+            await service.generate(
+                project=project,
+                shot=shot,
+                source_candidate=candidate,
+                kind=ReferenceProxyKind.SILHOUETTE_IMAGE,
+                visual_beat_id=shot.visual_beats[0].id,
+                render_profile=ReferenceProxyRenderProfile.AI_ENHANCED,
+                privacy_mode=ReferenceProxyPrivacyMode.ANONYMOUS_STRUCTURE_ONLY,
+                enhancer_engine="fake_ai_mannequin",
+                fallback_to_structural=False,
+            )
+        assert exc_info.value.code == "reference_proxy_generation_failed"
 
     import asyncio
 

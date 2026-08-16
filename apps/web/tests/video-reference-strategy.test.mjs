@@ -79,6 +79,28 @@ test("persists generated proxy assets before they are used", () => {
   assert.match(workflowSource, /onCreateReferenceProxy=\{createReferenceProxy\}/);
 });
 
+test("offers AI-enhanced proxy quality with an explicit anonymous privacy boundary", () => {
+  assert.match(strategySource, /renderProfile/);
+  assert.match(strategySource, /ai_enhanced/);
+  assert.match(strategySource, /structural/);
+  assert.match(strategySource, /anonymous_structure_only/);
+  assert.match(strategySource, /generative_remote/);
+  assert.match(strategySource, /fallbackToStructural/);
+  assert.match(strategySource, /allowUnknownCost/);
+  assert.match(strategySource, /cost_estimate_known/);
+  assert.match(strategyStyles, /\.video-reference-quality-settings/);
+  assert.match(strategyStyles, /\.video-reference-privacy-note/);
+});
+
+test("forwards AI proxy profile, privacy, fallback and cost consent to the API", () => {
+  assert.match(workflowSource, /render_profile: renderProfile/);
+  assert.match(workflowSource, /privacy_mode: privacyMode/);
+  assert.match(workflowSource, /enhancer_engine: enhancerEngine/);
+  assert.match(workflowSource, /fallback_to_structural: fallbackToStructural/);
+  assert.match(workflowSource, /allow_unknown_cost: allowUnknownCost/);
+  assert.match(workspaceSource, /\.\.\.options/);
+});
+
 test("lets users disable a proxy without deleting its historical asset", () => {
   assert.match(strategySource, /boundProxyIds/);
   assert.match(strategySource, /停用但保留历史白模资产/);

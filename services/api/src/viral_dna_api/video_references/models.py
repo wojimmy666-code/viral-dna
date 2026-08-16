@@ -8,7 +8,10 @@ from pydantic import BaseModel, Field, model_validator
 from .domain import (
     PersonReferencePolicy,
     ReferenceProxyAsset,
+    ReferenceProxyEngineClass,
     ReferenceProxyKind,
+    ReferenceProxyPrivacyMode,
+    ReferenceProxyRenderProfile,
 )
 
 
@@ -23,6 +26,19 @@ class ReferenceProxyCapabilityResponse(BaseModel):
     hand_keypoints: bool = False
     video_tracking: bool = False
     runtime_provider: str = ""
+    engine_class: ReferenceProxyEngineClass = (
+        ReferenceProxyEngineClass.DETERMINISTIC_LOCAL
+    )
+    render_profiles: list[ReferenceProxyRenderProfile] = Field(
+        default_factory=lambda: [ReferenceProxyRenderProfile.STRUCTURAL]
+    )
+    privacy_modes: list[ReferenceProxyPrivacyMode] = Field(
+        default_factory=lambda: [ReferenceProxyPrivacyMode.LOCAL_ONLY]
+    )
+    provider: str | None = None
+    model: str | None = None
+    estimated_unit_cost_micros: int | None = Field(default=None, ge=0)
+    cost_estimate_known: bool = False
 
 
 class ProxyEngineInstallationResponse(BaseModel):
@@ -48,6 +64,16 @@ class ReferenceProxyCreate(BaseModel):
     visual_beat_id: UUID
     kind: ReferenceProxyKind
     order: int = Field(default=1, ge=1, le=100)
+    render_profile: ReferenceProxyRenderProfile = ReferenceProxyRenderProfile.STRUCTURAL
+    privacy_mode: ReferenceProxyPrivacyMode | None = None
+    enhancer_engine: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
+    fallback_to_structural: bool = True
+    allow_unknown_cost: bool = False
 
     @model_validator(mode="after")
     def validate_source_kind(self) -> ReferenceProxyCreate:
@@ -66,6 +92,13 @@ class ReferenceProxyCreate(BaseModel):
             raise ValueError("原视频分镜来源不需要 source_candidate_id")
         if video_kind and self.order < 1:
             raise ValueError("视频动作代理顺序无效")
+        if self.render_profile == ReferenceProxyRenderProfile.STRUCTURAL:
+            if self.enhancer_engine is not None:
+                raise ValueError("本机结构白模不能指定 AI 增强引擎")
+            if self.privacy_mode not in {None, ReferenceProxyPrivacyMode.LOCAL_ONLY}:
+                raise ValueError("本机结构白模只能使用仅本机隐私模式")
+        elif self.privacy_mode == ReferenceProxyPrivacyMode.LOCAL_ONLY:
+            raise ValueError("AI 增强需要允许上传无身份结构稿")
         return self
 
 
