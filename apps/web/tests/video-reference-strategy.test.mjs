@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const strategySource = readFileSync(
-  new URL("../src/video-references/VideoReferenceStrategyBar.jsx", import.meta.url),
+const panelSource = readFileSync(
+  new URL("../src/video-controls/DepthControlPanel.jsx", import.meta.url),
   "utf8",
 );
-const strategyStyles = readFileSync(
-  new URL("../src/video-references/video-references.css", import.meta.url),
+const panelStyles = readFileSync(
+  new URL("../src/video-controls/depth-control.css", import.meta.url),
   "utf8",
 );
 const workspaceSource = readFileSync(
@@ -19,131 +19,56 @@ const workflowSource = readFileSync(
   "utf8",
 );
 
-test("renders model-specific identity and motion routes", () => {
-  assert.match(strategySource, /policy !== "managed_required"/);
-  assert.match(strategySource, /人物与动作来源/);
-  assert.match(strategySource, /routeCapability\.show_motion_proxy_controls/);
-  assert.match(strategySource, /strategy\?\.motion_semantics === "structural_control"/);
-  assert.match(strategySource, /生成依据与中间过程/);
-  assert.match(strategySource, /已回退 · 动作还原较弱/);
+test("renders identity, appearance and full-scene depth as separate sources", () => {
+  assert.match(panelSource, /className="depth-source-grid"/);
+  assert.match(panelSource, /managedAssetBinding/);
+  assert.match(panelSource, /appearanceCount/);
+  assert.match(panelSource, /activeDepth/);
+  assert.match(panelSource, /full_scene_depth_video|depth_control_assets/);
 });
 
-test("keeps full-width route details from crushing the strategy summary", () => {
-  assert.match(
-    strategyStyles,
-    /\.video-reference-strategy\s*\{[^}]*flex-wrap:\s*wrap;/s,
-  );
-  assert.match(
-    strategyStyles,
-    /\.video-reference-strategy-copy\s*\{[^}]*flex:\s*1 1 320px;/s,
-  );
-  assert.match(
-    strategyStyles,
-    /\.video-reference-route-details\s*\{[^}]*flex:\s*1 0 100%;[^}]*width:\s*100%;/s,
-  );
-  assert.doesNotMatch(
-    strategyStyles,
-    /> div:not\(\.video-reference-strategy-actions\)/,
-  );
+test("keeps depth controls advanced and collapsed by default", () => {
+  assert.match(panelSource, /<details className="depth-control-advanced">/);
+  assert.doesNotMatch(panelSource, /<details className="depth-control-advanced" open/);
+  assert.match(panelSource, /sourceVideoUrl/);
+  assert.match(panelSource, /thumbnail: true/);
+  assert.match(panelSource, /<video/);
 });
 
-test("offers distinct image and source-video privacy proxies", () => {
-  assert.match(strategySource, /生成图片白模/);
-  assert.match(strategySource, /生成原视频白模/);
-  assert.match(workspaceSource, /kind: "pose_proxy_image"/);
-  assert.match(workspaceSource, /kind: "motion_proxy_video"/);
-  assert.match(workspaceSource, /sourceKind: "source_shot_video"/);
+test("persists depth assets through dedicated create toggle and delete endpoints", () => {
+  assert.match(workflowSource, /async function createDepthControl/);
+  assert.match(workflowSource, /\/depth-controls\/shots\/\$\{shotDetail\.plan\.id\}/);
+  assert.match(workflowSource, /async function toggleDepthControl/);
+  assert.match(workflowSource, /async function deleteDepthControl/);
+  assert.match(workflowSource, /onCreateDepthControl=\{createDepthControl\}/);
+  assert.match(workflowSource, /onDeleteDepthControl=\{deleteDepthControl\}/);
+  assert.match(workflowSource, /onToggleDepthControl=\{toggleDepthControl\}/);
 });
 
-test("installs a checksum-pinned WholeBody engine and gates proxy enablement by quality", () => {
-  assert.match(workspaceSource, /proxy-engines\/\$\{encodeURIComponent\(engineName\)\}\/install/);
-  assert.match(strategySource, /dwpose_wholebody_mannequin/);
-  assert.match(strategySource, /semantic_validation_status === "passed"/);
-  assert.match(strategySource, /姿态质量未通过，只能预览或下载/);
-  assert.doesNotMatch(
-    strategySource,
-    /managedAssetBinding && wholeBodyEngine && !wholeBodyEngine\.available/,
-  );
-  assert.match(strategySource, /重新检测 DWPose WholeBody/);
-  assert.match(workspaceSource, /proxyEngineLoadError/);
-  assert.match(workspaceSource, /proxy-engines\/\$\{encodeURIComponent\(engineName\)\}\/installations/);
-  assert.match(workspaceSource, /onNotice\?\.\(\{/);
-  assert.match(strategySource, /DWPose WholeBody 安装进度/);
-  assert.match(strategySource, /<progress/);
+test("loads the real depth engine capability instead of a proxy engine", () => {
+  assert.match(workspaceSource, /request\("\/depth-controls\/engines"\)/);
+  assert.match(workspaceSource, /<DepthControlPanel/);
+  assert.match(panelSource, /video_depth_anything/);
+  assert.match(panelSource, /Video Depth Anything Small/);
 });
 
-test("persists generated proxy assets before they are used", () => {
-  assert.match(workflowSource, /async function createReferenceProxy/);
-  assert.match(workflowSource, /\/video-references\/shots\/\$\{shotDetail\.plan\.id\}\/proxies/);
-  assert.match(workflowSource, /expected_revision_id: detail\.project\.current_revision_id/);
-  assert.match(workflowSource, /onCreateReferenceProxy=\{createReferenceProxy\}/);
+test("installs the isolated depth engine with visible progress", () => {
+  assert.match(workspaceSource, /depth-controls\/engines\/\$\{encodeURIComponent\(engineName\)\}\/installations/);
+  assert.match(workspaceSource, /pollDepthEngineInstallation/);
+  assert.match(panelSource, /安装深度引擎/);
+  assert.match(panelSource, /<progress[\s\S]*aria-label="深度引擎安装进度"[\s\S]*max="100"/);
+  assert.match(panelStyles, /\.depth-engine-installation/);
 });
 
-test("offers AI-enhanced proxy quality with an explicit anonymous privacy boundary", () => {
-  assert.match(strategySource, /renderProfile/);
-  assert.match(strategySource, /ai_enhanced/);
-  assert.match(strategySource, /structural/);
-  assert.match(strategySource, /anonymous_structure_only/);
-  assert.match(strategySource, /generative_remote/);
-  assert.match(strategySource, /fallbackToStructural/);
-  assert.match(strategySource, /allowUnknownCost/);
-  assert.match(strategySource, /cost_estimate_known/);
-  assert.match(strategyStyles, /\.video-reference-quality-settings/);
-  assert.match(strategyStyles, /\.video-reference-privacy-note/);
+test("uses responsive grids without allowing source labels to overflow", () => {
+  assert.match(panelStyles, /\.depth-source-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/s);
+  assert.match(panelStyles, /\.depth-reference-copy\s*\{[^}]*min-width:\s*0/s);
+  assert.match(panelStyles, /text-overflow:\s*ellipsis/);
+  assert.match(panelStyles, /@container \(max-width: 760px\)/);
 });
 
-test("forwards AI proxy profile, privacy, fallback and cost consent to the API", () => {
-  assert.match(workflowSource, /render_profile: renderProfile/);
-  assert.match(workflowSource, /privacy_mode: privacyMode/);
-  assert.match(workflowSource, /enhancer_engine: enhancerEngine/);
-  assert.match(workflowSource, /fallback_to_structural: fallbackToStructural/);
-  assert.match(workflowSource, /allow_unknown_cost: allowUnknownCost/);
-  assert.match(workspaceSource, /\.\.\.options/);
-});
-
-test("lets users disable a proxy without deleting its historical asset", () => {
-  assert.match(strategySource, /boundProxyIds/);
-  assert.match(strategySource, /停用但保留历史白模资产/);
-  assert.match(strategySource, /旧绑定不可提交/);
-  assert.match(strategySource, /解除旧绑定/);
-  assert.match(workflowSource, /async function disableReferenceProxy/);
-  assert.match(workflowSource, /video_reference_bindings: nextBindings/);
-  assert.match(workflowSource, /onDisableReferenceProxy=\{disableReferenceProxy\}/);
-});
-
-test("only counts semantically verified proxy bindings as generation inputs", () => {
-  assert.match(workspaceSource, /function referenceProxyUsable/);
-  assert.match(workspaceSource, /usableProxyIds\.has\(item\.proxy_asset_id\)/);
-  assert.match(strategySource, /boundProxyIds\.has\(item\.id\) && proxyUsable\(item\)/);
-});
-
-test("previews persisted image and video proxies with safe media routes", () => {
-  assert.match(strategySource, /白模预览/);
-  assert.match(strategySource, /<MediaLightbox/);
-  assert.match(strategySource, /<video/);
-  assert.match(strategySource, /download: true/);
-  assert.match(strategySource, /query\.set\("v", options\.version\)/);
-  assert.match(strategySource, /proxy\.sha256 \|\| proxy\.updated_at/);
-  assert.match(
-    strategySource,
-    /\/api\/v1\/video-references\/shots\/\$\{shotPlanId\}\/proxies\/\$\{proxyId\}\/content/,
-  );
-});
-
-test("keeps historical proxies selectable and only enables one proxy per media type", () => {
-  assert.match(strategySource, /历史白模可重新启用/);
-  assert.match(strategySource, /onEnableProxy/);
-  assert.match(workflowSource, /async function enableReferenceProxy/);
-  assert.match(workflowSource, /binding\.media_type === target\.media_type/);
-  assert.match(workflowSource, /onEnableReferenceProxy=\{enableReferenceProxy\}/);
-});
-
-test("permanently deletes only unused image or video proxies", () => {
-  assert.match(strategySource, /onDeleteProxy/);
-  assert.match(strategySource, /!bound && \(/);
-  assert.match(strategySource, /<Trash size=\{17\}/);
-  assert.match(workflowSource, /async function deleteReferenceProxy/);
-  assert.match(workflowSource, /永久删除此\$\{label\}及其本地文件/);
-  assert.match(workflowSource, /method: "DELETE"/);
-  assert.match(workflowSource, /onDeleteReferenceProxy=\{deleteReferenceProxy\}/);
+test("does not retain legacy white-model or DWPose compatibility hooks", () => {
+  const combined = `${panelSource}\n${workspaceSource}\n${workflowSource}`;
+  assert.doesNotMatch(combined, /reference_proxy|ReferenceProxy|DWPose|pose_proxy|motion_proxy/);
+  assert.doesNotMatch(combined, /白模/);
 });

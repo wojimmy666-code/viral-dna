@@ -8,7 +8,17 @@ from uuid import UUID
 
 from .asset_library import Asset, AssetFolder
 from .chinese import simplify_model
+from .control_assets.jobs.domain import (
+    ACTIVE_DEPTH_JOB_STATUSES,
+    DepthControlJob,
+    DepthControlJobStatus,
+)
 from .exports import archive_report
+from .generated_artifacts.domain import (
+    AssetProvenance,
+    GeneratedArtifact,
+    StorageObjectReference,
+)
 from .models import (
     AnalysisJob,
     AnalysisRecord,
@@ -80,6 +90,10 @@ class InMemoryStore:
         self.viral_insights: dict[UUID, ViralInsightReport] = {}
         self.viral_concept_sets: dict[UUID, ViralConceptSet] = {}
         self.shot_video_generation_drafts: dict[UUID, ShotVideoGenerationDraft] = {}
+        self.depth_control_jobs: dict[UUID, DepthControlJob] = {}
+        self.generated_artifacts: dict[UUID, GeneratedArtifact] = {}
+        self.storage_object_references: dict[UUID, StorageObjectReference] = {}
+        self.asset_provenance: dict[UUID, AssetProvenance] = {}
 
     async def add_video(self, video: Video) -> Video:
         async with self._lock:
@@ -288,6 +302,9 @@ class InMemoryStore:
     async def get_storage_object(self, object_id: UUID) -> StorageObject | None:
         return self.storage_objects.get(object_id)
 
+    async def list_storage_objects(self) -> list[StorageObject]:
+        return list(self.storage_objects.values())
+
     async def save_object_replica(self, replica: ObjectReplica) -> ObjectReplica:
         async with self._lock:
             self.object_replicas[replica.id] = replica
@@ -330,6 +347,46 @@ class InMemoryStore:
 
     async def list_assets(self) -> list[Asset]:
         return sorted(self.assets.values(), key=lambda asset: asset.created_at)
+
+    async def save_generated_artifact(
+        self, artifact: GeneratedArtifact
+    ) -> GeneratedArtifact:
+        async with self._lock:
+            self.generated_artifacts[artifact.id] = artifact
+        return artifact
+
+    async def get_generated_artifact(
+        self, artifact_id: UUID
+    ) -> GeneratedArtifact | None:
+        return self.generated_artifacts.get(artifact_id)
+
+    async def list_generated_artifacts(self) -> list[GeneratedArtifact]:
+        return sorted(self.generated_artifacts.values(), key=lambda item: item.created_at)
+
+    async def save_storage_object_reference(
+        self, reference: StorageObjectReference
+    ) -> StorageObjectReference:
+        async with self._lock:
+            self.storage_object_references[reference.id] = reference
+        return reference
+
+    async def list_storage_object_references(
+        self, object_id: UUID | None = None
+    ) -> list[StorageObjectReference]:
+        references = list(self.storage_object_references.values())
+        if object_id is not None:
+            references = [item for item in references if item.storage_object_id == object_id]
+        return sorted(references, key=lambda item: item.created_at)
+
+    async def save_asset_provenance(
+        self, provenance: AssetProvenance
+    ) -> AssetProvenance:
+        async with self._lock:
+            self.asset_provenance[provenance.asset_id] = provenance
+        return provenance
+
+    async def get_asset_provenance(self, asset_id: UUID) -> AssetProvenance | None:
+        return self.asset_provenance.get(asset_id)
 
     async def save_project_asset_link(self, link: ProjectAssetLink) -> ProjectAssetLink:
         async with self._lock:
@@ -407,6 +464,65 @@ class InMemoryStore:
             key=lambda shot_plan: shot_plan.index,
         )
 
+    async def reset_production_shot_workflow(self, project_id: UUID) -> None:
+        async with self._lock:
+            shot_plan_ids = {
+                item.id for item in self.shot_plans.values() if item.project_id == project_id
+            }
+            generation_run_ids = {
+                item.id for item in self.generation_runs.values() if item.project_id == project_id
+            }
+            self.reference_bindings = {
+                key: item
+                for key, item in self.reference_bindings.items()
+                if item.shot_plan_id not in shot_plan_ids
+            }
+            self.generation_candidates = {
+                key: item
+                for key, item in self.generation_candidates.items()
+                if item.generation_run_id not in generation_run_ids
+            }
+            self.video_provider_tasks = {
+                key: item
+                for key, item in self.video_provider_tasks.items()
+                if item.generation_run_id not in generation_run_ids
+            }
+            self.generation_runs = {
+                key: item
+                for key, item in self.generation_runs.items()
+                if item.project_id != project_id
+            }
+            self.video_clip_preparations = {
+                key: item
+                for key, item in self.video_clip_preparations.items()
+                if item.project_id != project_id
+            }
+            self.approval_events = {
+                key: item
+                for key, item in self.approval_events.items()
+                if item.project_id != project_id
+            }
+            self.continuity_reports = {
+                key: item
+                for key, item in self.continuity_reports.items()
+                if item.project_id != project_id
+            }
+            self.shot_video_generation_drafts = {
+                key: item
+                for key, item in self.shot_video_generation_drafts.items()
+                if item.project_id != project_id
+            }
+            self.depth_control_jobs = {
+                key: item
+                for key, item in self.depth_control_jobs.items()
+                if item.project_id != project_id
+            }
+            self.shot_plans = {
+                key: item
+                for key, item in self.shot_plans.items()
+                if item.project_id != project_id
+            }
+
     async def save_reference_binding(
         self,
         binding: ReferenceBinding,
@@ -438,6 +554,51 @@ class InMemoryStore:
         async with self._lock:
             self.generation_runs[run.id] = run
         return run
+
+    async def save_depth_control_job(self, job: DepthControlJob) -> DepthControlJob:
+        async with self._lock:
+            self.depth_control_jobs[job.id] = job
+        return job
+
+    async def get_depth_control_job(self, job_id: UUID) -> DepthControlJob | None:
+        return self.depth_control_jobs.get(job_id)
+
+    async def list_depth_control_jobs(
+        self,
+        *,
+        project_id: UUID | None = None,
+        shot_plan_id: UUID | None = None,
+        active_only: bool = False,
+    ) -> list[DepthControlJob]:
+        jobs = list(self.depth_control_jobs.values())
+        if project_id is not None:
+            jobs = [item for item in jobs if item.project_id == project_id]
+        if shot_plan_id is not None:
+            jobs = [item for item in jobs if item.shot_plan_id == shot_plan_id]
+        if active_only:
+            jobs = [item for item in jobs if item.status in ACTIVE_DEPTH_JOB_STATUSES]
+        return sorted(jobs, key=lambda item: item.created_at)
+
+    async def claim_depth_control_job(
+        self,
+        job_id: UUID,
+    ) -> DepthControlJob | None:
+        async with self._lock:
+            job = self.depth_control_jobs.get(job_id)
+            if job is None or job.status != DepthControlJobStatus.QUEUED:
+                return None
+            now = _utc_now()
+            claimed = job.model_copy(
+                update={
+                    "status": DepthControlJobStatus.RUNNING,
+                    "started_at": job.started_at or now,
+                    "heartbeat_at": now,
+                    "updated_at": now,
+                    "progress_message": "正在准备深度生成",
+                }
+            )
+            self.depth_control_jobs[job_id] = claimed
+            return claimed
 
     async def claim_generation_run(
         self,

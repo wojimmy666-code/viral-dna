@@ -25,8 +25,8 @@ from viral_dna_api.video_generation.catalog import (
     video_duration_is_supported,
 )
 from viral_dna_api.video_generation.contracts import (
+    DepthControlVideo,
     OrderedReferenceFrame,
-    OrderedReferenceVideo,
     ProviderCredentialValidation,
     ProviderPollResult,
     ProviderSubmitResult,
@@ -297,14 +297,14 @@ def test_minimax_h3_uses_the_v2_multimodal_request(tmp_path: Path) -> None:
     assert payload["content"][1]["image_url"]["url"] != payload["content"][2]["image_url"]["url"]
 
 
-def test_minimax_h3_reference_video_uses_a_public_https_url(tmp_path: Path) -> None:
+def test_minimax_h3_depth_control_uses_a_public_https_url(tmp_path: Path) -> None:
     frame = tmp_path / "identity.jpg"
     frame.write_bytes(b"identity")
-    video = OrderedReferenceVideo(
-        proxy_asset_id=uuid4(),
-        visual_beat_id=uuid4(),
+    video = DepthControlVideo(
+        control_asset_id=uuid4(),
+        source_video_id=uuid4(),
         ordinal=1,
-        title="动作白模",
+        title="原分镜全场景深度",
         path=tmp_path / "motion.mp4",
         relative_path="motion.mp4",
         sha256="a" * 64,
@@ -321,14 +321,15 @@ def test_minimax_h3_reference_video_uses_a_public_https_url(tmp_path: Path) -> N
             reference_frames=(
                 ordered_reference_frame(frame, ordinal=1, start_ratio=0, end_ratio=1),
             ),
-            reference_videos=(video,),
+            depth_control_videos=(video,),
             duration_seconds=4,
             resolution="2K",
             aspect_ratio="9:16",
             width=1440,
             height=2560,
-            route_id="minimax_identity_image_motion_proxy",
-            effective_route_id="minimax_identity_image_motion_proxy",
+            route_id="minimax_identity_depth_guidance",
+            effective_route_id="minimax_identity_depth_guidance",
+            spatial_control_semantics="guided_depth_reference",
         )
     )
 
@@ -336,12 +337,12 @@ def test_minimax_h3_reference_video_uses_a_public_https_url(tmp_path: Path) -> N
     assert reference_video["video_url"]["url"] == "https://media.example.test/motion.mp4"
 
 
-def test_seedance_rejects_an_unpublished_local_reference_video(tmp_path: Path) -> None:
-    video = OrderedReferenceVideo(
-        proxy_asset_id=uuid4(),
-        visual_beat_id=uuid4(),
+def test_seedance_rejects_an_unpublished_local_depth_control(tmp_path: Path) -> None:
+    video = DepthControlVideo(
+        control_asset_id=uuid4(),
+        source_video_id=uuid4(),
         ordinal=1,
-        title="动作白模",
+        title="原分镜全场景深度",
         path=tmp_path / "motion.mp4",
         relative_path="motion.mp4",
         sha256="b" * 64,
@@ -356,7 +357,10 @@ def test_seedance_rejects_an_unpublished_local_reference_video(tmp_path: Path) -
                 prompt="演员完成参考动作",
                 negative_prompt="",
                 reference_frames=(),
-                reference_videos=(video,),
+                depth_control_videos=(video,),
+                route_id="seedance_managed_actor_depth_guidance",
+                effective_route_id="seedance_managed_actor_depth_guidance",
+                spatial_control_semantics="guided_depth_reference",
                 duration_seconds=5,
                 resolution="720P",
                 aspect_ratio="9:16",
@@ -395,7 +399,7 @@ def test_seedance_maps_every_reference_image_in_order(tmp_path: Path) -> None:
         )
     )
 
-    assert payload["content"][0]["text"].startswith("图片1走向图片2")
+    assert "\n图片1走向图片2" in payload["content"][0]["text"]
     references = payload["content"][1:]
     assert [item["role"] for item in references] == [
         "reference_image",
@@ -931,6 +935,9 @@ def test_ambiguous_submission_is_not_repeated(
             "prompt": "人物向前走",
             "negative_prompt": "身份漂移",
             "seed": 7,
+            "route_id": None,
+            "effective_route_id": None,
+            "spatial_control_semantics": None,
             "reference_images": [
                 {
                     "visual_beat_id": str(reference_frames[0].visual_beat_id),
@@ -941,7 +948,7 @@ def test_ambiguous_submission_is_not_repeated(
                     "end_ratio": 1,
                 }
             ],
-            "reference_videos": [],
+            "depth_control_videos": [],
             "reference_policy": {},
         }
         import hashlib
@@ -999,4 +1006,4 @@ def test_seedance_real_person_rejection_points_to_managed_identity_strategy() ->
     assert failure.category == "person_reference_policy"
     assert failure.title == "检测到未托管真人参考"
     assert failure.suggested_action == "review_person_references"
-    assert "图片／视频白模" in failure.message
+    assert "全场景深度" in failure.message

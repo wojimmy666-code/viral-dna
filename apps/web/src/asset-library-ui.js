@@ -6,6 +6,8 @@ export const ASSET_TYPE_OPTIONS = [
   { value: "clothing", label: "服装" },
   { value: "scene", label: "场景" },
   { value: "logo", label: "Logo" },
+  { value: "motion_reference", label: "动作参考" },
+  { value: "spatial_depth", label: "空间深度" },
   { value: "other", label: "其他" },
 ];
 

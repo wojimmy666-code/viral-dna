@@ -43,7 +43,7 @@ def _public_media_urls(request: ProviderVideoRequest) -> tuple[str, str]:
         raise VideoProviderError(
             409,
             "video_public_media_transport_required",
-            "Wan VACE 要求 Provider 可访问的目标人物图片 URL 和白模控制视频 URL；"
+            "Wan VACE 要求 Provider 可访问的目标人物图片 URL 和全场景深度控制视频 URL；"
             "请先配置媒体暂存服务",
         )
     return identity_url, control_url
@@ -60,7 +60,7 @@ def _build_wan_vace_request(request: ProviderVideoRequest) -> dict[str, object]:
             "ref_images_url": [identity_url],
         },
         "parameters": {
-            "control_condition": request.control_condition or "posebody",
+            "control_condition": request.control_condition or "depth",
             "strength": 1.0,
             "prompt_extend": False,
             "watermark": False,
@@ -69,6 +69,6 @@ def _build_wan_vace_request(request: ProviderVideoRequest) -> dict[str, object]:
 
 
 def build_bailian_request(request: ProviderVideoRequest) -> dict[str, object]:
-    if request.route_id == "wan_vace_posebody_repaint":
+    if request.route_id == "wan_vace_depth_control":
         return _build_wan_vace_request(request)
     return _build_wan_r2v_request(request)

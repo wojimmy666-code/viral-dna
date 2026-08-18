@@ -28,13 +28,10 @@ from ..models import (
     ShotPlan,
     VideoGenerationCapability,
     VideoGenerationInputMode,
+    VideoGenerationInputPlan,
+    VideoGenerationInputSource,
 )
 from ..public_media import PublicMediaStager, PublicMediaStagingError
-from ..reference_routes import IdentityReferenceTransport
-from ..video_references.domain import (
-    VideoReferenceMediaType,
-    VideoReferenceSourceKind,
-)
 from ..video_references.planner import (
     VideoReferencePolicyError,
     resolve_video_reference_plan,
@@ -45,9 +42,9 @@ from .contracts import (
     VIDEO_ADAPTER_PROTOCOL_VERSION,
     VIDEO_PROMPT_VERSION,
     VIDEO_REQUEST_SCHEMA_VERSION,
+    DepthControlVideo,
     GeneratedVideo,
     OrderedReferenceFrame,
-    OrderedReferenceVideo,
     ProviderManagedAssetReference,
     VideoAdapterIdentity,
     VideoAdapterRequest,
@@ -128,6 +125,21 @@ def _compiled_dimensions(
     width = max(256, math.floor(project.output_width * scale / 2) * 2)
     height = max(256, math.floor(project.output_height * scale / 2) * 2)
     return width, height
+
+
+def _effective_input_mode(request: VideoGenerationRequest) -> VideoGenerationInputMode:
+    """Derive the legacy coarse mode from the references actually submitted."""
+    image_count = len(request.reference_frames) + len(request.managed_asset_references)
+    video_count = len(request.depth_control_videos)
+    if image_count == 0 and video_count == 0:
+        return VideoGenerationInputMode.TEXT_TO_VIDEO
+    if image_count and video_count:
+        return VideoGenerationInputMode.HYBRID_REFERENCE_TO_VIDEO
+    if video_count:
+        return VideoGenerationInputMode.VIDEO_TO_VIDEO
+    if image_count == 1:
+        return VideoGenerationInputMode.IMAGE_TO_VIDEO
+    return VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO
 
 
 def _positive_prompt(
@@ -322,85 +334,6 @@ class VideoGenerationGateway:
         ):
             self.remote_orchestrator = RemoteVideoOrchestrator(settings_service, repository)
 
-    def _proxy_references(
-        self,
-        shot: ShotPlan,
-    ) -> tuple[tuple[OrderedReferenceFrame, ...], tuple[OrderedReferenceVideo, ...]]:
-        assets = {item.id: item for item in shot.reference_proxy_assets}
-        selected = [
-            binding
-            for binding in shot.video_reference_bindings
-            if binding.enabled
-            and binding.source_kind == VideoReferenceSourceKind.GENERATED_PROXY
-            and binding.proxy_asset_id is not None
-        ]
-        selected.sort(key=lambda item: item.order)
-        proxy_frames: list[OrderedReferenceFrame] = []
-        proxy_videos: list[OrderedReferenceVideo] = []
-        for binding in selected:
-            proxy = assets.get(binding.proxy_asset_id)
-            if proxy is None:
-                raise VideoGenerationGatewayError(
-                    422,
-                    "video_reference_proxy_missing",
-                    "已选择的动作代理资产不存在，请重新生成或解除绑定",
-                )
-            if not proxy.usable_for_generation:
-                raise VideoGenerationGatewayError(
-                    422,
-                    "video_reference_proxy_not_ready",
-                    "动作代理尚未同时通过身份去除与姿态质量校验，不能提交给视频模型",
-                )
-            path = self.workspace.resolve(proxy.relative_path)
-            if not path.is_file():
-                raise VideoGenerationGatewayError(
-                    404,
-                    "video_reference_proxy_file_missing",
-                    "动作代理文件不存在，请重新生成",
-                )
-            beat = next(
-                (item for item in shot.visual_beats if item.id == proxy.visual_beat_id),
-                None,
-            )
-            title = f"动作代理 · {beat.title if beat is not None else '分镜画面'}"
-            if proxy.media_type == VideoReferenceMediaType.IMAGE:
-                proxy_frames.append(
-                    OrderedReferenceFrame(
-                        visual_beat_id=proxy.visual_beat_id,
-                        ordinal=binding.order,
-                        title=title,
-                        candidate_id=proxy.id,
-                        path=path,
-                        relative_path=proxy.relative_path,
-                        sha256=proxy.sha256,
-                        start_ratio=beat.start_ratio if beat is not None else 0,
-                        end_ratio=beat.end_ratio if beat is not None else 1,
-                        transition_to_next_type=(
-                            beat.transition_to_next_type if beat is not None else "cut"
-                        ),
-                        transition_to_next_duration_seconds=(
-                            beat.transition_to_next_duration_seconds if beat is not None else 0
-                        ),
-                        transition_to_next_prompt=(
-                            beat.transition_to_next_prompt if beat is not None else ""
-                        ),
-                    )
-                )
-            elif proxy.media_type == VideoReferenceMediaType.VIDEO:
-                proxy_videos.append(
-                    OrderedReferenceVideo(
-                        proxy_asset_id=proxy.id,
-                        visual_beat_id=proxy.visual_beat_id,
-                        ordinal=binding.order,
-                        title=title,
-                        path=path,
-                        relative_path=proxy.relative_path,
-                        sha256=proxy.sha256,
-                        role=binding.role.value,
-                    )
-                )
-        return tuple(proxy_frames), tuple(proxy_videos)
-
     def validate_execution_mode(self, mode: ImageExecutionMode) -> None:
         if mode == ImageExecutionMode.LOCAL_TOOL:
             raise VideoGenerationGatewayError(
@@ -492,6 +425,51 @@ class VideoGenerationGateway:
         if self.remote_orchestrator is not None:
             await self.remote_orchestrator.cancel_run(run_id)
 
+    def _depth_control_videos(self, shot: ShotPlan) -> tuple[DepthControlVideo, ...]:
+        selected = [item for item in shot.depth_control_assets if item.enabled]
+        if len(selected) > 1:
+            raise VideoGenerationGatewayError(
+                422,
+                "depth_control_count_invalid",
+                "一个分镜只能启用一个全场景深度控制视频",
+            )
+        if not selected:
+            return ()
+        asset = selected[0]
+        if not asset.usable_for_generation or not asset.relative_path or not asset.sha256:
+            raise VideoGenerationGatewayError(
+                422,
+                "depth_control_not_ready",
+                "已启用的深度控制视频尚未通过质检，请重新生成",
+            )
+        try:
+            path = self.workspace.resolve(asset.relative_path)
+        except (OSError, ValueError) as exc:
+            raise VideoGenerationGatewayError(
+                409,
+                "depth_control_path_invalid",
+                "深度控制视频路径无效，请重新生成",
+            ) from exc
+        if not path.is_file():
+            raise VideoGenerationGatewayError(
+                404,
+                "depth_control_file_missing",
+                "深度控制视频文件不存在，请重新生成",
+            )
+        return (
+            DepthControlVideo(
+                control_asset_id=asset.id,
+                source_video_id=asset.source_video_id,
+                ordinal=1,
+                title="全场景深度控制",
+                path=path,
+                relative_path=asset.relative_path,
+                sha256=asset.sha256,
+                kind=asset.kind.value,
+                depth_convention=asset.depth_convention.value,
+            ),
+        )
+
     async def generate(
         self,
         project: ProductionProject,
@@ -508,7 +486,11 @@ class VideoGenerationGateway:
         seed: int | None = None,
         run_id: UUID | None = None,
         cancel_event: Event | None = None,
+        input_plan: VideoGenerationInputPlan | None = None,
     ) -> tuple[GenerationRun, list[GenerationCandidate]]:
+        input_plan = input_plan or VideoGenerationInputPlan(
+            sources=[VideoGenerationInputSource.APPROVED_IMAGES]
+        )
         try:
             mode = ImageExecutionMode(execution_mode)
         except ValueError as exc:
@@ -527,7 +509,7 @@ class VideoGenerationGateway:
         )
         adapter = self.adapters.get(mode)
         capability = identity.capability
-        if not (capability.image_to_video and capability.reference_route.enabled):
+        if input_plan.sources and not capability.reference_route.enabled:
             raise VideoGenerationGatewayError(
                 409,
                 "video_reference_route_disabled",
@@ -560,8 +542,7 @@ class VideoGenerationGateway:
         )
         managed_references = (
             all_managed_references
-            if capability.reference_route.identity_transport
-            == IdentityReferenceTransport.PROVIDER_MANAGED_ASSET
+            if input_plan.includes(VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS)
             else ()
         )
         managed_capability = capability.managed_assets
@@ -604,29 +585,30 @@ class VideoGenerationGateway:
                     "video_managed_asset_transport_unsupported",
                     "当前视频模型无法使用该托管资产引用协议",
                 )
-        proxy_reference_frames, proxy_reference_videos = self._proxy_references(shot)
+        depth_control_videos = (
+            self._depth_control_videos(shot)
+            if input_plan.includes(VideoGenerationInputSource.DEPTH_CONTROL)
+            else ()
+        )
         try:
             reference_plan = resolve_video_reference_plan(
                 capability=capability,
                 shot=shot,
                 reference_frames=source_ordered_frames,
                 managed_asset_references=managed_references,
-                proxy_reference_frames=proxy_reference_frames,
-                proxy_reference_videos=proxy_reference_videos,
+                depth_control_videos=depth_control_videos,
                 public_media_transport_ready=self.public_media_stager.ready,
+                depth_optional=True,
             )
         except VideoReferencePolicyError as exc:
             raise VideoGenerationGatewayError(422, exc.code, str(exc)) from exc
         ordered_frames = reference_plan.reference_frames
-        reference_videos = reference_plan.reference_videos
-        if reference_videos:
+        depth_control_videos = reference_plan.depth_control_videos
+        if depth_control_videos:
             try:
-                reference_videos = tuple(
-                    replace(
-                        item,
-                        public_url=self.public_media_stager.stage(item.path).url,
-                    )
-                    for item in reference_videos
+                depth_control_videos = tuple(
+                    replace(item, public_url=self.public_media_stager.stage(item.path).url)
+                    for item in depth_control_videos
                 )
             except PublicMediaStagingError as exc:
                 raise VideoGenerationGatewayError(
@@ -635,10 +617,20 @@ class VideoGenerationGateway:
                     str(exc),
                 ) from exc
         managed_references = reference_plan.managed_asset_references
+        reference_manifest = {
+            **reference_plan.manifest(),
+            "input_plan": input_plan.model_dump(mode="json"),
+        }
         total_reference_count = (
-            len(ordered_frames) + len(reference_videos) + len(managed_references)
+            len(ordered_frames) + len(depth_control_videos) + len(managed_references)
         )
-        if not (
+        if total_reference_count == 0 and not capability.text_to_video:
+            raise VideoGenerationGatewayError(
+                422,
+                "video_text_to_video_unsupported",
+                "当前模型不支持纯文生视频，请选择图片或资产输入",
+            )
+        if total_reference_count > 0 and not (
             capability.minimum_reference_images
             <= total_reference_count
             <= capability.maximum_reference_images
@@ -650,7 +642,8 @@ class VideoGenerationGateway:
                     f"当前模型支持 {capability.minimum_reference_images}～"
                     f"{capability.maximum_reference_images} 个参考输入；"
                     f"当前包含 {len(managed_references)} 个托管资产和 "
-                    f"{len(ordered_frames)} 张安全参考图、{len(reference_videos)} 个动作代理视频"
+                    f"{len(ordered_frames)} 张外观参考图、"
+                    f"{len(depth_control_videos)} 个深度控制视频"
                 ),
             )
         if candidate_count < 1 or candidate_count > capability.max_candidates:
@@ -704,9 +697,11 @@ class VideoGenerationGateway:
             allow_unknown_cost=allow_unknown_cost,
             seed=seed,
             managed_asset_references=managed_references,
-            reference_videos=reference_videos,
-            reference_manifest=reference_plan.manifest(),
+            depth_control_videos=depth_control_videos,
+            reference_manifest=reference_manifest,
+            input_plan=input_plan,
         )
+        effective_input_mode = _effective_input_mode(request)
         input_payload = self._input_payload(
             request,
             identity,
@@ -735,8 +730,9 @@ class VideoGenerationGateway:
                 seed=seed,
                 capability=capability,
                 managed_asset_references=managed_references,
-                reference_videos=reference_videos,
-                reference_manifest=reference_plan.manifest(),
+                depth_control_videos=depth_control_videos,
+                reference_manifest=reference_manifest,
+                input_plan=input_plan,
                 cancel_event=cancel_event,
             )
             if resolved_remote is not None:
@@ -753,7 +749,7 @@ class VideoGenerationGateway:
                     shot_plan_id=shot.id,
                     run_root=run_root,
                     reference_frames=ordered_frames,
-                    reference_videos=reference_videos,
+                    depth_control_videos=depth_control_videos,
                     managed_asset_references=managed_references,
                     candidate_count=candidate_count,
                     duration_seconds=duration_seconds,
@@ -764,7 +760,7 @@ class VideoGenerationGateway:
                     negative_prompt=negative_prompt,
                     seed=seed,
                     cancel_event=cancel_event,
-                    reference_manifest=reference_plan.manifest(),
+                    reference_manifest=reference_manifest,
                 )
             else:
                 if adapter is None:  # pragma: no cover
@@ -837,7 +833,7 @@ class VideoGenerationGateway:
             shot_plan_id=shot.id,
             revision_id=revision_id,
             kind=GenerationKind.VIDEO,
-            input_mode=VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO,
+            input_mode=effective_input_mode,
             provider=identity.provider,
             model=identity.model,
             model_snapshot=identity.model_snapshot,
@@ -882,7 +878,8 @@ class VideoGenerationGateway:
     ) -> dict[str, object]:
         return {
             "schema_version": VIDEO_REQUEST_SCHEMA_VERSION,
-            "input_mode": VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value,
+            "input_mode": _effective_input_mode(request).value,
+            "input_plan": request.input_plan.model_dump(mode="json"),
             "project_id": str(request.project.id),
             "shot_plan_id": str(request.shot.id),
             "revision_id": str(request.revision_id),
@@ -921,6 +918,8 @@ class VideoGenerationGateway:
                     "visual_beat_id": str(frame.visual_beat_id),
                     "ordinal": frame.ordinal,
                     "title": frame.title,
+                    "role": frame.role,
+                    "source_kind": frame.source_kind,
                     "candidate_id": str(frame.candidate_id),
                     "relative_path": frame.relative_path,
                     "sha256": frame.sha256,
@@ -934,17 +933,18 @@ class VideoGenerationGateway:
                 }
                 for frame in request.reference_frames
             ],
-            "reference_videos": [
+            "depth_control_videos": [
                 {
-                    "proxy_asset_id": str(video.proxy_asset_id),
-                    "visual_beat_id": str(video.visual_beat_id),
+                    "control_asset_id": str(video.control_asset_id),
+                    "source_video_id": str(video.source_video_id),
                     "ordinal": video.ordinal,
                     "title": video.title,
                     "relative_path": video.relative_path,
                     "sha256": video.sha256,
-                    "role": video.role,
+                    "kind": video.kind,
+                    "depth_convention": video.depth_convention,
                 }
-                for video in request.reference_videos
+                for video in request.depth_control_videos
             ],
             "managed_asset_references": [
                 {

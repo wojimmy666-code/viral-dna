@@ -3,14 +3,24 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .asset_library import Asset, AssetFolder
+from .control_assets.jobs.domain import (
+    ACTIVE_DEPTH_JOB_STATUSES,
+    DepthControlJob,
+    DepthControlJobStatus,
+)
+from .generated_artifacts.domain import (
+    AssetProvenance,
+    GeneratedArtifact,
+    StorageObjectReference,
+)
 from .models import (
     AnalysisJob,
     AnalysisRecord,
@@ -38,6 +48,7 @@ from .models import (
 )
 from .quality.contracts import ContinuityReport
 from .schema import WORKSPACE_SCHEMA_VERSION
+from .storage_errors import IncompatibleShotPlanSchemaError
 from .storage_objects import ObjectReplica, StorageObject
 from .viral_insights.contracts import ViralConceptSet, ViralInsightReport
 
@@ -161,6 +172,27 @@ _VIDEO_GENERATION_DRAFT_INDEXES = (
     ),
 )
 
+_DEPTH_CONTROL_JOB_TABLES = frozenset({"depth_control_jobs"})
+
+_DEPTH_CONTROL_JOB_INDEXES = (
+    ("idx_depth_control_jobs_project_id", "depth_control_jobs", "project_id"),
+    ("idx_depth_control_jobs_shot_plan_id", "depth_control_jobs", "shot_plan_id"),
+    ("idx_depth_control_jobs_status", "depth_control_jobs", "status"),
+)
+
+_GENERATED_ARTIFACT_TABLES = frozenset(
+    {"generated_artifacts", "storage_object_references", "asset_provenance"}
+)
+
+_GENERATED_ARTIFACT_INDEXES = (
+    ("idx_generated_artifacts_account_id", "generated_artifacts", "account_id"),
+    ("idx_generated_artifacts_workspace_id", "generated_artifacts", "workspace_id"),
+    ("idx_generated_artifacts_source_entity_id", "generated_artifacts", "source_entity_id"),
+    ("idx_storage_object_references_object_id", "storage_object_references", "storage_object_id"),
+    ("idx_storage_object_references_owner_id", "storage_object_references", "owner_id"),
+    ("idx_asset_provenance_asset_id", "asset_provenance", "asset_id"),
+)
+
 
 class SQLiteSchemaError(RuntimeError):
     """Raised when the durable database schema cannot be migrated safely."""
@@ -177,6 +209,8 @@ class SQLiteStore:
         | _QUALITY_TABLES
         | _VIRAL_INSIGHT_TABLES
         | _VIDEO_GENERATION_DRAFT_TABLES
+        | _DEPTH_CONTROL_JOB_TABLES
+        | _GENERATED_ARTIFACT_TABLES
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -259,6 +293,16 @@ class SQLiteStore:
                 self._create_video_generation_draft_indexes(connection)
                 if 9 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (9)")
+
+                self._create_json_tables(connection, _DEPTH_CONTROL_JOB_TABLES)
+                self._create_depth_control_job_indexes(connection)
+                if 10 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (10)")
+
+                self._create_json_tables(connection, _GENERATED_ARTIFACT_TABLES)
+                self._create_generated_artifact_indexes(connection)
+                if 11 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (11)")
             except Exception:
                 connection.rollback()
                 raise
@@ -329,6 +373,22 @@ class SQLiteStore:
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
             )
 
+    @staticmethod
+    def _create_depth_control_job_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _DEPTH_CONTROL_JOB_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_generated_artifact_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _GENERATED_ARTIFACT_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
     @classmethod
     def _table(cls, table: str) -> str:
         if table not in cls._allowed_tables:
@@ -386,12 +446,107 @@ class SQLiteStore:
         return str(row[0]) if row else None
 
     def _read_all(self, table: str) -> list[str]:
+        return [payload for _, payload in self._read_all_entries(table)]
+
+    def _read_all_entries(self, table: str) -> list[tuple[str, str]]:
         safe_table = self._table(table)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT payload FROM {safe_table} ORDER BY updated_at, record_key"  # noqa: S608
+                f"SELECT record_key, payload FROM {safe_table} "  # noqa: S608
+                "ORDER BY updated_at, record_key"
             ).fetchall()
-        return [str(row[0]) for row in rows]
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    @staticmethod
+    def _payload_value(payload: str, field: str) -> str | None:
+        try:
+            decoded = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        value = decoded.get(field)
+        return str(value) if value is not None else None
+
+    def _reset_production_shot_workflow(self, project_id: UUID) -> None:
+        project_key = str(project_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                def keys_for(table: str, field: str, values: set[str]) -> set[str]:
+                    if not values:
+                        return set()
+                    safe_table = self._table(table)
+                    rows = connection.execute(
+                        f"SELECT record_key, payload FROM {safe_table}"  # noqa: S608
+                    ).fetchall()
+                    return {
+                        str(record_key)
+                        for record_key, payload in rows
+                        if self._payload_value(str(payload), field) in values
+                    }
+
+                shot_plan_ids = keys_for("shot_plans", "project_id", {project_key})
+                generation_run_ids = keys_for(
+                    "generation_runs",
+                    "project_id",
+                    {project_key},
+                )
+                deletions = {
+                    "reference_bindings": keys_for(
+                        "reference_bindings",
+                        "shot_plan_id",
+                        shot_plan_ids,
+                    ),
+                    "generation_candidates": keys_for(
+                        "generation_candidates",
+                        "generation_run_id",
+                        generation_run_ids,
+                    ),
+                    "video_provider_tasks": keys_for(
+                        "video_provider_tasks",
+                        "generation_run_id",
+                        generation_run_ids,
+                    ),
+                    "video_clip_preparations": keys_for(
+                        "video_clip_preparations",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "approval_events": keys_for(
+                        "approval_events",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "continuity_reports": keys_for(
+                        "continuity_reports",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "shot_video_generation_drafts": keys_for(
+                        "shot_video_generation_drafts",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "depth_control_jobs": keys_for(
+                        "depth_control_jobs",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "generation_runs": generation_run_ids,
+                    "shot_plans": shot_plan_ids,
+                }
+                for table, record_keys in deletions.items():
+                    safe_table = self._table(table)
+                    connection.executemany(
+                        f"DELETE FROM {safe_table} WHERE record_key = ?",  # noqa: S608
+                        [(record_key,) for record_key in record_keys],
+                    )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
 
     def _count_production_projects_by_record(
         self,
@@ -629,6 +784,10 @@ class SQLiteStore:
     async def get_storage_object(self, object_id: UUID) -> StorageObject | None:
         return await self._get("storage_objects", object_id, StorageObject)
 
+    async def list_storage_objects(self) -> list[StorageObject]:
+        payloads = await asyncio.to_thread(self._read_all, "storage_objects")
+        return [StorageObject.model_validate_json(payload) for payload in payloads]
+
     async def save_object_replica(self, replica: ObjectReplica) -> ObjectReplica:
         return await self._save("object_replicas", replica.id, replica)
 
@@ -664,6 +823,45 @@ class SQLiteStore:
         payloads = await asyncio.to_thread(self._read_all, "assets")
         assets = [Asset.model_validate_json(payload) for payload in payloads]
         return sorted(assets, key=lambda item: item.created_at)
+
+    async def save_generated_artifact(
+        self, artifact: GeneratedArtifact
+    ) -> GeneratedArtifact:
+        return await self._save("generated_artifacts", artifact.id, artifact)
+
+    async def get_generated_artifact(
+        self, artifact_id: UUID
+    ) -> GeneratedArtifact | None:
+        return await self._get("generated_artifacts", artifact_id, GeneratedArtifact)
+
+    async def list_generated_artifacts(self) -> list[GeneratedArtifact]:
+        payloads = await asyncio.to_thread(self._read_all, "generated_artifacts")
+        return sorted(
+            (GeneratedArtifact.model_validate_json(payload) for payload in payloads),
+            key=lambda item: item.created_at,
+        )
+
+    async def save_storage_object_reference(
+        self, reference: StorageObjectReference
+    ) -> StorageObjectReference:
+        return await self._save("storage_object_references", reference.id, reference)
+
+    async def list_storage_object_references(
+        self, object_id: UUID | None = None
+    ) -> list[StorageObjectReference]:
+        payloads = await asyncio.to_thread(self._read_all, "storage_object_references")
+        references = [StorageObjectReference.model_validate_json(item) for item in payloads]
+        if object_id is not None:
+            references = [item for item in references if item.storage_object_id == object_id]
+        return sorted(references, key=lambda item: item.created_at)
+
+    async def save_asset_provenance(
+        self, provenance: AssetProvenance
+    ) -> AssetProvenance:
+        return await self._save("asset_provenance", provenance.asset_id, provenance)
+
+    async def get_asset_provenance(self, asset_id: UUID) -> AssetProvenance | None:
+        return await self._get("asset_provenance", asset_id, AssetProvenance)
 
     async def save_project_asset_link(self, link: ProjectAssetLink) -> ProjectAssetLink:
         return await self._save("project_asset_links", link.id, link)
@@ -754,15 +952,37 @@ class SQLiteStore:
         return await self._save("shot_plans", shot_plan.id, shot_plan)
 
     async def get_shot_plan(self, shot_plan_id: UUID) -> ShotPlan | None:
-        return await self._get("shot_plans", shot_plan_id, ShotPlan)
+        payload = await asyncio.to_thread(self._read, "shot_plans", str(shot_plan_id))
+        if payload is None:
+            return None
+        try:
+            return ShotPlan.model_validate_json(payload)
+        except ValidationError as exc:
+            raw_project_id = self._payload_value(payload, "project_id")
+            try:
+                project_id = UUID(raw_project_id) if raw_project_id is not None else None
+            except ValueError:
+                project_id = None
+            if project_id is None:
+                raise
+            raise IncompatibleShotPlanSchemaError(project_id) from exc
 
     async def list_shot_plans(self, project_id: UUID) -> list[ShotPlan]:
-        payloads = await asyncio.to_thread(self._read_all, "shot_plans")
-        shot_plans = [ShotPlan.model_validate_json(payload) for payload in payloads]
-        return sorted(
-            (shot_plan for shot_plan in shot_plans if shot_plan.project_id == project_id),
-            key=lambda shot_plan: shot_plan.index,
-        )
+        entries = await asyncio.to_thread(self._read_all_entries, "shot_plans")
+        payloads = [
+            payload
+            for _, payload in entries
+            if self._payload_value(payload, "project_id") == str(project_id)
+        ]
+        try:
+            shot_plans = [ShotPlan.model_validate_json(payload) for payload in payloads]
+        except ValidationError as exc:
+            raise IncompatibleShotPlanSchemaError(project_id) from exc
+        return sorted(shot_plans, key=lambda shot_plan: shot_plan.index)
+
+    async def reset_production_shot_workflow(self, project_id: UUID) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._reset_production_shot_workflow, project_id)
 
     async def save_reference_binding(
         self,
@@ -789,6 +1009,73 @@ class SQLiteStore:
 
     async def save_generation_run(self, run: GenerationRun) -> GenerationRun:
         return await self._save("generation_runs", run.id, run)
+
+    async def save_depth_control_job(self, job: DepthControlJob) -> DepthControlJob:
+        return await self._save("depth_control_jobs", job.id, job)
+
+    async def get_depth_control_job(self, job_id: UUID) -> DepthControlJob | None:
+        return await self._get("depth_control_jobs", job_id, DepthControlJob)
+
+    async def list_depth_control_jobs(
+        self,
+        *,
+        project_id: UUID | None = None,
+        shot_plan_id: UUID | None = None,
+        active_only: bool = False,
+    ) -> list[DepthControlJob]:
+        payloads = await asyncio.to_thread(self._read_all, "depth_control_jobs")
+        jobs = [DepthControlJob.model_validate_json(payload) for payload in payloads]
+        if project_id is not None:
+            jobs = [item for item in jobs if item.project_id == project_id]
+        if shot_plan_id is not None:
+            jobs = [item for item in jobs if item.shot_plan_id == shot_plan_id]
+        if active_only:
+            jobs = [item for item in jobs if item.status in ACTIVE_DEPTH_JOB_STATUSES]
+        return sorted(jobs, key=lambda item: item.created_at)
+
+    def _claim_depth_control_job(self, job_id: UUID) -> DepthControlJob | None:
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT payload FROM depth_control_jobs WHERE record_key = ?",
+                    (str(job_id),),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                job = DepthControlJob.model_validate_json(str(row[0]))
+                if job.status != DepthControlJobStatus.QUEUED:
+                    connection.commit()
+                    return None
+                claimed = job.model_copy(
+                    update={
+                        "status": DepthControlJobStatus.RUNNING,
+                        "started_at": job.started_at or now,
+                        "heartbeat_at": now,
+                        "updated_at": now,
+                        "progress_message": "正在准备深度生成",
+                    }
+                )
+                connection.execute(
+                    "UPDATE depth_control_jobs SET payload = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE record_key = ?",
+                    (self._serialize(claimed), str(job_id)),
+                )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+                return claimed
+
+    async def claim_depth_control_job(
+        self,
+        job_id: UUID,
+    ) -> DepthControlJob | None:
+        async with self._lock:
+            return await asyncio.to_thread(self._claim_depth_control_job, job_id)
 
     def _claim_generation_run(
         self,

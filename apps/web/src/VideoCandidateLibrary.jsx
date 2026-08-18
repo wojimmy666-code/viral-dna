@@ -7,6 +7,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { formatVideoDuration } from "./production-ui.js";
+import { AddToAssetsButton } from "./generated-assets/AddToAssetsButton.jsx";
 
 const HOVER_PREVIEW_DELAY_MS = 180;
 
@@ -159,7 +160,9 @@ export function VideoCandidateLibrary({
   onArchiveCandidates,
   onPreviewCandidate,
   onRestoreCandidates,
+  onNotice,
   plan,
+  request,
   resolveUrl,
 }) {
   const [historyExpanded, setHistoryExpanded] = useState(false);
@@ -528,6 +531,16 @@ export function VideoCandidateLibrary({
                 ? "已选择"
                 : "可采用"}
           </em>
+          <AddToAssetsButton
+            artifactKind="video_candidate"
+            assetType="motion_reference"
+            disabled={interactionBusy}
+            name={`分镜 ${plan.index} 生成视频`}
+            onNotice={onNotice}
+            request={request}
+            shotPlanId={plan.id}
+            sourceEntityId={displayedCandidate.id}
+          />
         </div>
       )}
 

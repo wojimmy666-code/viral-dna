@@ -37,6 +37,7 @@ import {
   workflowStatusLabel,
 } from "./production-ui.js";
 import { MediaLightbox } from "./MediaLightbox.jsx";
+import { AddToAssetsButton } from "./generated-assets/AddToAssetsButton.jsx";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import {
   assetDirectoryLabel,
@@ -364,6 +365,8 @@ export function ShotImageWorkspace({
   onSelectVisualBeat,
   onUpdateVisualBeat,
   onAdvance,
+  onNotice,
+  request,
 }) {
   const [keyframePickerOpen, setKeyframePickerOpen] = useState(false);
   const [shotCreateOpen, setShotCreateOpen] = useState(false);
@@ -1482,6 +1485,16 @@ export function ShotImageWorkspace({
                       }>
                         {displayedCandidateStateLabel}
                       </em>
+                      <AddToAssetsButton
+                        artifactKind="image_candidate"
+                        assetType="other"
+                        disabled={busy}
+                        name={`分镜 ${plan.index} 生成图片`}
+                        onNotice={onNotice}
+                        request={request}
+                        shotPlanId={plan.id}
+                        sourceEntityId={displayedCandidate.id}
+                      />
                     </div>
                   )}
                 </section>

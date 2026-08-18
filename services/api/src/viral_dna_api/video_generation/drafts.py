@@ -10,6 +10,8 @@ from ..models import (
     ShotPlan,
     ShotVideoGenerationDraft,
     ShotVideoGenerationDraftUpdate,
+    VideoGenerationInputPlan,
+    VideoGenerationInputSource,
 )
 from .settings import VideoGenerationSettingsService
 
@@ -118,6 +120,7 @@ class ShotVideoGenerationDraftService:
                 "resolution": payload.resolution.upper(),
                 "duration_seconds": round(payload.duration_seconds, 3),
                 "candidate_count": payload.candidate_count,
+                "input_plan": payload.input_plan,
                 "draft_version": current.draft_version + 1,
                 "origin": "user",
                 "updated_by_account_id": actor_account_id,
@@ -164,6 +167,7 @@ class ShotVideoGenerationDraftService:
                 candidate_count=_bounded_candidate_count(
                     request.get("candidate_count")
                 ),
+                input_plan=request.get("input_plan") or legacy_video_input_plan(),
                 origin="latest_run",
                 created_at=now,
                 updated_at=now,
@@ -178,7 +182,20 @@ class ShotVideoGenerationDraftService:
                 3.0,
             ),
             candidate_count=1,
+            input_plan=current_default_input_plan(),
             origin="global_default",
             created_at=now,
             updated_at=now,
         )
+
+
+def current_default_input_plan() -> VideoGenerationInputPlan:
+    """New drafts start as prompt-only; optional media is an explicit user choice."""
+    return VideoGenerationInputPlan()
+
+
+def legacy_video_input_plan() -> VideoGenerationInputPlan:
+    """Old runs were created from approved shot images unless stated otherwise."""
+    return VideoGenerationInputPlan(
+        sources=[VideoGenerationInputSource.APPROVED_IMAGES]
+    )

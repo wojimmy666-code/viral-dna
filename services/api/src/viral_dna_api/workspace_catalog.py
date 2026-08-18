@@ -83,6 +83,11 @@ class StorageLocationStatus(StrEnum):
     ERROR = "error"
 
 
+class StorageLocationScope(StrEnum):
+    WORKSPACE = "workspace"
+    ACCOUNT = "account"
+
+
 class StorageCapability(StrEnum):
     READ = "read"
     WRITE = "write"
@@ -137,6 +142,8 @@ class WorkspaceRegistration(BaseModel):
 class StorageLocation(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     workspace_id: UUID
+    account_id: UUID | None = None
+    scope: StorageLocationScope = StorageLocationScope.WORKSPACE
     name: str = Field(min_length=1, max_length=120)
     provider_type: StorageProviderType = StorageProviderType.LOCAL_FILESYSTEM
     device_id: UUID | None = None
@@ -611,6 +618,7 @@ class AccountContextService:
             if location is None:
                 location = StorageLocation(
                     workspace_id=workspace.id,
+                    account_id=account.id,
                     name=f"{device.name} 本地存储",
                     device_id=device.id,
                     config_reference=f"workspace-registration:{registration.id}",
@@ -618,6 +626,8 @@ class AccountContextService:
             else:
                 location = location.model_copy(
                     update={
+                        "account_id": location.account_id or account.id,
+                        "scope": StorageLocationScope.WORKSPACE,
                         "status": StorageLocationStatus.ONLINE,
                         "config_reference": f"workspace-registration:{registration.id}",
                         "updated_at": now,

@@ -34,6 +34,10 @@ const generationDraftSource = readFileSync(
   ),
   "utf8",
 );
+const videoInputComposerSource = readFileSync(
+  new URL("../src/video-inputs/VideoInputComposer.jsx", import.meta.url),
+  "utf8",
+);
 const generationControlsStyles = readFileSync(
   new URL("../src/shot-video-generation-controls.css", import.meta.url),
   "utf8",
@@ -231,6 +235,10 @@ test("persists each shot video model instead of reapplying the global default", 
     resolution: "1080P",
     duration_seconds: 5,
     candidate_count: 2,
+    input_plan: {
+      schema_version: "viral-dna-video-input-plan/v1",
+      sources: [],
+    },
   });
 
   assert.match(productionWorkflowSource, /useShotVideoGenerationDraft/);
@@ -251,6 +259,19 @@ test("persists each shot video model instead of reapplying the global default", 
     productionWorkflowSource,
     /modelAlias:\s*"bailian_wan_2_7_r2v"/,
   );
+});
+
+test("composes optional video inputs without exposing audio as a generation input", () => {
+  assert.match(workspaceSource, /<VideoInputComposer/);
+  assert.match(videoInputComposerSource, /id:\s*"approved_images"/);
+  assert.match(videoInputComposerSource, /id:\s*"project_assets"/);
+  assert.match(videoInputComposerSource, /id:\s*"provider_managed_assets"/);
+  assert.match(videoInputComposerSource, /id:\s*"reference_video"/);
+  assert.match(videoInputComposerSource, /id:\s*"depth_control"/);
+  assert.doesNotMatch(videoInputComposerSource, /id:\s*"audio"/);
+  assert.match(videoInputComposerSource, /生成前自动保存/);
+  assert.match(productionWorkflowSource, /input_plan:\s*\{/);
+  assert.match(productionWorkflowSource, /sources:\s*Array\.from/);
 });
 
 test("recovers the video model catalog and exposes an actionable retry state", () => {

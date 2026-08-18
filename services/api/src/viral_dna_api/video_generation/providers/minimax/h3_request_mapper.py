@@ -6,25 +6,19 @@ from ...media_transport import image_data_url, require_public_media_url
 
 def build_minimax_h3_request(request: ProviderVideoRequest) -> dict[str, object]:
     prompt = request.prompt
-    include_motion_video = (
-        request.route_id == "minimax_identity_image_motion_proxy"
-        and request.effective_route_id == "minimax_identity_image_motion_proxy"
-        and bool(request.reference_videos)
+    include_depth_video = (
+        request.route_id == "minimax_identity_depth_guidance"
+        and bool(request.depth_control_videos)
     )
-    if include_motion_video:
+    if include_depth_video:
         prompt = (
-            "图片1是唯一人物身份与外观来源；参考视频只提供动作节奏、姿态变化和镜头运动，"
-            "不得继承其中的身份、五官、年龄、服装或纹理。\n"
-            f"{prompt}"
-        )
-    elif request.effective_route_id == "pose_image_text_fallback":
-        prompt = (
-            "使用参考图保持目标人物身份；按文字描述还原动作。当前未提交动作视频，"
-            "不要假设存在强姿态控制。\n"
+            "图片1是唯一人物身份与外观来源；其他图片按各自角色提供场景、服装、产品或构图。"
+            "参考视频是全场景深度控制，只提供动作、位置、遮挡、空间深度和镜头轨迹。"
+            "禁止继承深度视频中的灰度、人物身份、五官、服装、纹理、颜色或原场景。\n"
             f"{prompt}"
         )
     if request.negative_prompt:
-        prompt = f"{prompt}\nNegative constraints: {request.negative_prompt}"
+        prompt = f"{prompt}\n负面约束：{request.negative_prompt}"
     return {
         "model": request.provider_model,
         "content": [
@@ -44,9 +38,9 @@ def build_minimax_h3_request(request: ProviderVideoRequest) -> dict[str, object]
                         "video_url": {"url": require_public_media_url(video)},
                         "role": "reference_video",
                     }
-                    for video in request.reference_videos
+                    for video in request.depth_control_videos
                 ]
-                if include_motion_video
+                if include_depth_video
                 else []
             ),
         ],

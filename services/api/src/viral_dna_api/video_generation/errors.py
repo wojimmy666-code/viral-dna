@@ -160,7 +160,8 @@ def classify_video_provider_failure(
             title="检测到未托管真人参考",
             message=(
                 "Seedance 仍检测到可能包含真人身份的输入。请确认已绑定 Provider 托管演员，"
-                "并只启用身份去除校验通过的图片／视频白模；不要重试提交原始人物素材。"
+                "为限制真人参考的模型绑定 Provider 托管演员，并仅提交全场景深度控制与"
+                "已授权外观资产；不要重试提交原始真人素材。"
             ),
             suggested_action="review_person_references",
             retryable=False,

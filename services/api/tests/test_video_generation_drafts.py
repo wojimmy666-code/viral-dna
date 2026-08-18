@@ -12,6 +12,8 @@ from viral_dna_api.models import (
     GenerationKind,
     ShotPlan,
     ShotVideoGenerationDraftUpdate,
+    VideoGenerationInputPlan,
+    VideoGenerationInputSource,
 )
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
@@ -65,10 +67,14 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
                 resolution="1080P",
                 duration_seconds=5,
                 candidate_count=2,
+                input_plan=VideoGenerationInputPlan(
+                    sources=[VideoGenerationInputSource.PROJECT_ASSETS]
+                ),
             ),
             actor_account_id=actor_id,
         )
         assert updated.model_alias == "seedance_2_0_fast"
+        assert updated.input_plan.sources == [VideoGenerationInputSource.PROJECT_ASSETS]
         assert updated.updated_by_account_id == actor_id
         assert updated.draft_version == 2
 
@@ -76,6 +82,7 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
         restored = await service.get(shot.id)
         assert restored.model_alias == "seedance_2_0_fast"
         assert restored.resolution == "1080P"
+        assert restored.input_plan.sources == [VideoGenerationInputSource.PROJECT_ASSETS]
 
         with pytest.raises(ShotVideoGenerationDraftError) as conflict:
             await service.update(
@@ -120,6 +127,7 @@ def test_video_generation_draft_backfills_latest_video_run() -> None:
         assert draft.model_alias == "minimax_h3"
         assert draft.duration_seconds == 6
         assert draft.candidate_count == 3
+        assert draft.input_plan.sources == [VideoGenerationInputSource.APPROVED_IMAGES]
 
     asyncio.run(scenario())
 

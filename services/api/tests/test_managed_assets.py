@@ -17,8 +17,8 @@ from viral_dna_api.managed_assets.volc_ark import (
 )
 from viral_dna_api.video_generation.catalog import load_video_model_catalog
 from viral_dna_api.video_generation.contracts import (
+    DepthControlVideo,
     OrderedReferenceFrame,
-    OrderedReferenceVideo,
     ProviderManagedAssetReference,
     ProviderVideoRequest,
 )
@@ -77,8 +77,10 @@ def test_seedance_catalog_declares_provider_managed_asset_capability() -> None:
         person_capability = catalog.option(alias).capability.person_references
         assert person_capability.policy == PersonReferencePolicy.MANAGED_REQUIRED
         assert person_capability.allow_raw_photoreal_person is False
-        assert person_capability.supports_pose_proxy_image is True
-        assert person_capability.supports_motion_proxy_video is True
+        route = catalog.option(alias).capability.reference_route
+        assert route.supports_depth_control_video is True
+        assert route.requires_depth_control_video is True
+        assert route.show_depth_control_controls is True
 
     assert catalog.option("bailian_wan_2_7_r2v").capability.managed_assets.supported is False
     assert catalog.option("minimax_h3").capability.managed_assets.supported is False
@@ -231,7 +233,7 @@ def test_seedance_places_managed_identity_before_local_frames_and_shifts_labels(
     )
 
     text = payload["content"][0]["text"]
-    assert "图片1是本分镜唯一演员身份来源" in text
+    assert "图片1 是唯一演员身份来源" in text
     assert "图片2走向图片3" in text
     assert "asset-virtual-001" not in text
     assert payload["content"][1] == {
@@ -264,7 +266,7 @@ def test_seedance_maps_provider_managed_video_as_reference_video(tmp_path: Path)
         )
     )
 
-    assert "视频1是本分镜唯一演员身份来源" in payload["content"][0]["text"]
+    assert "视频1 是唯一演员身份来源" in payload["content"][0]["text"]
     assert payload["content"][1] == {
         "type": "video_url",
         "video_url": {"url": "asset://asset-virtual-001"},
@@ -272,14 +274,14 @@ def test_seedance_maps_provider_managed_video_as_reference_video(tmp_path: Path)
     }
 
 
-def test_seedance_submits_managed_identity_before_identity_free_motion_proxy(
+def test_seedance_submits_managed_identity_before_full_scene_depth_control(
     tmp_path: Path,
 ) -> None:
     proxy_path = tmp_path / "motion-proxy.mp4"
     proxy_path.write_bytes(b"identity-free-motion-proxy")
-    proxy = OrderedReferenceVideo(
-        proxy_asset_id=uuid4(),
-        visual_beat_id=uuid4(),
+    depth = DepthControlVideo(
+        control_asset_id=uuid4(),
+        source_video_id=uuid4(),
         ordinal=1,
         title="无身份动作代理",
         path=proxy_path,
@@ -296,9 +298,14 @@ def test_seedance_submits_managed_identity_before_identity_free_motion_proxy(
             prompt="演员完成参考动作",
             negative_prompt="",
             reference_frames=(),
-            reference_videos=(proxy,),
+            depth_control_videos=(depth,),
             managed_asset_references=(_managed_reference(),),
-            reference_manifest={"strategy": "managed_identity_with_motion_proxy"},
+            route_id="seedance_managed_actor_depth_guidance",
+            effective_route_id="seedance_managed_actor_depth_guidance",
+            spatial_control_semantics="guided_depth_reference",
+            reference_manifest={
+                "strategy": "managed_actor_with_depth_and_appearance_assets"
+            },
             duration_seconds=5,
             resolution="720P",
             aspect_ratio="9:16",
@@ -315,4 +322,4 @@ def test_seedance_submits_managed_identity_before_identity_free_motion_proxy(
     )
     assert len(payload["content"]) == 3
     assert "唯一演员身份来源" in payload["content"][0]["text"]
-    assert "无身份、无纹理的动作代理" in payload["content"][0]["text"]
+    assert "全场景深度控制视频" in payload["content"][0]["text"]

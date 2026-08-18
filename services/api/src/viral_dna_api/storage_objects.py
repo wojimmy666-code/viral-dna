@@ -24,6 +24,8 @@ class StorageObjectType(StrEnum):
     THUMBNAIL = "thumbnail"
     ASSET_IMAGE = "asset_image"
     GENERATED_IMAGE = "generated_image"
+    GENERATED_VIDEO = "generated_video"
+    DEPTH_VIDEO = "depth_video"
     AUDIO = "audio"
     SUBTITLE = "subtitle"
     ANALYSIS_FILE = "analysis_file"
@@ -57,6 +59,8 @@ class StorageObject(BaseModel):
     mime_type: str = Field(min_length=1, max_length=160)
     size_bytes: int = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    account_id: UUID | None = None
+    origin_workspace_id: UUID | None = None
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=utc_now)
     deleted_at: datetime | None = None
@@ -66,6 +70,7 @@ class ObjectReplica(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     storage_object_id: UUID
     storage_location_id: UUID
+    account_id: UUID | None = None
     object_key: str = Field(min_length=1, max_length=1024)
     state: ObjectReplicaState = ObjectReplicaState.PENDING
     etag: str | None = Field(default=None, max_length=160)
@@ -73,6 +78,11 @@ class ObjectReplica(BaseModel):
     is_cache: bool = False
     is_pinned: bool = True
     last_verified_at: datetime | None = None
+    last_synced_at: datetime | None = None
+    remote_version: str | None = Field(default=None, max_length=300)
+    upload_session_id: str | None = Field(default=None, max_length=500)
+    error_code: str | None = Field(default=None, max_length=120)
+    error_message: str | None = Field(default=None, max_length=2000)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -86,11 +96,16 @@ class ObjectReplicaResponse(BaseModel):
     id: UUID
     storage_object_id: UUID
     storage_location_id: UUID
+    account_id: UUID | None = None
     state: ObjectReplicaState
     checksum: str | None = None
     is_cache: bool
     is_pinned: bool
     last_verified_at: datetime | None = None
+    last_synced_at: datetime | None = None
+    remote_version: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -98,6 +113,8 @@ class ObjectReplicaResponse(BaseModel):
 class StorageObjectResponse(BaseModel):
     id: UUID
     workspace_id: UUID
+    account_id: UUID | None = None
+    origin_workspace_id: UUID | None = None
     object_type: StorageObjectType
     original_filename: str
     mime_type: str
@@ -137,6 +154,8 @@ class StorageRepository(Protocol):
 
     async def get_storage_object(self, object_id: UUID) -> StorageObject | None: ...
 
+    async def list_storage_objects(self) -> list[StorageObject]: ...
+
     async def save_object_replica(self, replica: ObjectReplica) -> ObjectReplica: ...
 
     async def get_object_replica(self, replica_id: UUID) -> ObjectReplica | None: ...
@@ -156,6 +175,14 @@ class StorageDriver(Protocol):
     ) -> StoredFileInfo: ...
 
     async def stat(self, object_key: str) -> StoredFileInfo: ...
+
+    async def link_existing(
+        self,
+        source_object_key: str,
+        target_object_key: str,
+        *,
+        expected_sha256: str,
+    ) -> StoredFileInfo: ...
 
     async def open_read(self, object_key: str) -> Path: ...
 
@@ -258,6 +285,68 @@ class LocalFileStorageDriver:
     async def stat(self, object_key: str) -> StoredFileInfo:
         return await asyncio.to_thread(self._stat_sync, object_key)
 
+    async def link_existing(
+        self,
+        source_object_key: str,
+        target_object_key: str,
+        *,
+        expected_sha256: str,
+    ) -> StoredFileInfo:
+        return await asyncio.to_thread(
+            self._link_existing_sync,
+            source_object_key,
+            target_object_key,
+            expected_sha256,
+        )
+
+    def _link_existing_sync(
+        self,
+        source_object_key: str,
+        target_object_key: str,
+        expected_sha256: str,
+    ) -> StoredFileInfo:
+        source = self.resolve_key(source_object_key)
+        target = self.resolve_key(target_object_key)
+        if not source.is_file():
+            raise StorageObjectError(
+                "生成产物文件不存在",
+                status_code=409,
+                code="generated_artifact_missing",
+            )
+        source_info = self._stat_sync(source_object_key)
+        if source_info.sha256 != expected_sha256:
+            raise StorageObjectError(
+                "生成产物校验和不一致",
+                status_code=409,
+                code="checksum_mismatch",
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target_info = self._stat_sync(target_object_key)
+                if target_info.sha256 == expected_sha256:
+                    return target_info
+                raise StorageObjectError(
+                    "目标对象路径已被其他内容占用",
+                    status_code=409,
+                    code="object_key_conflict",
+                )
+            os.link(source, target)
+        except StorageObjectError:
+            raise
+        except OSError as exc:
+            raise StorageObjectError(
+                "当前文件系统不支持无复制加入资产库",
+                status_code=409,
+                code="zero_copy_unavailable",
+            ) from exc
+        return StoredFileInfo(
+            path=target,
+            size_bytes=source_info.size_bytes,
+            sha256=source_info.sha256,
+            etag=source_info.etag,
+        )
+
     def _stat_sync(self, object_key: str) -> StoredFileInfo:
         target = self.resolve_key(object_key)
         if not target.is_file():
@@ -336,6 +425,19 @@ class FakeCloudStorageDriver:
 
     async def stat(self, object_key: str) -> StoredFileInfo:
         return await self._delegate.stat(object_key)
+
+    async def link_existing(
+        self,
+        source_object_key: str,
+        target_object_key: str,
+        *,
+        expected_sha256: str,
+    ) -> StoredFileInfo:
+        raise StorageObjectError(
+            "云端存储不支持本地硬链接",
+            status_code=409,
+            code="zero_copy_unavailable",
+        )
 
     async def open_read(self, object_key: str) -> Path:
         return await self._delegate.open_read(object_key)
@@ -476,6 +578,7 @@ class StorageManager:
     async def register_existing_local_object(
         self,
         *,
+        account_id: UUID | None = None,
         workspace_id: UUID,
         storage_location_id: UUID,
         object_type: StorageObjectType,
@@ -484,7 +587,7 @@ class StorageManager:
         object_key: str,
         expected_sha256: str | None = None,
     ) -> StorageObject:
-        """Register an existing managed local file without copying its bytes."""
+        """Adopt an existing workspace file via a durable local hard link."""
 
         driver = self._drivers.get(storage_location_id)
         if driver is None or not driver.is_local:
@@ -502,20 +605,29 @@ class StorageManager:
             )
         filename = Path(original_filename or "file.bin").name.strip()[:255] or "file.bin"
         storage_object = StorageObject(
+            account_id=account_id,
             workspace_id=workspace_id,
+            origin_workspace_id=workspace_id,
             object_type=object_type,
             original_filename=filename,
             mime_type=mime_type,
             size_bytes=info.size_bytes,
             sha256=info.sha256,
         )
+        canonical_object_key = build_object_key(storage_object.id, filename)
+        adopted_info = await driver.link_existing(
+            object_key,
+            canonical_object_key,
+            expected_sha256=info.sha256,
+        )
         replica = ObjectReplica(
+            account_id=account_id,
             storage_object_id=storage_object.id,
             storage_location_id=storage_location_id,
-            object_key=object_key.replace("\\", "/"),
+            object_key=canonical_object_key,
             state=ObjectReplicaState.AVAILABLE,
-            etag=info.etag,
-            checksum=info.sha256,
+            etag=adopted_info.etag,
+            checksum=adopted_info.sha256,
             last_verified_at=utc_now(),
         )
         await self.repository.save_storage_bundle(storage_object, replica)
@@ -525,6 +637,7 @@ class StorageManager:
     async def save_object(
         self,
         *,
+        account_id: UUID | None = None,
         workspace_id: UUID,
         storage_location_id: UUID,
         object_type: StorageObjectType,
@@ -542,7 +655,9 @@ class StorageManager:
         filename = Path(original_filename or "file.bin").name.strip()[:255] or "file.bin"
         digest = hashlib.sha256(payload).hexdigest()
         storage_object = StorageObject(
+            account_id=account_id,
             workspace_id=workspace_id,
+            origin_workspace_id=workspace_id,
             object_type=object_type,
             original_filename=filename,
             mime_type=mime_type,
@@ -551,6 +666,7 @@ class StorageManager:
         )
         object_key = build_object_key(storage_object.id, filename)
         replica = ObjectReplica(
+            account_id=account_id,
             storage_object_id=storage_object.id,
             storage_location_id=storage_location_id,
             object_key=object_key,

@@ -142,17 +142,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%PYTHON_EXE%" -c "import httpx, opencc, uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
+"%PYTHON_EXE%" -c "import httpx, numpy, onnxruntime, opencc, uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
 if errorlevel 1 (
   echo [ViralDNA] Installing API dependencies...
   "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev]"
-  if errorlevel 1 exit /b 1
-)
-
-"%PYTHON_EXE%" -c "from importlib.metadata import version; import cv2, numpy, onnxruntime; assert int(numpy.__version__.split('.')[0]) ^< 3; assert tuple(map(int, version('onnxruntime').split('.')[:2])) ^< (1, 28)" >nul 2>&1
-if errorlevel 1 (
-  echo [ViralDNA] Installing or repairing privacy proxy dependencies...
-  "%PYTHON_EXE%" -m pip install --upgrade -e "%PROJECT_ROOT%\services\api[reference-proxy]"
   if errorlevel 1 exit /b 1
 )
 

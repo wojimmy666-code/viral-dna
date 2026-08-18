@@ -51,6 +51,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
+import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { PromptEditor } from "./prompt-editor/index.js";
 import {
@@ -4164,7 +4165,7 @@ function ModelSettingsDialog({
                   />
                   <small>
                     填写能从公网访问当前 ViralDNA API 的 HTTPS 域名或反向代理地址；
-                    不接受 localhost、内网 IP 或 HTTP。留空时会自动回退为图片白模与文字动作描述。
+                    不接受 localhost、内网 IP 或 HTTP。需要深度视频的模型在未配置时会明确阻止生成。
                   </small>
                 </label>
                 <label className="settings-field">
@@ -4185,7 +4186,7 @@ function ModelSettingsDialog({
               </div>
               <small className="managed-asset-settings-note">
                 {videoServerSettings.public_media_validation_message
-                  || "配置后，生成任务会把已启用的视频白模暂存为短期签名地址。"}
+                  || "配置后，生成任务会把已启用的全场景深度视频暂存为短期签名地址。"}
               </small>
             </section>
 
@@ -4333,6 +4334,8 @@ function ModelSettingsDialog({
               </div>
             </div>
           </section>
+
+          <DepthGenerationSettings request={apiRequest} />
 
           <section className="settings-section" aria-labelledby="analysis-profile-title">
             <div className="settings-section-heading">

@@ -143,6 +143,27 @@ function videoPromptChangesFromDraft(
   return changes;
 }
 
+function videoInputModeFromDraft(draft) {
+  const sources = new Set(draft?.inputSources || []);
+  const imageSources = [
+    "approved_images",
+    "project_assets",
+    "provider_managed_assets",
+  ].filter((item) => sources.has(item));
+  const videoSources = ["reference_video", "depth_control"].filter(
+    (item) => sources.has(item),
+  );
+  if (imageSources.length === 0 && videoSources.length === 0) return "text_to_video";
+  if (imageSources.length > 0 && videoSources.length > 0) {
+    return "hybrid_reference_to_video";
+  }
+  if (videoSources.length > 0) return "video_to_video";
+  if (imageSources.length === 1 && sources.has("approved_images")) {
+    return "image_to_video";
+  }
+  return "multi_image_to_video";
+}
+
 function shotDraftPatch(detail, visualBeatId, draft) {
   const activeBeat = visualBeatFromDetail(detail, visualBeatId);
   if (!detail?.plan || !activeBeat) {
@@ -2227,7 +2248,11 @@ export function ProductionHub({
           body: JSON.stringify({
             expected_revision_id: expectedRevisionId,
             candidate_count: candidateCount,
-            input_mode: "multi_image_to_video",
+            input_mode: videoInputModeFromDraft(videoDraft),
+            input_plan: {
+              schema_version: "viral-dna-video-input-plan/v1",
+              sources: Array.from(new Set(videoDraft.inputSources || [])),
+            },
             execution_mode: "remote_api",
             model_alias: videoDraft.modelAlias,
             resolution: videoDraft.resolution,
@@ -2288,92 +2313,54 @@ export function ProductionHub({
     return succeeded;
   }
 
-  async function createReferenceProxy({
-    kind,
-    sourceKind,
-    sourceCandidateId = null,
-    visualBeatId,
-    renderProfile = "structural",
-    privacyMode = null,
-    enhancerEngine = null,
-    fallbackToStructural = true,
-    allowUnknownCost = false,
-  }) {
-    if (!shotDetail?.plan || !detail?.project || !visualBeatId) return false;
-    let succeeded = false;
-    await executeAction(async () => {
-      const response = await request(
-        `/video-references/shots/${shotDetail.plan.id}/proxies`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision_id: detail.project.current_revision_id,
-            source_kind: sourceKind,
-            source_candidate_id: sourceCandidateId,
-            visual_beat_id: visualBeatId,
-            kind,
-            order: 1,
-            render_profile: renderProfile,
-            privacy_mode: privacyMode,
-            enhancer_engine: enhancerEngine,
-            fallback_to_structural: fallbackToStructural,
-            allow_unknown_cost: allowUnknownCost,
-          }),
-        },
-      );
+  async function createDepthControl(job) {
+    if (!shotDetail?.plan || !detail?.project) return false;
+    try {
       await Promise.all([
-        refreshProject(
-          detail.project.id,
-          shotDetail.plan.id,
-          visualBeatId,
-        ),
+        refreshProject(detail.project.id, shotDetail.plan.id, selectedVisualBeatId),
         onProjectsChanged(),
       ]);
-      const proxyLabel = response.proxy.media_type === "video"
-        ? "视频动作白模"
-        : "图片姿态白模";
-      onNotice(
-        response.proxy.fallback_applied
-          ? `${proxyLabel}的 AI 增强未通过，已安全回退到本机结构白模`
-          : response.proxy.semantic_validation_status === "passed"
-            ? `${proxyLabel}${response.proxy.effective_render_profile === "ai_enhanced" ? "已完成 AI 增强，" : ""}已通过校验并自动启用`
-          : `${proxyLabel}已生成，但姿态质量需要复核，暂未启用`,
-      );
+      onNotice({
+        type: "success",
+        title: "全场景深度已生成",
+        message: job?.device_name
+          ? `深度视频已通过 ${job.device_name} 生成并启用。`
+          : "深度视频只会提供动作、空间、遮挡和镜头控制，不携带人物或场景外观。",
+      });
+      return true;
+    } catch (refreshError) {
+      setActionError(refreshError.message || "深度视频已生成，但页面刷新失败。请手动刷新后查看。");
+      return false;
+    }
+  }
+
+  async function toggleDepthControl(assetId, enabled) {
+    if (!shotDetail?.plan || !detail?.project || !assetId) return false;
+    let succeeded = false;
+    await executeAction(async () => {
+      await request(`/depth-controls/shots/${shotDetail.plan.id}/${assetId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: detail.project.current_revision_id,
+          enabled,
+        }),
+      });
+      await Promise.all([
+        refreshProject(detail.project.id, shotDetail.plan.id, selectedVisualBeatId),
+        onProjectsChanged(),
+      ]);
+      onNotice(enabled ? "已启用该深度控制版本" : "已停用深度控制；历史文件仍保留");
       succeeded = true;
     });
     return succeeded;
   }
 
-  async function disableReferenceProxy(proxyAssetId) {
-    return setReferenceProxyEnabled(proxyAssetId, false);
-  }
-
-  async function enableReferenceProxy(proxyAssetId) {
-    return setReferenceProxyEnabled(proxyAssetId, true);
-  }
-
-  async function deleteReferenceProxy(proxyAssetId) {
-    if (!shotDetail?.plan || !detail?.project || !proxyAssetId) return false;
-    const target = (shotDetail.plan.reference_proxy_assets || []).find(
-      (item) => item.id === proxyAssetId,
-    );
-    if (!target) return false;
-    const inUse = (shotDetail.plan.video_reference_bindings || []).some(
-      (item) => item.enabled && item.proxy_asset_id === proxyAssetId,
-    );
-    if (inUse) {
-      onNotice({
-        type: "error",
-        title: "白模正在使用",
-        message: "请先停用该白模，再执行删除。",
-      });
-      return false;
-    }
-    const label = target.media_type === "video" ? "视频白模" : "图片白模";
+  async function deleteDepthControl(assetId) {
+    if (!shotDetail?.plan || !detail?.project || !assetId) return false;
     if (
       typeof window !== "undefined"
-      && !window.confirm(`永久删除此${label}及其本地文件？此操作无法恢复。`)
+      && !window.confirm("永久删除该深度控制视频及其本地文件？此操作无法恢复。")
     ) {
       return false;
     }
@@ -2383,7 +2370,7 @@ export function ProductionHub({
         expected_revision_id: detail.project.current_revision_id,
       });
       const response = await request(
-        `/video-references/shots/${shotDetail.plan.id}/proxies/${proxyAssetId}?${query}`,
+        `/depth-controls/shots/${shotDetail.plan.id}/${assetId}?${query}`,
         { method: "DELETE" },
       );
       await Promise.all([
@@ -2394,12 +2381,12 @@ export function ProductionHub({
         response.local_content_removed
           ? {
               type: "success",
-              title: `${label}已删除`,
-              message: "方案记录与本地派生文件均已移除。",
+              title: "深度控制已删除",
+              message: "方案记录与本地深度文件均已移除。",
             }
           : {
               type: "warning",
-              title: `${label}已从方案删除`,
+              title: "深度控制已从方案删除",
               message: response.cleanup_warning || "本地临时文件仍待清理。",
             },
       );
@@ -2407,51 +2394,6 @@ export function ProductionHub({
     });
     return succeeded;
   }
-
-  async function setReferenceProxyEnabled(proxyAssetId, enabled) {
-    if (!shotDetail?.plan || !detail?.project || !proxyAssetId) return false;
-    const target = (shotDetail.plan.reference_proxy_assets || []).find(
-      (item) => item.id === proxyAssetId,
-    );
-    if (!target) return false;
-    const nextBindings = (shotDetail.plan.video_reference_bindings || []).map((binding) => {
-      if (binding.proxy_asset_id === proxyAssetId) {
-        return { ...binding, enabled };
-      }
-      if (
-        enabled
-        && binding.source_kind === "generated_proxy"
-        && binding.media_type === target.media_type
-      ) {
-        return { ...binding, enabled: false };
-      }
-      return binding;
-    });
-    let succeeded = false;
-    await executeAction(async () => {
-      const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_revision_id: detail.project.current_revision_id,
-          confirm_stale: shotDetail.plan.video_status === "approved",
-          video_reference_bindings: nextBindings,
-        }),
-      });
-      await Promise.all([
-        refreshProject(detail.project.id, updated.plan.id, selectedVisualBeatId),
-        onProjectsChanged(),
-      ]);
-      onNotice(
-        enabled
-          ? `${target.media_type === "video" ? "视频" : "图片"}白模已启用`
-          : "白模已从当前生成策略停用；历史派生资产仍保留",
-      );
-      succeeded = true;
-    });
-    return succeeded;
-  }
-
   async function cancelVideoGeneration(runId) {
     if (!runId) return;
     await executeAction(async () => {
@@ -3187,7 +3129,9 @@ export function ProductionHub({
                 onSelectShot={selectShot}
                 onSelectVisualBeat={selectVisualBeat}
                 onUpdateVisualBeat={updateVisualBeat}
+                onNotice={onNotice}
                 project={detail.project}
+                request={request}
                 resolveUrl={resolveUrl}
                 selectedShotId={selectedShotId}
                 setDraft={setShotDraft}
@@ -3214,11 +3158,10 @@ export function ProductionHub({
                 onArchiveCandidates={archiveVideoCandidates}
                 onCancelRun={cancelVideoGeneration}
                 onClearError={() => setActionError("")}
-                onCreateReferenceProxy={createReferenceProxy}
+                onCreateDepthControl={createDepthControl}
                 onDecideContinuity={decideContinuityFinding}
-                onDeleteReferenceProxy={deleteReferenceProxy}
-                onDisableReferenceProxy={disableReferenceProxy}
-                onEnableReferenceProxy={enableReferenceProxy}
+                onDeleteDepthControl={deleteDepthControl}
+                onToggleDepthControl={toggleDepthControl}
                 onGenerate={generateVideoCandidates}
                 onManagedAssetChange={updateManagedAssetBinding}
                 onNotice={onNotice}
@@ -3240,6 +3183,9 @@ export function ProductionHub({
                 setVideoDraft={setVideoDraft}
                 shotDetail={shotDetail}
                 shots={shots}
+                sourceVideoUrl={resolveUrl(
+                  "/api/v1/productions/" + detail.project.id + "/source-video",
+                )}
                 videoDraft={videoDraft}
                 videoGenerationSettings={videoGenerationSettings}
                 videoGenerationSettingsError={videoGenerationSettingsError}

@@ -4,67 +4,13 @@ from typing import Annotated, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Path, Query
-from fastapi.responses import FileResponse
 
 from ..production import ProductionService, ProductionServiceError
 from ..public_media import PublicMediaStager
 from ..reference_routes import VideoReferenceRouteId, resolve_reference_route
 from ..video_generation.catalog import VideoModelCatalogError, load_video_model_catalog
-from .domain import PersonReferencePolicy, VideoReferenceSourceKind
-from .models import (
-    ProxyEngineInstallationResponse,
-    ReferenceProxyCapabilityResponse,
-    ReferenceProxyCreate,
-    ReferenceProxyCreateResponse,
-    ReferenceProxyDeleteResponse,
-    VideoReferencePlanStep,
-    VideoReferenceStrategyResponse,
-)
-from .proxies import ReferenceProxyService, ReferenceProxyServiceError
-from .proxies.contracts import ProxyEngineCapability
-from .proxies.service import ProxyEngineInstallation
-
-
-def _capability_response(
-    item: ProxyEngineCapability,
-) -> ReferenceProxyCapabilityResponse:
-    return ReferenceProxyCapabilityResponse(
-        engine=item.engine,
-        version=item.version,
-        kinds=list(item.kinds),
-        available=item.available,
-        availability_note=item.availability_note,
-        production_ready=item.production_ready,
-        wholebody=item.wholebody,
-        hand_keypoints=item.hand_keypoints,
-        video_tracking=item.video_tracking,
-        runtime_provider=item.runtime_provider,
-        engine_class=item.engine_class,
-        render_profiles=list(item.render_profiles),
-        privacy_modes=list(item.privacy_modes),
-        provider=item.provider,
-        model=item.model,
-        estimated_unit_cost_micros=item.estimated_unit_cost_micros,
-        cost_estimate_known=item.cost_estimate_known,
-    )
-
-
-def _installation_response(
-    item: ProxyEngineInstallation,
-) -> ProxyEngineInstallationResponse:
-    return ProxyEngineInstallationResponse(
-        id=item.id,
-        engine=item.engine,
-        status=item.status,
-        progress_percent=item.progress_percent,
-        downloaded_bytes=item.downloaded_bytes,
-        total_bytes=item.total_bytes,
-        message=item.message,
-        error_code=item.error_code,
-        capability=(
-            _capability_response(item.capability) if item.capability is not None else None
-        ),
-    )
+from .domain import PersonReferencePolicy
+from .models import VideoReferencePlanStep, VideoReferenceStrategyResponse
 
 
 def _raise_production(exc: ProductionServiceError) -> NoReturn:
@@ -74,66 +20,11 @@ def _raise_production(exc: ProductionServiceError) -> NoReturn:
     ) from exc
 
 
-def _raise_proxy(exc: ReferenceProxyServiceError) -> NoReturn:
-    raise HTTPException(
-        status_code=exc.status_code,
-        detail={"code": exc.code, "message": str(exc)},
-    ) from exc
-
-
 def create_video_reference_router(
     production: ProductionService,
-    proxies: ReferenceProxyService,
     public_media_stager: PublicMediaStager | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/video-references", tags=["video-references"])
-
-    @router.get(
-        "/proxy-engines",
-        response_model=list[ReferenceProxyCapabilityResponse],
-    )
-    async def list_proxy_engines() -> list[ReferenceProxyCapabilityResponse]:
-        return [_capability_response(item) for item in proxies.capabilities()]
-
-    @router.post(
-        "/proxy-engines/{engine_name}/installations",
-        response_model=ProxyEngineInstallationResponse,
-        status_code=202,
-    )
-    async def start_proxy_engine_installation(
-        engine_name: Annotated[str, Path(min_length=1, max_length=80)],
-    ) -> ProxyEngineInstallationResponse:
-        try:
-            item = await proxies.start_engine_installation(engine_name)
-        except ReferenceProxyServiceError as exc:
-            _raise_proxy(exc)
-        return _installation_response(item)
-
-    @router.get(
-        "/proxy-engines/installations/{installation_id}",
-        response_model=ProxyEngineInstallationResponse,
-    )
-    async def get_proxy_engine_installation(
-        installation_id: UUID,
-    ) -> ProxyEngineInstallationResponse:
-        try:
-            item = proxies.engine_installation(installation_id)
-        except ReferenceProxyServiceError as exc:
-            _raise_proxy(exc)
-        return _installation_response(item)
-
-    @router.post(
-        "/proxy-engines/{engine_name}/install",
-        response_model=ReferenceProxyCapabilityResponse,
-    )
-    async def install_proxy_engine(
-        engine_name: Annotated[str, Path(min_length=1, max_length=80)],
-    ) -> ReferenceProxyCapabilityResponse:
-        try:
-            item = await proxies.install_engine(engine_name)
-        except ReferenceProxyServiceError as exc:
-            _raise_proxy(exc)
-        return _capability_response(item)
 
     @router.get(
         "/shots/{shot_plan_id}/strategy",
@@ -154,96 +45,57 @@ def create_video_reference_router(
                 status_code=422,
                 detail={"code": "video_model_invalid", "message": str(exc)},
             ) from exc
-        capability = model.capability.person_references
-        policy = capability.policy
+
+        capability = model.capability.reference_route
         managed_bound = bool(detail.plan.managed_asset_bindings)
-        proxy_assets = {
-            item.id: item for item in detail.plan.reference_proxy_assets
-        }
-        selected_proxies = [
-            proxy
-            for item in detail.plan.video_reference_bindings
-            if item.enabled
-            and item.source_kind == VideoReferenceSourceKind.GENERATED_PROXY
-            and item.proxy_asset_id is not None
-            and (proxy := proxy_assets.get(item.proxy_asset_id)) is not None
-            and proxy.usable_for_generation
+        has_reference_image = bool(
+            detail.plan.image_prompt_mentions
+            or any(
+                beat.approved_image_candidate_id is not None
+                or beat.image_prompt_mentions
+                for beat in detail.plan.visual_beats
+            )
+        )
+        selected_depth = [
+            item
+            for item in detail.plan.depth_control_assets
+            if item.enabled and item.usable_for_generation
         ]
-        route_capability = model.capability.reference_route
         public_media_ready = bool(public_media_stager and public_media_stager.ready)
         route = resolve_reference_route(
-            route_capability,
+            capability,
             has_managed_identity=managed_bound,
-            has_raw_reference_image=any(
-                item.required and item.approved_image_candidate_id is not None
-                for item in detail.plan.visual_beats
-            ),
-            has_pose_proxy_image=any(item.media_type == "image" for item in selected_proxies),
-            has_motion_proxy_video=any(item.media_type == "video" for item in selected_proxies),
+            has_raw_reference_image=has_reference_image,
+            has_depth_control_video=bool(selected_depth),
             public_media_transport_ready=public_media_ready,
         )
-        if policy == PersonReferencePolicy.MANAGED_REQUIRED:
-            strategy = (
-                "managed_identity_with_proxy" if selected_proxies else "managed_identity"
-            )
-            allowed = route.generation_allowed
-            title = "托管演员 + 无身份动作参考"
+
+        if route.route_id == VideoReferenceRouteId.SEEDANCE_MANAGED_ACTOR_DEPTH_GUIDANCE:
+            strategy = "managed_actor_depth"
+            title = "托管演员 + 人物/场景资产 + 全场景深度视频"
             description = (
-                "托管演员是唯一人物身份来源；原始真人关键帧不会提交。"
-                + (
-                    f" 已选择 {len(selected_proxies)} 个图片/视频动作代理。"
-                    if selected_proxies
-                    else " 可按需生成图片或视频动作代理。"
-                )
+                "托管演员决定身份，人物以外的项目资产决定外观；深度视频只提供动作、"
+                "空间层次、遮挡和镜头轨迹。"
             )
-            blocker = route.blocker_message
-        elif policy in {
-            PersonReferencePolicy.RAW_SUPPORTED,
-            PersonReferencePolicy.MANAGED_OPTIONAL,
-        }:
-            strategy = "raw_references"
-            allowed = route.generation_allowed
-            title = "使用原始参考素材"
-            description = "当前模型允许直接提交已确认的原始人物、动作、构图和场景参考。"
-            blocker = route.blocker_message
-        elif policy == PersonReferencePolicy.NO_PERSON:
+        elif route.route_id == VideoReferenceRouteId.MINIMAX_IDENTITY_DEPTH_GUIDANCE:
+            strategy = "identity_image_depth"
+            title = "人物/场景资产 + 全场景深度视频"
+            description = (
+                "人物资产决定身份，场景、服装和产品资产决定外观；深度视频提供动作与空间引导。"
+            )
+        elif route.route_id == VideoReferenceRouteId.IMAGE_TEXT_FALLBACK:
+            strategy = "image_text"
+            title = "人物/场景资产 + 文字动作描述"
+            description = "当前模型不接收深度视频，仅使用图片资产与视频提示词。"
+        elif route.route_id == VideoReferenceRouteId.PERSON_FREE:
             strategy = "person_free"
-            allowed = route.generation_allowed and not managed_bound
-            title = "仅无人物参考"
-            description = "当前模型不允许人物或托管演员参考。"
-            blocker = route.blocker_message
-            if not allowed and blocker is None:
-                blocker = "请解除托管人物绑定后再生成"
+            title = "无人物参考"
+            description = "当前模型仅接收无人物画面与场景资产。"
         else:
-            strategy = "unknown"
-            allowed = route.generation_allowed
-            title = "兼容模式"
-            description = "当前模型尚未声明人物参考策略，生成前请人工确认。"
-            blocker = route.blocker_message
-        if route.route_id == VideoReferenceRouteId.MINIMAX_IDENTITY_IMAGE_MOTION_PROXY:
-            title = "目标人物图 + 动作参考视频"
-            description = (
-                "目标人物图是身份与外观来源；视频白模只提供动作、姿态和镜头运动。"
-                if route.motion_source == "motion_proxy_video"
-                else "当前没有启用视频白模，已自动改用目标人物图与文字动作描述。"
-            )
-        elif route.route_id == VideoReferenceRouteId.WAN_VACE_POSEBODY_REPAINT:
-            title = "目标人物图 + PoseBody 结构控制"
-            description = (
-                "目标人物图替换主体身份，视频白模通过 video_repainting(posebody)"
-                " 提供肢体动作结构。"
-            )
-        elif route.route_id == VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK:
-            title = "目标关键帧 + 文字动作描述"
-            description = (
-                "当前模型不接收参考视频；使用已确认的目标关键帧与文字动作描述生成，"
-                "不会显示或提交视频白模。"
-            )
-        elif route.route_id == VideoReferenceRouteId.ORDERED_MULTI_IMAGE:
-            title = "有序目标画面参考"
-            description = "按画面顺序提交已确认的目标关键帧，保持主体、场景与转场关系。"
-        identity_ready = route.identity_source != "none"
-        motion_ready = route.motion_source not in {"none", "prompt_motion_description"}
+            strategy = "ordered_images"
+            title = "有序人物/场景画面参考"
+            description = "按画面顺序提交已确认图片与项目资产。"
+
         steps = [
             VideoReferencePlanStep(
                 kind="identity",
@@ -251,175 +103,88 @@ def create_video_reference_router(
                 source=route.identity_source,
                 status=(
                     "ready"
-                    if identity_ready or not route_capability.identity_required
+                    if route.identity_source != "none" or not capability.identity_required
                     else "blocked"
                 ),
                 detail=(
-                    "Provider 托管演员是唯一身份来源"
+                    "使用 Provider 托管虚拟演员"
                     if route.identity_source == "provider_managed_asset"
-                    else "使用已确认的目标人物参考图"
+                    else "使用已关联的人物资产或已确认人物画面"
                     if route.identity_source == "approved_reference_image"
-                    else "该路由不需要人物身份输入"
+                    else "该路由不要求人物身份"
                 ),
             ),
             VideoReferencePlanStep(
-                kind="motion",
-                label="动作与运镜来源",
-                source=route.motion_source,
+                kind="appearance",
+                label="人物外观与场景来源",
+                source="project_assets_and_approved_frames",
+                status="ready" if has_reference_image else "optional",
+                detail="人物、服装、产品和场景由项目资产及已确认画面提供。",
+            ),
+            VideoReferencePlanStep(
+                kind="spatial_control",
+                label="动作与空间来源",
+                source=route.spatial_control_source,
                 status=(
-                    "fallback"
-                    if route.fallback_applied
-                    else "ready"
-                    if motion_ready
+                    "ready"
+                    if route.spatial_control_source == "full_scene_depth_video"
+                    else "blocked"
+                    if capability.requires_depth_control_video
                     else "optional"
                 ),
                 detail=(
-                    "视频白模只提供动作、姿态、位置和镜头运动，不提供人物身份"
-                    if route.motion_source == "motion_proxy_video"
-                    else "使用图片姿态和文字动作描述，动作还原强度低于视频控制"
-                    if route.motion_source in {"pose_proxy_image", "prompt_motion_description"}
-                    else "该模型不接收视频动作参考"
+                    "全场景深度视频只提供动作、遮挡、空间层次和镜头轨迹。"
+                    if capability.supports_depth_control_video
+                    else "当前模型不接收深度控制视频。"
                 ),
             ),
         ]
-        if policy == PersonReferencePolicy.MANAGED_REQUIRED:
-            steps.append(
-                VideoReferencePlanStep(
-                    kind="privacy",
-                    label="真人素材隔离",
-                    source="local_reference_filter",
-                    status="excluded",
-                    detail="原始真人关键帧不会提交给 Seedance；只保留托管身份与无身份动作信息",
-                )
-            )
-        if route_capability.requires_public_media_url:
+        if capability.requires_public_media_url:
             steps.append(
                 VideoReferencePlanStep(
                     kind="transport",
-                    label="Provider 媒体传输",
-                    source="public_media_url",
-                    status="ready" if public_media_ready else "fallback",
+                    label="深度视频传输",
+                    source="signed_https_url",
+                    status="ready" if public_media_ready else "blocked",
                     detail=(
-                        "已配置短期签名 HTTPS 媒体地址，可提交视频白模"
+                        "将使用短期签名 HTTPS 地址提交深度视频。"
                         if public_media_ready
-                        else "未配置公网媒体地址；本次将回退为图片白模与文字动作描述"
+                        else "请先在模型与设置中配置公网 HTTPS 媒体暂存地址。"
                     ),
                 )
             )
+
         return VideoReferenceStrategyResponse(
             model_alias=model.alias,
             model_label=model.label,
-            policy=policy,
+            policy=model.capability.person_references.policy,
             strategy=strategy,
             title=title,
             description=description,
-            managed_identity_required=policy == PersonReferencePolicy.MANAGED_REQUIRED,
-            managed_identity_bound=managed_bound,
-            raw_person_references_submitted=route_capability.accepts_raw_person_images,
-            proxy_image_supported=route_capability.supports_pose_proxy_image,
-            proxy_video_supported=route_capability.supports_motion_proxy_video,
-            selected_proxy_count=len(selected_proxies),
-            excluded_local_reference_count=(
-                len(detail.plan.visual_beats)
-                if policy == PersonReferencePolicy.MANAGED_REQUIRED
-                else 0
+            managed_identity_required=(
+                model.capability.person_references.policy
+                == PersonReferencePolicy.MANAGED_REQUIRED
             ),
-            generation_allowed=allowed,
-            blocker_message=blocker,
+            managed_identity_bound=managed_bound,
+            generation_allowed=route.generation_allowed,
+            blocker_message=route.blocker_message,
             route_id=route.route_id.value,
-            route_label=route_capability.label,
-            effective_route_id=route.effective_route_id.value,
-            support_level=route_capability.support_level.value,
+            route_label=capability.label,
+            support_level=capability.support_level.value,
             identity_transport=route.identity_transport.value,
-            motion_transport=route.motion_transport.value,
-            motion_semantics=route.motion_semantics.value,
+            spatial_control_transport=route.spatial_control_transport.value,
+            spatial_control_semantics=route.spatial_control_semantics.value,
             identity_source=route.identity_source,
-            motion_source=route.motion_source,
-            fallback_applied=route.fallback_applied,
-            requires_public_media_url=route_capability.requires_public_media_url,
-            provider_verified=route_capability.provider_verified,
+            spatial_control_source=route.spatial_control_source,
+            depth_control_supported=capability.supports_depth_control_video,
+            depth_control_required=capability.requires_depth_control_video,
+            show_depth_control_controls=capability.show_depth_control_controls,
+            selected_depth_control_count=len(selected_depth),
+            requires_public_media_url=capability.requires_public_media_url,
+            public_media_ready=public_media_ready,
+            provider_verified=capability.provider_verified,
             warnings=list(route.warnings),
             plan_steps=steps,
-        )
-
-    @router.post(
-        "/shots/{shot_plan_id}/proxies",
-        response_model=ReferenceProxyCreateResponse,
-        status_code=201,
-    )
-    async def create_proxy(
-        shot_plan_id: Annotated[UUID, Path()],
-        payload: ReferenceProxyCreate,
-    ) -> ReferenceProxyCreateResponse:
-        try:
-            return await production.create_reference_proxy(shot_plan_id, payload)
-        except ProductionServiceError as exc:
-            _raise_production(exc)
-
-    @router.delete(
-        "/shots/{shot_plan_id}/proxies/{proxy_asset_id}",
-        response_model=ReferenceProxyDeleteResponse,
-    )
-    async def delete_proxy(
-        shot_plan_id: Annotated[UUID, Path()],
-        proxy_asset_id: Annotated[UUID, Path()],
-        expected_revision_id: Annotated[UUID, Query()],
-    ) -> ReferenceProxyDeleteResponse:
-        try:
-            return await production.delete_reference_proxy(
-                shot_plan_id,
-                proxy_asset_id,
-                expected_revision_id,
-            )
-        except ProductionServiceError as exc:
-            _raise_production(exc)
-
-    @router.get(
-        "/shots/{shot_plan_id}/proxies/{proxy_asset_id}/content",
-        response_class=FileResponse,
-    )
-    async def get_proxy_content(
-        shot_plan_id: Annotated[UUID, Path()],
-        proxy_asset_id: Annotated[UUID, Path()],
-        thumbnail: Annotated[bool, Query()] = False,
-        download: Annotated[bool, Query()] = False,
-    ) -> FileResponse:
-        try:
-            detail = await production.get_shot(shot_plan_id)
-        except ProductionServiceError as exc:
-            _raise_production(exc)
-        asset = next(
-            (
-                item
-                for item in detail.plan.reference_proxy_assets
-                if item.id == proxy_asset_id
-            ),
-            None,
-        )
-        if asset is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "code": "reference_proxy_not_found",
-                    "message": "当前分镜中不存在该白模",
-                },
-            )
-        try:
-            path, media_type, filename = await proxies.resolve_content(
-                asset,
-                thumbnail=thumbnail,
-            )
-        except ReferenceProxyServiceError as exc:
-            _raise_proxy(exc)
-        return FileResponse(
-            path,
-            media_type=media_type,
-            filename=filename,
-            content_disposition_type="attachment" if download else "inline",
-            headers={
-                "Cache-Control": "private, max-age=86400",
-                "X-Content-Type-Options": "nosniff",
-            },
         )
 
     return router

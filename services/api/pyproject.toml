@@ -10,6 +10,8 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "numpy>=1.26,<2.4",
+  "onnxruntime>=1.20,<1.28",
   "opencc>=1.1.9,<2",
   "pillow>=11,<13",
   "pydantic>=2.10,<3",
@@ -19,15 +21,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-reference-proxy = [
-  "numpy>=1.26,<2.4",
-  "onnxruntime>=1.20,<1.28",
-  "opencv-python>=4.10,<5"
-]
 local-ai = [
   "faster-whisper>=1.2,<2",
-  "numpy>=1.26,<2.4",
-  "onnxruntime>=1.20,<1.28",
   "opencv-python>=4.10,<5",
   "rapidocr>=3.8,<4"
 ]

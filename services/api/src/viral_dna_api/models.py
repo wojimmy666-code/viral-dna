@@ -7,14 +7,22 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    HttpUrl,
+    SecretStr,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
+from .control_assets.domain import DepthControlAsset
 from .prompt_engine.contracts import PromptShotDraft
 from .reference_routes.domain import VideoReferenceRouteCapability
 from .schema import WORKSPACE_SCHEMA_VERSION
 from .video_references.domain import (
     PersonReferenceCapability,
-    ReferenceProxyAsset,
     VideoReferenceBinding,
 )
 
@@ -229,8 +237,64 @@ class ImageGenerationInputMode(StrEnum):
 
 
 class VideoGenerationInputMode(StrEnum):
+    TEXT_TO_VIDEO = "text_to_video"
     IMAGE_TO_VIDEO = "image_to_video"
     MULTI_IMAGE_TO_VIDEO = "multi_image_to_video"
+    VIDEO_TO_VIDEO = "video_to_video"
+    HYBRID_REFERENCE_TO_VIDEO = "hybrid_reference_to_video"
+
+
+class VideoGenerationInputSource(StrEnum):
+    """Optional generation inputs. Prompt text is always present and is not a toggle."""
+
+    APPROVED_IMAGES = "approved_images"
+    PROJECT_ASSETS = "project_assets"
+    PROVIDER_MANAGED_ASSETS = "provider_managed_assets"
+    REFERENCE_VIDEO = "reference_video"
+    DEPTH_CONTROL = "depth_control"
+
+
+class VideoGenerationInputPlan(BaseModel):
+    schema_version: Literal["viral-dna-video-input-plan/v1"] = (
+        "viral-dna-video-input-plan/v1"
+    )
+    sources: list[VideoGenerationInputSource] = Field(default_factory=list, max_length=5)
+
+    @field_validator("sources")
+    @classmethod
+    def require_unique_sources(
+        cls,
+        values: list[VideoGenerationInputSource],
+    ) -> list[VideoGenerationInputSource]:
+        if len(values) != len(set(values)):
+            raise ValueError("视频生成输入不能重复")
+        return values
+
+    def includes(self, source: VideoGenerationInputSource) -> bool:
+        return source in self.sources
+
+    @property
+    def input_mode(self) -> VideoGenerationInputMode:
+        image_sources = {
+            VideoGenerationInputSource.APPROVED_IMAGES,
+            VideoGenerationInputSource.PROJECT_ASSETS,
+            VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS,
+        }
+        control_sources = {
+            VideoGenerationInputSource.REFERENCE_VIDEO,
+            VideoGenerationInputSource.DEPTH_CONTROL,
+        }
+        image_count = sum(source in image_sources for source in self.sources)
+        control_count = sum(source in control_sources for source in self.sources)
+        if image_count == 0 and control_count == 0:
+            return VideoGenerationInputMode.TEXT_TO_VIDEO
+        if image_count and control_count:
+            return VideoGenerationInputMode.HYBRID_REFERENCE_TO_VIDEO
+        if control_count:
+            return VideoGenerationInputMode.VIDEO_TO_VIDEO
+        if image_count == 1 and VideoGenerationInputSource.APPROVED_IMAGES in self.sources:
+            return VideoGenerationInputMode.IMAGE_TO_VIDEO
+        return VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO
 
 
 class GenerationCostSource(StrEnum):
@@ -431,10 +495,13 @@ class ProviderManagedAssetCapability(BaseModel):
 
 
 class VideoGenerationCapability(BaseModel):
+    text_to_video: bool = False
     image_to_video: bool = True
+    reference_video: bool = False
+    depth_control_video: bool = False
     multi_image_reference: bool = False
     ordered_reference_images: bool = False
-    minimum_reference_images: int = Field(default=1, ge=1, le=20)
+    minimum_reference_images: int = Field(default=1, ge=0, le=20)
     maximum_reference_images: int = Field(default=1, ge=1, le=20)
     start_frame: bool = True
     end_frame: bool = False
@@ -472,6 +539,30 @@ class VideoGenerationCapability(BaseModel):
         if self.ordered_reference_images and not self.multi_image_reference:
             raise ValueError("有序参考图能力依赖多图参考能力")
         return self
+
+    @computed_field(return_type=list[VideoGenerationInputSource])
+    @property
+    def supported_input_sources(self) -> list[VideoGenerationInputSource]:
+        """Return the optional media inputs accepted by this model.
+
+        Prompt text is deliberately omitted because it is always submitted.
+        Audio is deliberately omitted because it belongs to the editing stage.
+        """
+        values: list[VideoGenerationInputSource] = []
+        if self.image_to_video:
+            values.extend(
+                [
+                    VideoGenerationInputSource.APPROVED_IMAGES,
+                    VideoGenerationInputSource.PROJECT_ASSETS,
+                ]
+            )
+        if self.managed_assets.supported:
+            values.append(VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS)
+        if self.reference_video:
+            values.append(VideoGenerationInputSource.REFERENCE_VIDEO)
+        if self.depth_control_video or self.reference_route.supports_depth_control_video:
+            values.append(VideoGenerationInputSource.DEPTH_CONTROL)
+        return values
 
 
 class VideoGenerationModelOption(BaseModel):
@@ -516,7 +607,6 @@ class VideoProviderCredentialUpdate(BaseModel):
         if managed_fields_set and self.provider != "volc_ark":
             raise ValueError("只有火山方舟 Provider 支持托管资产目录配置")
         return self
-
 
 class VideoGenerationSettingsUpdate(BaseModel):
     enabled: bool = True
@@ -1871,12 +1961,12 @@ class ShotPlan(BaseModel):
         default_factory=list,
         max_length=100,
     )
-    reference_proxy_assets: list[ReferenceProxyAsset] = Field(
+    depth_control_assets: list[DepthControlAsset] = Field(
         default_factory=list,
-        max_length=100,
+        max_length=20,
     )
     reference_policy_version: str = Field(
-        default="video-reference-policy/v1",
+        default="video-reference-policy/v3-depth-only",
         min_length=1,
         max_length=80,
     )
@@ -1942,15 +2032,17 @@ class ShotPlan(BaseModel):
             raise ValueError("视频参考绑定 ID 不能重复")
         return values
 
-    @field_validator("reference_proxy_assets")
+    @field_validator("depth_control_assets")
     @classmethod
-    def require_unique_proxy_asset_ids(
+    def require_unique_depth_control_asset_ids(
         cls,
-        values: list[ReferenceProxyAsset],
-    ) -> list[ReferenceProxyAsset]:
+        values: list[DepthControlAsset],
+    ) -> list[DepthControlAsset]:
         ids = [item.id for item in values]
         if len(ids) != len(set(ids)):
-            raise ValueError("动作代理资产 ID 不能重复")
+            raise ValueError("深度控制资产 ID 不能重复")
+        if sum(item.enabled for item in values) > 1:
+            raise ValueError("一个分镜只能启用一个深度控制资产")
         return values
 
     @field_validator("source_keyframe_relative_path")
@@ -2775,7 +2867,12 @@ class ImageGenerationCreate(BaseModel):
 class VideoGenerationCreate(BaseModel):
     expected_revision_id: UUID
     candidate_count: int = Field(default=1, ge=1, le=4)
-    input_mode: Literal["multi_image_to_video", "image_to_video"] = "multi_image_to_video"
+    input_mode: VideoGenerationInputMode = VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO
+    input_plan: VideoGenerationInputPlan = Field(
+        default_factory=lambda: VideoGenerationInputPlan(
+            sources=[VideoGenerationInputSource.APPROVED_IMAGES]
+        )
+    )
     execution_mode: Literal["simulated", "remote_api"] = "simulated"
     model_alias: str | None = Field(
         default=None,
@@ -2803,6 +2900,7 @@ class ShotVideoGenerationDraft(BaseModel):
     resolution: str = Field(pattern=r"^(?:[0-9]{3,4}P|2K)$")
     duration_seconds: float = Field(ge=0.1, le=60)
     candidate_count: int = Field(default=1, ge=1, le=4)
+    input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
     draft_version: int = Field(default=1, ge=1)
     origin: Literal["global_default", "latest_run", "user"] = "global_default"
     updated_by_account_id: UUID | None = None
@@ -2820,6 +2918,7 @@ class ShotVideoGenerationDraftUpdate(BaseModel):
     resolution: str = Field(pattern=r"^(?:[0-9]{3,4}P|2K)$")
     duration_seconds: float = Field(ge=0.1, le=60)
     candidate_count: int = Field(default=1, ge=1, le=4)
+    input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
 
 
 class ShotKeyframeSelectRequest(BaseModel):

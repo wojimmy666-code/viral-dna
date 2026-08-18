@@ -13,9 +13,9 @@ from ..models import (
 )
 from ..reference_routes.domain import (
     IdentityReferenceTransport,
-    MotionReferenceSemantics,
-    MotionReferenceTransport,
     RouteSupportLevel,
+    SpatialControlSemantics,
+    SpatialControlTransport,
     VideoReferenceRouteCapability,
     VideoReferenceRouteId,
 )
@@ -107,11 +107,16 @@ def _capability(
     maximum_reference_images: int = 1,
     managed_assets: bool = False,
     person_policy: PersonReferencePolicy = PersonReferencePolicy.RAW_SUPPORTED,
-    supports_motion_proxy_video: bool = False,
     reference_route: VideoReferenceRouteCapability | None = None,
+    text_to_video: bool = False,
+    reference_video: bool = False,
 ) -> VideoGenerationCapability:
+    resolved_route = reference_route or VideoReferenceRouteCapability()
     return VideoGenerationCapability(
+        text_to_video=text_to_video,
         image_to_video=True,
+        reference_video=reference_video,
+        depth_control_video=resolved_route.supports_depth_control_video,
         multi_image_reference=ordered_multi_image,
         ordered_reference_images=ordered_multi_image,
         minimum_reference_images=1,
@@ -167,11 +172,8 @@ def _capability(
             allow_asset_only_generation=(
                 person_policy == PersonReferencePolicy.MANAGED_REQUIRED
             ),
-            supports_pose_proxy_image=True,
-            supports_motion_proxy_video=supports_motion_proxy_video,
             supported_roles=[
                 VideoReferenceRole.ACTOR_IDENTITY,
-                VideoReferenceRole.MOTION,
                 VideoReferenceRole.COMPOSITION,
                 VideoReferenceRole.SCENE,
                 VideoReferenceRole.PRODUCT,
@@ -181,7 +183,7 @@ def _capability(
                 VideoReferenceRole.TRANSITION,
             ],
         ),
-        reference_route=(reference_route or VideoReferenceRouteCapability()),
+        reference_route=resolved_route,
     )
 
 
@@ -193,67 +195,59 @@ ORDERED_IMAGE_ROUTE = VideoReferenceRouteCapability(
 )
 
 SEEDANCE_MANAGED_ROUTE = VideoReferenceRouteCapability(
-    route_id=VideoReferenceRouteId.SEEDANCE_MANAGED_ACTOR_MOTION_PROXY,
-    label="托管演员 + 无身份动作视频",
+    route_id=VideoReferenceRouteId.SEEDANCE_MANAGED_ACTOR_DEPTH_GUIDANCE,
+    label="托管演员 + 全场景深度引导",
     identity_transport=IdentityReferenceTransport.PROVIDER_MANAGED_ASSET,
-    motion_transport=MotionReferenceTransport.REFERENCE_VIDEO,
-    motion_semantics=MotionReferenceSemantics.GUIDED_REFERENCE,
+    spatial_control_transport=SpatialControlTransport.REFERENCE_VIDEO,
+    spatial_control_semantics=SpatialControlSemantics.GUIDED_DEPTH_REFERENCE,
     identity_required=True,
     accepts_raw_person_images=False,
-    supports_pose_proxy_image=True,
-    supports_motion_proxy_video=True,
-    show_motion_proxy_controls=True,
+    supports_depth_control_video=True,
+    requires_depth_control_video=True,
+    show_depth_control_controls=True,
     requires_public_media_url=True,
-    fallback_route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
-    fallback_label="图片白模 + 文本动作描述",
 )
 
 MINIMAX_H3_ROUTE = VideoReferenceRouteCapability(
-    route_id=VideoReferenceRouteId.MINIMAX_IDENTITY_IMAGE_MOTION_PROXY,
-    label="人物参考图 + 动作视频",
+    route_id=VideoReferenceRouteId.MINIMAX_IDENTITY_DEPTH_GUIDANCE,
+    label="人物参考图 + 全场景深度引导",
     support_level=RouteSupportLevel.VERIFIED,
     identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
-    motion_transport=MotionReferenceTransport.REFERENCE_VIDEO,
-    motion_semantics=MotionReferenceSemantics.GUIDED_REFERENCE,
+    spatial_control_transport=SpatialControlTransport.REFERENCE_VIDEO,
+    spatial_control_semantics=SpatialControlSemantics.GUIDED_DEPTH_REFERENCE,
     identity_required=True,
     accepts_raw_person_images=True,
     provider_verified=True,
-    supports_pose_proxy_image=True,
-    supports_motion_proxy_video=True,
-    show_motion_proxy_controls=True,
+    supports_depth_control_video=True,
+    requires_depth_control_video=True,
+    show_depth_control_controls=True,
     requires_public_media_url=True,
-    fallback_route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
-    fallback_label="人物参考图 + 图片白模 + 文本动作描述",
-    availability_note="MiniMax H3 全能参考入口支持图片与参考视频组合输入",
+    availability_note="MiniMax H3 使用人物/场景图确定外观，深度视频提供动作与空间引导",
 )
 
-POSE_IMAGE_TEXT_ROUTE = VideoReferenceRouteCapability(
-    route_id=VideoReferenceRouteId.POSE_IMAGE_TEXT_FALLBACK,
+IMAGE_TEXT_ROUTE = VideoReferenceRouteCapability(
+    route_id=VideoReferenceRouteId.IMAGE_TEXT_FALLBACK,
     label="人物参考图 + 文本动作描述",
     identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
-    motion_transport=MotionReferenceTransport.POSE_IMAGE_TEXT,
-    motion_semantics=MotionReferenceSemantics.SUGGESTIVE,
     identity_required=True,
     accepts_raw_person_images=True,
-    supports_pose_proxy_image=True,
-    show_motion_proxy_controls=False,
 )
 
 WAN_VACE_ROUTE = VideoReferenceRouteCapability(
-    route_id=VideoReferenceRouteId.WAN_VACE_POSEBODY_REPAINT,
-    label="人物参考图 + PoseBody 控制视频",
+    route_id=VideoReferenceRouteId.WAN_VACE_DEPTH_CONTROL,
+    label="人物参考图 + 原生深度控制",
     enabled=False,
     support_level=RouteSupportLevel.RESERVED,
     identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
-    motion_transport=MotionReferenceTransport.CONTROL_VIDEO,
-    motion_semantics=MotionReferenceSemantics.STRUCTURAL_CONTROL,
+    spatial_control_transport=SpatialControlTransport.CONTROL_VIDEO,
+    spatial_control_semantics=SpatialControlSemantics.STRICT_DEPTH_CONTROL,
     identity_required=True,
     accepts_raw_person_images=True,
-    supports_pose_proxy_image=True,
-    supports_motion_proxy_video=True,
-    show_motion_proxy_controls=True,
+    supports_depth_control_video=True,
+    requires_depth_control_video=True,
+    show_depth_control_controls=True,
     requires_public_media_url=True,
-    availability_note="已完成 VACE 请求结构预留；启用前需配置 Provider 可访问的公网媒体暂存服务",
+    availability_note="已预留原生深度控制契约；启用前需完成 Wan VACE Provider 参数验收",
 )
 
 
@@ -285,7 +279,7 @@ _MODELS = (
         recommended=True,
     ),
     VideoModelSpec(
-        alias="bailian_wan_vace_posebody",
+        alias="bailian_wan_vace_depth",
         provider="bailian",
         model="wanx2.1-vace-plus",
         label="阿里 Wan VACE · PoseBody",
@@ -297,7 +291,6 @@ _MODELS = (
             resolutions=["720P"],
             default_duration=5,
             maximum_reference_images=2,
-            supports_motion_proxy_video=True,
             reference_route=WAN_VACE_ROUTE,
         ),
         pricing={
@@ -325,8 +318,8 @@ _MODELS = (
             maximum_reference_images=9,
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
-            supports_motion_proxy_video=True,
             reference_route=SEEDANCE_MANAGED_ROUTE,
+            text_to_video=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -350,8 +343,8 @@ _MODELS = (
             maximum_reference_images=9,
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
-            supports_motion_proxy_video=True,
             reference_route=SEEDANCE_MANAGED_ROUTE,
+            text_to_video=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -375,8 +368,8 @@ _MODELS = (
             maximum_reference_images=9,
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
-            supports_motion_proxy_video=True,
             reference_route=SEEDANCE_MANAGED_ROUTE,
+            text_to_video=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -420,8 +413,8 @@ _MODELS = (
             seed=False,
             ordered_multi_image=True,
             maximum_reference_images=9,
-            supports_motion_proxy_video=True,
             reference_route=MINIMAX_H3_ROUTE,
+            text_to_video=True,
         ),
         pricing={
             "kind": "per_second_by_resolution",
@@ -443,7 +436,7 @@ _MODELS = (
             durations=[6, 10],
             resolutions=["768P", "1080P"],
             seed=False,
-            reference_route=POSE_IMAGE_TEXT_ROUTE,
+            reference_route=IMAGE_TEXT_ROUTE,
         ),
         pricing={
             "kind": "fixed_matrix",
@@ -470,7 +463,7 @@ _MODELS = (
             durations=[6, 10],
             resolutions=["768P", "1080P"],
             seed=False,
-            reference_route=POSE_IMAGE_TEXT_ROUTE,
+            reference_route=IMAGE_TEXT_ROUTE,
         ),
         pricing={
             "kind": "fixed_matrix",

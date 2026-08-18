@@ -86,3 +86,28 @@ test("asset size is formatted for display", () => {
   assert.equal(formatAssetSize(1536), "1.5 KB");
   assert.equal(formatAssetSize(2 * 1024 * 1024), "2.0 MB");
 });
+
+test("generated image video and depth artifacts expose asset-library actions", () => {
+  const imageWorkspace = readFileSync(
+    new URL("../src/ShotImageWorkspace.jsx", import.meta.url),
+    "utf8",
+  );
+  const videoLibrary = readFileSync(
+    new URL("../src/VideoCandidateLibrary.jsx", import.meta.url),
+    "utf8",
+  );
+  const depthPanel = readFileSync(
+    new URL("../src/video-controls/DepthControlPanel.jsx", import.meta.url),
+    "utf8",
+  );
+  const assetLibrary = readFileSync(
+    new URL("../src/AssetLibrary.jsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(imageWorkspace, /artifactKind="image_candidate"/);
+  assert.match(videoLibrary, /artifactKind="video_candidate"/);
+  assert.match(depthPanel, /artifactKind="depth_control"/);
+  assert.match(assetLibrary, /asset\.media_kind !== "image"/);
+  assert.match(assetLibrary, /\/provenance/);
+});

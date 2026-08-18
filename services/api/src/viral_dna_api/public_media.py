@@ -149,7 +149,7 @@ def public_media_configuration() -> PublicMediaConfiguration:
             ttl_seconds=ttl,
             ready=False,
             validation_message=(
-                "未配置公网 HTTPS 地址；需要视频白模的模型将回退为图片白模与文字动作描述"
+                "未配置公网 HTTPS 地址；需要全场景深度视频的模型将无法提交生成"
             ),
         )
     try:

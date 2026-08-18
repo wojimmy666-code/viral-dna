@@ -8,6 +8,7 @@ export const EMPTY_VIDEO_DRAFT = Object.freeze({
   candidateCount: 1,
   modelAlias: "",
   resolution: "720P",
+  inputSources: [],
 });
 
 function normalizedCandidateCount(value) {
@@ -27,6 +28,10 @@ export function videoDraftParameters(draft) {
     resolution: String(draft?.resolution || "720P").trim().toUpperCase(),
     duration_seconds: normalizedDuration(draft?.durationSeconds),
     candidate_count: normalizedCandidateCount(draft?.candidateCount),
+    input_plan: {
+      schema_version: "viral-dna-video-input-plan/v1",
+      sources: Array.from(new Set(draft?.inputSources || [])),
+    },
   };
 }
 
@@ -40,6 +45,7 @@ function localVideoDraftParameters(draft) {
     resolution: draft.resolution,
     durationSeconds: draft.durationSeconds,
     candidateCount: draft.candidateCount,
+    inputSources: [...(draft.inputSources || [])],
   };
 }
 
@@ -76,6 +82,7 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
       || settings?.default_resolution
       || "720P"
     ).toUpperCase(),
+    inputSources: [...(persistedDraft?.input_plan?.sources || [])],
   };
 }
 

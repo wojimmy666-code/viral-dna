@@ -2,9 +2,9 @@
 
 from .domain import (
     IdentityReferenceTransport,
-    MotionReferenceSemantics,
-    MotionReferenceTransport,
     RouteSupportLevel,
+    SpatialControlSemantics,
+    SpatialControlTransport,
     VideoReferenceRouteCapability,
     VideoReferenceRouteId,
 )
@@ -12,10 +12,10 @@ from .resolver import ResolvedReferenceRoute, resolve_reference_route
 
 __all__ = [
     "IdentityReferenceTransport",
-    "MotionReferenceSemantics",
-    "MotionReferenceTransport",
     "ResolvedReferenceRoute",
     "RouteSupportLevel",
+    "SpatialControlSemantics",
+    "SpatialControlTransport",
     "VideoReferenceRouteCapability",
     "VideoReferenceRouteId",
     "resolve_reference_route",

@@ -26,6 +26,17 @@ from .candidate_lifecycle import (
     restore_candidate_records,
 )
 from .chinese import to_simplified
+from .control_assets.domain import DepthControlAsset
+from .control_assets.jobs.contracts import DepthControlJobContext
+from .control_assets.jobs.domain import DepthControlJob
+from .control_assets.models import (
+    DepthControlCreate,
+    DepthControlCreateResponse,
+    DepthControlDeleteResponse,
+    DepthControlUpdate,
+    DepthControlUpdateResponse,
+)
+from .control_assets.service import DepthControlService, DepthControlServiceError
 from .image_generation import ImageGenerationGateway, ImageGenerationGatewayError
 from .image_generation.identity_policy import (
     IdentityPolicyViolation,
@@ -119,7 +130,7 @@ from .models import (
     VideoClipPreparationStatus,
     VideoClipPreparationUpdate,
     VideoGenerationCreate,
-    VideoGenerationInputMode,
+    VideoGenerationInputSource,
     VideoProviderTask,
     VideoProviderTaskResponse,
     VideoProviderTaskStatus,
@@ -136,25 +147,13 @@ from .production_media import (
 )
 from .quality.continuity_service import ContinuityService, ContinuityServiceError
 from .quality.contracts import ContinuityReportStatus
+from .storage_errors import IncompatibleShotPlanSchemaError
 from .video_generation import (
     OrderedReferenceFrame,
     VideoGenerationGateway,
     VideoGenerationGatewayError,
 )
 from .video_generation.errors import classify_video_provider_failure
-from .video_references.domain import (
-    PersonContentClass,
-    VideoReferenceBinding,
-    VideoReferenceMediaType,
-    VideoReferenceRole,
-    VideoReferenceSourceKind,
-)
-from .video_references.models import (
-    ReferenceProxyCreate,
-    ReferenceProxyCreateResponse,
-    ReferenceProxyDeleteResponse,
-)
-from .video_references.proxies import ReferenceProxyService, ReferenceProxyServiceError
 from .workspace import WorkspaceError, WorkspaceManager
 
 MAX_REFERENCE_IMAGE_BYTES = 15 * 1024 * 1024
@@ -280,6 +279,12 @@ def _filesystem_path(path: Path) -> Path:
     return Path(f"{extended_prefix}{raw}")
 
 
+def _resolve_workspace_source_path(raw_path: str, workspace_root: Path) -> Path:
+    resolved = Path(raw_path).expanduser().resolve()
+    resolved.relative_to(workspace_root)
+    return resolved
+
+
 class ProductionRepository(Protocol):
     async def get_record(self, record_id: UUID) -> AnalysisRecord | None: ...
 
@@ -332,6 +337,8 @@ class ProductionRepository(Protocol):
     async def list_reference_assets(self, project_id: UUID) -> list[ReferenceAsset]: ...
 
     async def list_shot_plans(self, project_id: UUID) -> list[ShotPlan]: ...
+
+    async def reset_production_shot_workflow(self, project_id: UUID) -> None: ...
 
     async def list_reference_bindings(
         self,
@@ -1165,7 +1172,7 @@ class ProductionService:
         video_inspector: VideoInspector | None = None,
         continuity_service: ContinuityService | None = None,
         managed_asset_service: ManagedAssetCatalogService | None = None,
-        reference_proxy_service: ReferenceProxyService | None = None,
+        depth_control_service: DepthControlService | None = None,
     ) -> None:
         self.repository = repository
         self.workspace = workspace
@@ -1183,7 +1190,7 @@ class ProductionService:
         self.video_inspector = video_inspector or ProductionVideoInspector(self.media_processor)
         self.continuity = continuity_service or ContinuityService(repository)
         self.managed_assets = managed_asset_service
-        self.reference_proxies = reference_proxy_service
+        self.depth_controls = depth_control_service or DepthControlService(workspace)
         self._lock_guard = asyncio.Lock()
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
@@ -2815,151 +2822,262 @@ class ProductionService:
             ),
         )
 
-    async def create_reference_proxy(
+    async def prepare_depth_control_job(
         self,
         shot_plan_id: UUID,
-        payload: ReferenceProxyCreate,
-    ) -> ReferenceProxyCreateResponse:
-        if self.reference_proxies is None:
-            raise _fail(
-                409,
-                "reference_proxy_service_unavailable",
-                "动作代理服务尚未配置",
-            )
+        expected_revision_id: UUID | None,
+    ) -> DepthControlJobContext:
+        plan = await self._require_shot(shot_plan_id)
+        project = await self._require_project(plan.project_id)
+        if expected_revision_id is not None:
+            self._require_expected_revision(project, expected_revision_id)
+        video = await self.repository.get_video(project.video_id)
+        if video is None:
+            raise _fail(404, "source_video_not_found", "创作方案原视频不存在")
+        try:
+            if video.stored_relative_path:
+                source_path = self.workspace.resolve(video.stored_relative_path)
+                source_relative_path = video.stored_relative_path
+            elif video.stored_path:
+                source_path = await asyncio.to_thread(
+                    _resolve_workspace_source_path,
+                    video.stored_path,
+                    self.workspace.root,
+                )
+                source_relative_path = self.workspace.relative(source_path)
+            else:
+                raise ValueError("missing source path")
+        except (OSError, ValueError, WorkspaceError) as exc:
+            raise _fail(409, "source_video_path_invalid", "原视频文件路径无效") from exc
+        fingerprint_payload = json.dumps(
+            {
+                "source_video_id": str(video.id),
+                "source_relative_path": source_relative_path,
+                "source_sha256": video.sha256,
+                "shot_plan_id": str(plan.id),
+                "start_seconds": round(plan.start_seconds, 6),
+                "end_seconds": round(plan.end_seconds, 6),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return DepthControlJobContext(
+            project=project,
+            shot=plan,
+            source_path=source_path,
+            source_relative_path=source_relative_path,
+            source_video_id=video.id,
+            source_fingerprint=hashlib.sha256(fingerprint_payload).hexdigest(),
+        )
+
+    async def commit_depth_control_job(
+        self,
+        job: DepthControlJob,
+        asset: DepthControlAsset,
+    ) -> UUID:
+        lock = await self._project_lock(job.project_id)
+        try:
+            async with lock:
+                project = await self._require_project(job.project_id)
+                plan = await self._require_shot(job.shot_plan_id)
+                current = await self.prepare_depth_control_job(plan.id, None)
+                if current.source_fingerprint != job.source_fingerprint:
+                    raise _fail(
+                        409,
+                        "depth_source_changed",
+                        "原视频或分镜时间范围已变化，当前深度结果不会自动启用，请重新生成。",
+                    )
+                revision_id = uuid4()
+                now = utc_now()
+                prior_assets = [
+                    item.model_copy(update={"enabled": False, "updated_at": now})
+                    if item.enabled
+                    else item
+                    for item in plan.depth_control_assets
+                ]
+                has_prior_video = plan.approved_video_candidate_id is not None
+                updated = plan.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "depth_control_assets": [*prior_assets, asset],
+                        "video_status": (
+                            WorkflowItemStatus.STALE
+                            if has_prior_video
+                            else WorkflowItemStatus.DRAFT
+                        ),
+                        "approved_video_candidate_id": None,
+                        "updated_at": now,
+                    }
+                )
+                plans = await self.repository.list_shot_plans(project.id)
+                next_plans = [updated if item.id == updated.id else item for item in plans]
+                next_project = project.model_copy(
+                    update={
+                        "status": ProductionProjectStatus.ACTIVE,
+                        "active_step": ProductionStep.SHOT_VIDEOS,
+                        "updated_at": now,
+                    }
+                )
+                next_project, revision = await self._prepare_revision(
+                    next_project,
+                    ProductionChangeKind.REFERENCE_CHANGED,
+                    f"为分镜 {updated.index} 生成全场景深度控制视频",
+                    revision_id=revision_id,
+                    shot_plans=next_plans,
+                    reference_bindings=await self._all_bindings(next_plans),
+                )
+                await self.repository.save_production_bundle(
+                    next_project,
+                    revision,
+                    shot_plans=[updated],
+                )
+        except Exception:
+            deletion = await self.depth_controls.stage_content_deletion(asset)
+            await self.depth_controls.finalize_staged_content(deletion)
+            raise
+        return revision_id
+
+    async def create_depth_control(
+        self,
+        shot_plan_id: UUID,
+        payload: DepthControlCreate,
+    ) -> DepthControlCreateResponse:
         plan = await self._require_shot(shot_plan_id)
         project = await self._require_project(plan.project_id)
         self._require_expected_revision(project, payload.expected_revision_id)
-        if not any(item.id == payload.visual_beat_id for item in plan.visual_beats):
-            raise _fail(404, "visual_beat_not_found", "动作代理所属画面不存在")
-        candidate: GenerationCandidate | None = None
-        source_path_override: Path | None = None
-        source_video_id: UUID | None = None
-        start_seconds: float | None = None
-        end_seconds: float | None = None
-        if payload.source_kind == "source_shot_video":
-            video = await self.repository.get_video(project.video_id)
-            if video is None:
-                raise _fail(404, "source_video_not_found", "创作方案原视频不存在")
-            try:
-                if video.stored_relative_path:
-                    source_path_override = self.workspace.resolve(video.stored_relative_path)
-                elif video.stored_path:
-                    def resolve_legacy_video_path() -> Path:
-                        resolved = Path(video.stored_path).expanduser().resolve()
-                        resolved.relative_to(self.workspace.root)
-                        return resolved
-
-                    source_path_override = await asyncio.to_thread(
-                        resolve_legacy_video_path
-                    )
-                else:
-                    raise ValueError("missing source path")
-            except (OSError, ValueError, WorkspaceError) as exc:
-                raise _fail(409, "source_video_path_invalid", "原视频文件路径无效") from exc
-            if not await asyncio.to_thread(source_path_override.is_file):
-                raise _fail(404, "source_video_missing", "原视频文件不存在")
-            source_video_id = video.id
-            start_seconds = plan.start_seconds
-            end_seconds = plan.end_seconds
-        else:
-            assert payload.source_candidate_id is not None
-            candidate = await self.repository.get_generation_candidate(
-                payload.source_candidate_id
-            )
-            if candidate is None:
-                raise _fail(404, "generation_candidate_not_found", "动作代理源候选不存在")
-            run = await self.repository.get_generation_run(candidate.generation_run_id)
-            if run is None or run.shot_plan_id != plan.id:
-                raise _fail(
-                    422,
-                    "reference_proxy_source_mismatch",
-                    "动作代理源候选不属于当前分镜",
-                )
+        video = await self.repository.get_video(project.video_id)
+        if video is None:
+            raise _fail(404, "source_video_not_found", "创作方案原视频不存在")
         try:
-            proxy = await self.reference_proxies.generate(
+            if video.stored_relative_path:
+                source_path = self.workspace.resolve(video.stored_relative_path)
+            elif video.stored_path:
+                source_path = await asyncio.to_thread(
+                    _resolve_workspace_source_path,
+                    video.stored_path,
+                    self.workspace.root,
+                )
+            else:
+                raise ValueError("missing source path")
+        except (OSError, ValueError, WorkspaceError) as exc:
+            raise _fail(409, "source_video_path_invalid", "原视频文件路径无效") from exc
+        try:
+            asset = await self.depth_controls.generate(
                 project=project,
                 shot=plan,
-                source_candidate=candidate,
-                source_path_override=source_path_override,
-                source_video_id=source_video_id,
-                start_seconds=start_seconds,
-                end_seconds=end_seconds,
-                kind=payload.kind,
-                visual_beat_id=payload.visual_beat_id,
-                order=payload.order,
-                render_profile=payload.render_profile,
-                privacy_mode=payload.privacy_mode,
-                enhancer_engine=payload.enhancer_engine,
-                fallback_to_structural=payload.fallback_to_structural,
-                allow_unknown_cost=payload.allow_unknown_cost,
+                source_path=source_path,
+                source_video_id=video.id,
             )
-        except ReferenceProxyServiceError as exc:
+        except DepthControlServiceError as exc:
             raise _fail(exc.status_code, exc.code, str(exc)) from exc
 
+        lock = await self._project_lock(project.id)
+        try:
+            async with lock:
+                project = await self._require_project(project.id)
+                self._require_expected_revision(project, payload.expected_revision_id)
+                plan = await self._require_shot(plan.id)
+                revision_id = uuid4()
+                prior_assets = [
+                    item.model_copy(update={"enabled": False, "updated_at": utc_now()})
+                    if item.enabled
+                    else item
+                    for item in plan.depth_control_assets
+                ]
+                has_prior_video = plan.approved_video_candidate_id is not None
+                updated = plan.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "depth_control_assets": [*prior_assets, asset],
+                        "video_status": (
+                            WorkflowItemStatus.STALE
+                            if has_prior_video
+                            else WorkflowItemStatus.DRAFT
+                        ),
+                        "approved_video_candidate_id": None,
+                        "updated_at": utc_now(),
+                    }
+                )
+                plans = await self.repository.list_shot_plans(project.id)
+                next_plans = [updated if item.id == updated.id else item for item in plans]
+                next_project = project.model_copy(
+                    update={
+                        "status": ProductionProjectStatus.ACTIVE,
+                        "active_step": ProductionStep.SHOT_VIDEOS,
+                        "updated_at": utc_now(),
+                    }
+                )
+                next_project, revision = await self._prepare_revision(
+                    next_project,
+                    ProductionChangeKind.REFERENCE_CHANGED,
+                    f"为分镜 {updated.index} 生成全场景深度控制视频",
+                    revision_id=revision_id,
+                    shot_plans=next_plans,
+                    reference_bindings=await self._all_bindings(next_plans),
+                )
+                await self.repository.save_production_bundle(
+                    next_project,
+                    revision,
+                    shot_plans=[updated],
+                )
+        except Exception:
+            deletion = await self.depth_controls.stage_content_deletion(asset)
+            await self.depth_controls.finalize_staged_content(deletion)
+            raise
+        return DepthControlCreateResponse(current_revision_id=revision_id, asset=asset)
+
+    async def update_depth_control(
+        self,
+        shot_plan_id: UUID,
+        asset_id: UUID,
+        payload: DepthControlUpdate,
+    ) -> DepthControlUpdateResponse:
+        plan = await self._require_shot(shot_plan_id)
+        project = await self._require_project(plan.project_id)
         lock = await self._project_lock(project.id)
         async with lock:
             project = await self._require_project(project.id)
             self._require_expected_revision(project, payload.expected_revision_id)
             plan = await self._require_shot(plan.id)
-            revision_id = uuid4()
-            binding = VideoReferenceBinding(
-                role=VideoReferenceRole.MOTION,
-                source_kind=VideoReferenceSourceKind.GENERATED_PROXY,
-                media_type=VideoReferenceMediaType(proxy.media_type),
-                visual_beat_id=proxy.visual_beat_id,
-                proxy_asset_id=proxy.id,
-                person_class=PersonContentClass.NON_PHOTOREAL_PROXY,
-                rights_state="confirmed",
-                order=proxy.order,
-                enabled=proxy.usable_for_generation,
-            )
-            prior_bindings = [
-                item.model_copy(update={"enabled": False})
-                if (
-                    proxy.usable_for_generation
-                    and item.enabled
-                    and item.source_kind
-                    == VideoReferenceSourceKind.GENERATED_PROXY
-                    and item.media_type == binding.media_type
+            target = next((item for item in plan.depth_control_assets if item.id == asset_id), None)
+            if target is None:
+                raise _fail(404, "depth_control_not_found", "当前分镜中不存在该深度控制视频")
+            if payload.enabled and not target.usable_for_generation:
+                raise _fail(422, "depth_control_not_ready", "该深度控制视频尚未通过质检")
+            now = utc_now()
+            assets = [
+                item.model_copy(
+                    update={
+                        "enabled": payload.enabled if item.id == asset_id else False,
+                        "updated_at": now,
+                    }
                 )
+                if item.id == asset_id or (payload.enabled and item.enabled)
                 else item
-                for item in plan.video_reference_bindings
+                for item in plan.depth_control_assets
             ]
-            has_prior_video = plan.approved_video_candidate_id is not None
+            revision_id = uuid4()
             updated = plan.model_copy(
                 update={
                     "revision_id": revision_id,
-                    "reference_proxy_assets": [*plan.reference_proxy_assets, proxy],
-                    "video_reference_bindings": [*prior_bindings, binding],
+                    "depth_control_assets": assets,
                     "video_status": (
                         WorkflowItemStatus.STALE
-                        if has_prior_video
+                        if plan.approved_video_candidate_id is not None
                         else WorkflowItemStatus.DRAFT
                     ),
                     "approved_video_candidate_id": None,
-                    "updated_at": utc_now(),
+                    "updated_at": now,
                 }
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated if item.id == updated.id else item for item in plans]
-            next_project = project.model_copy(
-                update={
-                    "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_VIDEOS,
-                    "estimated_cost_micros": (
-                        project.estimated_cost_micros
-                        + (proxy.estimated_cost_micros or 0)
-                    ),
-                    "actual_cost_micros": (
-                        project.actual_cost_micros + (proxy.actual_cost_micros or 0)
-                    ),
-                    "updated_at": utc_now(),
-                }
-            )
+            next_project = project.model_copy(update={"updated_at": now})
             next_project, revision = await self._prepare_revision(
                 next_project,
                 ProductionChangeKind.REFERENCE_CHANGED,
-                f"为分镜 {updated.index} 生成无身份动作代理",
+                f"{'启用' if payload.enabled else '停用'}分镜 {updated.index} 的深度控制视频",
                 revision_id=revision_id,
                 shot_plans=next_plans,
                 reference_bindings=await self._all_bindings(next_plans),
@@ -2969,71 +3087,43 @@ class ProductionService:
                 revision,
                 shot_plans=[updated],
             )
-        return ReferenceProxyCreateResponse(
-            current_revision_id=revision_id,
-            proxy=proxy,
-        )
+        selected = next(item for item in assets if item.id == asset_id)
+        return DepthControlUpdateResponse(current_revision_id=revision_id, asset=selected)
 
-    async def delete_reference_proxy(
+    async def delete_depth_control(
         self,
         shot_plan_id: UUID,
-        proxy_asset_id: UUID,
+        asset_id: UUID,
         expected_revision_id: UUID,
-    ) -> ReferenceProxyDeleteResponse:
-        if self.reference_proxies is None:
-            raise _fail(
-                409,
-                "reference_proxy_service_unavailable",
-                "动作代理服务尚未配置",
-            )
+    ) -> DepthControlDeleteResponse:
         plan = await self._require_shot(shot_plan_id)
         project = await self._require_project(plan.project_id)
         lock = await self._project_lock(project.id)
         staged_deletion = None
-        target = None
         revision_id = uuid4()
         async with lock:
             project = await self._require_project(project.id)
             self._require_expected_revision(project, expected_revision_id)
             plan = await self._require_shot(plan.id)
-            target = next(
-                (
-                    item
-                    for item in plan.reference_proxy_assets
-                    if item.id == proxy_asset_id
-                ),
-                None,
-            )
+            target = next((item for item in plan.depth_control_assets if item.id == asset_id), None)
             if target is None:
-                raise _fail(404, "reference_proxy_not_found", "当前分镜中不存在该白模")
-            if any(
-                item.enabled and item.proxy_asset_id == proxy_asset_id
-                for item in plan.video_reference_bindings
-            ):
-                raise _fail(
-                    409,
-                    "reference_proxy_in_use",
-                    "该白模正在使用，请先停用后再删除",
-                )
+                raise _fail(404, "depth_control_not_found", "当前分镜中不存在该深度控制视频")
             try:
-                staged_deletion = await self.reference_proxies.stage_content_deletion(
-                    target
-                )
-            except ReferenceProxyServiceError as exc:
+                staged_deletion = await self.depth_controls.stage_content_deletion(target)
+            except DepthControlServiceError as exc:
                 raise _fail(exc.status_code, exc.code, str(exc)) from exc
             updated = plan.model_copy(
                 update={
                     "revision_id": revision_id,
-                    "reference_proxy_assets": [
-                        item
-                        for item in plan.reference_proxy_assets
-                        if item.id != proxy_asset_id
+                    "depth_control_assets": [
+                        item for item in plan.depth_control_assets if item.id != asset_id
                     ],
-                    "video_reference_bindings": [
-                        item
-                        for item in plan.video_reference_bindings
-                        if item.proxy_asset_id != proxy_asset_id
-                    ],
+                    "video_status": (
+                        WorkflowItemStatus.STALE
+                        if plan.approved_video_candidate_id is not None
+                        else WorkflowItemStatus.DRAFT
+                    ),
+                    "approved_video_candidate_id": None,
                     "updated_at": utc_now(),
                 }
             )
@@ -3044,10 +3134,7 @@ class ProductionService:
                 next_project, revision = await self._prepare_revision(
                     next_project,
                     ProductionChangeKind.REFERENCE_CHANGED,
-                    (
-                        f"删除分镜 {updated.index} 的未启用"
-                        f"{'视频' if target.media_type.value == 'video' else '图片'}白模"
-                    ),
+                    f"删除分镜 {updated.index} 的深度控制视频",
                     revision_id=revision_id,
                     shot_plans=next_plans,
                     reference_bindings=await self._all_bindings(next_plans),
@@ -3058,31 +3145,16 @@ class ProductionService:
                     shot_plans=[updated],
                 )
             except Exception:
-                try:
-                    await self.reference_proxies.restore_staged_content(staged_deletion)
-                except ReferenceProxyServiceError as restore_error:
-                    raise _fail(
-                        restore_error.status_code,
-                        restore_error.code,
-                        str(restore_error),
-                    ) from restore_error
+                assert staged_deletion is not None
+                await self.depth_controls.restore_staged_content(staged_deletion)
                 raise
-
-        assert target is not None
         assert staged_deletion is not None
-        local_content_removed = await self.reference_proxies.finalize_staged_content(
-            staged_deletion
-        )
-        return ReferenceProxyDeleteResponse(
+        removed = await self.depth_controls.finalize_staged_content(staged_deletion)
+        return DepthControlDeleteResponse(
             current_revision_id=revision_id,
-            proxy_asset_id=target.id,
-            media_type=target.media_type.value,
-            local_content_removed=local_content_removed,
-            cleanup_warning=(
-                None
-                if local_content_removed
-                else "白模已从方案中删除，但本地临时文件仍待清理"
-            ),
+            asset_id=asset_id,
+            local_content_removed=removed,
+            cleanup_warning=None if removed else "记录已删除，但本地文件仍待清理",
         )
 
     async def preview_analysis_update(
@@ -4775,6 +4847,80 @@ class ProductionService:
         self._schedule_video_run(run.id)
         return await self._run_response(run)
 
+    async def _validate_video_input_plan(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        payload: VideoGenerationCreate,
+        capability,
+    ) -> None:
+        """Validate only the media inputs explicitly selected by the user.
+
+        Prompt text is always submitted. Audio intentionally does not exist in
+        this contract; source/generated audio is handled later by the editor.
+        """
+        sources = set(payload.input_plan.sources)
+        if not sources:
+            if not capability.text_to_video:
+                raise _fail(
+                    422,
+                    "video_text_to_video_unsupported",
+                    "当前模型不支持纯文生视频，请选择图片或资产输入，或切换模型",
+                )
+            return
+
+        image_sources = {
+            VideoGenerationInputSource.APPROVED_IMAGES,
+            VideoGenerationInputSource.PROJECT_ASSETS,
+        }
+        if sources & image_sources and not capability.image_to_video:
+            raise _fail(422, "video_image_input_unsupported", "当前模型不支持图片输入")
+        if (
+            VideoGenerationInputSource.APPROVED_IMAGES in sources
+            and not await self._has_valid_approved_image_output(project, plan)
+        ):
+            raise _fail(409, "approved_image_required", "请先确认用于生成视频的分镜图片")
+        if VideoGenerationInputSource.PROJECT_ASSETS in sources:
+            asset_ids = {
+                mention.reference_asset_id
+                for beat in plan.visual_beats
+                for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
+            }
+            if not asset_ids:
+                raise _fail(
+                    409,
+                    "video_project_asset_required",
+                    "当前分镜尚未在提示词中关联项目图片资产",
+                )
+        if VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS in sources:
+            if not capability.managed_assets.supported:
+                raise _fail(
+                    422,
+                    "video_managed_assets_unsupported",
+                    "当前模型不支持 Provider 托管资产",
+                )
+            if not plan.managed_asset_bindings:
+                raise _fail(409, "video_managed_asset_required", "请先选择 Provider 托管人物资产")
+        if VideoGenerationInputSource.REFERENCE_VIDEO in sources:
+            if not capability.reference_video:
+                raise _fail(422, "video_reference_video_unsupported", "当前模型不支持普通参考视频")
+            raise _fail(
+                409,
+                "video_reference_video_not_bound",
+                "当前分镜尚未绑定普通参考视频；该输入不会自动使用原视频",
+            )
+        if VideoGenerationInputSource.DEPTH_CONTROL in sources:
+            if not (
+                capability.depth_control_video
+                or capability.reference_route.supports_depth_control_video
+            ):
+                raise _fail(422, "video_depth_control_unsupported", "当前模型不支持深度视频控制")
+            if not any(
+                item.enabled and item.usable_for_generation
+                for item in plan.depth_control_assets
+            ):
+                raise _fail(409, "depth_control_required", "请先生成并启用一个可用的深度控制视频")
+
     async def _enqueue_video_run(
         self,
         shot_plan_id: UUID,
@@ -4800,18 +4946,8 @@ class ProductionService:
             )
         if not plan.video_prompt.strip():
             raise _fail(409, "video_prompt_required", "请先填写视频提示词")
-        if not await self._has_valid_approved_image_output(project, plan):
-            raise _fail(
-                409,
-                "approved_image_required",
-                "当前分镜缺少有效的已确认图片",
-            )
         if payload.generation_intent == "new_variation" and payload.seed is None:
             payload = payload.model_copy(update={"seed": secrets.randbelow(2_147_483_648)})
-        if payload.input_mode != VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value:
-            payload = payload.model_copy(
-                update={"input_mode": VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO.value}
-            )
         try:
             execution_mode = ImageExecutionMode(payload.execution_mode)
         except ValueError as exc:
@@ -4835,6 +4971,12 @@ class ProductionService:
             )
         except VideoGenerationGatewayError as exc:
             raise _video_gateway_failure(exc) from exc
+        await self._validate_video_input_plan(
+            project,
+            plan,
+            payload,
+            identity.capability,
+        )
         payload = payload.model_copy(
             update={
                 "duration_seconds": duration_seconds,
@@ -4890,7 +5032,7 @@ class ProductionService:
             shot_plan_id=plan.id,
             revision_id=payload.expected_revision_id,
             kind=GenerationKind.VIDEO,
-            input_mode=VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO,
+            input_mode=payload.input_mode,
             provider=identity.provider,
             model=identity.model,
             model_snapshot=identity.model_snapshot,
@@ -5645,53 +5787,124 @@ class ProductionService:
                 )
             if not plan.video_prompt.strip():
                 raise _fail(409, "video_prompt_required", "请先填写视频提示词")
-            if not await self._has_valid_approved_image_output(project, plan):
-                raise _fail(
-                    409,
-                    "approved_image_required",
-                    "当前分镜缺少有效的已确认图片",
-                )
+            identity, _ = self.video_gateway.resolve_identity(
+                execution_mode=payload.execution_mode,
+                model_alias=payload.model_alias,
+                duration_seconds=round(payload.duration_seconds or plan.duration_seconds, 3),
+                resolution=payload.resolution,
+                candidate_count=payload.candidate_count,
+                allow_unknown_cost=payload.allow_unknown_cost,
+            )
+            await self._validate_video_input_plan(
+                project,
+                plan,
+                payload,
+                identity.capability,
+            )
             target_beats = [item for item in plan.visual_beats if item.required] or list(
                 plan.visual_beats
             )
             reference_frames: list[OrderedReferenceFrame] = []
-            for ordinal, beat in enumerate(
-                sorted(target_beats, key=lambda item: item.index),
-                start=1,
+            if payload.input_plan.includes(VideoGenerationInputSource.APPROVED_IMAGES):
+                for ordinal, beat in enumerate(
+                    sorted(target_beats, key=lambda item: item.index),
+                    start=1,
+                ):
+                    if beat.approved_image_candidate_id is None:
+                        raise _fail(
+                            409,
+                            "approved_image_required",
+                            f"画面 {beat.index} 缺少已确认图片",
+                        )
+                    candidate = await self._require_candidate(beat.approved_image_candidate_id)
+                    source_run = await self._require_run(candidate.generation_run_id)
+                    if not _run_matches_visual_beat(source_run, plan, beat.id):
+                        raise _fail(
+                            409,
+                            "approved_candidate_mismatch",
+                            f"画面 {beat.index} 的已采用图片与画面记录不匹配",
+                        )
+                    candidate_path, _ = await self.resolve_candidate_content(candidate.id)
+                    reference_frames.append(
+                        OrderedReferenceFrame(
+                            visual_beat_id=beat.id,
+                            ordinal=ordinal,
+                            title=beat.title,
+                            candidate_id=candidate.id,
+                            path=candidate_path,
+                            relative_path=candidate.relative_path,
+                            sha256=candidate.sha256,
+                            start_ratio=beat.start_ratio,
+                            end_ratio=beat.end_ratio,
+                            transition_to_next_type=beat.transition_to_next_type,
+                            transition_to_next_duration_seconds=(
+                                beat.transition_to_next_duration_seconds
+                            ),
+                            transition_to_next_prompt=beat.transition_to_next_prompt,
+                            role="composition",
+                            source_kind="approved_frame",
+                        )
+                    )
+            if (
+                payload.input_plan.includes(VideoGenerationInputSource.PROJECT_ASSETS)
+                and self.project_assets is not None
             ):
-                if beat.approved_image_candidate_id is None:
-                    raise _fail(
-                        409,
-                        "approved_image_required",
-                        f"画面 {beat.index} 缺少已确认图片",
+                asset_roles = {
+                    ReferenceAssetType.PERSON: "actor_identity",
+                    ReferenceAssetType.SCENE: "scene",
+                    ReferenceAssetType.WARDROBE: "wardrobe",
+                    ReferenceAssetType.PRODUCT: "product",
+                    ReferenceAssetType.PROP: "composition",
+                    ReferenceAssetType.STYLE: "composition",
+                }
+                seen_asset_ids: set[UUID] = set()
+                mention_sources = [
+                    (beat, mention)
+                    for beat in sorted(target_beats, key=lambda item: item.index)
+                    for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
+                ]
+                for beat, mention in mention_sources:
+                    if mention.reference_asset_id in seen_asset_ids:
+                        continue
+                    reference = await self.project_assets.get_reference(
+                        mention.reference_asset_id,
+                        project.id,
+                        include_archived=False,
                     )
-                candidate = await self._require_candidate(beat.approved_image_candidate_id)
-                source_run = await self._require_run(candidate.generation_run_id)
-                if not _run_matches_visual_beat(source_run, plan, beat.id):
-                    raise _fail(
-                        409,
-                        "approved_candidate_mismatch",
-                        f"画面 {beat.index} 的已采用图片与画面记录不匹配",
+                    if reference is None or not reference.rights_confirmed:
+                        raise _fail(
+                            422,
+                            "video_reference_asset_unavailable",
+                            f"参考资产 @{mention.label} 不存在、已归档或尚未确认使用权",
+                        )
+                    path, mime_type = await self.project_assets.resolve_content(
+                        reference.id,
+                        thumbnail=False,
                     )
-                candidate_path, _ = await self.resolve_candidate_content(candidate.id)
-                reference_frames.append(
-                    OrderedReferenceFrame(
-                        visual_beat_id=beat.id,
-                        ordinal=ordinal,
-                        title=beat.title,
-                        candidate_id=candidate.id,
-                        path=candidate_path,
-                        relative_path=candidate.relative_path,
-                        sha256=candidate.sha256,
-                        start_ratio=beat.start_ratio,
-                        end_ratio=beat.end_ratio,
-                        transition_to_next_type=beat.transition_to_next_type,
-                        transition_to_next_duration_seconds=(
-                            beat.transition_to_next_duration_seconds
-                        ),
-                        transition_to_next_prompt=beat.transition_to_next_prompt,
+                    if not mime_type.startswith("image/"):
+                        raise _fail(
+                            422,
+                            "video_reference_asset_type_invalid",
+                            f"参考资产 @{mention.label} 不是可用图片",
+                        )
+                    seen_asset_ids.add(reference.id)
+                    reference_frames.append(
+                        OrderedReferenceFrame(
+                            visual_beat_id=beat.id,
+                            ordinal=len(reference_frames) + 1,
+                            title=f"资产 · {reference.name}",
+                            candidate_id=reference.id,
+                            path=path,
+                            relative_path=reference.relative_path,
+                            sha256=reference.sha256,
+                            start_ratio=beat.start_ratio,
+                            end_ratio=beat.end_ratio,
+                            transition_to_next_type="cut",
+                            transition_to_next_duration_seconds=0,
+                            role=asset_roles[reference.type],
+                            source_kind="project_asset",
+                        )
                     )
-                )
             duration_seconds = round(
                 payload.duration_seconds or plan.duration_seconds,
                 3,
@@ -5709,6 +5922,7 @@ class ProductionService:
                     resolution=payload.resolution,
                     allow_unknown_cost=payload.allow_unknown_cost,
                     seed=payload.seed,
+                    input_plan=payload.input_plan,
                     run_id=run_id,
                     cancel_event=cancellation,
                 )
@@ -8166,7 +8380,12 @@ class ProductionService:
         self,
         project: ProductionProject,
     ) -> tuple[ProductionProject, list[ShotPlan]]:
-        plans = await self.repository.list_shot_plans(project.id)
+        incompatible_schema = False
+        try:
+            plans = await self.repository.list_shot_plans(project.id)
+        except IncompatibleShotPlanSchemaError:
+            plans = []
+            incompatible_schema = True
         if plans:
             current_project = await self._require_project(project.id)
             current_project, plans = await self._repair_legacy_simulated_outputs(
@@ -8188,9 +8407,22 @@ class ProductionService:
         lock = await self._project_lock(project.id)
         async with lock:
             project = await self._require_project(project.id)
-            plans = await self.repository.list_shot_plans(project.id)
+            try:
+                plans = await self.repository.list_shot_plans(project.id)
+            except IncompatibleShotPlanSchemaError:
+                await self.repository.reset_production_shot_workflow(project.id)
+                plans = []
+                incompatible_schema = True
             if plans:
                 return project, plans
+            if incompatible_schema:
+                project = project.model_copy(
+                    update={
+                        "status": ProductionProjectStatus.DRAFT,
+                        "active_step": ProductionStep.SHOT_IMAGES,
+                        "updated_at": utc_now(),
+                    }
+                )
             report = await self.repository.get_report_by_analysis(project.base_analysis_id)
             if report is None or report.video_id != project.video_id:
                 raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
@@ -8206,7 +8438,11 @@ class ProductionService:
             project, revision = await self._prepare_revision(
                 project,
                 ProductionChangeKind.SHOT_PLAN_CHANGED,
-                "为早期创作方案补充分镜创作计划",
+                (
+                    "重建当前版本的分镜工作流"
+                    if incompatible_schema
+                    else "为早期创作方案补充分镜创作计划"
+                ),
                 revision_id=revision_id,
                 report=report,
                 shot_plans=plans,
@@ -8775,20 +9011,6 @@ class ProductionService:
         if "video_reference_bindings" in fields:
             if payload.video_reference_bindings is None:
                 raise _fail(422, "invalid_shot_plan", "视频参考绑定不能为 null")
-            proxy_assets = {item.id: item for item in plan.reference_proxy_assets}
-            for binding in payload.video_reference_bindings:
-                if (
-                    binding.enabled
-                    and binding.source_kind == VideoReferenceSourceKind.GENERATED_PROXY
-                    and binding.proxy_asset_id is not None
-                ):
-                    proxy = proxy_assets.get(binding.proxy_asset_id)
-                    if proxy is None or not proxy.usable_for_generation:
-                        raise _fail(
-                            422,
-                            "reference_proxy_quality_not_passed",
-                            "动作代理尚未通过姿态质量校验，不能启用",
-                        )
             updates["video_reference_bindings"] = payload.video_reference_bindings
         if "required" in fields:
             if payload.required is None:
@@ -9513,7 +9735,12 @@ class ProductionService:
         return None
 
     async def _require_shot(self, shot_plan_id: UUID) -> ShotPlan:
-        plan = await self.repository.get_shot_plan(shot_plan_id)
+        try:
+            plan = await self.repository.get_shot_plan(shot_plan_id)
+        except IncompatibleShotPlanSchemaError as exc:
+            project = await self._require_project(exc.project_id)
+            await self._ensure_project_shots(project)
+            plan = None
         if plan is None:
             raise _fail(404, "shot_plan_not_found", "分镜创作计划不存在")
         return plan

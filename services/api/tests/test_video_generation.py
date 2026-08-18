@@ -16,12 +16,15 @@ from viral_dna_api.models import (
     ShotPlan,
     VideoGenerationCreate,
     VideoGenerationInputMode,
+    VideoGenerationInputPlan,
+    VideoGenerationInputSource,
 )
 from viral_dna_api.video_generation import (
     OrderedReferenceFrame,
     VideoGenerationGateway,
     VideoGenerationGatewayError,
 )
+from viral_dna_api.video_generation.catalog import load_video_model_catalog
 from viral_dna_api.workspace import WorkspaceManager
 
 
@@ -63,6 +66,33 @@ def filesystem_path(path: Path) -> Path:
     if os.name != "nt":
         return path
     return Path(f"{chr(92)}{chr(92)}?{chr(92)}{path}")
+
+
+def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
+    prompt_only = VideoGenerationInputPlan()
+    approved_frame = VideoGenerationInputPlan(
+        sources=[VideoGenerationInputSource.APPROVED_IMAGES]
+    )
+    composed = VideoGenerationInputPlan(
+        sources=[
+            VideoGenerationInputSource.PROJECT_ASSETS,
+            VideoGenerationInputSource.DEPTH_CONTROL,
+        ]
+    )
+    video_only = VideoGenerationInputPlan(
+        sources=[VideoGenerationInputSource.DEPTH_CONTROL]
+    )
+
+    assert prompt_only.input_mode == VideoGenerationInputMode.TEXT_TO_VIDEO
+    assert approved_frame.input_mode == VideoGenerationInputMode.IMAGE_TO_VIDEO
+    assert composed.input_mode == VideoGenerationInputMode.HYBRID_REFERENCE_TO_VIDEO
+    assert video_only.input_mode == VideoGenerationInputMode.VIDEO_TO_VIDEO
+    assert "audio" not in {item.value for item in VideoGenerationInputSource}
+
+    capabilities = load_video_model_catalog().option("minimax_h3").capability
+    assert VideoGenerationInputSource.PROJECT_ASSETS in capabilities.supported_input_sources
+    assert VideoGenerationInputSource.DEPTH_CONTROL in capabilities.supported_input_sources
+    assert "audio" not in capabilities.model_dump(mode="json")["supported_input_sources"]
 
 
 def test_video_gateway_creates_persistent_simulated_candidates(

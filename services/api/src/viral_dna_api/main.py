@@ -20,8 +20,17 @@ from . import __version__
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
 from .asset_library import AssetLibraryService
+from .asset_promotion import GeneratedAssetPromotionService
+from .asset_promotion.routes import create_generated_asset_promotion_router
 from .asset_routes import create_asset_router
 from .chinese import to_simplified
+from .control_assets.jobs.service import DepthControlJobService
+from .control_assets.routes import (
+    create_depth_control_router,
+    create_depth_generation_settings_router,
+)
+from .control_assets.service import DepthControlService
+from .control_assets.settings import DepthGenerationSettingsService
 from .exports import ExportService
 from .image_generation import (
     ImageGenerationGateway,
@@ -190,7 +199,6 @@ from .video_generation.settings import (
     VideoGenerationSettingsService,
     VideoGenerationSettingsServiceError,
 )
-from .video_references.proxies import ReferenceProxyService
 from .video_references.routes import create_video_reference_router
 from .viral_insights.publisher import ProductionConceptPublisher
 from .viral_insights.routes import create_viral_insight_router
@@ -241,12 +249,14 @@ async def lifespan(_app: FastAPI):
     await project_asset_service.bootstrap_legacy_references()
     await record_service.bootstrap(recover_interrupted=True)
     await production_service.recover_generation_runs()
+    await depth_control_job_service.recover()
     try:
         yield
     finally:
         await timeline_export_service.shutdown()
         await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
+        await depth_control_job_service.shutdown()
 
 
 app = FastAPI(
@@ -287,18 +297,28 @@ video_generation_draft_service = ShotVideoGenerationDraftService(
     store,
     video_generation_settings_service,
 )
-reference_proxy_service = ReferenceProxyService(
-    workspace_manager,
-    image_gateway=image_generation_gateway,
-    video_settings=video_generation_settings_service,
-)
 account_context_service = create_account_context_service(workspace_manager)
 platform_connection_service = create_platform_connection_service(account_context_service)
 pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
 notification_service = create_notification_service(account_context_service)
-reference_proxy_service.notification_publisher = notification_service
+depth_generation_settings_service = DepthGenerationSettingsService(
+    workspace_manager,
+    account_context_service,
+)
+depth_control_service = DepthControlService(
+    workspace_manager,
+    settings_service=depth_generation_settings_service,
+    notification_publisher=notification_service,
+)
 storage_manager = StorageManager(store, workspace_manager)
 asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
+generated_asset_promotion_service = GeneratedAssetPromotionService(
+    repository=store,
+    account_context=account_context_service,
+    workspace=workspace_manager,
+    storage=storage_manager,
+    assets=asset_library_service,
+)
 project_asset_service = ProjectAssetService(
     store, workspace_manager, storage_manager, account_context_service
 )
@@ -312,7 +332,13 @@ production_service = ProductionService(
     notification_publisher=notification_service,
     continuity_service=continuity_service,
     managed_asset_service=managed_asset_service,
-    reference_proxy_service=reference_proxy_service,
+    depth_control_service=depth_control_service,
+)
+depth_control_job_service = DepthControlJobService(
+    store,
+    production_service,
+    depth_control_service,
+    notification_publisher=notification_service,
 )
 viral_insight_service = ViralInsightService(
     store,
@@ -334,6 +360,10 @@ timeline_export_service = TimelineExportService(
     on_export_succeeded=production_service.mark_export_completed,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
+app.include_router(
+    create_generated_asset_promotion_router(generated_asset_promotion_service),
+    prefix=API_PREFIX,
+)
 app.include_router(create_managed_asset_router(managed_asset_service), prefix=API_PREFIX)
 app.include_router(
     create_video_generation_draft_router(
@@ -345,8 +375,22 @@ app.include_router(
 app.include_router(
     create_video_reference_router(
         production_service,
-        reference_proxy_service,
         public_media_stager,
+    ),
+    prefix=API_PREFIX,
+)
+app.include_router(
+    create_depth_control_router(
+        production_service,
+        depth_control_service,
+        depth_control_job_service,
+    ),
+    prefix=API_PREFIX,
+)
+app.include_router(
+    create_depth_generation_settings_router(
+        depth_generation_settings_service,
+        depth_control_service,
     ),
     prefix=API_PREFIX,
 )

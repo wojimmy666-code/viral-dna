@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .contracts import MAX_GENERATED_VIDEO_BYTES, OrderedReferenceVideo
+from .contracts import MAX_GENERATED_VIDEO_BYTES, DepthControlVideo
 from .errors import VideoProviderError
 
 MAX_PROVIDER_IMAGE_BYTES = 10 * 1024 * 1024
@@ -35,7 +35,7 @@ def image_data_url(path: Path) -> str:
     return f"data:{media_type};base64,{encoded}"
 
 
-def require_public_media_url(video: OrderedReferenceVideo) -> str:
+def require_public_media_url(video: DepthControlVideo) -> str:
     raw = str(video.public_url or "").strip()
     try:
         parsed = urlsplit(raw)
@@ -44,7 +44,7 @@ def require_public_media_url(video: OrderedReferenceVideo) -> str:
         raise VideoProviderError(
             422,
             "video_public_media_url_invalid",
-            "参考视频的公网媒体地址格式无效",
+            "深度控制视频的公网媒体地址格式无效",
         ) from exc
     if (
         parsed.scheme.lower() != "https"
@@ -57,7 +57,7 @@ def require_public_media_url(video: OrderedReferenceVideo) -> str:
         raise VideoProviderError(
             422,
             "video_public_media_url_invalid",
-            "参考视频必须使用 Provider 可访问的 HTTPS 地址",
+            "深度控制视频必须使用 Provider 可访问的 HTTPS 地址",
         )
     return raw
 

@@ -23,16 +23,12 @@ const appSource = readFileSync(
   "utf8",
 );
 
-test("browses provider managed people without exposing a manual asset id field", () => {
+test("browses provider managed people without a manual asset id field", () => {
   assert.match(pickerSource, /\/managed-assets\/providers\/volc_ark\/catalog/);
-  assert.match(pickerSource, /虚拟人像/);
-  assert.match(pickerSource, /已授权真人/);
-  assert.match(pickerSource, /Provider 返回/);
-  assert.doesNotMatch(pickerSource, /手动输入资产 ID[^。]*<input/);
+  assert.doesNotMatch(pickerSource, /name="asset_id"/);
 });
 
-test("binds one provider actor identity to a shot revision", () => {
-  assert.match(bindingSource, /演员身份（Provider 托管）/);
+test("binds one provider actor identity to the active shot revision", () => {
   assert.match(bindingSource, /managed-assets\/providers\/\$\{binding\.provider\}\/assets/);
   assert.doesNotMatch(bindingSource, /src=\{binding\.preview_url\}/);
   assert.match(workflowSource, /async function updateManagedAssetBinding/);
@@ -41,18 +37,18 @@ test("binds one provider actor identity to a shot revision", () => {
   assert.match(workspaceSource, /managed_asset_bindings/);
 });
 
-test("configures the asset directory with separate AK SK credentials", () => {
+test("configures the managed asset directory with separate access credentials", () => {
   assert.match(appSource, /videoManagedAssetAccessKey/);
   assert.match(appSource, /videoManagedAssetSecretKey/);
-  assert.match(appSource, /托管虚拟资产目录/);
-  assert.match(appSource, /视频 API Key 不能读取目录/);
-  assert.match(appSource, /ProjectName 必须与视频推理 API Key 一致/);
+  assert.match(appSource, /videoManagedAssetProjectName/);
 });
 
-test("shows model compatibility and counts managed assets against reference limits", () => {
+test("treats managed identity and depth control as independent optional inputs", () => {
   assert.match(workspaceSource, /capabilities\?\.managed_assets/);
   assert.match(workspaceSource, /managedIdentityRequired/);
-  assert.match(workspaceSource, /selectedProxyCount/);
-  assert.match(workspaceSource, /当前策略将提交 \$\{totalReferenceCount\} 个安全参考输入/);
-  assert.match(workspaceSource, /当前模型不支持已绑定的 Provider 托管人物资产/);
+  assert.match(workspaceSource, /selectedDepthCount/);
+  assert.match(workspaceSource, /depth_control_assets/);
+  assert.match(workspaceSource, /selectedInputSources\.has\("provider_managed_assets"\)/);
+  assert.match(workspaceSource, /selectedInputSources\.has\("depth_control"\)/);
+  assert.match(workspaceSource, /\{usesDepthControl && \(/);
 });

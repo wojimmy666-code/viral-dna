@@ -40,12 +40,41 @@ class AssetType(StrEnum):
     CLOTHING = "clothing"
     SCENE = "scene"
     LOGO = "logo"
+    MOTION_REFERENCE = "motion_reference"
+    SPATIAL_DEPTH = "spatial_depth"
     OTHER = "other"
+
+
+class AssetMediaKind(StrEnum):
+    IMAGE = "image"
+    VIDEO = "video"
+    DEPTH_VIDEO = "depth_video"
+
+
+class AssetOriginKind(StrEnum):
+    USER_UPLOAD = "user_upload"
+    GENERATED_IMAGE = "generated_image"
+    GENERATED_VIDEO = "generated_video"
+    GENERATED_DEPTH = "generated_depth"
+    IMPORTED_PLATFORM = "imported_platform"
+
+
+class AssetRightsBasis(StrEnum):
+    USER_CONFIRMED = "user_confirmed"
+    SYSTEM_GENERATED = "system_generated"
+    PENDING_REVIEW = "pending_review"
+
+
+class AssetScope(StrEnum):
+    WORKSPACE = "workspace"
+    ACCOUNT = "account"
 
 
 class AssetFolder(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     workspace_id: UUID
+    account_id: UUID | None = None
+    scope: AssetScope = AssetScope.WORKSPACE
     parent_id: UUID | None = None
     name: str = Field(min_length=1, max_length=120)
     sort_order: int = Field(default=0, ge=-10_000, le=10_000)
@@ -63,6 +92,13 @@ class Asset(BaseModel):
     content_object_id: UUID
     thumbnail_object_id: UUID
     type: AssetType
+    account_id: UUID | None = None
+    scope: AssetScope = AssetScope.WORKSPACE
+    media_kind: AssetMediaKind = AssetMediaKind.IMAGE
+    content_type: AssetType | None = None
+    origin_kind: AssetOriginKind = AssetOriginKind.USER_UPLOAD
+    origin_artifact_id: UUID | None = None
+    rights_basis: AssetRightsBasis = AssetRightsBasis.USER_CONFIRMED
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=20)
@@ -71,10 +107,14 @@ class Asset(BaseModel):
     storage_policy: StoragePolicy = StoragePolicy.LOCAL_ONLY
     width: int = Field(gt=0)
     height: int = Field(gt=0)
+    duration_seconds: float | None = Field(default=None, gt=0)
+    fps: float | None = Field(default=None, gt=0)
+    codec: str | None = Field(default=None, max_length=80)
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     archived_at: datetime | None = None
+    deleted_at: datetime | None = None
 
 
 class AssetFolderCreate(BaseModel):
@@ -106,6 +146,8 @@ class AssetFolderCoverResponse(BaseModel):
 class AssetFolderResponse(BaseModel):
     id: UUID
     workspace_id: UUID
+    account_id: UUID | None = None
+    scope: AssetScope = AssetScope.WORKSPACE
     name: str
     sort_order: int
     version: int
@@ -152,6 +194,13 @@ class AssetResponse(BaseModel):
     content_object_id: UUID
     thumbnail_object_id: UUID
     type: AssetType
+    account_id: UUID | None = None
+    scope: AssetScope = AssetScope.WORKSPACE
+    media_kind: AssetMediaKind = AssetMediaKind.IMAGE
+    content_type: AssetType | None = None
+    origin_kind: AssetOriginKind = AssetOriginKind.USER_UPLOAD
+    origin_artifact_id: UUID | None = None
+    rights_basis: AssetRightsBasis = AssetRightsBasis.USER_CONFIRMED
     name: str
     description: str
     tags: list[str]
@@ -165,10 +214,14 @@ class AssetResponse(BaseModel):
     sha256: str
     width: int
     height: int
+    duration_seconds: float | None = None
+    fps: float | None = None
+    codec: str | None = None
     version: int
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None = None
+    deleted_at: datetime | None = None
     content_url: str
     thumbnail_url: str
 
@@ -319,12 +372,13 @@ class AssetLibraryService:
         workspace_id: UUID,
         payload: AssetFolderCreate,
     ) -> AssetFolderResponse:
-        await self._active_context(workspace_id)
+        context, _ = await self._active_context(workspace_id)
         name = _text(payload.name, field_name="目录名称", max_length=120)
         async with self._lock:
             await self._require_unique_folder_name(workspace_id, name)
             folder = AssetFolder(
                 workspace_id=workspace_id,
+                account_id=context.account.id,
                 name=name,
                 sort_order=payload.sort_order,
             )
@@ -501,6 +555,7 @@ class AssetLibraryService:
             else None
         )
         content_object = await self.storage.save_object(
+            account_id=context.account.id,
             workspace_id=context.active_workspace.id,
             storage_location_id=local_location.id,
             object_type=StorageObjectType.ASSET_IMAGE,
@@ -509,6 +564,7 @@ class AssetLibraryService:
             payload=file_payload,
         )
         thumbnail_object = await self.storage.save_object(
+            account_id=context.account.id,
             workspace_id=context.active_workspace.id,
             storage_location_id=local_location.id,
             object_type=StorageObjectType.THUMBNAIL,
@@ -519,10 +575,12 @@ class AssetLibraryService:
         asset = Asset(
             id=asset_id,
             workspace_id=workspace_id,
+            account_id=context.account.id,
             folder_id=payload.folder_id,
             content_object_id=content_object.id,
             thumbnail_object_id=thumbnail_object.id,
             type=payload.type,
+            content_type=payload.type,
             name=name,
             description=description,
             tags=normalize_tags(payload.tags),

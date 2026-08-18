@@ -19,6 +19,7 @@ import {
   ShieldCheck,
   Trash,
   UploadSimple,
+  VideoCamera,
   WarningCircle,
   X,
 } from "@phosphor-icons/react";
@@ -65,7 +66,17 @@ function AssetThumbnail({ asset, resolveUrl, eager = false, useOriginal = false,
 
   return (
     <span className={`asset-thumbnail ${failed ? "failed" : ""}`}>
-      {!failed && source ? (
+      {!failed && source && useOriginal && asset.media_kind !== "image" ? (
+        <video
+          aria-label={alt}
+          controls
+          onError={() => setFailed(true)}
+          playsInline
+          poster={asset.thumbnail_url ? resolveUrl(asset.thumbnail_url) : undefined}
+          preload="metadata"
+          src={source}
+        />
+      ) : !failed && source ? (
         <img
           alt={alt}
           decoding="async"
@@ -75,7 +86,7 @@ function AssetThumbnail({ asset, resolveUrl, eager = false, useOriginal = false,
         />
       ) : (
         <span className="asset-thumbnail-fallback" aria-hidden="true">
-          <ImageSquare size={28} />
+          {asset.media_kind === "image" ? <ImageSquare size={28} /> : <VideoCamera size={28} />}
         </span>
       )}
     </span>
@@ -143,6 +154,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selectedAsset, setSelectedAsset] = useState(null);
+  const [selectedProvenance, setSelectedProvenance] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFile, setUploadFile] = useState(null);
   const [uploadDraft, setUploadDraft] = useState(EMPTY_UPLOAD);
@@ -277,6 +289,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
   useEffect(() => {
     if (!selectedAsset) {
       setDetailDraft(null);
+      setSelectedProvenance(null);
       return;
     }
     setDetailDraft({
@@ -289,6 +302,18 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
       rightsNote: selectedAsset.rights_note || "",
     });
   }, [selectedAsset]);
+
+  useEffect(() => {
+    let active = true;
+    setSelectedProvenance(null);
+    if (!selectedAsset?.origin_artifact_id) return undefined;
+    request(`/assets/${selectedAsset.id}/provenance`)
+      .then((payload) => {
+        if (active) setSelectedProvenance(payload);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [request, selectedAsset?.id, selectedAsset?.origin_artifact_id]);
 
   async function refreshFolders() {
     if (!workspaceId) return;
@@ -639,7 +664,11 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               <span className="asset-card-meta">
                 <span>{ASSET_TYPE_LABELS[asset.type] || asset.type}</span>
                 <i />
-                <span>{asset.width} × {asset.height}</span>
+                <span>
+                  {asset.media_kind === "image"
+                    ? `${asset.width} × ${asset.height}`
+                    : `${Number(asset.duration_seconds || 0).toFixed(1)} 秒`}
+                </span>
               </span>
               <span className="asset-card-tags">
                 {(asset.tags || []).slice(0, 2).map((tag) => <small key={tag}>{tag}</small>)}
@@ -1122,6 +1151,14 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               </label>
               <dl className="asset-file-facts">
                 <div><dt>尺寸</dt><dd>{selectedAsset.width} × {selectedAsset.height}</dd></div>
+                {selectedAsset.duration_seconds && (
+                  <div><dt>时长</dt><dd>{Number(selectedAsset.duration_seconds).toFixed(2)} 秒</dd></div>
+                )}
+                <div><dt>来源</dt><dd>{selectedAsset.origin_kind?.startsWith("generated_") ? "ViralDNA 生成" : "用户上传"}</dd></div>
+                <div><dt>范围</dt><dd>{selectedAsset.scope === "account" ? "账户资产" : "当前工作区"}</dd></div>
+                {selectedProvenance?.provider && (
+                  <div><dt>生成引擎</dt><dd title={`${selectedProvenance.provider} · ${selectedProvenance.model || ""}`}>{selectedProvenance.provider} · {selectedProvenance.model || "默认模型"}</dd></div>
+                )}
                 <div><dt>文件</dt><dd>{formatAssetSize(selectedAsset.size_bytes)} · {selectedAsset.mime_type}</dd></div>
                 <div><dt>更新</dt><dd>{formatAssetDate(selectedAsset.updated_at)}</dd></div>
                 <div><dt>校验</dt><dd title={selectedAsset.sha256}>{selectedAsset.sha256.slice(0, 12)}…</dd></div>
@@ -1143,7 +1180,8 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                   保存修改
                 </button>
                 <a className="secondary-button compact" download href={resolveUrl(selectedAsset.content_url)}>
-                  <DownloadSimple size={16} />原图
+                  <DownloadSimple size={16} />
+                  {selectedAsset.media_kind === "image" ? "原图" : "原视频"}
                 </a>
               </div>
             </form>

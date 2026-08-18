@@ -1,15 +1,9 @@
-"""Provider-neutral video reference policies and derived privacy proxies."""
+"""Provider-neutral identity and creative-reference policies."""
 
 from .domain import (
     PersonContentClass,
     PersonReferenceCapability,
     PersonReferencePolicy,
-    ReferenceProxyAsset,
-    ReferenceProxyEngineClass,
-    ReferenceProxyKind,
-    ReferenceProxyPrivacyMode,
-    ReferenceProxyRenderProfile,
-    ReferenceProxyStatus,
     VideoReferenceBinding,
     VideoReferenceMediaType,
     VideoReferenceRole,
@@ -20,12 +14,6 @@ __all__ = [
     "PersonContentClass",
     "PersonReferenceCapability",
     "PersonReferencePolicy",
-    "ReferenceProxyAsset",
-    "ReferenceProxyEngineClass",
-    "ReferenceProxyKind",
-    "ReferenceProxyPrivacyMode",
-    "ReferenceProxyRenderProfile",
-    "ReferenceProxyStatus",
     "VideoReferenceBinding",
     "VideoReferenceMediaType",
     "VideoReferenceRole",

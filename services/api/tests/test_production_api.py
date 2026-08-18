@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import time
 from io import BytesIO
 from pathlib import Path
@@ -65,24 +66,12 @@ from viral_dna_api.pipeline import build_simulated_report
 from viral_dna_api.production import (
     ProductionService,
     ProductionServiceError,
-    _filesystem_path,
     inspect_reference_image,
 )
 from viral_dna_api.production_media import VideoInspectionResult
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
 from viral_dna_api.video_generation import VideoGenerationGateway
-from viral_dna_api.video_references.domain import (
-    PersonContentClass,
-    ReferenceProxyAsset,
-    ReferenceProxyKind,
-    ReferenceProxyStatus,
-    VideoReferenceBinding,
-    VideoReferenceMediaType,
-    VideoReferenceRole,
-    VideoReferenceSourceKind,
-)
-from viral_dna_api.video_references.proxies.service import ReferenceProxyService
 from viral_dna_api.workspace import WorkspaceManager
 
 
@@ -499,103 +488,6 @@ def test_project_default_output_follows_source_video_ratio(
         assert detail.project.output_aspect_ratio == "16:9"
         assert detail.project.output_width == 1920
         assert detail.project.output_height == 1080
-
-    asyncio.run(scenario())
-
-
-def test_delete_reference_proxy_requires_unused_asset_and_removes_local_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def scenario() -> None:
-        service, repository = isolated_service(tmp_path, monkeypatch)
-        service.reference_proxies = ReferenceProxyService(
-            service.workspace,
-            engines=[],
-        )
-        record, _, analysis, _ = await seed_completed_analysis(repository)
-        detail = await service.create_project(
-            record.id,
-            ProductionProjectCreate(base_analysis_id=analysis.id),
-        )
-        plan = (await service.list_shots(detail.project.id))[0].plan
-        proxy_id = uuid4()
-        proxy_root = (
-            service.workspace.production_shot_root(record.id, detail.project.id, plan.id)
-            / "reference-proxies"
-            / str(proxy_id)
-        )
-        _filesystem_path(proxy_root).mkdir(parents=True)
-        content_path = proxy_root / "proxy.png"
-        thumbnail_path = proxy_root / "thumbnail.png"
-        _filesystem_path(content_path).write_bytes(b"unused-proxy")
-        _filesystem_path(thumbnail_path).write_bytes(b"unused-proxy-thumbnail")
-        proxy = ReferenceProxyAsset(
-            id=proxy_id,
-            visual_beat_id=plan.visual_beats[0].id,
-            kind=ReferenceProxyKind.POSE_PROXY_IMAGE,
-            media_type=VideoReferenceMediaType.IMAGE,
-            status=ReferenceProxyStatus.READY,
-            source_image_candidate_id=uuid4(),
-            relative_path=service.workspace.relative(content_path),
-            thumbnail_relative_path=service.workspace.relative(thumbnail_path),
-            sha256="a" * 64,
-            engine="test_proxy",
-            engine_version="1",
-            identity_removed=True,
-            validation_status="passed",
-        )
-        binding = VideoReferenceBinding(
-            role=VideoReferenceRole.MOTION,
-            source_kind=VideoReferenceSourceKind.GENERATED_PROXY,
-            media_type=VideoReferenceMediaType.IMAGE,
-            visual_beat_id=proxy.visual_beat_id,
-            proxy_asset_id=proxy.id,
-            person_class=PersonContentClass.NON_PHOTOREAL_PROXY,
-            enabled=True,
-        )
-        await repository.save_shot_plan(
-            plan.model_copy(
-                update={
-                    "reference_proxy_assets": [proxy],
-                    "video_reference_bindings": [binding],
-                }
-            )
-        )
-
-        with pytest.raises(ProductionServiceError) as active_error:
-            await service.delete_reference_proxy(
-                plan.id,
-                proxy.id,
-                detail.project.current_revision_id,
-            )
-        assert active_error.value.code == "reference_proxy_in_use"
-        assert _filesystem_path(proxy_root).is_dir()
-
-        await repository.save_shot_plan(
-            plan.model_copy(
-                update={
-                    "reference_proxy_assets": [proxy],
-                    "video_reference_bindings": [
-                        binding.model_copy(update={"enabled": False})
-                    ],
-                }
-            )
-        )
-        deleted = await service.delete_reference_proxy(
-            plan.id,
-            proxy.id,
-            detail.project.current_revision_id,
-        )
-
-        refreshed = await service.get_shot(plan.id)
-        assert deleted.proxy_asset_id == proxy.id
-        assert deleted.media_type == "image"
-        assert deleted.local_content_removed is True
-        assert deleted.cleanup_warning is None
-        assert refreshed.plan.reference_proxy_assets == []
-        assert refreshed.plan.video_reference_bindings == []
-        assert not _filesystem_path(proxy_root).exists()
 
     asyncio.run(scenario())
 
@@ -2410,6 +2302,151 @@ def test_image_candidate_soft_delete_restore_and_approval_protection(
     asyncio.run(scenario())
 
 
+def test_incompatible_shot_workflow_is_reset_and_rebuilt_per_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        root = tmp_path / "schema-reset-workspace"
+        monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+        workspace = WorkspaceManager()
+        repository = SQLiteStore(workspace.database_path)
+        service = ProductionService(
+            repository,
+            workspace,
+            image_gateway=FakeRealImageGateway(workspace),
+        )
+        record, _, analysis, _ = await seed_completed_analysis(repository)
+        affected = await service.create_project(
+            record.id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis.id,
+                name="需要重建的方案",
+            ),
+        )
+        unaffected = await service.create_project(
+            record.id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis.id,
+                name="不受影响的方案",
+            ),
+        )
+        affected_plans = await repository.list_shot_plans(affected.project.id)
+        unaffected_plan_ids = {
+            item.id for item in await repository.list_shot_plans(unaffected.project.id)
+        }
+        affected_plan_ids = {item.id for item in affected_plans}
+        invalid_plan = affected_plans[0]
+        fake_run_id = uuid4()
+        fake_candidate_id = uuid4()
+
+        with sqlite3.connect(workspace.database_path) as connection:
+            row = connection.execute(
+                "SELECT payload FROM shot_plans WHERE record_key = ?",
+                (str(invalid_plan.id),),
+            ).fetchone()
+            assert row is not None
+            invalid_payload = json.loads(str(row[0]))
+            invalid_payload["video_reference_bindings"] = [
+                {
+                    "id": str(uuid4()),
+                    "role": "motion",
+                    "source_kind": "generated_proxy",
+                    "media_type": "video",
+                    "reference_asset_id": str(uuid4()),
+                    "person_class": "non_photoreal_proxy",
+                    "rights_state": "confirmed",
+                    "order": 1,
+                    "enabled": True,
+                }
+            ]
+            connection.execute(
+                "UPDATE shot_plans SET payload = ? WHERE record_key = ?",
+                (json.dumps(invalid_payload), str(invalid_plan.id)),
+            )
+
+            dependent_rows = {
+                "reference_bindings": (
+                    uuid4(),
+                    {"shot_plan_id": str(invalid_plan.id)},
+                ),
+                "generation_runs": (
+                    fake_run_id,
+                    {
+                        "project_id": str(affected.project.id),
+                        "shot_plan_id": str(invalid_plan.id),
+                    },
+                ),
+                "generation_candidates": (
+                    fake_candidate_id,
+                    {"generation_run_id": str(fake_run_id)},
+                ),
+                "video_provider_tasks": (
+                    uuid4(),
+                    {"generation_run_id": str(fake_run_id)},
+                ),
+                "video_clip_preparations": (
+                    uuid4(),
+                    {
+                        "project_id": str(affected.project.id),
+                        "shot_plan_id": str(invalid_plan.id),
+                    },
+                ),
+                "approval_events": (
+                    uuid4(),
+                    {
+                        "project_id": str(affected.project.id),
+                        "shot_plan_id": str(invalid_plan.id),
+                    },
+                ),
+                "continuity_reports": (
+                    uuid4(),
+                    {"project_id": str(affected.project.id)},
+                ),
+                "shot_video_generation_drafts": (
+                    invalid_plan.id,
+                    {
+                        "project_id": str(affected.project.id),
+                        "shot_plan_id": str(invalid_plan.id),
+                    },
+                ),
+            }
+            for table, (record_key, payload) in dependent_rows.items():
+                connection.execute(
+                    f"INSERT OR REPLACE INTO {table} (record_key, payload) VALUES (?, ?)",
+                    (str(record_key), json.dumps(payload)),
+                )
+            connection.commit()
+
+        with pytest.raises(ProductionServiceError) as removed_deep_link:
+            await service.get_shot(invalid_plan.id)
+        assert removed_deep_link.value.code == "shot_plan_not_found"
+
+        recovered = await service.get_project(affected.project.id)
+        rebuilt_plans = await repository.list_shot_plans(affected.project.id)
+
+        assert recovered.shot_count == len(affected_plans)
+        assert {item.id for item in rebuilt_plans}.isdisjoint(affected_plan_ids)
+        assert all(not item.video_reference_bindings for item in rebuilt_plans)
+        assert all(
+            item.reference_policy_version == "video-reference-policy/v3-depth-only"
+            for item in rebuilt_plans
+        )
+        assert {
+            item.id for item in await repository.list_shot_plans(unaffected.project.id)
+        } == unaffected_plan_ids
+
+        with sqlite3.connect(workspace.database_path) as connection:
+            for table, (record_key, _) in dependent_rows.items():
+                remaining = connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE record_key = ?",
+                    (str(record_key),),
+                ).fetchone()
+                assert remaining == (0,)
+
+    asyncio.run(scenario())
+
+
 def test_batch451_video_generation_review_revoke_and_gate_flow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2518,7 +2555,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 video_run.error_message,
             )
             assert video_run.kind == "video"
-            assert video_run.input_mode == "multi_image_to_video"
+            assert video_run.input_mode == "image_to_video"
             assert video_run.execution_mode == "simulated"
             assert len(video_run.candidates) == (2 if index == 0 else 1)
             candidate = video_run.candidates[0]

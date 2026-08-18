@@ -12,6 +12,7 @@ from ..models import (
     ProductionProject,
     ShotPlan,
     VideoGenerationCapability,
+    VideoGenerationInputPlan,
     VideoProviderTaskStatus,
 )
 
@@ -60,18 +61,21 @@ class OrderedReferenceFrame:
     transition_to_next_type: str
     transition_to_next_duration_seconds: float
     transition_to_next_prompt: str = ""
+    role: str = "composition"
+    source_kind: str = "approved_frame"
 
 
 @dataclass(frozen=True, slots=True)
-class OrderedReferenceVideo:
-    proxy_asset_id: UUID
-    visual_beat_id: UUID
+class DepthControlVideo:
+    control_asset_id: UUID
+    source_video_id: UUID
     ordinal: int
     title: str
     path: Path
     relative_path: str
     sha256: str
-    role: str = "motion"
+    kind: str = "full_scene_depth_video"
+    depth_convention: str = "near_white_far_black"
     public_url: str | None = None
 
 
@@ -103,8 +107,9 @@ class VideoGenerationRequest:
     allow_unknown_cost: bool = False
     seed: int | None = None
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
-    reference_videos: tuple[OrderedReferenceVideo, ...] = ()
+    depth_control_videos: tuple[DepthControlVideo, ...] = ()
     reference_manifest: dict[str, Any] = field(default_factory=dict)
+    input_plan: VideoGenerationInputPlan = field(default_factory=VideoGenerationInputPlan)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +128,9 @@ class VideoAdapterRequest:
     seed: int | None
     capability: VideoGenerationCapability
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
-    reference_videos: tuple[OrderedReferenceVideo, ...] = ()
+    depth_control_videos: tuple[DepthControlVideo, ...] = ()
     reference_manifest: dict[str, Any] = field(default_factory=dict)
+    input_plan: VideoGenerationInputPlan = field(default_factory=VideoGenerationInputPlan)
     cancel_event: Event | None = None
 
 
@@ -209,10 +215,10 @@ class ProviderVideoRequest:
     height: int
     route_id: str = "ordered_multi_image"
     effective_route_id: str = "ordered_multi_image"
-    motion_semantics: str = "none"
+    spatial_control_semantics: str = "none"
     control_condition: str | None = None
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
-    reference_videos: tuple[OrderedReferenceVideo, ...] = ()
+    depth_control_videos: tuple[DepthControlVideo, ...] = ()
     reference_manifest: dict[str, Any] = field(default_factory=dict)
     seed: int | None = None
 
