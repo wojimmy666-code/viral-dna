@@ -11,12 +11,16 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
 
 from . import __version__
+from .account_preferences import (
+    UserPreferencesService,
+    create_user_preferences_router,
+)
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
 from .asset_library import AssetLibraryService
@@ -32,6 +36,11 @@ from .control_assets.routes import (
 from .control_assets.service import DepthControlService
 from .control_assets.settings import DepthGenerationSettingsService
 from .exports import ExportService
+from .identity import (
+    PlatformAdmin,
+    create_identity_router,
+    require_platform_admin,
+)
 from .image_generation import (
     ImageGenerationGateway,
     ImageGenerationSettingsService,
@@ -294,6 +303,7 @@ image_generation_gateway = ImageGenerationGateway(
 )
 public_media_stager = PublicMediaStager(workspace_manager)
 account_context_service = create_account_context_service(workspace_manager)
+user_preferences_service = UserPreferencesService(account_context_service)
 platform_connection_service = create_platform_connection_service(account_context_service)
 pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
 notification_service = create_notification_service(account_context_service)
@@ -414,6 +424,16 @@ app.include_router(
 )
 app.include_router(create_public_media_router(public_media_stager), prefix=API_PREFIX)
 app.include_router(create_media_staging_router(media_staging_service), prefix=API_PREFIX)
+app.include_router(
+    create_media_staging_router(
+        media_staging_service,
+        prefix="/admin/settings/media-staging",
+        dependencies=[Depends(require_platform_admin)],
+    ),
+    prefix=API_PREFIX,
+)
+app.include_router(create_identity_router(account_context_service), prefix=API_PREFIX)
+app.include_router(create_user_preferences_router(user_preferences_service), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)
@@ -1404,6 +1424,100 @@ async def update_video_generation_settings(
 async def validate_video_provider(
     provider: Literal["bailian", "volc_ark", "minimax"],
     payload: VideoProviderValidationRequest,
+) -> VideoProviderValidationResponse:
+    try:
+        return await video_generation_settings_service.validate_provider(provider, payload)
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/admin/settings/model",
+    response_model=ModelSettingsResponse,
+)
+async def admin_get_model_settings(_admin: PlatformAdmin) -> ModelSettingsResponse:
+    try:
+        return model_settings_service.get()
+    except ModelSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/admin/settings/model",
+    response_model=ModelSettingsResponse,
+)
+async def admin_update_model_settings(
+    payload: ModelSettingsUpdate,
+    _admin: PlatformAdmin,
+) -> ModelSettingsResponse:
+    try:
+        return await model_settings_service.update(payload)
+    except ModelSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/admin/settings/image-generation",
+    response_model=ImageGenerationSettingsResponse,
+)
+async def admin_get_image_generation_settings(
+    _admin: PlatformAdmin,
+) -> ImageGenerationSettingsResponse:
+    try:
+        return image_generation_settings_service.get()
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/admin/settings/image-generation",
+    response_model=ImageGenerationSettingsResponse,
+)
+async def admin_update_image_generation_settings(
+    payload: ImageGenerationSettingsUpdate,
+    _admin: PlatformAdmin,
+) -> ImageGenerationSettingsResponse:
+    try:
+        return await image_generation_settings_service.update(payload)
+    except ImageGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/admin/settings/video-generation",
+    response_model=VideoGenerationSettingsResponse,
+)
+async def admin_get_video_generation_settings(
+    _admin: PlatformAdmin,
+) -> VideoGenerationSettingsResponse:
+    try:
+        return video_generation_settings_service.get()
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/admin/settings/video-generation",
+    response_model=VideoGenerationSettingsResponse,
+)
+async def admin_update_video_generation_settings(
+    payload: VideoGenerationSettingsUpdate,
+    _admin: PlatformAdmin,
+) -> VideoGenerationSettingsResponse:
+    try:
+        return await video_generation_settings_service.update(payload)
+    except VideoGenerationSettingsServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/admin/settings/video-generation/providers/{{provider}}/validate",
+    response_model=VideoProviderValidationResponse,
+)
+async def admin_validate_video_provider(
+    provider: Literal["bailian", "volc_ark", "minimax"],
+    payload: VideoProviderValidationRequest,
+    _admin: PlatformAdmin,
 ) -> VideoProviderValidationResponse:
     try:
         return await video_generation_settings_service.validate_provider(provider, payload)

@@ -51,9 +51,11 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
+import { PlatformAdminConsole } from "./admin/PlatformAdminConsole.jsx";
 import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsPanel.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
+import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
 import { PromptEditor } from "./prompt-editor/index.js";
 import {
   NotificationDrawer,
@@ -587,7 +589,11 @@ export function App() {
   const [targetModel, setTargetModel] = useState(initialModelSettings.targetModel);
   const [analysisProfile, setAnalysisProfile] = useState(initialModelSettings.analysisProfile);
   const [maxCostCny, setMaxCostCny] = useState(initialModelSettings.maxCostCny);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [userSession, setUserSession] = useState(null);
+  const [adminSession, setAdminSession] = useState(null);
+  const [userPreferences, setUserPreferences] = useState(null);
+  const [userSettingsLoading, setUserSettingsLoading] = useState(false);
+  const [adminSettingsLoading, setAdminSettingsLoading] = useState(false);
   const [serverModelSettings, setServerModelSettings] = useState(DEFAULT_SERVER_MODEL_SETTINGS);
   const [serverImageSettings, setServerImageSettings] = useState(
     DEFAULT_IMAGE_GENERATION_SETTINGS,
@@ -612,7 +618,6 @@ export function App() {
     baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
     apiKey: "",
   });
-  const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [imageToolDetecting, setImageToolDetecting] = useState(false);
@@ -770,9 +775,20 @@ export function App() {
   useEffect(() => {
     loadWorkspace().catch(() => undefined);
     loadGenerationSettings().catch(() => undefined);
+    loadUserSettings({ quiet: true }).catch(() => undefined);
     refreshHistory({ quiet: true }).catch(() => undefined);
     loadPlatformConnections({ quiet: true }).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (appRoute.name !== "user-settings") return;
+    loadUserSettings().catch(() => undefined);
+  }, [appRoute.name]);
+
+  useEffect(() => {
+    if (appRoute.name !== "platform-admin") return;
+    loadPlatformAdminSettings().catch(() => undefined);
+  }, [appRoute.name]);
 
   useEffect(() => {
     const recoverVideoSettings = () => {
@@ -874,19 +890,90 @@ export function App() {
     historyPageSize,
   ]);
 
-  useEffect(() => {
-    if (!settingsOpen) return undefined;
-    const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape" && !settingsSaving && !workspaceSaving) setSettingsOpen(false);
+  async function loadUserSettings({ quiet = false } = {}) {
+    if (!quiet) setUserSettingsLoading(true);
+    try {
+      const [session, preferences] = await Promise.all([
+        apiRequest("/session"),
+        apiRequest("/me/settings/preferences"),
+      ]);
+      setUserSession(session);
+      setUserPreferences(preferences);
+      setTargetModel(preferences.settings.target_model);
+      setAnalysisProfile(preferences.settings.analysis_profile);
+      setMaxCostCny(
+        preferences.settings.max_cost_cny == null
+          ? ""
+          : Number(preferences.settings.max_cost_cny).toFixed(2),
+      );
+      apiRequest("/admin/session")
+        .then(setAdminSession)
+        .catch(() => setAdminSession(null));
+      return preferences;
+    } finally {
+      if (!quiet) setUserSettingsLoading(false);
+    }
+  }
+
+  async function saveUserSettings(nextSettings, revision) {
+    const maxCost = String(nextSettings.max_cost_cny ?? "").trim();
+    const payload = {
+      ...nextSettings,
+      max_cost_cny: maxCost ? Number(maxCost) : null,
+      image_model_alias: nextSettings.image_model_alias || null,
+      video_model_alias: nextSettings.video_model_alias || null,
+      video_resolution: nextSettings.video_resolution || null,
     };
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [settingsOpen, settingsSaving, workspaceSaving]);
+    const saved = await apiRequest("/me/settings/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision, settings: payload }),
+    });
+    setUserPreferences(saved);
+    setTargetModel(saved.settings.target_model);
+    setAnalysisProfile(saved.settings.analysis_profile);
+    setMaxCostCny(
+      saved.settings.max_cost_cny == null
+        ? ""
+        : Number(saved.settings.max_cost_cny).toFixed(2),
+    );
+    showNotice("账户设置已保存");
+    return saved;
+  }
+
+  async function loadPlatformAdminSettings() {
+    setAdminSettingsLoading(true);
+    setSettingsError("");
+    try {
+      const [session, remote, imageRemote, videoRemote, mediaRemote] = await Promise.all([
+        apiRequest("/admin/session"),
+        apiRequest("/admin/settings/model"),
+        apiRequest("/admin/settings/image-generation"),
+        apiRequest("/admin/settings/video-generation"),
+        apiRequest("/admin/settings/media-staging"),
+      ]);
+      setAdminSession(session);
+      setServerModelSettings(remote);
+      setServerImageSettings(imageRemote);
+      setServerVideoSettings(videoRemote);
+      setServerMediaStagingSettings(mediaRemote);
+      setSettingsDraft((current) => ({
+        ...current,
+        ...imageSettingsDraft(imageRemote),
+        ...videoSettingsDraft(videoRemote),
+        ...mediaStagingSettingsDraft(mediaRemote),
+        provider: remote.provider,
+        modelAlias: remote.model_alias,
+        baseUrl: remote.base_url,
+        apiKey: "",
+      }));
+    } catch (requestError) {
+      setSettingsError(requestError.message);
+      throw requestError;
+    } finally {
+      setAdminSettingsLoading(false);
+    }
+  }
 
   async function loadWorkspace() {
     const next = await apiRequest("/workspace");
@@ -1047,7 +1134,6 @@ export function App() {
   }
 
   function selectNav(id) {
-    setSettingsOpen(false);
     setPlatformConnectionTarget("");
     navigate(pathForNav(id));
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1130,7 +1216,6 @@ export function App() {
   }
 
   function openPlatformConnections(platform = "") {
-    setSettingsOpen(false);
     setPlatformConnectionTarget(platform);
     navigate(pathForNav("platform-connections"));
   }
@@ -1145,64 +1230,9 @@ export function App() {
     setHistoryPageSize(Number(value));
   }
 
-  async function openModelSettings() {
-    setSettingsDraft({
-      targetModel,
-      analysisProfile,
-      maxCostCny,
-      ...imageSettingsDraft(serverImageSettings),
-      ...videoSettingsDraft(serverVideoSettings),
-      ...mediaStagingSettingsDraft(serverMediaStagingSettings),
-      provider: serverModelSettings.provider,
-      modelAlias: serverModelSettings.model_alias,
-      baseUrl: serverModelSettings.base_url,
-      apiKey: "",
-    });
-    setSettingsError("");
-    setImageToolDetection(null);
-    setCodexDiscovery(null);
-    setCodexNetworkTest(null);
-    setCodexSandboxTest(null);
-    setMediaStagingValidation(null);
-    setSettingsOpen(true);
-    setSettingsLoading(true);
-    void discoverLocalCodex({ quiet: true });
-    try {
-      const [remote, imageRemote, videoRemote, mediaStagingRemote, nextWorkspace] = await Promise.all([
-        apiRequest("/settings/model"),
-        apiRequest("/settings/image-generation"),
-        loadVideoGenerationSettings({ retryCount: 1 }),
-        loadMediaStagingSettings(),
-        apiRequest("/workspace"),
-      ]);
-      setWorkspaceInfo(nextWorkspace);
-      setWorkspaceDraft(nextWorkspace.root_path);
-      setWorkspaceValidation(null);
-      setWorkspaceError("");
-      setServerModelSettings(remote);
-      setServerImageSettings(imageRemote);
-      setServerVideoSettings(videoRemote);
-      setServerMediaStagingSettings(mediaStagingRemote);
-      videoSettingsLoadedRef.current = true;
-      updateVideoSettingsLoadState("ready");
-      setVideoSettingsLoadError("");
-      setSettingsDraft({
-        targetModel,
-        analysisProfile,
-        maxCostCny,
-        ...imageSettingsDraft(imageRemote),
-        ...videoSettingsDraft(videoRemote),
-        ...mediaStagingSettingsDraft(mediaStagingRemote),
-        provider: remote.provider,
-        modelAlias: remote.model_alias,
-        baseUrl: remote.base_url,
-        apiKey: "",
-      });
-    } catch (requestError) {
-      setSettingsError(`无法读取服务端模型设置：${requestError.message}`);
-    } finally {
-      setSettingsLoading(false);
-    }
+  async function openModelSettings(section = "generation") {
+    navigate(`/settings/${section}`);
+    await loadUserSettings({ quiet: true }).catch(() => undefined);
   }
 
   function updateSettingsDraft(update) {
@@ -1225,7 +1255,7 @@ export function App() {
     setMediaStagingValidation(null);
     setSettingsError("");
     try {
-      const saved = await apiRequest("/settings/media-staging", {
+      const saved = await apiRequest("/admin/settings/media-staging", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(mediaStagingSettingsPayload(settingsDraft)),
@@ -1236,7 +1266,7 @@ export function App() {
         mediaStagingAccessKeyId: "",
         mediaStagingAccessKeySecret: "",
       }));
-      const result = await apiRequest("/settings/media-staging/validate", {
+      const result = await apiRequest("/admin/settings/media-staging/validate", {
         method: "POST",
       });
       setMediaStagingValidation(result);
@@ -1504,13 +1534,7 @@ export function App() {
     });
   }
 
-  async function saveModelSettings() {
-    const trimmedCost = String(settingsDraft.maxCostCny || "").trim();
-    const costNumber = trimmedCost ? Number(trimmedCost) : null;
-    if (costNumber !== null && (!Number.isFinite(costNumber) || costNumber <= 0 || costNumber > 1000)) {
-      setSettingsError("成本上限必须大于 0 且不超过 ¥1000，留空表示不限制。");
-      return;
-    }
+  async function savePlatformSettings() {
     const hasConfiguredKey =
       serverModelSettings.api_key_configured || serverImageSettings.api_key_configured;
     const needsRemoteKey = settingsDraft.imageExecutionMode === "remote_api";
@@ -1548,7 +1572,7 @@ export function App() {
     try {
       const sharedApiKey = String(settingsDraft.apiKey || "").trim() || null;
       if (sharedApiKey || serverModelSettings.api_key_configured) {
-        const remote = await apiRequest("/settings/model", {
+        const remote = await apiRequest("/admin/settings/model", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1560,7 +1584,7 @@ export function App() {
         });
         setServerModelSettings(remote);
       }
-      const imageRemote = await apiRequest("/settings/image-generation", {
+      const imageRemote = await apiRequest("/admin/settings/image-generation", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1592,7 +1616,7 @@ export function App() {
       });
       setServerImageSettings(imageRemote);
 
-      const videoRemote = await apiRequest("/settings/video-generation", {
+      const videoRemote = await apiRequest("/admin/settings/video-generation", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1647,7 +1671,7 @@ export function App() {
           }),
         }),
       });
-      const mediaStagingRemote = await apiRequest("/settings/media-staging", {
+      const mediaStagingRemote = await apiRequest("/admin/settings/media-staging", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(mediaStagingSettingsPayload(settingsDraft)),
@@ -1659,20 +1683,6 @@ export function App() {
       updateVideoSettingsLoadState("ready");
       setVideoSettingsLoadError("");
 
-      const nextSettings = {
-        targetModel: settingsDraft.targetModel,
-        analysisProfile: settingsDraft.analysisProfile,
-        maxCostCny: costNumber === null ? "" : costNumber.toFixed(2),
-      };
-      setTargetModel(nextSettings.targetModel);
-      setAnalysisProfile(nextSettings.analysisProfile);
-      setMaxCostCny(nextSettings.maxCostCny);
-      let persisted = true;
-      try {
-        window.localStorage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
-      } catch {
-        persisted = false;
-      }
       setSettingsDraft((current) => ({
         ...current,
         apiKey: "",
@@ -1692,12 +1702,7 @@ export function App() {
             ?.managed_asset_project_name || "default"
         ),
       }));
-      setSettingsOpen(false);
-      showNotice(
-        persisted
-          ? "分析、图片与视频模型配置已验证并保存"
-          : "配置已应用，但浏览器未保存分析默认值",
-      );
+      showNotice("平台模型、凭据与媒体配置已保存");
     } catch (requestError) {
       setSettingsError(requestError.message);
     } finally {
@@ -2266,6 +2271,80 @@ export function App() {
   );
   const recordMatchesRoute = appRoute.name === "record-workspace"
     && video?.record_id === appRoute.recordId;
+  const effectiveImageSettings = useMemo(() => {
+    const preferences = userPreferences?.settings;
+    if (!preferences) return serverImageSettings;
+    return {
+      ...serverImageSettings,
+      default_candidate_count: preferences.image_candidate_count
+        || serverImageSettings.default_candidate_count,
+      remote_model_alias: preferences.image_model_alias
+        || serverImageSettings.remote_model_alias,
+    };
+  }, [serverImageSettings, userPreferences]);
+  const effectiveVideoSettings = useMemo(() => {
+    const preferences = userPreferences?.settings;
+    if (!preferences) return serverVideoSettings;
+    return {
+      ...serverVideoSettings,
+      default_model_alias: preferences.video_model_alias
+        || serverVideoSettings.default_model_alias,
+      default_resolution: preferences.video_resolution
+        || serverVideoSettings.default_resolution,
+    };
+  }, [serverVideoSettings, userPreferences]);
+
+  if (appRoute.name === "platform-admin") {
+    return (
+      <PlatformAdminConsole
+        adminSession={adminSession}
+        draft={settingsDraft}
+        error={settingsError}
+        imageServerSettings={serverImageSettings}
+        loading={adminSettingsLoading}
+        mediaStagingServerSettings={serverMediaStagingSettings}
+        mediaStagingValidating={mediaStagingValidating}
+        mediaStagingValidation={mediaStagingValidation}
+        onBack={() => navigate(pathForNav("settings"))}
+        onChange={updateSettingsDraft}
+        onNavigate={(section) => navigate(`/admin/${section}`)}
+        onSave={savePlatformSettings}
+        onValidateMediaStaging={validateMediaStaging}
+        request={apiRequest}
+        saving={settingsSaving}
+        section={appRoute.adminSection}
+        serverSettings={serverModelSettings}
+        videoServerSettings={serverVideoSettings}
+      />
+    );
+  }
+
+  if (appRoute.name === "user-settings") {
+    return (
+      <UserSettingsPage
+        adminAvailable={userSession?.auth_mode === "local_bootstrap"}
+        imageSettings={serverImageSettings}
+        loading={userSettingsLoading}
+        onBack={() => navigate(pathForNav("workspace"))}
+        onNavigate={(section) => navigate(`/settings/${section}`)}
+        onOpenAdmin={() => navigate(pathForNav("admin"))}
+        onOpenConnections={() => navigate(pathForNav("platform-connections"))}
+        onSave={saveUserSettings}
+        onSwitchWorkspace={switchWorkspace}
+        onValidateWorkspace={validateWorkspace}
+        onWorkspaceChange={updateWorkspaceDraft}
+        preferences={userPreferences}
+        section={appRoute.settingsSection}
+        session={userSession}
+        videoSettings={serverVideoSettings}
+        workspace={workspaceInfo}
+        workspaceDraft={workspaceDraft}
+        workspaceError={workspaceError}
+        workspaceSaving={workspaceSaving}
+        workspaceValidation={workspaceValidation}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -2278,8 +2357,8 @@ export function App() {
           changeHistoryLifecycle(value);
           navigate(pathForNav("history"));
         }}
-        onOpenSettings={openModelSettings}
-        settingsOpen={settingsOpen}
+        onOpenSettings={() => openModelSettings("profile")}
+        settingsOpen={activeNav === "settings"}
         historyCount={historyLifecycleCounts.active}
       />
 
@@ -2507,8 +2586,8 @@ export function App() {
                   <ProductionHub
                     analysisId={report.analysis_id}
                     error={productionsError}
-                    imageGenerationSettings={serverImageSettings}
-                    videoGenerationSettings={serverVideoSettings}
+                    imageGenerationSettings={effectiveImageSettings}
+                    videoGenerationSettings={effectiveVideoSettings}
                     videoGenerationSettingsError={videoSettingsLoadError}
                     videoGenerationSettingsStatus={videoSettingsLoadState}
                     listSignal={productionListSignal}
@@ -2553,58 +2632,6 @@ export function App() {
           )}
         </div>
       </div>
-
-      {settingsOpen && (
-        <ModelSettingsDialog
-          draft={settingsDraft}
-          error={settingsError}
-          loading={settingsLoading}
-          saving={settingsSaving}
-          serverSettings={serverModelSettings}
-          imageServerSettings={serverImageSettings}
-          videoServerSettings={serverVideoSettings}
-          mediaStagingServerSettings={serverMediaStagingSettings}
-          mediaStagingValidating={mediaStagingValidating}
-          mediaStagingValidation={mediaStagingValidation}
-          imageToolDetecting={imageToolDetecting}
-          imageToolDetection={imageToolDetection}
-          codexApplying={codexApplying}
-          codexDiscovering={codexDiscovering}
-          codexDiscovery={codexDiscovery}
-          codexNetworkTesting={codexNetworkTesting}
-          codexNetworkTest={codexNetworkTest}
-          codexSandboxTesting={codexSandboxTesting}
-          codexSandboxTest={codexSandboxTest}
-          workspace={workspaceInfo}
-          workspaceDraft={workspaceDraft}
-          workspaceValidation={workspaceValidation}
-          workspaceSaving={workspaceSaving}
-          workspaceError={workspaceError}
-          onWorkspaceChange={updateWorkspaceDraft}
-          onValidateWorkspace={validateWorkspace}
-          onSwitchWorkspace={switchWorkspace}
-          onChange={updateSettingsDraft}
-          onApplyLocalCodex={applyLocalCodexConfiguration}
-          onDetectLocalImageTool={detectLocalImageTool}
-          onDiscoverLocalCodex={discoverLocalCodex}
-          onTestLocalCodexNetwork={testLocalCodexNetwork}
-          onTestLocalCodexSandbox={testLocalCodexSandbox}
-          onValidateMediaStaging={validateMediaStaging}
-          onClose={() => setSettingsOpen(false)}
-          onReset={() =>
-            updateSettingsDraft({
-              ...DEFAULT_MODEL_SETTINGS,
-              ...imageSettingsDraft(),
-              ...videoSettingsDraft(),
-              provider: DEFAULT_SERVER_MODEL_SETTINGS.provider,
-              modelAlias: DEFAULT_SERVER_MODEL_SETTINGS.model_alias,
-              baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
-              apiKey: "",
-            })
-          }
-          onSave={saveModelSettings}
-        />
-      )}
 
       <NotificationDrawer
         filter={notificationFilter}

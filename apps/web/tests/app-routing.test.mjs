@@ -13,6 +13,23 @@ test("maps first-phase navigation to independent page URLs", () => {
   assert.equal(pathForNav("history"), "/records");
   assert.equal(pathForNav("assets"), "/assets");
   assert.equal(pathForNav("platform-connections"), "/settings/platform-connections");
+  assert.equal(pathForNav("settings"), "/settings/profile");
+  assert.equal(pathForNav("admin"), "/admin/providers");
+});
+
+test("keeps user settings and platform administration on separate route trees", () => {
+  assert.deepEqual(resolveAppRoute("/settings/generation"), {
+    name: "user-settings",
+    activeNav: "settings",
+    recordId: "",
+    settingsSection: "generation",
+  });
+  assert.deepEqual(resolveAppRoute("/admin/media"), {
+    name: "platform-admin",
+    activeNav: "admin",
+    recordId: "",
+    adminSection: "media",
+  });
 });
 test("resolves new analysis and record workspaces as different pages", () => {
   assert.deepEqual(resolveAppRoute("/analyses/new"), {

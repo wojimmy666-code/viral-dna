@@ -4,6 +4,8 @@ const NAV_PATHS = Object.freeze({
   history: "/records",
   assets: "/assets",
   "platform-connections": "/settings/platform-connections",
+  settings: "/settings/profile",
+  admin: "/admin/providers",
 });
 
 function normalizePathname(pathname) {
@@ -48,6 +50,32 @@ export function resolveAppRoute(pathname) {
       name: "platform-connections",
       activeNav: "platform-connections",
       recordId: "",
+    };
+  }
+  const settingsMatch = normalized.match(/^\/settings\/(profile|generation|device)$/);
+  if (settingsMatch) {
+    return {
+      name: "user-settings",
+      activeNav: "settings",
+      recordId: "",
+      settingsSection: settingsMatch[1],
+    };
+  }
+  if (normalized === "/settings") {
+    return {
+      name: "user-settings",
+      activeNav: "settings",
+      recordId: "",
+      settingsSection: "profile",
+    };
+  }
+  const adminMatch = normalized.match(/^\/admin\/(providers|models|media|runtime)$/);
+  if (adminMatch || normalized === "/admin") {
+    return {
+      name: "platform-admin",
+      activeNav: "admin",
+      recordId: "",
+      adminSection: adminMatch?.[1] || "providers",
     };
   }
   return { name: "not-found", activeNav: "workspace", recordId: "" };

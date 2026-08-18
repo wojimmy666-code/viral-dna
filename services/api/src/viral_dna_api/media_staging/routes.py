@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 
 from .domain import (
@@ -10,8 +12,17 @@ from .domain import (
 from .service import MediaStagingError, MediaStagingService
 
 
-def create_media_staging_router(service: MediaStagingService) -> APIRouter:
-    router = APIRouter(prefix="/settings/media-staging", tags=["media-staging"])
+def create_media_staging_router(
+    service: MediaStagingService,
+    *,
+    prefix: str = "/settings/media-staging",
+    dependencies: list[Any] | None = None,
+) -> APIRouter:
+    router = APIRouter(
+        prefix=prefix,
+        tags=["media-staging"],
+        dependencies=dependencies or [],
+    )
 
     @router.get("", response_model=MediaStagingSettingsResponse)
     async def get_settings() -> MediaStagingSettingsResponse:
