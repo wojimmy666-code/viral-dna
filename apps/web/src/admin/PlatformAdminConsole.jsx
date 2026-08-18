@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { DepthGenerationSettings } from "../depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "../media-staging/MediaStagingSettingsPanel.jsx";
+import { SettingsActions } from "../ui/settings/SettingsPrimitives.jsx";
 import "./platform-admin.css";
 
 const ADMIN_SECTIONS = [
@@ -44,7 +45,7 @@ export function PlatformAdminConsole({
 }) {
   const videoProviders = videoServerSettings?.providers || [];
   return (
-    <div className="platform-admin-shell">
+    <div className="platform-admin-shell settings-surface">
       <aside className="platform-admin-sidebar">
         <div className="platform-admin-brand">
           <span><ShieldCheck size={22} weight="fill" /></span>
@@ -404,11 +405,11 @@ export function PlatformAdminConsole({
         )}
 
         {error && <p className="admin-settings-error" role="alert">{error}</p>}
-        <footer className="platform-admin-actions">
-          <button className="primary-action" disabled={loading || saving} onClick={onSave} type="button">
+        <SettingsActions className="platform-admin-actions">
+          <button className="primary-button" disabled={loading || saving} onClick={onSave} type="button">
             {saving ? "保存中…" : "保存平台配置"}
           </button>
-        </footer>
+        </SettingsActions>
       </main>
     </div>
   );

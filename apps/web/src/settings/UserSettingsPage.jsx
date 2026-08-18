@@ -8,6 +8,11 @@ import {
   SlidersHorizontal,
   UserCircle,
 } from "@phosphor-icons/react";
+import {
+  SettingsActions,
+  SettingsPanel,
+  SettingsShell,
+} from "../ui/settings/SettingsPrimitives.jsx";
 import "./settings-center.css";
 
 const SECTIONS = [
@@ -88,7 +93,7 @@ export function UserSettingsPage({
   }
 
   return (
-    <main className="settings-center">
+    <SettingsShell className="settings-center">
       <header className="settings-center-header">
         <button className="settings-back" onClick={onBack} type="button">
           <ArrowLeft size={19} /> 返回工作台
@@ -130,7 +135,7 @@ export function UserSettingsPage({
           )}
         </nav>
 
-        <section className="settings-page-panel" aria-busy={loading || saving}>
+        <SettingsPanel busy={loading || saving} className="settings-page-panel">
           {section === "profile" && (
             <>
               <header className="settings-panel-heading">
@@ -281,11 +286,16 @@ export function UserSettingsPage({
                   <small>切换后，下载、分析、导出和资产默认写入新工作区。</small>
                 </label>
                 <div className="device-workspace-actions">
-                  <button disabled={workspaceSaving} onClick={onValidateWorkspace} type="button">
+                  <button
+                    className="secondary-button"
+                    disabled={workspaceSaving}
+                    onClick={onValidateWorkspace}
+                    type="button"
+                  >
                     检查文件夹
                   </button>
                   <button
-                    className="primary-action"
+                    className="primary-button"
                     disabled={workspaceSaving || workspaceValidation?.valid === false}
                     onClick={onSwitchWorkspace}
                     type="button"
@@ -303,19 +313,19 @@ export function UserSettingsPage({
 
           {error && <p className="settings-page-error" role="alert">{error}</p>}
           {section !== "device" && (
-            <footer className="settings-page-actions">
+            <SettingsActions className="settings-page-actions">
               <button
-                className="primary-action"
+                className="primary-button"
                 disabled={loading || saving}
                 onClick={save}
                 type="button"
               >
                 {saving ? "保存中…" : "保存账户设置"}
               </button>
-            </footer>
+            </SettingsActions>
           )}
-        </section>
+        </SettingsPanel>
       </div>
-    </main>
+    </SettingsShell>
   );
 }

@@ -2,7 +2,11 @@
   background: var(--canvas);
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  min-height: 100vh;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .platform-admin-sidebar {
@@ -10,10 +14,12 @@
   color: #fff;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 22px 16px;
-  position: sticky;
-  top: 0;
+  scrollbar-gutter: stable;
 }
 
 .platform-admin-brand {
@@ -38,9 +44,18 @@
   gap: 2px;
 }
 
+.platform-admin-brand strong {
+  font-size: var(--type-body-size);
+  line-height: var(--type-leading-ui);
+}
+
 .platform-admin-brand small,
 .platform-admin-sidebar button {
   color: #b8b8c5;
+}
+
+.platform-admin-brand small {
+  font-size: var(--type-caption-size);
 }
 
 .platform-admin-sidebar nav {
@@ -58,6 +73,11 @@
   min-height: 44px;
   padding: 0 11px;
   text-align: left;
+  cursor: pointer;
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--type-leading-ui);
+  transition: background 150ms ease, color 150ms ease;
 }
 
 .platform-admin-sidebar button:hover,
@@ -67,7 +87,7 @@
 }
 
 .platform-admin-sidebar button.active {
-  font-weight: 700;
+  font-weight: var(--type-weight-semibold);
 }
 
 .platform-admin-back {
@@ -78,8 +98,12 @@
 }
 
 .platform-admin-main {
+  height: 100%;
   min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 28px 32px 48px;
+  scrollbar-gutter: stable;
 }
 
 .platform-admin-header {
@@ -93,13 +117,16 @@
 .platform-admin-header p {
   color: var(--purple);
   font-size: var(--type-label-size);
-  font-weight: 700;
+  font-weight: var(--type-weight-semibold);
+  line-height: var(--type-leading-ui);
   margin: 0 0 5px;
 }
 
 .platform-admin-header h1 {
   font-size: var(--type-page-size);
+  line-height: var(--type-leading-tight);
   margin: 0;
+  text-wrap: balance;
 }
 
 .platform-admin-principal {
@@ -110,6 +137,12 @@
 
 .platform-admin-principal small {
   color: var(--text-tertiary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-admin-principal strong {
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .platform-admin-boundary,
@@ -130,6 +163,8 @@
   gap: 9px;
   margin-bottom: 16px;
   padding: 12px 14px;
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
 }
 
 .platform-admin-boundary p {
@@ -149,11 +184,18 @@
   border-bottom: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
-  padding: 18px 22px;
+  padding: 20px 24px;
 }
 
-.admin-settings-section h2,
+.admin-settings-section h2 {
+  font-size: var(--type-heading-size);
+  line-height: var(--type-leading-tight);
+  margin: 0;
+}
+
 .admin-settings-section h3 {
+  font-size: var(--type-subheading-size);
+  line-height: var(--type-leading-tight);
   margin: 0;
 }
 
@@ -173,7 +215,7 @@
 }
 
 .admin-settings-grid {
-  padding: 22px;
+  padding: 20px 24px;
 }
 
 .admin-wide-field {
@@ -190,7 +232,7 @@
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(180px, 1fr) auto minmax(220px, 1fr) minmax(220px, 1fr);
-  padding: 18px 22px;
+  padding: 18px 24px;
 }
 
 .admin-managed-assets,
@@ -214,6 +256,8 @@
 .admin-public-media > p,
 .admin-runtime-tool > p {
   color: var(--text-secondary);
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
   margin-bottom: 0;
 }
 
@@ -237,6 +281,7 @@
 .admin-provider-list small,
 .admin-model-catalog small {
   color: var(--text-tertiary);
+  font-size: var(--type-caption-size);
   overflow-wrap: anywhere;
 }
 
@@ -260,6 +305,7 @@
 
 .admin-model-catalog code {
   color: var(--text-secondary);
+  font-size: var(--type-label-size);
   font-family: var(--font-family-mono);
 }
 
@@ -269,23 +315,46 @@
 
 .admin-settings-error {
   background: #fff1f2;
+  border-radius: 10px;
   color: #b42336;
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
   margin-top: 14px;
   padding: 12px 14px;
 }
 
 .platform-admin-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 16px;
+  min-height: auto;
+  padding: 16px 0 0;
+  border-top: 0;
+  background: transparent;
 }
 
 @media (max-width: 900px) {
-  .platform-admin-shell { grid-template-columns: 1fr; }
-  .platform-admin-sidebar { min-height: auto; position: static; }
+  .platform-admin-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+  .platform-admin-sidebar {
+    height: auto;
+    min-height: auto;
+    overflow: visible;
+    overscroll-behavior-y: auto;
+    scrollbar-gutter: auto;
+  }
   .platform-admin-sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .platform-admin-back { margin-top: 14px; }
-  .platform-admin-main { padding: 22px 16px 40px; }
+  .platform-admin-main {
+    height: auto;
+    overflow: visible;
+    overscroll-behavior-y: auto;
+    padding: 22px 16px 40px;
+    scrollbar-gutter: auto;
+  }
   .admin-provider-list article { grid-template-columns: 1fr auto; }
   .admin-provider-list article .settings-field { grid-column: 1 / -1; }
 }
@@ -294,4 +363,9 @@
   .platform-admin-header { align-items: flex-start; flex-direction: column; gap: 12px; }
   .admin-settings-grid { grid-template-columns: 1fr; }
   .admin-wide-field { grid-column: auto; }
+  .platform-admin-actions { padding-top: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .platform-admin-sidebar button { transition: none; }
 }

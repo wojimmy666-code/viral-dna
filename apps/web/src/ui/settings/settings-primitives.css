@@ -1,0 +1,186 @@
+.settings-surface {
+  color: var(--text-primary);
+  font-family: var(--font-family-ui);
+  font-size: var(--type-body-size);
+  line-height: var(--type-leading-ui);
+}
+
+.settings-panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.settings-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-panel-header h2 {
+  margin: 0;
+  font-size: var(--type-heading-size);
+  font-weight: var(--type-weight-bold);
+  line-height: var(--type-leading-tight);
+  text-wrap: balance;
+}
+
+.settings-panel-header p {
+  max-width: 72ch;
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
+  text-wrap: pretty;
+}
+
+.settings-surface .settings-field {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+  line-height: var(--type-leading-ui);
+}
+
+.settings-surface .settings-field select,
+.settings-surface .settings-field > input,
+.settings-surface .settings-field > textarea,
+.settings-surface .settings-money-input {
+  width: 100%;
+  min-height: var(--control-height);
+  border: 1px solid #dcdde6;
+  border-radius: 10px;
+  color: var(--text-primary);
+  background: var(--panel);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--type-leading-ui);
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.settings-surface .settings-field select,
+.settings-surface .settings-field > input {
+  height: var(--control-height);
+  padding: 0 13px;
+}
+
+.settings-surface .settings-field > textarea {
+  min-height: 96px;
+  padding: 11px 13px;
+  resize: vertical;
+}
+
+.settings-surface .settings-field select:hover:not(:disabled),
+.settings-surface .settings-field > input:hover:not(:disabled),
+.settings-surface .settings-field > textarea:hover:not(:disabled) {
+  border-color: #c8c8d6;
+}
+
+.settings-surface .settings-field select:focus,
+.settings-surface .settings-field > input:focus,
+.settings-surface .settings-field > textarea:focus {
+  border-color: #aaa3ff;
+  box-shadow: 0 0 0 3px rgba(91, 77, 245, 0.09);
+  outline: 0;
+}
+
+.settings-surface .settings-field select:disabled,
+.settings-surface .settings-field > input:disabled,
+.settings-surface .settings-field > textarea:disabled {
+  color: #858592;
+  background: #f5f5f8;
+}
+
+.settings-surface .settings-field small {
+  color: var(--text-tertiary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--type-leading-copy);
+}
+
+.settings-actions {
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 24px;
+  border-top: 1px solid var(--line);
+  background: #fcfcfe;
+}
+
+.settings-definition-list {
+  display: grid;
+  margin: 0;
+  padding: 4px 24px 20px;
+}
+
+.settings-definition-list > div {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-definition-list > div:last-child {
+  border-bottom: 0;
+}
+
+.settings-definition-list dt {
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+}
+
+.settings-definition-list dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-weight-regular);
+}
+
+@media (max-width: 620px) {
+  .settings-panel-header {
+    align-items: flex-start;
+    padding: 18px 16px;
+  }
+
+  .settings-actions {
+    padding: 12px 16px;
+  }
+
+  .settings-actions > button {
+    flex: 1;
+  }
+
+  .settings-definition-list {
+    padding: 4px 16px 16px;
+  }
+
+  .settings-definition-list > div {
+    grid-template-columns: 1fr;
+    align-content: center;
+    gap: 3px;
+    padding: 10px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-surface .settings-field select,
+  .settings-surface .settings-field > input,
+  .settings-surface .settings-field > textarea {
+    transition: none;
+  }
+}

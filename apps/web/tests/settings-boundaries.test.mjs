@@ -10,6 +10,18 @@ const adminSettings = fs.readFileSync(
   new URL("../src/admin/PlatformAdminConsole.jsx", import.meta.url),
   "utf8",
 );
+const userSettingsStyles = fs.readFileSync(
+  new URL("../src/settings/settings-center.css", import.meta.url),
+  "utf8",
+);
+const settingsPrimitives = fs.readFileSync(
+  new URL("../src/ui/settings/settings-primitives.css", import.meta.url),
+  "utf8",
+);
+const adminSettingsStyles = fs.readFileSync(
+  new URL("../src/admin/platform-admin.css", import.meta.url),
+  "utf8",
+);
 const app = fs.readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
 
 test("user settings cannot render or submit platform credentials", () => {
@@ -27,8 +39,39 @@ test("platform admin uses an independent page shell", () => {
   assert.doesNotMatch(app, /\{settingsOpen && \(/);
 });
 
+test("platform admin keeps desktop navigation and content in independent scroll regions", () => {
+  assert.match(
+    adminSettingsStyles,
+    /\.platform-admin-shell\s*\{[\s\S]*?height:\s*100dvh;[\s\S]*?overflow:\s*hidden;/,
+  );
+  assert.match(
+    adminSettingsStyles,
+    /\.platform-admin-sidebar\s*\{[\s\S]*?overflow-y:\s*auto;/,
+  );
+  assert.match(
+    adminSettingsStyles,
+    /\.platform-admin-main\s*\{[\s\S]*?overflow-y:\s*auto;/,
+  );
+  assert.match(
+    adminSettingsStyles,
+    /@media \(max-width:\s*900px\)[\s\S]*?\.platform-admin-shell\s*\{[\s\S]*?height:\s*auto;[\s\S]*?overflow:\s*visible;/,
+  );
+});
+
 test("effective generation defaults overlay account preferences without credentials", () => {
   assert.match(app, /effectiveImageSettings/);
   assert.match(app, /effectiveVideoSettings/);
   assert.match(app, /userPreferences\?\.settings/);
+});
+
+test("settings pages share the product typography and button vocabulary", () => {
+  assert.doesNotMatch(userSettings, /primary-action/);
+  assert.doesNotMatch(adminSettings, /primary-action/);
+  assert.match(userSettings, /className="primary-button"/);
+  assert.match(userSettings, /className="secondary-button"/);
+  assert.match(adminSettings, /className="primary-button"/);
+  assert.doesNotMatch(userSettingsStyles, /clamp\(/);
+  assert.match(userSettingsStyles, /font-size: var\(--type-page-size\)/);
+  assert.match(settingsPrimitives, /min-height: var\(--control-height\)/);
+  assert.match(settingsPrimitives, /font-size: var\(--type-body-size\)/);
 });

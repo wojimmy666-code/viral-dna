@@ -1,15 +1,15 @@
 .settings-center {
   min-width: 0;
-  padding: 28px;
+  padding: 24px;
 }
 
 .settings-center-header {
-  align-items: end;
+  align-items: center;
   display: grid;
-  gap: 18px;
+  gap: 16px;
   grid-template-columns: minmax(0, 1fr) auto;
-  margin: 0 auto 24px;
-  max-width: 1240px;
+  margin: 0 auto 20px;
+  max-width: 1180px;
 }
 
 .settings-back {
@@ -25,28 +25,28 @@
 }
 
 .settings-eyebrow {
-  color: var(--purple);
-  font-size: var(--type-label-size);
-  font-weight: 700;
-  letter-spacing: .04em;
-  margin: 0 0 6px;
+  display: none;
 }
 
 .settings-center-header h1 {
-  font-size: clamp(28px, 3vw, 38px);
+  font-size: var(--type-page-size);
+  line-height: var(--type-leading-tight);
   margin: 0;
+  text-wrap: balance;
 }
 
 .settings-center-header p:not(.settings-eyebrow) {
   color: var(--text-secondary);
-  margin: 8px 0 0;
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
+  margin: 5px 0 0;
 }
 
 .settings-account-chip {
   align-items: center;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   display: flex;
   gap: 10px;
   padding: 10px 13px;
@@ -59,15 +59,16 @@
 
 .settings-account-chip small {
   color: var(--text-tertiary);
+  font-size: var(--type-caption-size);
 }
 
 .settings-center-layout {
   align-items: start;
   display: grid;
   gap: 20px;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   margin: 0 auto;
-  max-width: 1240px;
+  max-width: 1180px;
 }
 
 .settings-section-nav {
@@ -89,6 +90,11 @@
   padding: 0 12px;
   text-align: left;
   width: 100%;
+  cursor: pointer;
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--type-leading-ui);
+  transition: background 150ms ease, color 150ms ease;
 }
 
 .settings-section-nav button:hover,
@@ -107,16 +113,11 @@
 }
 
 .settings-page-panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
   min-width: 0;
-  overflow: hidden;
 }
 
-.settings-panel-heading,
-.settings-page-actions {
-  padding: 22px 24px;
+.settings-panel-heading {
+  padding: 20px 24px;
 }
 
 .settings-panel-heading {
@@ -125,19 +126,25 @@
 
 .settings-panel-heading h2 {
   font-size: var(--type-heading-size);
+  line-height: var(--type-leading-tight);
   margin: 0;
+  text-wrap: balance;
 }
 
 .settings-panel-heading p {
   color: var(--text-secondary);
-  margin: 6px 0 0;
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
+  margin: 5px 0 0;
+  text-wrap: pretty;
 }
 
 .settings-form-grid {
   display: grid;
-  gap: 18px;
+  column-gap: 16px;
+  row-gap: 18px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  padding: 24px;
+  padding: 20px 24px;
 }
 
 .settings-money-input {
@@ -147,6 +154,7 @@
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   overflow: hidden;
+  min-height: var(--control-height);
 }
 
 .settings-money-input > span {
@@ -160,6 +168,13 @@
 .settings-money-input input {
   border: 0;
   border-radius: 0;
+  min-width: 0;
+  height: calc(var(--control-height) - 2px);
+  padding: 0 13px;
+  color: var(--text-primary);
+  background: transparent;
+  font-size: var(--type-body-size);
+  outline: 0;
 }
 
 .settings-boundary-note {
@@ -170,6 +185,8 @@
   display: flex;
   gap: 9px;
   padding: 14px 24px;
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
 }
 
 .settings-boundary-note svg {
@@ -180,42 +197,44 @@
 .device-settings-list {
   display: grid;
   margin: 0;
-  padding: 8px 24px 24px;
+  padding: 4px 24px 20px;
 }
 
 .device-settings-list div {
-  align-items: start;
+  align-items: center;
   border-bottom: 1px solid var(--line);
   display: grid;
-  gap: 18px;
-  grid-template-columns: 140px minmax(0, 1fr);
-  padding: 16px 0;
+  gap: 16px;
+  grid-template-columns: 120px minmax(0, 1fr);
+  min-height: 52px;
 }
+
+.device-settings-list div:last-child { border-bottom: 0; }
 
 .device-settings-list dt {
   color: var(--text-secondary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .device-settings-list dd {
+  color: var(--text-primary);
+  font-size: var(--type-body-size);
+  font-weight: var(--type-weight-regular);
   margin: 0;
   overflow-wrap: anywhere;
 }
 
 .device-workspace-editor {
   border-top: 1px solid var(--line);
-  padding: 22px 24px 24px;
+  padding: 20px 24px 24px;
 }
 
 .device-workspace-actions {
   display: flex;
-  gap: 9px;
+  gap: 10px;
   justify-content: flex-end;
   margin-top: 14px;
-}
-
-.device-workspace-actions button {
-  min-height: 42px;
-  padding: 0 16px;
 }
 
 .device-workspace-valid {
@@ -224,6 +243,7 @@
   display: flex;
   gap: 7px;
   margin: 12px 0 0;
+  font-size: var(--type-label-size);
 }
 
 .device-workspace-editor .settings-page-error {
@@ -232,15 +252,16 @@
 
 .settings-page-error {
   background: #fff1f2;
+  border-radius: 10px;
   color: #b42336;
+  font-size: var(--type-label-size);
+  line-height: var(--type-leading-copy);
   margin: 0 24px 20px;
   padding: 12px 14px;
 }
 
 .settings-page-actions {
-  border-top: 1px solid var(--line);
-  display: flex;
-  justify-content: flex-end;
+  margin: 0;
 }
 
 @media (max-width: 820px) {
@@ -257,4 +278,25 @@
   .settings-nav-divider,
   .settings-section-nav button:nth-last-child(-n+2) { display: none; }
   .settings-form-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 620px) {
+  .settings-center { padding: 16px; }
+  .settings-panel-heading { padding: 18px 16px; }
+  .settings-form-grid { padding: 18px 16px; }
+  .settings-boundary-note { padding: 12px 16px; }
+  .device-settings-list { padding: 4px 16px 16px; }
+  .device-settings-list div {
+    align-content: center;
+    grid-template-columns: 1fr;
+    gap: 3px;
+    padding: 10px 0;
+  }
+  .device-workspace-editor { padding: 18px 16px; }
+  .device-workspace-actions > button { flex: 1; }
+  .settings-page-error { margin-inline: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-section-nav button { transition: none; }
 }
