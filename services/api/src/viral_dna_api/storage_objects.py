@@ -39,6 +39,13 @@ class ObjectReplicaState(StrEnum):
     MISSING = "missing"
     FAILED = "failed"
     DELETING = "deleting"
+    DELETED = "deleted"
+
+
+class ObjectReplicaKind(StrEnum):
+    LOCAL_PRIMARY = "local_primary"
+    CLOUD_DURABLE = "cloud_durable"
+    PROVIDER_STAGING = "provider_staging"
 
 
 class StorageSyncState(StrEnum):
@@ -72,7 +79,9 @@ class ObjectReplica(BaseModel):
     storage_location_id: UUID
     account_id: UUID | None = None
     object_key: str = Field(min_length=1, max_length=1024)
+    replica_kind: ObjectReplicaKind = ObjectReplicaKind.LOCAL_PRIMARY
     state: ObjectReplicaState = ObjectReplicaState.PENDING
+    content_type: str | None = Field(default=None, max_length=160)
     etag: str | None = Field(default=None, max_length=160)
     checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     is_cache: bool = False
@@ -81,6 +90,8 @@ class ObjectReplica(BaseModel):
     last_synced_at: datetime | None = None
     remote_version: str | None = Field(default=None, max_length=300)
     upload_session_id: str | None = Field(default=None, max_length=500)
+    remote_last_modified_at: datetime | None = None
+    delete_after: datetime | None = None
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=2000)
     created_at: datetime = Field(default_factory=utc_now)

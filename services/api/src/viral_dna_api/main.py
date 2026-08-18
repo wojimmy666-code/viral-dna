@@ -41,6 +41,9 @@ from .link_ingestion import LinkIngestionError, identify_platform
 from .managed_assets import ManagedAssetCatalogService
 from .managed_assets.routes import create_managed_asset_router
 from .media import get_analysis_artifact_root
+from .media_staging.routes import create_media_staging_router
+from .media_staging.secrets import MediaStagingSecretStore
+from .media_staging.service import MediaStagingService
 from .model_settings import ModelSettingsService, ModelSettingsServiceError
 from .models import (
     AnalysisCostSummary,
@@ -213,6 +216,7 @@ from .workspace_catalog import (
     WorkspaceListItem,
     WorkspaceLocalRegisterRequest,
     create_account_context_service,
+    default_account_catalog_path,
 )
 
 API_PREFIX = "/api/v1"
@@ -250,6 +254,7 @@ async def lifespan(_app: FastAPI):
     await record_service.bootstrap(recover_interrupted=True)
     await production_service.recover_generation_runs()
     await depth_control_job_service.recover()
+    media_staging_service.start_cleanup()
     try:
         yield
     finally:
@@ -257,6 +262,7 @@ async def lifespan(_app: FastAPI):
         await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
         await depth_control_job_service.shutdown()
+        await media_staging_service.shutdown()
 
 
 app = FastAPI(
@@ -287,20 +293,33 @@ image_generation_gateway = ImageGenerationGateway(
     repository=store,
 )
 public_media_stager = PublicMediaStager(workspace_manager)
+account_context_service = create_account_context_service(workspace_manager)
+platform_connection_service = create_platform_connection_service(account_context_service)
+pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
+notification_service = create_notification_service(account_context_service)
+storage_manager = StorageManager(store, workspace_manager)
+media_staging_secret_store = MediaStagingSecretStore(
+    default_account_catalog_path().parent / "secrets"
+)
+media_staging_service = MediaStagingService(
+    store,
+    workspace_manager,
+    account_context_service,
+    storage_manager,
+    public_media_stager,
+    media_staging_secret_store,
+)
 video_generation_gateway = VideoGenerationGateway(
     workspace_manager,
     settings_service=video_generation_settings_service,
     repository=store,
     public_media_stager=public_media_stager,
+    media_staging_service=media_staging_service,
 )
 video_generation_draft_service = ShotVideoGenerationDraftService(
     store,
     video_generation_settings_service,
 )
-account_context_service = create_account_context_service(workspace_manager)
-platform_connection_service = create_platform_connection_service(account_context_service)
-pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
-notification_service = create_notification_service(account_context_service)
 depth_generation_settings_service = DepthGenerationSettingsService(
     workspace_manager,
     account_context_service,
@@ -310,7 +329,6 @@ depth_control_service = DepthControlService(
     settings_service=depth_generation_settings_service,
     notification_publisher=notification_service,
 )
-storage_manager = StorageManager(store, workspace_manager)
 asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
 generated_asset_promotion_service = GeneratedAssetPromotionService(
     repository=store,
@@ -395,6 +413,7 @@ app.include_router(
     prefix=API_PREFIX,
 )
 app.include_router(create_public_media_router(public_media_stager), prefix=API_PREFIX)
+app.include_router(create_media_staging_router(media_staging_service), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)

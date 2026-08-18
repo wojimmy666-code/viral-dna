@@ -52,6 +52,7 @@ import {
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
 import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
+import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsPanel.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { PromptEditor } from "./prompt-editor/index.js";
 import {
@@ -182,6 +183,23 @@ const DEFAULT_VIDEO_GENERATION_SETTINGS = Object.freeze({
     { provider: "minimax", label: "MiniMax", api_key_configured: false, base_url: "https://api.minimaxi.com/v1" },
   ],
   models: [],
+});
+const DEFAULT_MEDIA_STAGING_SETTINGS = Object.freeze({
+  provider: "disabled",
+  credential_mode: "ecs_ram_role",
+  region: "oss-cn-shanghai",
+  bucket: "",
+  internal_endpoint: null,
+  public_endpoint: null,
+  role_name: null,
+  object_prefix: "viraldna/staging",
+  signed_url_ttl_seconds: 28800,
+  cleanup_grace_seconds: 86400,
+  access_key_configured: false,
+  access_key_hint: null,
+  ready: false,
+  validation_status: "not_configured",
+  validation_message: null,
 });
 const DEFAULT_WORKSPACE_INFO = Object.freeze({
   root_path: "",
@@ -478,6 +496,41 @@ function videoSettingsDraft(server = DEFAULT_VIDEO_GENERATION_SETTINGS) {
   };
 }
 
+function mediaStagingSettingsDraft(server = DEFAULT_MEDIA_STAGING_SETTINGS) {
+  return {
+    mediaStagingProvider: server.provider || "disabled",
+    mediaStagingCredentialMode: server.credential_mode || "ecs_ram_role",
+    mediaStagingRegion: server.region || "oss-cn-shanghai",
+    mediaStagingBucket: server.bucket || "",
+    mediaStagingInternalEndpoint: server.internal_endpoint || "",
+    mediaStagingPublicEndpoint: server.public_endpoint || "",
+    mediaStagingRoleName: server.role_name || "",
+    mediaStagingObjectPrefix: server.object_prefix || "viraldna/staging",
+    mediaStagingTtlSeconds: Number(server.signed_url_ttl_seconds || 28800),
+    mediaStagingCleanupGraceSeconds: Number(server.cleanup_grace_seconds || 86400),
+    mediaStagingAccessKeyId: "",
+    mediaStagingAccessKeySecret: "",
+  };
+}
+
+function mediaStagingSettingsPayload(draft) {
+  return {
+    provider: draft.mediaStagingProvider,
+    credential_mode: draft.mediaStagingCredentialMode,
+    region: String(draft.mediaStagingRegion || "").trim(),
+    bucket: String(draft.mediaStagingBucket || "").trim(),
+    internal_endpoint: String(draft.mediaStagingInternalEndpoint || "").trim() || null,
+    public_endpoint: String(draft.mediaStagingPublicEndpoint || "").trim() || null,
+    role_name: String(draft.mediaStagingRoleName || "").trim() || null,
+    object_prefix: String(draft.mediaStagingObjectPrefix || "viraldna/staging").trim(),
+    signed_url_ttl_seconds: Number(draft.mediaStagingTtlSeconds || 28800),
+    cleanup_grace_seconds: Number(draft.mediaStagingCleanupGraceSeconds || 86400),
+    access_key_id: String(draft.mediaStagingAccessKeyId || "").trim() || null,
+    access_key_secret: String(draft.mediaStagingAccessKeySecret || "").trim() || null,
+    clear_access_key: false,
+  };
+}
+
 function localProxyDeliveryLabel(value) {
   return {
     codex_native: "由 Codex 读取系统代理",
@@ -542,12 +595,18 @@ export function App() {
   const [serverVideoSettings, setServerVideoSettings] = useState(
     DEFAULT_VIDEO_GENERATION_SETTINGS,
   );
+  const [serverMediaStagingSettings, setServerMediaStagingSettings] = useState(
+    DEFAULT_MEDIA_STAGING_SETTINGS,
+  );
+  const [mediaStagingValidating, setMediaStagingValidating] = useState(false);
+  const [mediaStagingValidation, setMediaStagingValidation] = useState(null);
   const [videoSettingsLoadState, setVideoSettingsLoadState] = useState("idle");
   const [videoSettingsLoadError, setVideoSettingsLoadError] = useState("");
   const [settingsDraft, setSettingsDraft] = useState({
     ...initialModelSettings,
     ...imageSettingsDraft(),
     ...videoSettingsDraft(),
+    ...mediaStagingSettingsDraft(),
     provider: DEFAULT_SERVER_MODEL_SETTINGS.provider,
     modelAlias: DEFAULT_SERVER_MODEL_SETTINGS.model_alias,
     baseUrl: DEFAULT_SERVER_MODEL_SETTINGS.base_url,
@@ -877,15 +936,22 @@ export function App() {
     throw lastError || new Error("视频模型目录读取失败");
   }
 
+  async function loadMediaStagingSettings() {
+    const next = await apiRequest("/settings/media-staging");
+    setServerMediaStagingSettings(next || DEFAULT_MEDIA_STAGING_SETTINGS);
+    return next || DEFAULT_MEDIA_STAGING_SETTINGS;
+  }
+
   async function loadGenerationSettings() {
-    const [imageResult, videoResult] = await Promise.allSettled([
+    const [imageResult, videoResult, mediaStagingResult] = await Promise.allSettled([
       apiRequest("/settings/image-generation"),
       loadVideoGenerationSettings(),
+      loadMediaStagingSettings(),
     ]);
     if (imageResult.status === "fulfilled") {
       setServerImageSettings(imageResult.value);
     }
-    return { imageResult, videoResult };
+    return { imageResult, videoResult, mediaStagingResult };
   }
 
   function resetProductionWorkspace() {
@@ -1086,6 +1152,7 @@ export function App() {
       maxCostCny,
       ...imageSettingsDraft(serverImageSettings),
       ...videoSettingsDraft(serverVideoSettings),
+      ...mediaStagingSettingsDraft(serverMediaStagingSettings),
       provider: serverModelSettings.provider,
       modelAlias: serverModelSettings.model_alias,
       baseUrl: serverModelSettings.base_url,
@@ -1096,14 +1163,16 @@ export function App() {
     setCodexDiscovery(null);
     setCodexNetworkTest(null);
     setCodexSandboxTest(null);
+    setMediaStagingValidation(null);
     setSettingsOpen(true);
     setSettingsLoading(true);
     void discoverLocalCodex({ quiet: true });
     try {
-      const [remote, imageRemote, videoRemote, nextWorkspace] = await Promise.all([
+      const [remote, imageRemote, videoRemote, mediaStagingRemote, nextWorkspace] = await Promise.all([
         apiRequest("/settings/model"),
         apiRequest("/settings/image-generation"),
         loadVideoGenerationSettings({ retryCount: 1 }),
+        loadMediaStagingSettings(),
         apiRequest("/workspace"),
       ]);
       setWorkspaceInfo(nextWorkspace);
@@ -1113,6 +1182,7 @@ export function App() {
       setServerModelSettings(remote);
       setServerImageSettings(imageRemote);
       setServerVideoSettings(videoRemote);
+      setServerMediaStagingSettings(mediaStagingRemote);
       videoSettingsLoadedRef.current = true;
       updateVideoSettingsLoadState("ready");
       setVideoSettingsLoadError("");
@@ -1122,6 +1192,7 @@ export function App() {
         maxCostCny,
         ...imageSettingsDraft(imageRemote),
         ...videoSettingsDraft(videoRemote),
+        ...mediaStagingSettingsDraft(mediaStagingRemote),
         provider: remote.provider,
         modelAlias: remote.model_alias,
         baseUrl: remote.base_url,
@@ -1147,6 +1218,35 @@ export function App() {
       setCodexSandboxTest(null);
     }
     setSettingsDraft((current) => ({ ...current, ...update }));
+  }
+
+  async function validateMediaStaging() {
+    setMediaStagingValidating(true);
+    setMediaStagingValidation(null);
+    setSettingsError("");
+    try {
+      const saved = await apiRequest("/settings/media-staging", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mediaStagingSettingsPayload(settingsDraft)),
+      });
+      setServerMediaStagingSettings(saved);
+      setSettingsDraft((current) => ({
+        ...current,
+        mediaStagingAccessKeyId: "",
+        mediaStagingAccessKeySecret: "",
+      }));
+      const result = await apiRequest("/settings/media-staging/validate", {
+        method: "POST",
+      });
+      setMediaStagingValidation(result);
+      if (!result.valid) setSettingsError(result.message);
+    } catch (requestError) {
+      setMediaStagingValidation({ valid: false, message: requestError.message });
+      setSettingsError(requestError.message);
+    } finally {
+      setMediaStagingValidating(false);
+    }
   }
 
   function updateWorkspaceDraft(value) {
@@ -1547,8 +1647,14 @@ export function App() {
           }),
         }),
       });
+      const mediaStagingRemote = await apiRequest("/settings/media-staging", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mediaStagingSettingsPayload(settingsDraft)),
+      });
       videoSettingsRequestIdRef.current += 1;
       setServerVideoSettings(videoRemote);
+      setServerMediaStagingSettings(mediaStagingRemote);
       videoSettingsLoadedRef.current = true;
       updateVideoSettingsLoadState("ready");
       setVideoSettingsLoadError("");
@@ -1575,6 +1681,8 @@ export function App() {
         ),
         videoManagedAssetAccessKey: "",
         videoManagedAssetSecretKey: "",
+        mediaStagingAccessKeyId: "",
+        mediaStagingAccessKeySecret: "",
         videoManagedAssetRegion: (
           videoRemote.providers?.find((provider) => provider.provider === "volc_ark")
             ?.managed_asset_region || "cn-beijing"
@@ -2455,6 +2563,9 @@ export function App() {
           serverSettings={serverModelSettings}
           imageServerSettings={serverImageSettings}
           videoServerSettings={serverVideoSettings}
+          mediaStagingServerSettings={serverMediaStagingSettings}
+          mediaStagingValidating={mediaStagingValidating}
+          mediaStagingValidation={mediaStagingValidation}
           imageToolDetecting={imageToolDetecting}
           imageToolDetection={imageToolDetection}
           codexApplying={codexApplying}
@@ -2478,6 +2589,7 @@ export function App() {
           onDiscoverLocalCodex={discoverLocalCodex}
           onTestLocalCodexNetwork={testLocalCodexNetwork}
           onTestLocalCodexSandbox={testLocalCodexSandbox}
+          onValidateMediaStaging={validateMediaStaging}
           onClose={() => setSettingsOpen(false)}
           onReset={() =>
             updateSettingsDraft({
@@ -3137,6 +3249,9 @@ function ModelSettingsDialog({
   serverSettings,
   imageServerSettings,
   videoServerSettings,
+  mediaStagingServerSettings,
+  mediaStagingValidating,
+  mediaStagingValidation,
   imageToolDetecting,
   imageToolDetection,
   codexApplying,
@@ -3160,6 +3275,7 @@ function ModelSettingsDialog({
   onDiscoverLocalCodex,
   onTestLocalCodexNetwork,
   onTestLocalCodexSandbox,
+  onValidateMediaStaging,
   onClose,
   onReset,
   onSave,
@@ -4138,12 +4254,23 @@ function ModelSettingsDialog({
               </label>
             </div>
 
-            <section className="managed-asset-settings-panel" aria-label="Provider 公网媒体暂存">
+            <MediaStagingSettingsPanel
+              draft={draft}
+              onChange={onChange}
+              onValidate={onValidateMediaStaging}
+              saving={saving}
+              serverSettings={mediaStagingServerSettings}
+              validating={mediaStagingValidating}
+              validation={mediaStagingValidation}
+            />
+
+            {draft.mediaStagingProvider === "local_proxy" && (
+            <section className="managed-asset-settings-panel" aria-label="本机反向代理媒体暂存">
               <div className="settings-section-heading compact-heading">
                 <div>
-                  <strong>参考视频公网暂存</strong>
+                  <strong>本机反向代理（高级备用）</strong>
                   <p>
-                    为 Seedance、MiniMax H3 等模型签发短期 HTTPS 地址；本地路径和工作区结构不会暴露。
+                    仅在不使用 OSS 时，通过自己的公网 ViralDNA API 临时提供媒体。
                   </p>
                 </div>
                 <span className={`image-settings-state ${videoServerSettings.public_media_transport_ready ? "enabled" : ""}`}>
@@ -4189,6 +4316,7 @@ function ModelSettingsDialog({
                   || "配置后，生成任务会把已启用的全场景深度视频暂存为短期签名地址。"}
               </small>
             </section>
+            )}
 
             <div className="video-provider-settings-list">
               {(videoServerSettings.providers || []).map((provider) => (

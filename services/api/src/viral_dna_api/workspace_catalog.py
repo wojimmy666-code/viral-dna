@@ -459,6 +459,65 @@ class AccountContextService:
             raise AccountCatalogError("找不到工作区", status_code=404)
         return [item for item in state.storage_locations if item.workspace_id == workspace_id]
 
+    async def ensure_account_storage_location(
+        self,
+        *,
+        provider_type: StorageProviderType,
+        name: str,
+        config_reference: str,
+    ) -> StorageLocation:
+        """Create or refresh an account-owned cloud location for the active workspace.
+
+        The location remains workspace-addressable today while its account scope
+        and stable config reference allow a future cloud catalog to synchronize it.
+        """
+
+        context = await self.ensure_current()
+        async with self._lock:
+            state = await self.repository.load()
+            now = _utc_now()
+            location = next(
+                (
+                    item
+                    for item in state.storage_locations
+                    if item.account_id == context.account.id
+                    and item.workspace_id == context.active_workspace.id
+                    and item.provider_type == provider_type
+                    and item.config_reference == config_reference
+                ),
+                None,
+            )
+            capabilities = [
+                StorageCapability.READ,
+                StorageCapability.WRITE,
+                StorageCapability.SIGNED_URL,
+                StorageCapability.MULTIPART_UPLOAD,
+            ]
+            if location is None:
+                location = StorageLocation(
+                    workspace_id=context.active_workspace.id,
+                    account_id=context.account.id,
+                    scope=StorageLocationScope.ACCOUNT,
+                    name=name,
+                    provider_type=provider_type,
+                    capabilities=capabilities,
+                    config_reference=config_reference,
+                )
+            else:
+                location = location.model_copy(
+                    update={
+                        "name": name,
+                        "scope": StorageLocationScope.ACCOUNT,
+                        "status": StorageLocationStatus.ONLINE,
+                        "capabilities": capabilities,
+                        "updated_at": now,
+                    }
+                )
+            _replace_by_id(state.storage_locations, location)
+            state.updated_at = now
+            await self.repository.save(state)
+            return location
+
     async def _activate_registered(
         self,
         workspace_id: UUID,

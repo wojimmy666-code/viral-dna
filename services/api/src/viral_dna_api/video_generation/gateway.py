@@ -17,6 +17,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from ..chinese import to_simplified
 from ..media import MediaProcessingError, MediaProcessor
+from ..media_staging import MediaStagingError, MediaStagingService
 from ..models import (
     GenerationCandidate,
     GenerationCostSource,
@@ -315,9 +316,11 @@ class VideoGenerationGateway:
         repository: object | None = None,
         remote_orchestrator: RemoteVideoOrchestrator | None = None,
         public_media_stager: PublicMediaStager | None = None,
+        media_staging_service: MediaStagingService | None = None,
     ) -> None:
         self.workspace = workspace
         self.public_media_stager = public_media_stager or PublicMediaStager(workspace)
+        self.media_staging_service = media_staging_service
         if adapters is None:
             simulated = SimulatedVideoAdapter(media_processor)
             self.adapters: dict[ImageExecutionMode, VideoGenerationAdapter] = {
@@ -597,7 +600,11 @@ class VideoGenerationGateway:
                 reference_frames=source_ordered_frames,
                 managed_asset_references=managed_references,
                 depth_control_videos=depth_control_videos,
-                public_media_transport_ready=self.public_media_stager.ready,
+                public_media_transport_ready=(
+                    await self.media_staging_service.ready()
+                    if self.media_staging_service is not None
+                    else self.public_media_stager.ready
+                ),
                 depth_optional=True,
             )
         except VideoReferencePolicyError as exc:
@@ -606,10 +613,36 @@ class VideoGenerationGateway:
         depth_control_videos = reference_plan.depth_control_videos
         if depth_control_videos:
             try:
-                depth_control_videos = tuple(
-                    replace(item, public_url=self.public_media_stager.stage(item.path).url)
-                    for item in depth_control_videos
-                )
+                staged_depth_videos: list[DepthControlVideo] = []
+                for item in depth_control_videos:
+                    if self.media_staging_service is not None:
+                        staged = await self.media_staging_service.stage_path(
+                            item.path,
+                            expected_sha256=item.sha256,
+                            purpose=f"video_generation:{run_id or 'pending'}",
+                        )
+                        staged_depth_videos.append(
+                            replace(
+                                item,
+                                public_url=staged.url,
+                                storage_object_id=staged.storage_object_id,
+                                access_lease_id=staged.lease_id,
+                            )
+                        )
+                    else:
+                        staged_depth_videos.append(
+                            replace(
+                                item,
+                                public_url=self.public_media_stager.stage(item.path).url,
+                            )
+                        )
+                depth_control_videos = tuple(staged_depth_videos)
+            except MediaStagingError as exc:
+                raise VideoGenerationGatewayError(
+                    exc.status_code,
+                    exc.code,
+                    str(exc),
+                ) from exc
             except PublicMediaStagingError as exc:
                 raise VideoGenerationGatewayError(
                     exc.status_code,

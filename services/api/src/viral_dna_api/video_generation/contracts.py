@@ -76,6 +76,8 @@ class DepthControlVideo:
     sha256: str
     kind: str = "full_scene_depth_video"
     depth_convention: str = "near_white_far_black"
+    storage_object_id: UUID | None = None
+    access_lease_id: UUID | None = None
     public_url: str | None = None
 
 

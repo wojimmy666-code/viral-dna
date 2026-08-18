@@ -21,6 +21,7 @@ from .generated_artifacts.domain import (
     GeneratedArtifact,
     StorageObjectReference,
 )
+from .media_staging.domain import MediaAccessLease, MediaStagingConfig
 from .models import (
     AnalysisJob,
     AnalysisRecord,
@@ -193,6 +194,15 @@ _GENERATED_ARTIFACT_INDEXES = (
     ("idx_asset_provenance_asset_id", "asset_provenance", "asset_id"),
 )
 
+_MEDIA_STAGING_TABLES = frozenset({"media_staging_configs", "media_access_leases"})
+
+_MEDIA_STAGING_INDEXES = (
+    ("idx_media_staging_configs_account_id", "media_staging_configs", "account_id"),
+    ("idx_media_access_leases_account_id", "media_access_leases", "account_id"),
+    ("idx_media_access_leases_object_id", "media_access_leases", "storage_object_id"),
+    ("idx_media_access_leases_expires_at", "media_access_leases", "expires_at"),
+)
+
 
 class SQLiteSchemaError(RuntimeError):
     """Raised when the durable database schema cannot be migrated safely."""
@@ -211,6 +221,7 @@ class SQLiteStore:
         | _VIDEO_GENERATION_DRAFT_TABLES
         | _DEPTH_CONTROL_JOB_TABLES
         | _GENERATED_ARTIFACT_TABLES
+        | _MEDIA_STAGING_TABLES
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -303,6 +314,11 @@ class SQLiteStore:
                 self._create_generated_artifact_indexes(connection)
                 if 11 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (11)")
+
+                self._create_json_tables(connection, _MEDIA_STAGING_TABLES)
+                self._create_media_staging_indexes(connection)
+                if 12 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (12)")
             except Exception:
                 connection.rollback()
                 raise
@@ -384,6 +400,14 @@ class SQLiteStore:
     @staticmethod
     def _create_generated_artifact_indexes(connection: sqlite3.Connection) -> None:
         for index_name, table, payload_field in _GENERATED_ARTIFACT_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_media_staging_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _MEDIA_STAGING_INDEXES:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
@@ -801,6 +825,29 @@ class SQLiteStore:
             (item for item in replicas if item.storage_object_id == object_id),
             key=lambda item: item.created_at,
         )
+
+    async def save_media_staging_config(
+        self,
+        config: MediaStagingConfig,
+    ) -> MediaStagingConfig:
+        return await self._save("media_staging_configs", config.account_id, config)
+
+    async def get_media_staging_config(
+        self,
+        account_id: UUID,
+    ) -> MediaStagingConfig | None:
+        return await self._get("media_staging_configs", account_id, MediaStagingConfig)
+
+    async def save_media_access_lease(
+        self,
+        lease: MediaAccessLease,
+    ) -> MediaAccessLease:
+        return await self._save("media_access_leases", lease.id, lease)
+
+    async def list_media_access_leases(self) -> list[MediaAccessLease]:
+        payloads = await asyncio.to_thread(self._read_all, "media_access_leases")
+        leases = [MediaAccessLease.model_validate_json(payload) for payload in payloads]
+        return sorted(leases, key=lambda item: item.created_at)
 
     async def save_asset_folder(self, folder: AssetFolder) -> AssetFolder:
         return await self._save("asset_folders", folder.id, folder)
