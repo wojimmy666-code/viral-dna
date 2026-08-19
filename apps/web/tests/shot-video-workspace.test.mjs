@@ -15,6 +15,7 @@ import {
   buildVideoReferenceOptions,
   insertVideoMentionIntoPrompt,
   normalizeVideoPromptMentions,
+  selectedVideoReferenceOptions,
   removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
   videoMentionToken,
@@ -268,6 +269,7 @@ test("persists each shot video model instead of reapplying the global default", 
     input_plan: {
       schema_version: "viral-dna-video-input-plan/v1",
       sources: [],
+      references: [],
     },
   });
 
@@ -289,6 +291,43 @@ test("persists each shot video model instead of reapplying the global default", 
     productionWorkflowSource,
     /modelAlias:\s*"bailian_wan_2_7_r2v"/,
   );
+});
+
+test("keeps selected generation references separate from prompt mentions", () => {
+  const reference = {
+    reference_kind: "approved_image",
+    reference_id: "5e098a85-7bd7-4b35-97bc-17397a3f1f48",
+    label: "分镜图/图1-动作",
+    role: "composition",
+    order: 1,
+  };
+  const detail = {
+    plan: {
+      duration_seconds: 3,
+      video_prompt: "保持构图和动作。",
+      video_prompt_mentions: [reference],
+    },
+  };
+  const settings = {
+    default_model_alias: "bailian_wan_2_7_r2v",
+    default_resolution: "720P",
+    models: [{ alias: "bailian_wan_2_7_r2v" }],
+  };
+  const restored = videoDraftFromDetail(detail, settings, {
+    input_plan: { sources: ["approved_images"] },
+  });
+
+  assert.deepEqual(restored.selectedReferences, [reference]);
+  assert.deepEqual(restored.videoPromptMentions, []);
+  assert.deepEqual(videoDraftParameters(restored).input_plan.references, [reference]);
+
+  const mentioned = videoDraftFromDetail({
+    plan: {
+      ...detail.plan,
+      video_prompt: "保持 @分镜图/图1-动作 的构图和动作。",
+    },
+  }, settings, { input_plan: { sources: ["approved_images"], references: [reference] } });
+  assert.deepEqual(mentioned.videoPromptMentions, [reference]);
 });
 
 test("composes optional video inputs without exposing audio as a generation input", () => {
@@ -428,6 +467,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.equal(videoMentionToken(asset), "@资产/小喵酱/面部");
   assert.equal(requiredSourceForVideoMention(asset), "project_assets");
   const managed = options.find((item) => item.reference_kind === "provider_managed_asset");
+  assert.deepEqual(selectedVideoReferenceOptions(options, [asset]), [asset]);
   assert.equal(
     managed.preview_url,
     "/api/v1/managed-assets/providers/volc_ark/assets/managed-person-1/preview",
@@ -445,8 +485,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.equal(normalized[0].reference_id, projectAssetId);
   assert.equal(normalized[0].order, 1);
   const detached = normalizeVideoPromptMentions("不显式书写引用别名", normalized, options);
-  assert.equal(detached.length, 1);
-  assert.equal(detached[0].reference_id, projectAssetId);
+  assert.equal(detached.length, 0);
   assert.equal(
     removeVideoMentionFromPrompt(prompt, normalized[0]),
     "保持 的身份，动作参考深度视频。",
@@ -465,6 +504,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(workspaceSource, /requiredInputSource/);
   assert.match(workspaceSource, /videoPromptMentions/);
+  assert.match(workspaceSource, /selectedReferences/);
   assert.match(videoPromptReferenceEditorSource, /className="video-prompt-highlight"/);
   assert.match(videoPromptReferenceEditorSource, /document\.addEventListener\("pointerdown"/);
   assert.match(videoPromptReferenceEditorSource, /aria-activedescendant/);

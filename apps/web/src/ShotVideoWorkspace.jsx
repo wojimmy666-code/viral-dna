@@ -27,8 +27,10 @@ import { useDepthControlJob } from "./video-controls/depth/useDepthControlJob.js
 import { GenerationReferenceComposer } from "./video-inputs/reference-composer/GenerationReferenceComposer.jsx";
 import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
 import {
+  removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
   videoMentionToken,
+  videoReferenceKey,
 } from "./video-inputs/video-prompt-references.js";
 import "./managed-assets/managed-assets.css";
 import "./video-controls/depth-control.css";
@@ -324,8 +326,9 @@ export function ShotVideoWorkspace({
   const usesManagedAssets = selectedInputSources.has("provider_managed_assets");
   const usesReferenceVideo = selectedInputSources.has("reference_video");
   const usesDepthControl = selectedInputSources.has("depth_control");
+  const selectedVideoReferences = videoDraft.selectedReferences || [];
   const explicitVideoMentions = videoDraft.videoPromptMentions || [];
-  const explicitProjectAssetMentions = explicitVideoMentions.filter(
+  const explicitProjectAssetMentions = selectedVideoReferences.filter(
     (mention) => mention.reference_kind === "project_asset",
   );
   const projectAssetCount = useMemo(() => (
@@ -807,10 +810,18 @@ export function ShotVideoWorkspace({
               depthAssets={plan?.depth_control_assets || []}
               managedAssetBinding={managedAssetBinding}
               model={selectedModel}
-              onChange={({ videoPromptMentions, inputSources }) => setVideoDraft((current) => ({
+              onChange={({ selectedReferences, inputSources, removedReference }) => setVideoDraft((current) => ({
                 ...current,
-                videoPromptMentions,
+                selectedReferences,
                 inputSources,
+                videoPrompt: removedReference
+                  ? removeVideoMentionFromPrompt(current.videoPrompt, removedReference)
+                  : current.videoPrompt,
+                videoPromptMentions: removedReference
+                  ? (current.videoPromptMentions || []).filter(
+                      (mention) => videoReferenceKey(mention) !== videoReferenceKey(removedReference),
+                    )
+                  : current.videoPromptMentions,
               }))}
               onCreateDepth={() => {
                 setVideoDraft((current) => ({
@@ -825,9 +836,9 @@ export function ShotVideoWorkspace({
               onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
               referenceFrames={referenceFrames}
               resolveUrl={resolveUrl}
+              selectedReferences={videoDraft.selectedReferences || []}
               selectedSources={videoDraft.inputSources || []}
               shotPlanId={plan.id}
-              videoPromptMentions={videoDraft.videoPromptMentions || []}
               videoReferenceBindings={plan?.video_reference_bindings || []}
             />
             {usesDepthControl && (
@@ -886,6 +897,7 @@ export function ShotVideoWorkspace({
               }))}
               referenceFrames={referenceFrames}
               resolveUrl={resolveUrl}
+              selectedReferences={videoDraft.selectedReferences || []}
               value={videoDraft.videoPrompt}
               videoPromptMentions={videoDraft.videoPromptMentions || []}
               videoReferenceBindings={plan?.video_reference_bindings || []}

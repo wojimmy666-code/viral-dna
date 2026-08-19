@@ -58,6 +58,46 @@ export function videoMentionToken(item = {}) {
   return label ? `@${label}` : "";
 }
 
+export function promptContainsVideoMention(prompt, item = {}) {
+  const token = videoMentionToken(item);
+  return Boolean(token && String(prompt || "").includes(token));
+}
+
+export function normalizeVideoGenerationReferences(references = [], options = []) {
+  const optionByKey = new Map(options.map((item) => [videoReferenceKey(item), item]));
+  const seen = new Set();
+  const normalized = [];
+  for (const reference of [...(references || [])].sort(
+    (left, right) => Number(left.order || 0) - Number(right.order || 0),
+  )) {
+    const key = videoReferenceKey(reference);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const option = optionByKey.get(key);
+    normalized.push({
+      reference_kind: option?.reference_kind || reference.reference_kind,
+      reference_id: option?.reference_id || reference.reference_id,
+      label: option?.label || reference.label,
+      role: option?.role || reference.role,
+      order: normalized.length + 1,
+    });
+  }
+  return normalized;
+}
+
+export function selectedVideoReferenceOptions(options = [], selectedReferences = []) {
+  const selectedByKey = new Map(
+    normalizeVideoGenerationReferences(selectedReferences, options)
+      .map((item) => [videoReferenceKey(item), item]),
+  );
+  return options
+    .filter((item) => selectedByKey.has(videoReferenceKey(item)))
+    .sort((left, right) => (
+      selectedByKey.get(videoReferenceKey(left)).order
+      - selectedByKey.get(videoReferenceKey(right)).order
+    ));
+}
+
 export function managedAssetPreviewPath(binding = {}) {
   if (!binding.provider || !binding.asset_id) return binding.preview_url || "";
   return `/api/v1/managed-assets/providers/${encodeURIComponent(binding.provider)}/assets/${encodeURIComponent(binding.asset_id)}/preview`;
@@ -238,6 +278,7 @@ export function normalizeVideoPromptMentions(prompt, mentions = [], options = []
           role: option.role,
         }
       : mention;
+    if (!promptContainsVideoMention(prompt, canonical)) continue;
     nextMentions.push({
       ...canonical,
       order: nextMentions.length + 1,

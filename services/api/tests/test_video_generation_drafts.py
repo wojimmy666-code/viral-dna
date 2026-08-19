@@ -14,6 +14,9 @@ from viral_dna_api.models import (
     ShotVideoGenerationDraftUpdate,
     VideoGenerationInputPlan,
     VideoGenerationInputSource,
+    VideoGenerationReference,
+    VideoPromptReferenceKind,
+    VideoPromptReferenceRole,
 )
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
@@ -59,6 +62,7 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
         assert initial.origin == "global_default"
 
         actor_id = uuid4()
+        reference_id = uuid4()
         updated = await service.update(
             shot.id,
             ShotVideoGenerationDraftUpdate(
@@ -68,13 +72,22 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
                 duration_seconds=5,
                 candidate_count=2,
                 input_plan=VideoGenerationInputPlan(
-                    sources=[VideoGenerationInputSource.PROJECT_ASSETS]
+                    sources=[VideoGenerationInputSource.PROJECT_ASSETS],
+                    references=[
+                        VideoGenerationReference(
+                            reference_kind=VideoPromptReferenceKind.PROJECT_ASSET,
+                            reference_id=reference_id,
+                            label="asset/person",
+                            role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+                        )
+                    ],
                 ),
             ),
             actor_account_id=actor_id,
         )
         assert updated.model_alias == "seedance_2_0_fast"
         assert updated.input_plan.sources == [VideoGenerationInputSource.PROJECT_ASSETS]
+        assert updated.input_plan.references[0].reference_id == reference_id
         assert updated.updated_by_account_id == actor_id
         assert updated.draft_version == 2
 
@@ -83,6 +96,7 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
         assert restored.model_alias == "seedance_2_0_fast"
         assert restored.resolution == "1080P"
         assert restored.input_plan.sources == [VideoGenerationInputSource.PROJECT_ASSETS]
+        assert restored.input_plan.references[0].reference_id == reference_id
 
         with pytest.raises(ShotVideoGenerationDraftError) as conflict:
             await service.update(

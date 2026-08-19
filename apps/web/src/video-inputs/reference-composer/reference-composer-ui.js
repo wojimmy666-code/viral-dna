@@ -28,7 +28,7 @@ export function referenceAlias(item = {}, index = 0) {
   return `图${ordinal}`;
 }
 export function selectedReferenceItems({
-  mentions = [],
+  references = [],
   options = [],
   selectedSources = [],
 } = {}) {
@@ -36,14 +36,14 @@ export function selectedReferenceItems({
   const items = [];
   const representedSources = new Set();
 
-  [...mentions]
+  [...references]
     .sort((left, right) => Number(left.order || 0) - Number(right.order || 0))
-    .forEach((mention) => {
-      const source = requiredSourceForVideoMention(mention);
+    .forEach((reference) => {
+      const source = requiredSourceForVideoMention(reference);
       if (source) representedSources.add(source);
       items.push({
-        ...mention,
-        ...(optionByKey.get(videoReferenceKey(mention)) || {}),
+        ...reference,
+        ...(optionByKey.get(videoReferenceKey(reference)) || {}),
         explicit: true,
       });
     });

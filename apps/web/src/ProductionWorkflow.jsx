@@ -2253,6 +2253,7 @@ export function ProductionHub({
             input_plan: {
               schema_version: "viral-dna-video-input-plan/v1",
               sources: Array.from(new Set(videoDraft.inputSources || [])),
+              references: videoDraft.selectedReferences || [],
             },
             execution_mode: "remote_api",
             model_alias: videoDraft.modelAlias,

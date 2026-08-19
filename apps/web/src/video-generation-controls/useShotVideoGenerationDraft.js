@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeVideoDuration } from "../production-ui.js";
+import {
+  normalizeVideoGenerationReferences,
+  normalizeVideoPromptMentions,
+  requiredSourceForVideoMention,
+} from "../video-inputs/video-prompt-references.js";
 
 export const EMPTY_VIDEO_DRAFT = Object.freeze({
   videoPrompt: "",
   videoPromptMentions: [],
+  selectedReferences: [],
   negativeConstraints: "",
   durationSeconds: "",
   candidateCount: 1,
@@ -32,6 +38,7 @@ export function videoDraftParameters(draft) {
     input_plan: {
       schema_version: "viral-dna-video-input-plan/v1",
       sources: Array.from(new Set(draft?.inputSources || [])),
+      references: normalizeVideoGenerationReferences(draft?.selectedReferences || []),
     },
   };
 }
@@ -47,6 +54,7 @@ function localVideoDraftParameters(draft) {
     durationSeconds: draft.durationSeconds,
     candidateCount: draft.candidateCount,
     inputSources: [...(draft.inputSources || [])],
+    selectedReferences: (draft.selectedReferences || []).map((item) => ({ ...item })),
   };
 }
 
@@ -67,12 +75,21 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
   const durationSeconds = selectedModel
     ? normalizeVideoDuration(rawDuration, selectedModel)
     : normalizedDuration(rawDuration);
+  const videoPrompt = detail?.plan?.video_prompt || "";
+  const legacyMentions = detail?.plan?.video_prompt_mentions || [];
+  const selectedReferences = normalizeVideoGenerationReferences(
+    persistedDraft?.input_plan?.references?.length
+      ? persistedDraft.input_plan.references
+      : legacyMentions,
+  );
+  const inferredSources = selectedReferences
+    .map(requiredSourceForVideoMention)
+    .filter(Boolean);
   return {
     ...EMPTY_VIDEO_DRAFT,
-    videoPrompt: detail?.plan?.video_prompt || "",
-    videoPromptMentions: (detail?.plan?.video_prompt_mentions || []).map(
-      (item) => ({ ...item }),
-    ),
+    videoPrompt,
+    videoPromptMentions: normalizeVideoPromptMentions(videoPrompt, legacyMentions),
+    selectedReferences,
     negativeConstraints: (
       detail?.plan?.video_negative_constraints || []
     ).join("\n"),
@@ -86,7 +103,10 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
       || settings?.default_resolution
       || "720P"
     ).toUpperCase(),
-    inputSources: [...(persistedDraft?.input_plan?.sources || [])],
+    inputSources: Array.from(new Set([
+      ...(persistedDraft?.input_plan?.sources || []),
+      ...inferredSources,
+    ])),
   };
 }
 

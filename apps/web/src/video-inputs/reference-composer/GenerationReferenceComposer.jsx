@@ -25,9 +25,9 @@ export function GenerationReferenceComposer({
   onOpenManagedAssets,
   referenceFrames,
   resolveUrl,
+  selectedReferences,
   selectedSources,
   shotPlanId,
-  videoPromptMentions,
   videoReferenceBindings,
 }) {
   const anchorRef = useRef(null);
@@ -41,35 +41,35 @@ export function GenerationReferenceComposer({
     videoReferenceBindings,
   }), [assets, depthAssets, managedAssetBinding, referenceFrames, videoReferenceBindings]);
   const items = useMemo(() => selectedReferenceItems({
-    mentions: videoPromptMentions,
+    references: selectedReferences,
     options,
     selectedSources,
-  }), [options, selectedSources, videoPromptMentions]);
+  }), [options, selectedReferences, selectedSources]);
   const selectedKeys = useMemo(
-    () => new Set((videoPromptMentions || []).map(videoReferenceKey)),
-    [videoPromptMentions],
+    () => new Set((selectedReferences || []).map(videoReferenceKey)),
+    [selectedReferences],
   );
 
   function toggleReference(option, enabled) {
     const key = videoReferenceKey(option);
     const source = requiredSourceForVideoMention(option);
-    let mentions = (videoPromptMentions || []).filter((item) => videoReferenceKey(item) !== key);
+    let references = (selectedReferences || []).filter((item) => videoReferenceKey(item) !== key);
     if (enabled) {
-      mentions.push({
+      references.push({
         reference_kind: option.reference_kind,
         reference_id: option.reference_id,
         label: option.label,
         role: option.role,
-        order: mentions.length + 1,
+        order: references.length + 1,
       });
     }
-    mentions = mentions.map((item, index) => ({ ...item, order: index + 1 }));
+    references = references.map((item, index) => ({ ...item, order: index + 1 }));
     const sources = new Set(selectedSources || []);
     if (enabled && source) sources.add(source);
-    if (!enabled && source && !mentions.some((item) => requiredSourceForVideoMention(item) === source)) {
+    if (!enabled && source && !references.some((item) => requiredSourceForVideoMention(item) === source)) {
       sources.delete(source);
     }
-    onChange?.({ videoPromptMentions: mentions, inputSources: [...sources] });
+    onChange?.({ selectedReferences: references, inputSources: [...sources], removedReference: enabled ? null : option });
   }
 
   function removeItem(item) {
@@ -80,20 +80,20 @@ export function GenerationReferenceComposer({
     }
     const source = referenceSource(item);
     onChange?.({
-      videoPromptMentions,
+      selectedReferences,
       inputSources: (selectedSources || []).filter((value) => value !== source),
     });
   }
 
   function reorderItem(draggedKey, targetKey) {
-    const mentions = [...(videoPromptMentions || [])];
-    const from = mentions.findIndex((item) => videoReferenceKey(item) === draggedKey);
-    const to = mentions.findIndex((item) => videoReferenceKey(item) === targetKey);
+    const references = [...(selectedReferences || [])];
+    const from = references.findIndex((item) => videoReferenceKey(item) === draggedKey);
+    const to = references.findIndex((item) => videoReferenceKey(item) === targetKey);
     if (from < 0 || to < 0 || from === to) return;
-    const [moved] = mentions.splice(from, 1);
-    mentions.splice(to, 0, moved);
+    const [moved] = references.splice(from, 1);
+    references.splice(to, 0, moved);
     onChange?.({
-      videoPromptMentions: mentions.map((item, index) => ({ ...item, order: index + 1 })),
+      selectedReferences: references.map((item, index) => ({ ...item, order: index + 1 })),
       inputSources: selectedSources,
     });
   }

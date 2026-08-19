@@ -254,11 +254,51 @@ class VideoGenerationInputSource(StrEnum):
     DEPTH_CONTROL = "depth_control"
 
 
+class VideoPromptReferenceKind(StrEnum):
+    """Stable source categories used by generation inputs and prompt mentions."""
+
+    PROJECT_ASSET = "project_asset"
+    APPROVED_IMAGE = "approved_image"
+    PROVIDER_MANAGED_ASSET = "provider_managed_asset"
+    REFERENCE_VIDEO = "reference_video"
+    DEPTH_CONTROL = "depth_control"
+
+
+class VideoPromptReferenceRole(StrEnum):
+    ACTOR_IDENTITY = "actor_identity"
+    COMPOSITION = "composition"
+    SCENE = "scene"
+    PRODUCT = "product"
+    WARDROBE = "wardrobe"
+    MOTION = "motion"
+    CAMERA = "camera"
+    DEPTH = "depth"
+
+
+class VideoGenerationReference(BaseModel):
+    """A concrete media input selected for one video generation request."""
+
+    reference_kind: VideoPromptReferenceKind
+    reference_id: UUID
+    label: str = Field(min_length=1, max_length=260)
+    role: VideoPromptReferenceRole
+    order: int = Field(default=1, ge=1, le=100)
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str) -> str:
+        normalized = value.strip().lstrip("@").strip()
+        if not normalized:
+            raise ValueError("视频生成参考名称不能为空")
+        return normalized
+
+
 class VideoGenerationInputPlan(BaseModel):
     schema_version: Literal["viral-dna-video-input-plan/v1"] = (
         "viral-dna-video-input-plan/v1"
     )
     sources: list[VideoGenerationInputSource] = Field(default_factory=list, max_length=5)
+    references: list[VideoGenerationReference] = Field(default_factory=list, max_length=100)
 
     @field_validator("sources")
     @classmethod
@@ -268,6 +308,17 @@ class VideoGenerationInputPlan(BaseModel):
     ) -> list[VideoGenerationInputSource]:
         if len(values) != len(set(values)):
             raise ValueError("视频生成输入不能重复")
+        return values
+
+    @field_validator("references")
+    @classmethod
+    def require_unique_references(
+        cls,
+        values: list[VideoGenerationReference],
+    ) -> list[VideoGenerationReference]:
+        keys = [(item.reference_kind, item.reference_id) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("视频生成参考不能重复")
         return values
 
     def includes(self, source: VideoGenerationInputSource) -> bool:
@@ -1824,28 +1875,7 @@ class PromptAssetMention(BaseModel):
         return normalized
 
 
-class VideoPromptReferenceKind(StrEnum):
-    """Stable source categories that may be mentioned inside a video prompt."""
-
-    PROJECT_ASSET = "project_asset"
-    APPROVED_IMAGE = "approved_image"
-    PROVIDER_MANAGED_ASSET = "provider_managed_asset"
-    REFERENCE_VIDEO = "reference_video"
-    DEPTH_CONTROL = "depth_control"
-
-
-class VideoPromptReferenceRole(StrEnum):
-    ACTOR_IDENTITY = "actor_identity"
-    COMPOSITION = "composition"
-    SCENE = "scene"
-    PRODUCT = "product"
-    WARDROBE = "wardrobe"
-    MOTION = "motion"
-    CAMERA = "camera"
-    DEPTH = "depth"
-
-
-class VideoPromptMention(BaseModel):
+class VideoPromptMention(VideoGenerationReference):
     """A human-readable prompt token bound to one concrete generation input."""
 
     reference_kind: VideoPromptReferenceKind

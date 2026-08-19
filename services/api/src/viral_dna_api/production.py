@@ -4911,6 +4911,18 @@ class ProductionService:
             VideoPromptReferenceKind.REFERENCE_VIDEO: VideoGenerationInputSource.REFERENCE_VIDEO,
             VideoPromptReferenceKind.DEPTH_CONTROL: VideoGenerationInputSource.DEPTH_CONTROL,
         }
+        selected_reference_keys = {
+            (reference.reference_kind, reference.reference_id)
+            for reference in payload.input_plan.references
+        }
+        for reference in payload.input_plan.references:
+            required_source = source_by_reference_kind[reference.reference_kind]
+            if required_source not in sources:
+                raise _fail(
+                    409,
+                    "video_generation_reference_source_disabled",
+                    f"生成参考 @{reference.label} 尚未启用对应输入来源",
+                )
         for mention in plan.video_prompt_mentions:
             if f"@{mention.label}" not in plan.video_prompt:
                 raise _fail(
@@ -4924,6 +4936,13 @@ class ProductionService:
                     409,
                     "video_prompt_reference_source_disabled",
                     f"视频提示词中的 @{mention.label} 尚未启用对应生成输入",
+                )
+        for mention in plan.video_prompt_mentions:
+            if (mention.reference_kind, mention.reference_id) not in selected_reference_keys:
+                raise _fail(
+                    409,
+                    "video_prompt_reference_not_selected",
+                    f"提示词引用 @{mention.label} 尚未通过 +参考 加入本次生成",
                 )
         if not sources:
             if not capability.text_to_video:
@@ -4947,9 +4966,9 @@ class ProductionService:
             raise _fail(409, "approved_image_required", "请先确认用于生成视频的分镜图片")
         if VideoGenerationInputSource.PROJECT_ASSETS in sources:
             asset_ids = {
-                mention.reference_id
-                for mention in plan.video_prompt_mentions
-                if mention.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
+                reference.reference_id
+                for reference in payload.input_plan.references
+                if reference.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
             } or {
                 mention.reference_asset_id
                 for beat in plan.visual_beats
@@ -5878,7 +5897,7 @@ class ProductionService:
             if payload.input_plan.includes(VideoGenerationInputSource.APPROVED_IMAGES):
                 approved_mentions = {
                     item.reference_id: item
-                    for item in plan.video_prompt_mentions
+                    for item in payload.input_plan.references
                     if item.reference_kind == VideoPromptReferenceKind.APPROVED_IMAGE
                 }
                 approved_targets = sorted(
@@ -5949,7 +5968,7 @@ class ProductionService:
                 seen_asset_ids: set[UUID] = set()
                 video_asset_mentions = [
                     item
-                    for item in plan.video_prompt_mentions
+                    for item in payload.input_plan.references
                     if item.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
                 ]
                 if video_asset_mentions:

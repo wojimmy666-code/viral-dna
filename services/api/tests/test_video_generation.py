@@ -18,6 +18,7 @@ from viral_dna_api.models import (
     VideoGenerationInputMode,
     VideoGenerationInputPlan,
     VideoGenerationInputSource,
+    VideoGenerationReference,
     VideoPromptMention,
     VideoPromptReferenceKind,
     VideoPromptReferenceRole,
@@ -73,6 +74,7 @@ def filesystem_path(path: Path) -> Path:
 
 
 def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
+    reference_id = uuid4()
     prompt_only = VideoGenerationInputPlan()
     approved_frame = VideoGenerationInputPlan(
         sources=[VideoGenerationInputSource.APPROVED_IMAGES]
@@ -81,7 +83,15 @@ def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
         sources=[
             VideoGenerationInputSource.PROJECT_ASSETS,
             VideoGenerationInputSource.DEPTH_CONTROL,
-        ]
+        ],
+        references=[
+            VideoGenerationReference(
+                reference_kind=VideoPromptReferenceKind.PROJECT_ASSET,
+                reference_id=reference_id,
+                label="asset/person",
+                role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+            )
+        ],
     )
     video_only = VideoGenerationInputPlan(
         sources=[VideoGenerationInputSource.DEPTH_CONTROL]
@@ -91,6 +101,7 @@ def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
     assert approved_frame.input_mode == VideoGenerationInputMode.IMAGE_TO_VIDEO
     assert composed.input_mode == VideoGenerationInputMode.HYBRID_REFERENCE_TO_VIDEO
     assert video_only.input_mode == VideoGenerationInputMode.VIDEO_TO_VIDEO
+    assert composed.references[0].reference_id == reference_id
     assert "audio" not in {item.value for item in VideoGenerationInputSource}
 
     capabilities = load_video_model_catalog().option("minimax_h3").capability
