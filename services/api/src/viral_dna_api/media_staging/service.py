@@ -402,7 +402,7 @@ class MediaStagingService:
                 and item.deleted_at is None
             ):
                 try:
-                    await self.storage.resolve_local(item.id)
+                    await self.storage.materialize_local(item.id)
                     return item
                 except StorageObjectError:
                     continue

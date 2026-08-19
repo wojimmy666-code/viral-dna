@@ -30,6 +30,71 @@ export function videoMentionToken(item = {}) {
   return label ? `@${label}` : "";
 }
 
+export function managedAssetPreviewPath(binding = {}) {
+  if (!binding.provider || !binding.asset_id) return binding.preview_url || "";
+  return `/api/v1/managed-assets/providers/${encodeURIComponent(binding.provider)}/assets/${encodeURIComponent(binding.asset_id)}/preview`;
+}
+
+export function insertVideoMentionIntoPrompt(prompt, range, item) {
+  const source = String(prompt || "");
+  const start = Math.max(0, Math.min(Number(range?.start) || 0, source.length));
+  const end = Math.max(start, Math.min(Number(range?.end) || start, source.length));
+  const before = source.slice(0, start);
+  const after = source.slice(end);
+  const token = videoMentionToken(item);
+  const leadingSeparator = before && !/[\s([\{（【《“‘，。！？；：、,.;:!?]$/u.test(before)
+    ? " "
+    : "";
+  const trailingSeparator = !after
+    ? " "
+    : /^[\s)\]\}）】》”’，。！？；：、,.;:!?]/u.test(after)
+      ? ""
+      : " ";
+  const inserted = `${leadingSeparator}${token}${trailingSeparator}`;
+  return {
+    value: `${before}${inserted}${after}`,
+    cursor: before.length + inserted.length,
+  };
+}
+
+export function buildVideoPromptHighlightSegments(prompt, mentions = []) {
+  const source = String(prompt || "");
+  const matches = [];
+  const uniqueTokens = new Map();
+  for (const mention of mentions) {
+    const token = videoMentionToken(mention);
+    if (token) uniqueTokens.set(token, mention);
+  }
+  for (const [token, mention] of uniqueTokens) {
+    let cursor = 0;
+    while (cursor < source.length) {
+      const start = source.indexOf(token, cursor);
+      if (start < 0) break;
+      matches.push({ start, end: start + token.length, text: token, mention });
+      cursor = start + token.length;
+    }
+  }
+  matches.sort((left, right) => left.start - right.start || right.end - left.end);
+  const segments = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.start < cursor) continue;
+    if (match.start > cursor) {
+      segments.push({ type: "text", text: source.slice(cursor, match.start) });
+    }
+    segments.push({
+      type: "mention",
+      text: match.text,
+      referenceKey: videoReferenceKey(match.mention),
+    });
+    cursor = match.end;
+  }
+  if (cursor < source.length) {
+    segments.push({ type: "text", text: source.slice(cursor) });
+  }
+  return segments.length ? segments : [{ type: "text", text: source }];
+}
+
 export function removeVideoMentionFromPrompt(prompt, mention) {
   const token = videoMentionToken(mention);
   return String(prompt || "")
@@ -89,7 +154,7 @@ export function buildVideoReferenceOptions({
       role: "actor_identity",
       category: "Provider 托管角色",
       description: `${managedAssetBinding.provider} · ${managedAssetBinding.project_name}`,
-      preview_url: managedAssetBinding.preview_url || "",
+      preview_url: managedAssetPreviewPath(managedAssetBinding),
       search_text: `${managedAssetBinding.name} ${managedAssetBinding.group_name || ""} 托管角色`,
     });
   }

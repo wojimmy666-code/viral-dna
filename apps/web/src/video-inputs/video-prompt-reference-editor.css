@@ -2,13 +2,78 @@
   min-width: 0;
 }
 
-.video-prompt-reference-editor {
-  min-width: 0;
-  position: relative;
+.video-prompt-reference-field > label {
+  display: block;
 }
 
-.video-prompt-reference-editor textarea {
+.video-prompt-reference-editor {
+  width: min(100%, 90ch);
+  min-width: 0;
+  position: relative;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.video-prompt-reference-editor .prompt-editor-textarea {
+  width: 100%;
+  position: relative;
+  z-index: 1;
   display: block;
+  color: transparent;
+  background: transparent;
+  caret-color: var(--production-text-primary, #24212b);
+  -webkit-text-fill-color: transparent;
+  text-wrap: wrap;
+  tab-size: 4;
+}
+
+.video-prompt-reference-editor.selecting .video-prompt-highlight {
+  visibility: hidden;
+}
+
+.video-prompt-reference-editor.selecting .prompt-editor-textarea {
+  color: var(--production-text-primary, #24212b);
+  -webkit-text-fill-color: var(--production-text-primary, #24212b);
+}
+
+.video-prompt-reference-editor:not(.selecting) .prompt-editor-textarea::selection {
+  color: transparent;
+  background: rgba(96, 73, 230, 0.24);
+  -webkit-text-fill-color: transparent;
+}
+
+.video-prompt-reference-editor .prompt-editor-textarea::placeholder {
+  color: #817b8b;
+  -webkit-text-fill-color: #817b8b;
+}
+
+.video-prompt-highlight {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  color: var(--production-text-primary, #24212b);
+  font-family: var(--font-family-ui);
+  font-size: var(--production-type-body);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--production-leading-editor);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  tab-size: 4;
+  text-wrap: wrap;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.video-prompt-highlight mark {
+  border-radius: 4px;
+  color: #5947dc;
+  background: #eeeaff;
 }
 
 .video-prompt-mention-menu {
@@ -68,6 +133,7 @@
 }
 
 .video-prompt-mention-menu button:hover,
+.video-prompt-mention-menu button.active,
 .video-prompt-mention-menu button:focus-visible {
   background: #f6f4ff;
   outline: none;
@@ -145,5 +211,22 @@
   .video-prompt-mention-menu {
     width: calc(100% - 12px);
     left: 6px;
+  }
+}
+
+@media (forced-colors: active) {
+  .video-prompt-highlight {
+    display: none;
+  }
+
+  .video-prompt-reference-editor .prompt-editor-textarea {
+    color: CanvasText;
+    -webkit-text-fill-color: CanvasText;
+  }
+
+  .video-prompt-reference-editor .prompt-editor-textarea::selection {
+    color: HighlightText;
+    background: Highlight;
+    -webkit-text-fill-color: HighlightText;
   }
 }

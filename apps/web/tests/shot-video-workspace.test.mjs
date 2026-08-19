@@ -11,7 +11,9 @@ import {
   videoDraftParameters,
 } from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
 import {
+  buildVideoPromptHighlightSegments,
   buildVideoReferenceOptions,
+  insertVideoMentionIntoPrompt,
   normalizeVideoPromptMentions,
   removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
@@ -39,6 +41,10 @@ const generationDraftSource = readFileSync(
     "../src/video-generation-controls/useShotVideoGenerationDraft.js",
     import.meta.url,
   ),
+  "utf8",
+);
+const videoPromptReferenceEditorSource = readFileSync(
+  new URL("../src/video-inputs/VideoPromptReferenceEditor.jsx", import.meta.url),
   "utf8",
 );
 const videoInputComposerSource = readFileSync(
@@ -388,6 +394,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
     }],
     managedAssetBinding: {
       id: "08c760fc-f454-41b0-b074-aa3895537a88",
+      asset_id: "managed-person-1",
       name: "演员A",
       provider: "volc_ark",
       project_name: "default",
@@ -398,6 +405,11 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.equal(asset.role, "actor_identity");
   assert.equal(videoMentionToken(asset), "@资产/小喵酱/面部");
   assert.equal(requiredSourceForVideoMention(asset), "project_assets");
+  const managed = options.find((item) => item.reference_kind === "provider_managed_asset");
+  assert.equal(
+    managed.preview_url,
+    "/api/v1/managed-assets/providers/volc_ark/assets/managed-person-1/preview",
+  );
 
   const prompt = "保持 @资产/小喵酱/面部 的身份，动作参考深度视频。";
   const normalized = normalizeVideoPromptMentions(prompt, [{
@@ -415,9 +427,25 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
     "保持 的身份，动作参考深度视频。",
   );
 
+  const inserted = insertVideoMentionIntoPrompt("浅黄色短袖上衣@", {
+    start: "浅黄色短袖上衣".length,
+    end: "浅黄色短袖上衣@".length,
+  }, asset);
+  assert.equal(inserted.value, "浅黄色短袖上衣 @资产/小喵酱/面部 ");
+  const highlighted = buildVideoPromptHighlightSegments(inserted.value, [asset]);
+  assert.deepEqual(highlighted.map((item) => item.type), ["text", "mention", "text"]);
+  assert.equal(highlighted[1].text, "@资产/小喵酱/面部");
+
   assert.match(workspaceSource, /<VideoPromptReferenceEditor/);
   assert.match(workspaceSource, /requiredInputSource/);
   assert.match(workspaceSource, /videoPromptMentions/);
+  assert.match(videoPromptReferenceEditorSource, /className="video-prompt-highlight"/);
+  assert.match(videoPromptReferenceEditorSource, /document\.addEventListener\("pointerdown"/);
+  assert.match(videoPromptReferenceEditorSource, /aria-activedescendant/);
+  assert.match(videoPromptReferenceEditorSource, /selectionActive \? " selecting"/);
+  assert.match(videoPromptReferenceEditorSource, /onSelect=\{updateSelectionState\}/);
+  assert.match(videoPromptReferenceEditorSource, /new ResizeObserver/);
+  assert.match(videoPromptReferenceEditorSource, /textarea\.clientWidth \+ horizontalBorder/);
 });
 
 test("keeps provider failures in notifications and scopes model warnings", () => {

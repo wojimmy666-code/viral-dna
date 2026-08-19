@@ -58,6 +58,51 @@ def classify_video_provider_failure(
     raw_message = str(message or "").strip()
     raw_code = str(provider_code or "").strip() or None
     lowered = f"{normalized_code} {raw_code or ''} {raw_message}".casefold()
+
+    if normalized_code in {
+        "media_staging_not_configured",
+        "oss_credentials_missing",
+        "oss_ecs_role_unavailable",
+    }:
+        return VideoProviderFailure(
+            code=normalized_code,
+            category="media_staging",
+            title="媒体暂存服务尚未配置",
+            message=(
+                "当前模型需要可访问的 HTTPS 媒体地址。"
+                "请在平台设置中完成 OSS 媒体暂存配置并通过连接测试。"
+            ),
+            suggested_action="open_model_settings",
+            retryable=False,
+            provider_code=raw_code,
+            technical_message=sanitize_provider_error_message(raw_message),
+        )
+    if normalized_code in {
+        "media_source_missing",
+        "media_source_outside_workspace",
+        "checksum_mismatch",
+    }:
+        return VideoProviderFailure(
+            code=normalized_code,
+            category="generation_input",
+            title="生成输入不可用",
+            message="深度视频或参考媒体已丢失、已变更或不属于当前工作区，请重新生成或重新选择。",
+            suggested_action="review_references",
+            retryable=False,
+            provider_code=raw_code,
+            technical_message=sanitize_provider_error_message(raw_message),
+        )
+    if normalized_code.startswith(("oss_", "media_staging_", "public_media_")):
+        return VideoProviderFailure(
+            code=normalized_code,
+            category="media_staging",
+            title="媒体暂存未完成",
+            message="上传媒体或签发临时访问地址失败，请检查 OSS 配置和网络后重试。",
+            suggested_action="retry",
+            retryable=True,
+            provider_code=raw_code,
+            technical_message=sanitize_provider_error_message(raw_message),
+        )
     provider_label = _PROVIDER_LABELS.get(str(provider or ""), "视频模型服务")
 
     if (

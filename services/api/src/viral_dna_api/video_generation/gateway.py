@@ -670,6 +670,20 @@ class VideoGenerationGateway:
                     exc.status_code,
                     exc.code,
                     str(exc),
+                    retryable=exc.status_code >= 500,
+                    error_category="media_staging",
+                    user_title="媒体暂存未完成",
+                    suggested_action=(
+                        "open_model_settings"
+                        if exc.code
+                        in {
+                            "media_staging_not_configured",
+                            "oss_credentials_missing",
+                            "oss_ecs_role_unavailable",
+                        }
+                        else "retry"
+                    ),
+                    technical_message=str(exc),
                 ) from exc
             except PublicMediaStagingError as exc:
                 raise VideoGenerationGatewayError(
