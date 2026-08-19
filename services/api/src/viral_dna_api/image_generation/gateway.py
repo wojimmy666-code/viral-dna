@@ -495,6 +495,7 @@ class ImageGenerationGateway:
         source_path: Path | None,
         input_mode: ImageGenerationInputMode | str = ImageGenerationInputMode.KEYFRAME_EDIT,
         execution_mode: str | None = None,
+        model_alias: str | None = None,
         allow_unknown_cost: bool = False,
         seed: int | None = None,
         reuse_cache: bool = True,
@@ -586,6 +587,7 @@ class ImageGenerationGateway:
             selected_mode,
             settings,
             candidate_count=candidate_count,
+            model_alias=model_alias,
         )
         try:
             validate_identity_generation(
@@ -1135,11 +1137,12 @@ class ImageGenerationGateway:
         settings: Any,
         *,
         candidate_count: int,
+        model_alias: str | None = None,
     ) -> tuple[AdapterIdentity, Any]:
         if mode == ImageExecutionMode.REMOTE_API:
             try:
                 catalog = load_image_model_catalog()
-                option = catalog.option(settings.remote_model_alias)
+                option = catalog.option(model_alias or settings.remote_model_alias)
             except ImageModelCatalogError as exc:
                 raise ImageGenerationGatewayError(
                     503,

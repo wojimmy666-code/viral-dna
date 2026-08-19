@@ -4,7 +4,6 @@ import {
   CheckCircle,
   DownloadSimple,
   FilmStrip,
-  MagicWand,
   PlayCircle,
   WarningCircle,
 } from "@phosphor-icons/react";
@@ -25,7 +24,7 @@ import { ShotVideoGenerationControls } from "./ShotVideoGenerationControls.jsx";
 import { ManagedAssetPicker } from "./managed-assets/ManagedAssetPicker.jsx";
 import { DepthControlPanel } from "./video-controls/DepthControlPanel.jsx";
 import { useDepthControlJob } from "./video-controls/depth/useDepthControlJob.js";
-import { VideoInputComposer } from "./video-inputs/VideoInputComposer.jsx";
+import { GenerationReferenceComposer } from "./video-inputs/reference-composer/GenerationReferenceComposer.jsx";
 import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
 import {
   requiredSourceForVideoMention,
@@ -190,6 +189,7 @@ export function ShotVideoWorkspace({
   const depthEnginePollTimer = useRef(null);
   const [referenceStrategy, setReferenceStrategy] = useState(null);
   const [referenceStrategyError, setReferenceStrategyError] = useState("");
+  const [depthSettingsOpen, setDepthSettingsOpen] = useState(false);
   const plan = shotDetail?.plan;
   const depthGeneration = useDepthControlJob({
     expectedRevisionId: project?.current_revision_id,
@@ -533,9 +533,6 @@ export function ShotVideoWorkspace({
   const mentionBlockedReason = (() => {
     for (const mention of explicitVideoMentions) {
       const token = videoMentionToken(mention);
-      if (token && !String(videoDraft.videoPrompt || "").includes(token)) {
-        return `${token} 已从提示词中删除，请移除或重新插入该引用`;
-      }
       const requiredSource = requiredSourceForVideoMention(mention);
       if (requiredSource && !selectedInputSources.has(requiredSource)) {
         return `${token || "该素材"} 尚未加入本次生成输入`;
@@ -699,10 +696,6 @@ export function ShotVideoWorkspace({
         report={continuityReport}
       />
 
-      <div className="shot-video-foundation-note">
-        <MagicWand size={18} weight="fill" />
-        <span><strong>可组合生成输入</strong>：提示词始终提交；媒体输入只有在下方主动选择后才会发送，音频留到视频剪辑阶段处理。</span>
-      </div>
       {error && <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>}
 
       <div className="shot-video-layout">
@@ -809,45 +802,68 @@ export function ShotVideoWorkspace({
           />
 
           <div className="shot-video-prompt-panel">
-            <VideoInputComposer
+            <GenerationReferenceComposer
+              assets={assets}
+              depthAssets={plan?.depth_control_assets || []}
               managedAssetBinding={managedAssetBinding}
               model={selectedModel}
-              onChange={(inputSources) => setVideoDraft((current) => ({
+              onChange={({ videoPromptMentions, inputSources }) => setVideoDraft((current) => ({
                 ...current,
+                videoPromptMentions,
                 inputSources,
               }))}
+              onCreateDepth={() => {
+                setVideoDraft((current) => ({
+                  ...current,
+                  inputSources: Array.from(new Set([
+                    ...(current.inputSources || []),
+                    "depth_control",
+                  ])),
+                }));
+                setDepthSettingsOpen(true);
+              }}
               onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
-              projectAssetCount={projectAssetCount}
-              referenceFrameCount={approvedReferenceCount}
+              referenceFrames={referenceFrames}
+              resolveUrl={resolveUrl}
               selectedSources={videoDraft.inputSources || []}
+              shotPlanId={plan.id}
+              videoPromptMentions={videoDraft.videoPromptMentions || []}
+              videoReferenceBindings={plan?.video_reference_bindings || []}
             />
             {usesDepthControl && (
-              <DepthControlPanel
-                busy={busy || depthEngineLoadBusy}
-                engineCapabilities={depthEngineCapabilities}
-                engineError={depthEngineLoadError}
-                generationError={depthGeneration.error}
-                generationJob={depthGeneration.job}
-                installation={depthEngineInstallation}
-                installationError={depthEngineInstallError}
-                managedAssetBinding={managedAssetBinding}
-                model={selectedModel}
-                onCancelGeneration={depthGeneration.cancel}
-                onCreate={depthGeneration.start}
-                onDelete={onDeleteDepthControl}
-                onInstall={installDepthEngine}
-                onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
-                onRetryGeneration={depthGeneration.retry}
-                onToggle={onToggleDepthControl}
-                onNotice={onNotice}
-                plan={plan}
-                referenceFrames={referenceFrames}
-                request={request}
-                resolveUrl={resolveUrl}
-                sourceVideoUrl={sourceVideoUrl}
-                strategy={referenceStrategy}
-                strategyError={referenceStrategyError}
-              />
+              <details
+                className="shot-video-depth-input-details"
+                onToggle={(event) => setDepthSettingsOpen(event.currentTarget.open)}
+                open={depthSettingsOpen}
+              >
+                <summary><span>深度控制（高级）</span><small>查看输入计划、预览、重建或停用</small></summary>
+                <DepthControlPanel
+                  busy={busy || depthEngineLoadBusy}
+                  engineCapabilities={depthEngineCapabilities}
+                  engineError={depthEngineLoadError}
+                  generationError={depthGeneration.error}
+                  generationJob={depthGeneration.job}
+                  installation={depthEngineInstallation}
+                  installationError={depthEngineInstallError}
+                  managedAssetBinding={managedAssetBinding}
+                  model={selectedModel}
+                  onCancelGeneration={depthGeneration.cancel}
+                  onCreate={depthGeneration.start}
+                  onDelete={onDeleteDepthControl}
+                  onInstall={installDepthEngine}
+                  onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
+                  onRetryGeneration={depthGeneration.retry}
+                  onToggle={onToggleDepthControl}
+                  onNotice={onNotice}
+                  plan={plan}
+                  referenceFrames={referenceFrames}
+                  request={request}
+                  resolveUrl={resolveUrl}
+                  sourceVideoUrl={sourceVideoUrl}
+                  strategy={referenceStrategy}
+                  strategyError={referenceStrategyError}
+                />
+              </details>
             )}
             <VideoPromptReferenceEditor
               assets={assets}

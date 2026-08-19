@@ -1209,6 +1209,9 @@ export function ProductionHub({
   const [generationEngine, setGenerationEngine] = useState("default");
   const [generationInputMode, setGenerationInputMode] = useState("keyframe_edit");
   const [generationCandidateCount, setGenerationCandidateCount] = useState(1);
+  const [generationModelAlias, setGenerationModelAlias] = useState(
+    imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
+  );
   const [focusedCandidateId, setFocusedCandidateId] = useState("");
   const referencePreviewUrl = useObjectUrl(referenceFile);
   const imageGate = useMemo(() => {
@@ -1229,9 +1232,13 @@ export function ProductionHub({
   }, [shots]);
 
   useEffect(() => {
-    setGenerationSettings(
-      imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS,
-    );
+    const nextSettings = imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS;
+    setGenerationSettings(nextSettings);
+    setGenerationModelAlias((current) => {
+      if (current === "local_tool" && nextSettings.local_executable_path) return current;
+      if ((nextSettings.models || []).some((model) => model.alias === current)) return current;
+      return nextSettings.remote_model_alias || "qwen_image_2_pro";
+    });
   }, [imageGenerationSettings]);
 
   useEffect(() => {
@@ -1754,6 +1761,7 @@ export function ProductionHub({
             candidate_count: candidateCount,
             input_mode: effectiveInputMode,
             execution_mode: executionMode,
+            model_alias: executionMode === "remote_api" ? generationModelAlias : null,
             allow_unknown_cost: acceptsUnknownCost,
             generation_intent: imageGenerationIntentForShot(shotDetail),
           }),
@@ -1775,18 +1783,6 @@ export function ProductionHub({
       });
       setShotDetail((current) => upsertGenerationRun(current, run));
       onNotice("图片生成任务已取消");
-    });
-  }
-
-  async function retryShotGeneration(runId) {
-    if (!runId) return;
-    await executeAction(async () => {
-      const run = await request(`/generation-runs/${runId}/retry`, {
-        method: "POST",
-      });
-      setShotDetail((current) => upsertGenerationRun(current, run));
-      await onProjectsChanged();
-      onNotice("重试任务已加入队列");
     });
   }
 
@@ -3112,6 +3108,7 @@ export function ProductionHub({
                 generationCandidateCount={generationCandidateCount}
                 generationEngine={generationEngine}
                 generationInputMode={generationInputMode}
+                generationModelAlias={generationModelAlias}
                 generationSettings={generationSettings}
                 onAdvance={advanceWorkflow}
                 onApprove={approveCandidate}
@@ -3126,7 +3123,6 @@ export function ProductionHub({
                 onRevokeApproval={revokeImageApproval}
                 onReorderShots={reorderShots}
                 onReorderVisualBeats={reorderVisualBeats}
-                onRetryRun={retryShotGeneration}
                 onRestoreShot={restoreShot}
                 onSave={submitShot}
                 onSelectCandidate={selectCandidate}
@@ -3143,6 +3139,7 @@ export function ProductionHub({
                 setGenerationCandidateCount={setGenerationCandidateCount}
                 setGenerationEngine={setGenerationEngine}
                 setGenerationInputMode={setGenerationInputMode}
+                setGenerationModelAlias={setGenerationModelAlias}
                 shotDetail={shotDetail}
                 shots={shots}
                 sourceVideoUrl={resolveUrl(

@@ -47,8 +47,25 @@ const videoPromptReferenceEditorSource = readFileSync(
   new URL("../src/video-inputs/VideoPromptReferenceEditor.jsx", import.meta.url),
   "utf8",
 );
-const videoInputComposerSource = readFileSync(
-  new URL("../src/video-inputs/VideoInputComposer.jsx", import.meta.url),
+const generationReferenceComposerSource = readFileSync(
+  new URL(
+    "../src/video-inputs/reference-composer/GenerationReferenceComposer.jsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const referencePickerSource = readFileSync(
+  new URL(
+    "../src/video-inputs/reference-composer/ReferencePickerPopover.jsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const referenceComposerStyles = readFileSync(
+  new URL(
+    "../src/video-inputs/reference-composer/reference-composer.css",
+    import.meta.url,
+  ),
   "utf8",
 );
 const generationControlsStyles = readFileSync(
@@ -275,14 +292,19 @@ test("persists each shot video model instead of reapplying the global default", 
 });
 
 test("composes optional video inputs without exposing audio as a generation input", () => {
-  assert.match(workspaceSource, /<VideoInputComposer/);
-  assert.match(videoInputComposerSource, /id:\s*"approved_images"/);
-  assert.match(videoInputComposerSource, /id:\s*"project_assets"/);
-  assert.match(videoInputComposerSource, /id:\s*"provider_managed_assets"/);
-  assert.match(videoInputComposerSource, /id:\s*"reference_video"/);
-  assert.match(videoInputComposerSource, /id:\s*"depth_control"/);
-  assert.doesNotMatch(videoInputComposerSource, /id:\s*"audio"/);
-  assert.match(videoInputComposerSource, /生成前自动保存/);
+  assert.match(workspaceSource, /<GenerationReferenceComposer/);
+  assert.match(generationReferenceComposerSource, /ReferencePickerPopover/);
+  assert.match(generationReferenceComposerSource, /selectedReferenceItems/);
+  assert.match(generationReferenceComposerSource, /未添加媒体参考，将按文生视频生成/);
+  assert.match(referencePickerSource, /选择托管人物/);
+  assert.match(referencePickerSource, /创建或管理深度视频/);
+  assert.match(referencePickerSource, /preferredWidth=\{480\}/);
+  assert.match(referenceComposerStyles, /--reference-picker-title-size:\s*0\.875rem/);
+  assert.match(referenceComposerStyles, /grid-template-columns:\s*44px minmax\(0, 1fr\) 22px/);
+  assert.match(referenceComposerStyles, /min-height:\s*56px/);
+  assert.doesNotMatch(generationReferenceComposerSource, /id:\s*"audio"/);
+  assert.doesNotMatch(workspaceSource, /shot-video-foundation-note/);
+  assert.doesNotMatch(workspaceSource, /可组合生成输入/);
   assert.match(productionWorkflowSource, /input_plan:\s*\{/);
   assert.match(productionWorkflowSource, /sources:\s*Array\.from/);
 });
@@ -422,6 +444,9 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.equal(normalized.length, 1);
   assert.equal(normalized[0].reference_id, projectAssetId);
   assert.equal(normalized[0].order, 1);
+  const detached = normalizeVideoPromptMentions("不显式书写引用别名", normalized, options);
+  assert.equal(detached.length, 1);
+  assert.equal(detached[0].reference_id, projectAssetId);
   assert.equal(
     removeVideoMentionFromPrompt(prompt, normalized[0]),
     "保持 的身份，动作参考深度视频。",
@@ -437,6 +462,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.equal(highlighted[1].text, "@资产/小喵酱/面部");
 
   assert.match(workspaceSource, /<VideoPromptReferenceEditor/);
+  assert.match(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(workspaceSource, /requiredInputSource/);
   assert.match(workspaceSource, /videoPromptMentions/);
   assert.match(videoPromptReferenceEditorSource, /className="video-prompt-highlight"/);

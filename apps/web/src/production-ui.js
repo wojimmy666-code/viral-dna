@@ -516,7 +516,7 @@ export function generationFailureGuidance(run) {
     return "Codex 未能连接 ChatGPT。请先到“模型与设置”检查命令行代理并运行网络测试，然后重试。";
   }
   if (code === "text_to_image_unsupported") {
-    return "当前引擎不支持纯文生图，请改用关键帧编辑或选择支持文生图的引擎。";
+    return "当前引擎不支持纯文生图，请改用图生图或选择支持文生图的引擎。";
   }
   if (code.startsWith("local_tool")) {
     return "本机工具没有完成生成。请检查模型与设置中的工具、代理和登录状态后重试。";

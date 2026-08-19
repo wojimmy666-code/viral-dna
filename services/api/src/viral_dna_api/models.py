@@ -2936,6 +2936,11 @@ class ImageGenerationCreate(BaseModel):
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT
     execution_mode: Literal["remote_api", "local_tool"] | None = None
+    model_alias: str | None = Field(
+        default=None,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
     allow_unknown_cost: bool = False
     generation_intent: Literal["standard", "new_variation"] = "standard"
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)

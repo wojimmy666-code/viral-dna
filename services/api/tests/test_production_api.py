@@ -221,13 +221,14 @@ class FakeRealImageGateway:
         source_path,
         input_mode,
         execution_mode,
+        model_alias,
         allow_unknown_cost,
         seed=None,
         reuse_cache=True,
         run_id=None,
         cancel_event=None,
     ):
-        del execution_mode, allow_unknown_cost, reuse_cache, cancel_event
+        del model_alias, execution_mode, allow_unknown_cost, reuse_cache, cancel_event
         run, candidates = await asyncio.to_thread(
             generate_simulated_images,
             self.workspace,

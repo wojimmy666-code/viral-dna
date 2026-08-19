@@ -38,6 +38,7 @@ import {
 } from "./production-ui.js";
 import { MediaLightbox } from "./MediaLightbox.jsx";
 import { AddToAssetsButton } from "./generated-assets/AddToAssetsButton.jsx";
+import { ImageGenerationCommandBar } from "./image-generation-controls/ImageGenerationCommandBar.jsx";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import {
   assetDirectoryLabel,
@@ -334,6 +335,7 @@ export function ShotImageWorkspace({
   generationCandidateCount,
   generationEngine,
   generationInputMode,
+  generationModelAlias,
   generationSettings,
   project,
   advanced,
@@ -343,6 +345,7 @@ export function ShotImageWorkspace({
   setGenerationCandidateCount,
   setGenerationEngine,
   setGenerationInputMode,
+  setGenerationModelAlias,
   sourceVideoUrl,
   onSelectShot,
   onSave,
@@ -360,7 +363,6 @@ export function ShotImageWorkspace({
   onRevokeApproval,
   onReorderShots,
   onReorderVisualBeats,
-  onRetryRun,
   onRestoreShot,
   onSelectVisualBeat,
   onUpdateVisualBeat,
@@ -530,7 +532,6 @@ export function ShotImageWorkspace({
     (total, group) => total + group.candidates.length,
     0,
   );
-  const hasPriorAiCandidates = candidates.length > 0;
   const candidateIdentity = candidates
     .map((candidate) => `${candidate.id}:${candidate.status}`)
     .join("|");
@@ -545,6 +546,7 @@ export function ShotImageWorkspace({
   const effectiveGenerationSettings = {
     ...generationSettings,
     execution_mode: executionMode || generationSettings?.execution_mode,
+    remote_model_alias: generationModelAlias || generationSettings?.remote_model_alias,
   };
   const estimatedCostMicros = estimateImageGenerationCostMicros(
     effectiveGenerationSettings,
@@ -552,7 +554,7 @@ export function ShotImageWorkspace({
   );
   const modeLabel = imageGenerationModeLabel(effectiveGenerationSettings);
   const selectedModel = (generationSettings?.models || []).find(
-    (item) => item.alias === generationSettings?.remote_model_alias,
+    (item) => item.alias === effectiveGenerationSettings.remote_model_alias,
   );
   const configuredEngine = !generationSettings?.enabled
     ? "尚未配置"
@@ -571,6 +573,13 @@ export function ShotImageWorkspace({
     : estimatedCostMicros == null
       ? "成本未知，生成前确认"
       : `预计 ${formatCostMicros(estimatedCostMicros)} / 次`;
+  const commandCostLabel = (
+    generationSettings?.enabled
+    && executionMode === "remote_api"
+    && estimatedCostMicros != null
+  )
+    ? `预计 ${formatCostMicros(estimatedCostMicros)}`
+    : "";
   const latestRunCostLabel = latestRun?.cost_source === "subscription_quota"
     ? "使用订阅配额"
     : latestRun?.cost_source === "unknown"
@@ -579,9 +588,6 @@ export function ShotImageWorkspace({
         ? `实际 ${formatCostMicros(latestRun.actual_cost_micros)}`
         : "";
   const latestRunBusy = ["queued", "running", "cancellation_requested"].includes(
-    latestRun?.status,
-  );
-  const latestRunRetryable = ["failed", "blocked", "cancelled"].includes(
     latestRun?.status,
   );
   const latestRunTone = ["completed", "cached"].includes(latestRun?.status)
@@ -1057,7 +1063,7 @@ export function ShotImageWorkspace({
           </strong>
           <small>
            {latestRun
-              ? `${imageGenerationRunLabel(latestRun)} · ${latestRun.input_mode === "text_to_image" ? "纯文生图" : "关键帧编辑"} · ${latestRunCostLabel}${latestRun.latency_ms == null ? "" : " · " + latestRun.latency_ms + " ms"}`
+              ? `${imageGenerationRunLabel(latestRun)} · ${latestRun.input_mode === "text_to_image" ? "纯文生图" : "图生图"} · ${latestRunCostLabel}${latestRun.latency_ms == null ? "" : " · " + latestRun.latency_ms + " ms"}`
              : `默认生成 ${candidateCount} 张 · ${configuredCostLabel}`}
           </small>
           {ignoredSimulation && (
@@ -1508,115 +1514,66 @@ export function ShotImageWorkspace({
                 </div>
               )}
 
-              <section className="shot-generation-controls">
-                <header>
-                  <div>
-                    <strong>AI 生图设置</strong>
-                    <small>仅作用于本次生成，不修改全局模型设置</small>
-                  </div>
-                  <span>默认 1 张</span>
-                </header>
-                <div>
-                  <label>
-                    <span>生成方式</span>
-                    <select
-                      disabled={busy}
-                      onChange={(event) => setGenerationInputMode(event.target.value)}
-                      value={generationInputMode}
-                    >
-                      <option value="keyframe_edit">关键帧编辑（文字 + 图片）</option>
-                      <option disabled={identityPolicy.enabled} value="text_to_image">
-                        纯文生图（仅文字）{identityPolicy.enabled ? "（人物身份资产已绑定）" : ""}
-                      </option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>生图引擎</span>
-                    <select
-                      disabled={busy}
-                      onChange={(event) => setGenerationEngine(event.target.value)}
-                      value={generationEngine}
-                    >
-                      <option value="default">默认（{imageGenerationModeLabel(generationSettings)}）</option>
-                      <option disabled={!remoteConfigured} value="remote_api">国内大模型 API{remoteConfigured ? "" : "（未配置）"}</option>
-                      <option disabled={!localConfigured} value="local_tool">本机 ImageGen{localConfigured ? "" : "（未配置）"}</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>候选数量</span>
-                    <select
-                      disabled={busy}
-                      onChange={(event) => setGenerationCandidateCount(Number(event.target.value))}
-                      value={candidateCount}
-                    >
-                      {[1, 2, 3, 4].map((count) => (
-                        <option key={count} value={count}>{count} 张</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                {generationInputManifest.length > 0 && (
-                  <section className={`shot-input-manifest${identityPolicy.enabled ? " identity-locked" : ""}`}>
-                    <header>
-                      <div>
-                        <strong>本次将发送给模型</strong>
-                        <small>保存并生成时会固化为任务输入快照</small>
-                      </div>
-                      {identityPolicy.enabled && <span>身份来源已锁定</span>}
-                    </header>
-                    <ol>
-                      {generationInputManifest.map((item) => (
-                        <li className={item.identity_source ? "identity" : ""} key={`${item.input_index}-${item.asset_id || "source"}`}>
-                          <span className="shot-input-manifest-thumb">
-                            <MediaPreview
-                              alt={`${item.label}输入缩略图`}
-                              emptyLabel="无预览"
-                              src={resolveUrl(item.thumbnail_url)}
-                            />
-                          </span>
-                          <span>
-                            <b>图像 {item.input_index}</b>
-                            <strong>{item.label}</strong>
-                            <small>{manifestRoleLabel(item)}</small>
-                          </span>
-                        </li>
-                      ))}
-                    </ol>
-                    {identityPolicy.enabled && (
-                      <p>
-                        图像 1 只保留姿态、构图和动作；人物年龄、五官、脸型、肤色与身份只取自图像 2。
-                      </p>
-                    )}
-                  </section>
-                )}
-                {identityGenerationBlocker && (
-                  <p className="shot-identity-blocker" role="alert">
-                    <WarningCircle size={15} />
-                    {identityGenerationBlocker}
-                  </p>
-                )}
-                <p>
-                  {generationInputMode === "text_to_image"
-                    ? "纯文生图不会发送当前关键帧或已绑定参考图。"
-                    : "关键帧编辑会发送当前关键帧，并附带已绑定的人物、产品或场景参考图。"}
-                  {" "}{configuredCostLabel}
-                </p>
-              </section>
+              {generationInputManifest.length > 0 && (
+                <section className={`shot-input-manifest compact${identityPolicy.enabled ? " identity-locked" : ""}`}>
+                  <header>
+                    <div>
+                      <strong>本次参考 {generationInputManifest.length} 项</strong>
+                      <small>生成时按编号顺序提交</small>
+                    </div>
+                    {identityPolicy.enabled && <span>人物身份已锁定</span>}
+                  </header>
+                  <ol>
+                    {generationInputManifest.map((item) => (
+                      <li className={item.identity_source ? "identity" : ""} key={`${item.input_index}-${item.asset_id || "source"}`}>
+                        <span className="shot-input-manifest-thumb">
+                          <MediaPreview
+                            alt={`${item.label}输入缩略图`}
+                            emptyLabel="无预览"
+                            src={resolveUrl(item.thumbnail_url)}
+                          />
+                        </span>
+                        <span>
+                          <b>{item.input_index}</b>
+                          <strong>{item.label}</strong>
+                          <small>{manifestRoleLabel(item)}</small>
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              )}
+
+              <ImageGenerationCommandBar
+                aspectRatio={project?.output_aspect_ratio}
+                busy={busy}
+                candidateCount={candidateCount}
+                estimatedCostLabel={commandCostLabel}
+                generationAvailable={generationAvailable}
+                identityBlocker={identityGenerationBlocker}
+                identityLocked={identityPolicy.enabled}
+                inputCount={generationInputManifest.length}
+                inputMode={generationInputMode}
+                latestRun={latestRun}
+                latestRunBusy={latestRunBusy}
+                modelAlias={
+                  executionMode === "local_tool"
+                    ? "local_tool"
+                    : effectiveGenerationSettings.remote_model_alias
+                }
+                onCancelRun={onCancelRun}
+                onCandidateCountChange={setGenerationCandidateCount}
+                onGenerate={onGenerate}
+                onInputModeChange={setGenerationInputMode}
+                onModelChange={(alias, nextExecutionMode) => {
+                  setGenerationEngine(nextExecutionMode);
+                  setGenerationModelAlias(alias);
+                }}
+                planApproved={plan.image_status === "approved"}
+                settings={effectiveGenerationSettings}
+              />
 
               <div className="shot-review-actions">
-                {latestRunBusy && (
-                  <button
-                    className="secondary-button compact danger-text"
-                    disabled={busy || latestRun.status === "cancellation_requested"}
-                    onClick={() => onCancelRun(latestRun.id)}
-                    type="button"
-                  >
-                    {latestRun.status === "cancellation_requested"
-                      ? <CircleNotch className="spin" size={16} />
-                      : <X size={16} />}
-                    {latestRun.status === "cancellation_requested" ? "正在取消" : "取消任务"}
-                  </button>
-                )}
                 {plan.image_status === "approved" && (
                   <button
                     className="secondary-button compact"
@@ -1628,35 +1585,6 @@ export function ShotImageWorkspace({
                     取消采用
                   </button>
                 )}
-                <button
-                  className="secondary-button compact"
-                  disabled={
-                    busy
-                    || latestRunBusy
-                    || plan.image_status === "approved"
-                    || !generationAvailable
-                    || Boolean(identityGenerationBlocker)
-                  }
-                  onClick={() => (
-                    latestRunRetryable
-                      ? onRetryRun(latestRun.id)
-                      : onGenerate()
-                  )}
-                  type="button"
-                >
-                  {busy || latestRunBusy
-                    ? <CircleNotch className="spin" size={16} />
-                    : <MagicWand size={16} />}
-                  {!generationAvailable
-                    ? "请先配置生图模型"
-                    : latestRunBusy
-                    ? "正在生成"
-                    : plan.image_status === "approved"
-                      ? "取消采用后可生成"
-                    : latestRunRetryable
-                      ? "重试上次任务"
-                      : `生成 ${candidateCount} 个${hasPriorAiCandidates ? "新" : ""}候选`}
-                </button>
                 <button
                   className="primary-button compact"
                   disabled={

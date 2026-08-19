@@ -4,16 +4,13 @@ import {
   ImageSquare,
   MagnifyingGlass,
   UserCircle,
-  X,
 } from "@phosphor-icons/react";
 import {
   buildVideoReferenceOptions,
   buildVideoPromptHighlightSegments,
   insertVideoMentionIntoPrompt,
   normalizeVideoPromptMentions,
-  removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
-  videoMentionToken,
   videoReferenceKey,
 } from "./video-prompt-references.js";
 import "./video-prompt-reference-editor.css";
@@ -207,16 +204,6 @@ export function VideoPromptReferenceEditor({
     });
   }
 
-  function removeMention(mention) {
-    const remaining = (videoPromptMentions || [])
-      .filter((item) => videoReferenceKey(item) !== videoReferenceKey(mention))
-      .map((item, index) => ({ ...item, order: index + 1 }));
-    onChange({
-      videoPrompt: removeVideoMentionFromPrompt(value, mention),
-      videoPromptMentions: remaining,
-    });
-  }
-
   return (
     <div className="video-prompt-reference-field">
       <label htmlFor={editorId}>视频提示词</label>
@@ -283,15 +270,6 @@ export function VideoPromptReferenceEditor({
       <small className="video-prompt-reference-help">
         输入 @ 选择具体素材；名称用于阅读，系统会保存对象 ID，并按当前模型编译成真实输入参数。
       </small>
-      {(videoPromptMentions || []).length > 0 && (
-        <span className="video-prompt-reference-chips" aria-label="已关联生成输入">
-          {videoPromptMentions.map((mention) => (
-            <button key={videoReferenceKey(mention)} onClick={() => removeMention(mention)} type="button">
-              {videoMentionToken(mention)}<X size={12} />
-            </button>
-          ))}
-        </span>
-      )}
     </div>
   );
 }

@@ -5730,6 +5730,7 @@ class ProductionService:
                     source_path=source_path,
                     input_mode=payload.input_mode,
                     execution_mode=payload.execution_mode,
+                    model_alias=payload.model_alias,
                     allow_unknown_cost=payload.allow_unknown_cost,
                     seed=payload.seed,
                     reuse_cache=payload.generation_intent != "new_variation",

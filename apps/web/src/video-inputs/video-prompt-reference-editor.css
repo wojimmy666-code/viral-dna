@@ -181,32 +181,6 @@
   object-fit: cover;
 }
 
-.video-prompt-reference-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.video-prompt-reference-chips button {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
-  border: 1px solid #d9d3ff;
-  border-radius: 999px;
-  color: #6252d9;
-  background: #f5f3ff;
-  font-size: var(--type-caption-size);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.video-prompt-reference-chips button:hover {
-  border-color: #a99cf4;
-  background: #eeebff;
-}
-
 @media (max-width: 620px) {
   .video-prompt-mention-menu {
     width: calc(100% - 12px);

@@ -9,6 +9,12 @@ import {
   normalizePromptMentionDraft,
   removeMentionFromPrompt,
 } from "../src/shot-image-ui.js";
+import {
+  LOCAL_IMAGE_MODEL_ALIAS,
+  imageGenerationSummary,
+  imageModelCompatibility,
+  imageModelOptions,
+} from "../src/image-generation-controls/image-generation-ui.js";
 
 const shotImageSource = readFileSync(
   new URL("../src/ShotImageWorkspace.jsx", import.meta.url),
@@ -16,6 +22,14 @@ const shotImageSource = readFileSync(
 );
 const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
+  "utf8",
+);
+const imageCommandBarSource = readFileSync(
+  new URL("../src/image-generation-controls/ImageGenerationCommandBar.jsx", import.meta.url),
+  "utf8",
+);
+const imageControlStyles = readFileSync(
+  new URL("../src/image-generation-controls/image-generation-controls.css", import.meta.url),
   "utf8",
 );
 
@@ -76,5 +90,51 @@ test("progressively reveals optional image negative constraints", () => {
   assert.doesNotMatch(
     shotImageSource,
     /<details[\s\S]{0,240}className="production-field shot-image-negative-constraints"[^>]*\sopen(?:=|>)/,
+  );
+});
+
+test("image generation uses a compact command bar with upward popovers", () => {
+  assert.match(shotImageSource, /ImageGenerationCommandBar/);
+  assert.doesNotMatch(shotImageSource, /className="shot-generation-controls"/);
+  assert.match(imageCommandBarSource, /ImageModelPopover/);
+  assert.match(imageCommandBarSource, /ImageGenerationSettingsPopover/);
+  assert.match(imageCommandBarSource, /function submit\(\) \{\s*onGenerate\(\);/);
+  assert.match(imageCommandBarSource, /aria-label=\{`生成 \$\{candidateCount\} 张图片`\}/);
+  assert.match(imageCommandBarSource, /:\s*"生成"\}/);
+  assert.match(imageCommandBarSource, /estimatedCostLabel\s*&&/);
+  assert.doesNotMatch(imageCommandBarSource, /selectedModel\?\.providerLabel\s*\|\|\s*compatibility\.reason/);
+  assert.match(imageControlStyles, /\.shot-image-command-bar\s*\{/);
+  assert.match(imageControlStyles, /\.shot-image-command-bar\s*\{[\s\S]*?display:\s*flex;[\s\S]*?flex-wrap:\s*nowrap;/);
+  assert.doesNotMatch(imageControlStyles, /grid-template-areas:\s*"model summary cost actions"/);
+  assert.doesNotMatch(imageControlStyles, /@container \(max-width: 560px\)/);
+  assert.match(imageControlStyles, /@container \(max-width: 440px\)/);
+  assert.match(imageControlStyles, /button\.active:disabled\s*\{[\s\S]*?opacity:\s*1;/);
+  assert.match(imageControlStyles, /\.image-settings-scroll-region\s*\{[\s\S]*overflow-y:\s*auto/);
+});
+
+test("image model choices support per-run routing and compatibility checks", () => {
+  const models = imageModelOptions({
+    api_key_configured: true,
+    local_executable_path: "imagegen.exe",
+    models: [{
+      alias: "remote-model",
+      label: "Remote model",
+      capabilities: {
+        text_to_image: true,
+        image_to_image: true,
+        max_input_images: 2,
+      },
+    }],
+  });
+  assert.deepEqual(models.map((model) => model.alias), ["remote-model", LOCAL_IMAGE_MODEL_ALIAS]);
+  assert.equal(imageModelCompatibility(models[0], { inputCount: 2 }).compatible, true);
+  assert.equal(imageModelCompatibility(models[0], { inputCount: 3 }).compatible, false);
+  assert.match(
+    imageGenerationSummary({ aspectRatio: "9:16", candidateCount: 2, inputMode: "text_to_image" }),
+    /9:16.*2/,
+  );
+  assert.match(
+    imageGenerationSummary({ aspectRatio: "16:9", candidateCount: 1, inputMode: "keyframe_edit" }),
+    /^图生图/,
   );
 });

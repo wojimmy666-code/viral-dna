@@ -12,6 +12,34 @@ export const VIDEO_REFERENCE_SOURCE_BY_KIND = Object.freeze({
   depth_control: "depth_control",
 });
 
+export const VIDEO_REFERENCE_CATEGORY_BY_KIND = Object.freeze({
+  approved_image: "image",
+  project_asset: "image",
+  provider_managed_asset: "actor",
+  reference_video: "video",
+  depth_control: "depth",
+});
+
+export function videoReferenceSourceSupported(capabilities = {}, source = "") {
+  if (Array.isArray(capabilities.supported_input_sources)) {
+    return capabilities.supported_input_sources.includes(source);
+  }
+  if (["approved_images", "project_assets"].includes(source)) {
+    return Boolean(capabilities.image_to_video);
+  }
+  if (source === "provider_managed_assets") {
+    return Boolean(capabilities.managed_assets?.supported);
+  }
+  if (source === "reference_video") return Boolean(capabilities.reference_video);
+  if (source === "depth_control") {
+    return Boolean(
+      capabilities.depth_control_video
+      || capabilities.reference_route?.supports_depth_control_video,
+    );
+  }
+  return false;
+}
+
 const ROLE_BY_ASSET_TYPE = Object.freeze({
   person: "actor_identity",
   wardrobe: "wardrobe",
@@ -173,7 +201,8 @@ export function buildVideoReferenceOptions({
         role: "depth",
         category: "动作与空间视频",
         description: `${Number(asset.duration_seconds || 0).toFixed(1)} 秒 · 近白远黑`,
-        preview_url: "",
+        preview_url: asset.thumbnail_url || asset.preview_url || "",
+        content_url: asset.content_url || "",
         search_text: `深度视频 动作 空间 ${index + 1}`,
       });
     });
@@ -189,6 +218,7 @@ export function buildVideoReferenceOptions({
         category: "普通参考视频",
         description: "动作或镜头参考",
         preview_url: binding.thumbnail_url || "",
+        content_url: binding.content_url || binding.source_url || "",
         search_text: `${binding.label || ""} 参考视频 动作 镜头`,
       });
     });
@@ -208,14 +238,10 @@ export function normalizeVideoPromptMentions(prompt, mentions = [], options = []
           role: option.role,
         }
       : mention;
-    const storedTokenPresent = String(prompt || "").includes(videoMentionToken(mention));
-    const canonicalTokenPresent = String(prompt || "").includes(videoMentionToken(canonical));
-    if (storedTokenPresent || canonicalTokenPresent) {
-      nextMentions.push({
-        ...(canonicalTokenPresent ? canonical : mention),
-        order: nextMentions.length + 1,
-      });
-    }
+    nextMentions.push({
+      ...canonical,
+      order: nextMentions.length + 1,
+    });
   }
   return nextMentions;
 }

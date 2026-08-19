@@ -337,6 +337,49 @@ def test_image_settings_remote_validation_and_secret_persistence(
     )
 
 
+def test_gateway_honors_per_run_remote_model_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolate_image_settings(tmp_path, monkeypatch)
+
+    async def credential_probe(api_key: str, base_url: str) -> CredentialValidationResult:
+        del api_key, base_url
+        return CredentialValidationResult(
+            requested_model="qwen-plus",
+            resolved_model="qwen-plus",
+            provider_request_id="validation-request",
+            latency_ms=8,
+            usage=ModelUsage(),
+        )
+
+    settings_service = ImageGenerationSettingsService(credential_probe)
+    asyncio.run(
+        settings_service.update(
+            ImageGenerationSettingsUpdate(
+                execution_mode="remote_api",
+                remote_model_alias="qwen_image_2_pro",
+                remote_api_key="test-secret-key",
+                remote_base_url="https://dashscope.aliyuncs.com/api/v1",
+            )
+        )
+    )
+    settings = settings_service.get()
+    gateway = ImageGenerationGateway(WorkspaceManager(), settings_service)
+    identity, _ = asyncio.run(
+        gateway._adapter(
+            ImageExecutionMode.REMOTE_API,
+            settings,
+            candidate_count=1,
+            model_alias="qwen_image_2",
+        )
+    )
+
+    assert identity.model == "qwen-image-2.0"
+    assert identity.model_option is not None
+    assert identity.model_option.alias == "qwen_image_2"
+
+
 def test_image_endpoint_and_local_arguments_reject_unsafe_values() -> None:
     with pytest.raises(Exception, match="保护 API Key"):
         normalize_image_base_url("https://evil.example/api/v1")
