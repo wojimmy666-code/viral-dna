@@ -137,6 +137,11 @@ function videoPromptChangesFromDraft(
   if (draft.videoPrompt.trim() !== (detail.plan.video_prompt || "").trim()) {
     changes.video_prompt = draft.videoPrompt.trim();
   }
+  if (JSON.stringify(draft.videoPromptMentions || []) !== JSON.stringify(
+    detail.plan.video_prompt_mentions || [],
+  )) {
+    changes.video_prompt_mentions = draft.videoPromptMentions || [];
+  }
   if (JSON.stringify(nextConstraints) !== JSON.stringify(currentConstraints)) {
     changes.video_negative_constraints = nextConstraints;
   }
@@ -3148,6 +3153,7 @@ export function ProductionHub({
             {activeSection === "shot_videos" && (
               <ShotVideoWorkspace
                 advanced={["editing", "export"].includes(detail.project.active_step)}
+                assets={assets}
                 busy={busy}
                 continuityReport={continuityReport}
                 error={actionError}

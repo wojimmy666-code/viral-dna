@@ -3,6 +3,7 @@ import { normalizeVideoDuration } from "../production-ui.js";
 
 export const EMPTY_VIDEO_DRAFT = Object.freeze({
   videoPrompt: "",
+  videoPromptMentions: [],
   negativeConstraints: "",
   durationSeconds: "",
   candidateCount: 1,
@@ -69,6 +70,9 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
   return {
     ...EMPTY_VIDEO_DRAFT,
     videoPrompt: detail?.plan?.video_prompt || "",
+    videoPromptMentions: (detail?.plan?.video_prompt_mentions || []).map(
+      (item) => ({ ...item }),
+    ),
     negativeConstraints: (
       detail?.plan?.video_negative_constraints || []
     ).join("\n"),
@@ -198,11 +202,15 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
     if (
       promptBaseline
       && next.videoPrompt === promptBaseline.videoPrompt
+      && JSON.stringify(next.videoPromptMentions || [])
+        === JSON.stringify(promptBaseline.videoPromptMentions || [])
       && next.negativeConstraints === promptBaseline.negativeConstraints
     ) {
       promptDirtyRef.current.delete(shotPlanId);
     } else if (
       next.videoPrompt !== current.videoPrompt
+      || JSON.stringify(next.videoPromptMentions || [])
+        !== JSON.stringify(current.videoPromptMentions || [])
       || next.negativeConstraints !== current.negativeConstraints
     ) {
       promptDirtyRef.current.add(shotPlanId);
@@ -238,6 +246,8 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
     const promptMatchesServer = Boolean(
       localDraft
       && localDraft.videoPrompt === generated.videoPrompt
+      && JSON.stringify(localDraft.videoPromptMentions || [])
+        === JSON.stringify(generated.videoPromptMentions || [])
       && localDraft.negativeConstraints === generated.negativeConstraints
     );
     if (promptWasDirty && promptMatchesServer) {
@@ -245,6 +255,7 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
     }
     promptBaselinesRef.current.set(shotPlanId, {
       videoPrompt: generated.videoPrompt,
+      videoPromptMentions: generated.videoPromptMentions,
       negativeConstraints: generated.negativeConstraints,
     });
     const preservePrompt = promptDirtyRef.current.has(shotPlanId);
@@ -255,6 +266,7 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
           ...(preservePrompt
             ? {
                 videoPrompt: localDraft.videoPrompt,
+                videoPromptMentions: localDraft.videoPromptMentions,
                 negativeConstraints: localDraft.negativeConstraints,
               }
             : {}),

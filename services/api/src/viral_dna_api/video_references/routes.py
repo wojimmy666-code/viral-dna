@@ -5,8 +5,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Path, Query
 
+from ..media_staging import MediaStagingService
 from ..production import ProductionService, ProductionServiceError
-from ..public_media import PublicMediaStager
 from ..reference_routes import VideoReferenceRouteId, resolve_reference_route
 from ..video_generation.catalog import VideoModelCatalogError, load_video_model_catalog
 from .domain import PersonReferencePolicy
@@ -22,7 +22,7 @@ def _raise_production(exc: ProductionServiceError) -> NoReturn:
 
 def create_video_reference_router(
     production: ProductionService,
-    public_media_stager: PublicMediaStager | None = None,
+    media_staging_service: MediaStagingService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/video-references", tags=["video-references"])
 
@@ -61,7 +61,13 @@ def create_video_reference_router(
             for item in detail.plan.depth_control_assets
             if item.enabled and item.usable_for_generation
         ]
-        public_media_ready = bool(public_media_stager and public_media_stager.ready)
+        # Reference-route preflight must use the same account-scoped staging
+        # readiness check as the generation gateway. Checking only the legacy
+        # local proxy here incorrectly blocks a valid OSS configuration.
+        public_media_ready = bool(
+            media_staging_service is not None
+            and await media_staging_service.ready()
+        )
         route = resolve_reference_route(
             capability,
             has_managed_identity=managed_bound,

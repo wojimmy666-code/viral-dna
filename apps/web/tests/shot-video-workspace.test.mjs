@@ -10,6 +10,13 @@ import {
   videoDraftFromDetail,
   videoDraftParameters,
 } from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
+import {
+  buildVideoReferenceOptions,
+  normalizeVideoPromptMentions,
+  removeVideoMentionFromPrompt,
+  requiredSourceForVideoMention,
+  videoMentionToken,
+} from "../src/video-inputs/video-prompt-references.js";
 
 const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
@@ -364,6 +371,53 @@ test("auto-saves changed prompts with the returned revision before generating", 
   assert.doesNotMatch(generationControlsSource, /保存提示词/);
   assert.doesNotMatch(workspaceSource, /onSave/);
   assert.doesNotMatch(productionWorkflowSource, /async function saveVideoPrompt/);
+  assert.match(productionWorkflowSource, /changes\.video_prompt_mentions/);
+  assert.match(generationDraftSource, /videoPromptMentions/);
+});
+
+test("binds readable prompt mentions to stable multimodal reference ids", () => {
+  const projectAssetId = "0e65c993-3487-4ec6-9801-c9de5d72f4bb";
+  const options = buildVideoReferenceOptions({
+    assets: [{
+      id: projectAssetId,
+      name: "面部",
+      folder_name: "小喵酱",
+      type: "person",
+      rights_confirmed: true,
+      thumbnail_url: "/asset.jpg",
+    }],
+    managedAssetBinding: {
+      id: "08c760fc-f454-41b0-b074-aa3895537a88",
+      name: "演员A",
+      provider: "volc_ark",
+      project_name: "default",
+    },
+  });
+  const asset = options.find((item) => item.reference_kind === "project_asset");
+  assert.equal(asset.label, "资产/小喵酱/面部");
+  assert.equal(asset.role, "actor_identity");
+  assert.equal(videoMentionToken(asset), "@资产/小喵酱/面部");
+  assert.equal(requiredSourceForVideoMention(asset), "project_assets");
+
+  const prompt = "保持 @资产/小喵酱/面部 的身份，动作参考深度视频。";
+  const normalized = normalizeVideoPromptMentions(prompt, [{
+    reference_kind: asset.reference_kind,
+    reference_id: asset.reference_id,
+    label: asset.label,
+    role: asset.role,
+    order: 8,
+  }], options);
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].reference_id, projectAssetId);
+  assert.equal(normalized[0].order, 1);
+  assert.equal(
+    removeVideoMentionFromPrompt(prompt, normalized[0]),
+    "保持 的身份，动作参考深度视频。",
+  );
+
+  assert.match(workspaceSource, /<VideoPromptReferenceEditor/);
+  assert.match(workspaceSource, /requiredInputSource/);
+  assert.match(workspaceSource, /videoPromptMentions/);
 });
 
 test("keeps provider failures in notifications and scopes model warnings", () => {

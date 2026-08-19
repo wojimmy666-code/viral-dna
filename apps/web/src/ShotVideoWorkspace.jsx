@@ -26,6 +26,11 @@ import { ManagedAssetPicker } from "./managed-assets/ManagedAssetPicker.jsx";
 import { DepthControlPanel } from "./video-controls/DepthControlPanel.jsx";
 import { useDepthControlJob } from "./video-controls/depth/useDepthControlJob.js";
 import { VideoInputComposer } from "./video-inputs/VideoInputComposer.jsx";
+import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
+import {
+  requiredSourceForVideoMention,
+  videoMentionToken,
+} from "./video-inputs/video-prompt-references.js";
 import "./managed-assets/managed-assets.css";
 import "./video-controls/depth-control.css";
 
@@ -133,6 +138,7 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
 
 export function ShotVideoWorkspace({
   advanced,
+  assets = [],
   busy,
   continuityReport,
   error,
@@ -318,11 +324,19 @@ export function ShotVideoWorkspace({
   const usesManagedAssets = selectedInputSources.has("provider_managed_assets");
   const usesReferenceVideo = selectedInputSources.has("reference_video");
   const usesDepthControl = selectedInputSources.has("depth_control");
-  const projectAssetCount = useMemo(() => new Set(
-    (plan?.visual_beats || []).flatMap((beat) => (
-      beat.image_prompt_mentions || plan?.image_prompt_mentions || []
-    )).map((mention) => mention.reference_asset_id),
-  ).size, [plan?.image_prompt_mentions, plan?.visual_beats]);
+  const explicitVideoMentions = videoDraft.videoPromptMentions || [];
+  const explicitProjectAssetMentions = explicitVideoMentions.filter(
+    (mention) => mention.reference_kind === "project_asset",
+  );
+  const projectAssetCount = useMemo(() => (
+    explicitProjectAssetMentions.length > 0
+      ? new Set(explicitProjectAssetMentions.map((mention) => mention.reference_id)).size
+      : new Set(
+          (plan?.visual_beats || []).flatMap((beat) => (
+            beat.image_prompt_mentions || plan?.image_prompt_mentions || []
+          )).map((mention) => mention.reference_asset_id),
+        ).size
+  ), [explicitProjectAssetMentions, plan?.image_prompt_mentions, plan?.visual_beats]);
 
   useEffect(() => () => {
     if (depthEnginePollTimer.current) {
@@ -516,6 +530,43 @@ export function ShotVideoWorkspace({
       );
     }
   }
+  const mentionBlockedReason = (() => {
+    for (const mention of explicitVideoMentions) {
+      const token = videoMentionToken(mention);
+      if (token && !String(videoDraft.videoPrompt || "").includes(token)) {
+        return `${token} 已从提示词中删除，请移除或重新插入该引用`;
+      }
+      const requiredSource = requiredSourceForVideoMention(mention);
+      if (requiredSource && !selectedInputSources.has(requiredSource)) {
+        return `${token || "该素材"} 尚未加入本次生成输入`;
+      }
+      if (
+        ["approved_image", "project_asset"].includes(mention.reference_kind)
+        && selectedModel
+        && !selectedModel.capabilities?.image_to_video
+      ) {
+        return `当前模型不支持 ${token || "图片素材"} 图片输入`;
+      }
+      if (
+        mention.reference_kind === "reference_video"
+        && selectedModel
+        && !selectedModel.capabilities?.reference_video
+      ) {
+        return `当前模型不支持 ${token || "参考视频"} 视频输入`;
+      }
+      if (
+        mention.reference_kind === "depth_control"
+        && selectedModel
+        && !(
+          selectedModel.capabilities?.depth_control_video
+          || selectedModel.capabilities?.reference_route?.supports_depth_control_video
+        )
+      ) {
+        return `当前模型不支持 ${token || "深度视频"} 深度控制输入`;
+      }
+    }
+    return null;
+  })();
   const generationBlockedReason = modelCatalogLoading
     ? "正在读取视频模型目录，请稍候"
     : modelCatalogFailed
@@ -526,6 +577,8 @@ export function ShotVideoWorkspace({
       ? "没有已开放的视频生成模型"
     : !selectedModel
       ? "请选择视频生成模型"
+      : mentionBlockedReason
+        ? mentionBlockedReason
       : selectedInputSources.size === 0 && !selectedModel.capabilities?.text_to_video
         ? "当前模型不支持纯文生视频，请增加图片输入或切换模型"
       : usesApprovedImages && !selectedModel.capabilities?.image_to_video
@@ -796,19 +849,31 @@ export function ShotVideoWorkspace({
                 strategyError={referenceStrategyError}
               />
             )}
-            <label>
-              <span>视频提示词</span>
-              <textarea
-                className="prompt-editor-textarea"
-                maxLength={8000}
-                onChange={(event) => setVideoDraft((current) => ({
-                  ...current,
-                  videoPrompt: event.target.value,
-                }))}
-                rows={5}
-                value={videoDraft.videoPrompt}
-              />
-            </label>
+            <VideoPromptReferenceEditor
+              assets={assets}
+              depthAssets={plan?.depth_control_assets || []}
+              managedAssetBinding={managedAssetBinding}
+              onChange={({
+                videoPrompt,
+                videoPromptMentions,
+                requiredInputSource,
+              }) => setVideoDraft((current) => ({
+                ...current,
+                videoPrompt,
+                videoPromptMentions,
+                inputSources: requiredInputSource
+                  ? Array.from(new Set([
+                      ...(current.inputSources || []),
+                      requiredInputSource,
+                    ]))
+                  : current.inputSources,
+              }))}
+              referenceFrames={referenceFrames}
+              resolveUrl={resolveUrl}
+              value={videoDraft.videoPrompt}
+              videoPromptMentions={videoDraft.videoPromptMentions || []}
+              videoReferenceBindings={plan?.video_reference_bindings || []}
+            />
             <details className="shot-video-negative-constraints">
               <summary>视频负面约束（可选）</summary>
               <textarea

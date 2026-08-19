@@ -149,6 +149,23 @@ def _positive_prompt(
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = (),
 ) -> str:
     lines = [f"动作与运镜要求：{shot.video_prompt.strip()}"]
+    if shot.video_prompt_mentions:
+        role_labels = {
+            "actor_identity": "人物身份",
+            "composition": "构图",
+            "scene": "场景",
+            "product": "产品外观",
+            "wardrobe": "服装",
+            "motion": "人物动作",
+            "camera": "运镜",
+            "depth": "动作与空间深度",
+        }
+        lines.append("提示词中的 @引用 与本次上传素材一一对应，必须按各自用途使用：")
+        for mention in sorted(shot.video_prompt_mentions, key=lambda item: item.order):
+            lines.append(
+                f"- @{mention.label}：{role_labels[mention.role.value]}；"
+                "不得与其他引用交换身份、外观、动作或空间职责。"
+            )
     if managed_asset_references:
         names = "、".join(item.name for item in managed_asset_references)
         lines.append(
@@ -543,8 +560,17 @@ class VideoGenerationGateway:
             )
             for binding in shot.managed_asset_bindings
         )
+        mentioned_managed_ids = {
+            item.reference_id
+            for item in shot.video_prompt_mentions
+            if item.reference_kind.value == "provider_managed_asset"
+        }
         managed_references = (
-            all_managed_references
+            tuple(
+                item
+                for item in all_managed_references
+                if not mentioned_managed_ids or item.binding_id in mentioned_managed_ids
+            )
             if input_plan.includes(VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS)
             else ()
         )
@@ -561,7 +587,9 @@ class VideoGenerationGateway:
                 "video_managed_asset_count_unsupported",
                 f"当前视频模型最多绑定 {managed_capability.maximum_bindings} 个托管资产",
             )
-        for binding, reference in zip(shot.managed_asset_bindings, managed_references, strict=True):
+        managed_bindings_by_id = {item.id: item for item in shot.managed_asset_bindings}
+        for reference in managed_references:
+            binding = managed_bindings_by_id[reference.binding_id]
             if binding.provider != managed_capability.provider:
                 raise VideoGenerationGatewayError(
                     422,
@@ -653,6 +681,10 @@ class VideoGenerationGateway:
         reference_manifest = {
             **reference_plan.manifest(),
             "input_plan": input_plan.model_dump(mode="json"),
+            "prompt_mentions": [
+                item.model_dump(mode="json")
+                for item in sorted(shot.video_prompt_mentions, key=lambda value: value.order)
+            ],
         }
         total_reference_count = (
             len(ordered_frames) + len(depth_control_videos) + len(managed_references)

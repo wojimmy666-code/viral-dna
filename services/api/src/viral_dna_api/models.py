@@ -1824,6 +1824,45 @@ class PromptAssetMention(BaseModel):
         return normalized
 
 
+class VideoPromptReferenceKind(StrEnum):
+    """Stable source categories that may be mentioned inside a video prompt."""
+
+    PROJECT_ASSET = "project_asset"
+    APPROVED_IMAGE = "approved_image"
+    PROVIDER_MANAGED_ASSET = "provider_managed_asset"
+    REFERENCE_VIDEO = "reference_video"
+    DEPTH_CONTROL = "depth_control"
+
+
+class VideoPromptReferenceRole(StrEnum):
+    ACTOR_IDENTITY = "actor_identity"
+    COMPOSITION = "composition"
+    SCENE = "scene"
+    PRODUCT = "product"
+    WARDROBE = "wardrobe"
+    MOTION = "motion"
+    CAMERA = "camera"
+    DEPTH = "depth"
+
+
+class VideoPromptMention(BaseModel):
+    """A human-readable prompt token bound to one concrete generation input."""
+
+    reference_kind: VideoPromptReferenceKind
+    reference_id: UUID
+    label: str = Field(min_length=1, max_length=260)
+    role: VideoPromptReferenceRole
+    order: int = Field(default=1, ge=1, le=100)
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str) -> str:
+        normalized = value.strip().lstrip("@").strip()
+        if not normalized:
+            raise ValueError("视频提示词引用名称不能为空")
+        return normalized
+
+
 class ShotVisualBeat(BaseModel):
     """Ordered visual node inside one model-generated shot video."""
 
@@ -1952,6 +1991,10 @@ class ShotPlan(BaseModel):
     )
     image_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     video_prompt: str = Field(default="", max_length=8000)
+    video_prompt_mentions: list[VideoPromptMention] = Field(
+        default_factory=list,
+        max_length=40,
+    )
     video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     managed_asset_bindings: list[ProviderManagedAssetBinding] = Field(
         default_factory=list,
@@ -2019,6 +2062,20 @@ class ShotPlan(BaseModel):
         keys = [(item.provider, item.role) for item in values]
         if len(keys) != len(set(keys)):
             raise ValueError("同一 Provider 的托管资产角色不能重复绑定")
+        return values
+
+    @field_validator("video_prompt_mentions")
+    @classmethod
+    def require_unique_video_prompt_mentions(
+        cls,
+        values: list[VideoPromptMention],
+    ) -> list[VideoPromptMention]:
+        keys = [(item.reference_kind, item.reference_id) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("同一视频输入不能在提示词中重复关联")
+        orders = [item.order for item in values]
+        if len(orders) != len(set(orders)):
+            raise ValueError("视频提示词引用顺序不能重复")
         return values
 
     @field_validator("video_reference_bindings")
@@ -2648,6 +2705,10 @@ class ShotPlanFieldsUpdate(BaseModel):
     )
     image_negative_constraints: list[str] | None = Field(default=None, max_length=40)
     video_prompt: str | None = Field(default=None, max_length=8000)
+    video_prompt_mentions: list[VideoPromptMention] | None = Field(
+        default=None,
+        max_length=40,
+    )
     video_negative_constraints: list[str] | None = Field(default=None, max_length=40)
     managed_asset_bindings: list[ProviderManagedAssetBinding] | None = Field(
         default=None,
@@ -2709,6 +2770,22 @@ class ShotPlanFieldsUpdate(BaseModel):
         keys = [(item.provider, item.role) for item in values]
         if len(keys) != len(set(keys)):
             raise ValueError("同一 Provider 的托管资产角色不能重复绑定")
+        return values
+
+    @field_validator("video_prompt_mentions")
+    @classmethod
+    def require_unique_video_mentions(
+        cls,
+        values: list[VideoPromptMention] | None,
+    ) -> list[VideoPromptMention] | None:
+        if values is None:
+            return values
+        keys = [(item.reference_kind, item.reference_id) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("同一视频输入不能在提示词中重复关联")
+        orders = [item.order for item in values]
+        if len(orders) != len(set(orders)):
+            raise ValueError("视频提示词引用顺序不能重复")
         return values
 
     @field_validator("video_reference_bindings")

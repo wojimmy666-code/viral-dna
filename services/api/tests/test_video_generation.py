@@ -18,6 +18,9 @@ from viral_dna_api.models import (
     VideoGenerationInputMode,
     VideoGenerationInputPlan,
     VideoGenerationInputSource,
+    VideoPromptMention,
+    VideoPromptReferenceKind,
+    VideoPromptReferenceRole,
 )
 from viral_dna_api.video_generation import (
     OrderedReferenceFrame,
@@ -25,6 +28,7 @@ from viral_dna_api.video_generation import (
     VideoGenerationGatewayError,
 )
 from viral_dna_api.video_generation.catalog import load_video_model_catalog
+from viral_dna_api.video_generation.gateway import _positive_prompt
 from viral_dna_api.workspace import WorkspaceManager
 
 
@@ -93,6 +97,49 @@ def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
     assert VideoGenerationInputSource.PROJECT_ASSETS in capabilities.supported_input_sources
     assert VideoGenerationInputSource.DEPTH_CONTROL in capabilities.supported_input_sources
     assert "audio" not in capabilities.model_dump(mode="json")["supported_input_sources"]
+
+
+def test_video_prompt_mentions_keep_stable_ids_and_compile_reference_roles() -> None:
+    reference_id = uuid4()
+    mention = VideoPromptMention(
+        reference_kind=VideoPromptReferenceKind.PROJECT_ASSET,
+        reference_id=reference_id,
+        label="@资产/小喵酱/面部",
+        role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+        order=1,
+    )
+    shot = ShotPlan(
+        project_id=uuid4(),
+        revision_id=uuid4(),
+        source_shot_id="shot-reference-001",
+        index=1,
+        start_seconds=0,
+        end_seconds=3,
+        duration_seconds=3,
+        image_prompt="保持构图",
+        video_prompt="使用 @资产/小喵酱/面部 作为唯一人物身份来源。",
+        video_prompt_mentions=[mention],
+    )
+
+    assert shot.video_prompt_mentions[0].reference_id == reference_id
+    assert shot.video_prompt_mentions[0].label == "资产/小喵酱/面部"
+    compiled = _positive_prompt(shot, ())
+    assert "@资产/小喵酱/面部：人物身份" in compiled
+    assert "不得与其他引用交换身份、外观、动作或空间职责" in compiled
+
+    with pytest.raises(ValidationError):
+        ShotPlan(
+            project_id=uuid4(),
+            revision_id=uuid4(),
+            source_shot_id="shot-reference-duplicate",
+            index=1,
+            start_seconds=0,
+            end_seconds=3,
+            duration_seconds=3,
+            image_prompt="保持构图",
+            video_prompt="重复引用",
+            video_prompt_mentions=[mention, mention.model_copy(update={"order": 2})],
+        )
 
 
 def test_video_gateway_creates_persistent_simulated_candidates(

@@ -403,7 +403,7 @@ app.include_router(
 app.include_router(
     create_video_reference_router(
         production_service,
-        public_media_stager,
+        media_staging_service,
     ),
     prefix=API_PREFIX,
 )

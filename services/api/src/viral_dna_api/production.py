@@ -131,6 +131,8 @@ from .models import (
     VideoClipPreparationUpdate,
     VideoGenerationCreate,
     VideoGenerationInputSource,
+    VideoPromptMention,
+    VideoPromptReferenceKind,
     VideoProviderTask,
     VideoProviderTaskResponse,
     VideoProviderTaskStatus,
@@ -2446,6 +2448,7 @@ class ProductionService:
                     image_prompt_mentions=source_plan.image_prompt_mentions,
                     image_negative_constraints=source_plan.image_negative_constraints,
                     video_prompt=source_plan.video_prompt,
+                    video_prompt_mentions=source_plan.video_prompt_mentions,
                     video_negative_constraints=source_plan.video_negative_constraints,
                     locks=source_plan.locks,
                     required=source_plan.required,
@@ -4156,6 +4159,7 @@ class ProductionService:
                 fields
                 & {
                     "video_prompt",
+                    "video_prompt_mentions",
                     "video_negative_constraints",
                     "managed_asset_bindings",
                     "video_reference_bindings",
@@ -4204,6 +4208,25 @@ class ProductionService:
                         raise _fail(exc.status_code, exc.code, str(exc)) from exc
                 normalized_payload = normalized_payload.model_copy(
                     update={"managed_asset_bindings": verified_bindings}
+                )
+            if "video_prompt_mentions" in fields:
+                normalized_video_mentions = await self._validate_video_prompt_mentions(
+                    project,
+                    plan,
+                    payload.video_prompt_mentions or [],
+                    managed_asset_bindings=(
+                        normalized_payload.managed_asset_bindings
+                        if "managed_asset_bindings" in fields
+                        else plan.managed_asset_bindings
+                    ),
+                    video_reference_bindings=(
+                        normalized_payload.video_reference_bindings
+                        if "video_reference_bindings" in fields
+                        else plan.video_reference_bindings
+                    ),
+                )
+                normalized_payload = normalized_payload.model_copy(
+                    update={"video_prompt_mentions": normalized_video_mentions}
                 )
             if "reference_bindings" in fields or "image_prompt_mentions" in fields:
                 binding_inputs = (
@@ -4359,6 +4382,25 @@ class ProductionService:
                             raise _fail(exc.status_code, exc.code, str(exc)) from exc
                     normalized_item = normalized_item.model_copy(
                         update={"managed_asset_bindings": verified_bindings}
+                    )
+                if "video_prompt_mentions" in fields:
+                    normalized_video_mentions = await self._validate_video_prompt_mentions(
+                        project,
+                        current,
+                        item.video_prompt_mentions or [],
+                        managed_asset_bindings=(
+                            normalized_item.managed_asset_bindings
+                            if "managed_asset_bindings" in fields
+                            else current.managed_asset_bindings
+                        ),
+                        video_reference_bindings=(
+                            normalized_item.video_reference_bindings
+                            if "video_reference_bindings" in fields
+                            else current.video_reference_bindings
+                        ),
+                    )
+                    normalized_item = normalized_item.model_copy(
+                        update={"video_prompt_mentions": normalized_video_mentions}
                     )
                 if "reference_bindings" in fields or "image_prompt_mentions" in fields:
                     previous = [
@@ -4860,6 +4902,29 @@ class ProductionService:
         this contract; source/generated audio is handled later by the editor.
         """
         sources = set(payload.input_plan.sources)
+        source_by_reference_kind = {
+            VideoPromptReferenceKind.APPROVED_IMAGE: VideoGenerationInputSource.APPROVED_IMAGES,
+            VideoPromptReferenceKind.PROJECT_ASSET: VideoGenerationInputSource.PROJECT_ASSETS,
+            VideoPromptReferenceKind.PROVIDER_MANAGED_ASSET: (
+                VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS
+            ),
+            VideoPromptReferenceKind.REFERENCE_VIDEO: VideoGenerationInputSource.REFERENCE_VIDEO,
+            VideoPromptReferenceKind.DEPTH_CONTROL: VideoGenerationInputSource.DEPTH_CONTROL,
+        }
+        for mention in plan.video_prompt_mentions:
+            if f"@{mention.label}" not in plan.video_prompt:
+                raise _fail(
+                    409,
+                    "video_prompt_reference_token_missing",
+                    f"视频提示词引用 @{mention.label} 已不在正文中，请重新选择或移除该引用",
+                )
+            required_source = source_by_reference_kind[mention.reference_kind]
+            if required_source not in sources:
+                raise _fail(
+                    409,
+                    "video_prompt_reference_source_disabled",
+                    f"视频提示词中的 @{mention.label} 尚未启用对应生成输入",
+                )
         if not sources:
             if not capability.text_to_video:
                 raise _fail(
@@ -4882,6 +4947,10 @@ class ProductionService:
             raise _fail(409, "approved_image_required", "请先确认用于生成视频的分镜图片")
         if VideoGenerationInputSource.PROJECT_ASSETS in sources:
             asset_ids = {
+                mention.reference_id
+                for mention in plan.video_prompt_mentions
+                if mention.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
+            } or {
                 mention.reference_asset_id
                 for beat in plan.visual_beats
                 for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
@@ -5806,10 +5875,25 @@ class ProductionService:
             )
             reference_frames: list[OrderedReferenceFrame] = []
             if payload.input_plan.includes(VideoGenerationInputSource.APPROVED_IMAGES):
-                for ordinal, beat in enumerate(
-                    sorted(target_beats, key=lambda item: item.index),
-                    start=1,
-                ):
+                approved_mentions = {
+                    item.reference_id: item
+                    for item in plan.video_prompt_mentions
+                    if item.reference_kind == VideoPromptReferenceKind.APPROVED_IMAGE
+                }
+                approved_targets = sorted(
+                    (
+                        beat
+                        for beat in target_beats
+                        if not approved_mentions
+                        or beat.approved_image_candidate_id in approved_mentions
+                    ),
+                    key=lambda beat: (
+                        approved_mentions.get(beat.approved_image_candidate_id).order
+                        if beat.approved_image_candidate_id in approved_mentions
+                        else beat.index
+                    ),
+                )
+                for ordinal, beat in enumerate(approved_targets, start=1):
                     if beat.approved_image_candidate_id is None:
                         raise _fail(
                             409,
@@ -5829,7 +5913,11 @@ class ProductionService:
                         OrderedReferenceFrame(
                             visual_beat_id=beat.id,
                             ordinal=ordinal,
-                            title=beat.title,
+                            title=(
+                                approved_mentions[beat.approved_image_candidate_id].label
+                                if beat.approved_image_candidate_id in approved_mentions
+                                else beat.title
+                            ),
                             candidate_id=candidate.id,
                             path=candidate_path,
                             relative_path=candidate.relative_path,
@@ -5858,16 +5946,27 @@ class ProductionService:
                     ReferenceAssetType.STYLE: "composition",
                 }
                 seen_asset_ids: set[UUID] = set()
-                mention_sources = [
-                    (beat, mention)
-                    for beat in sorted(target_beats, key=lambda item: item.index)
-                    for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
+                video_asset_mentions = [
+                    item
+                    for item in plan.video_prompt_mentions
+                    if item.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
                 ]
-                for beat, mention in mention_sources:
-                    if mention.reference_asset_id in seen_asset_ids:
+                if video_asset_mentions:
+                    mention_sources = [
+                        (target_beats[0], mention.reference_id, mention.label)
+                        for mention in sorted(video_asset_mentions, key=lambda item: item.order)
+                    ]
+                else:
+                    mention_sources = [
+                        (beat, mention.reference_asset_id, mention.label)
+                        for beat in sorted(target_beats, key=lambda item: item.index)
+                        for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
+                    ]
+                for beat, reference_asset_id, mention_label in mention_sources:
+                    if reference_asset_id in seen_asset_ids:
                         continue
                     reference = await self.project_assets.get_reference(
-                        mention.reference_asset_id,
+                        reference_asset_id,
                         project.id,
                         include_archived=False,
                     )
@@ -5875,7 +5974,7 @@ class ProductionService:
                         raise _fail(
                             422,
                             "video_reference_asset_unavailable",
-                            f"参考资产 @{mention.label} 不存在、已归档或尚未确认使用权",
+                            f"参考资产 @{mention_label} 不存在、已归档或尚未确认使用权",
                         )
                     path, mime_type = await self.project_assets.resolve_content(
                         reference.id,
@@ -5885,14 +5984,14 @@ class ProductionService:
                         raise _fail(
                             422,
                             "video_reference_asset_type_invalid",
-                            f"参考资产 @{mention.label} 不是可用图片",
+                            f"参考资产 @{mention_label} 不是可用图片",
                         )
                     seen_asset_ids.add(reference.id)
                     reference_frames.append(
                         OrderedReferenceFrame(
                             visual_beat_id=beat.id,
                             ordinal=len(reference_frames) + 1,
-                            title=f"资产 · {reference.name}",
+                            title=mention_label or f"资产/{reference.name}",
                             candidate_id=reference.id,
                             path=path,
                             relative_path=reference.relative_path,
@@ -8900,6 +8999,7 @@ class ProductionService:
             payload.model_fields_set
             & {
                 "video_prompt",
+                "video_prompt_mentions",
                 "video_negative_constraints",
                 "managed_asset_bindings",
                 "video_reference_bindings",
@@ -9008,6 +9108,10 @@ class ProductionService:
             if payload.managed_asset_bindings is None:
                 raise _fail(422, "invalid_shot_plan", "托管资产绑定不能为 null")
             updates["managed_asset_bindings"] = payload.managed_asset_bindings
+        if "video_prompt_mentions" in fields:
+            if payload.video_prompt_mentions is None:
+                raise _fail(422, "invalid_shot_plan", "视频提示词引用不能为 null")
+            updates["video_prompt_mentions"] = payload.video_prompt_mentions
         if "video_reference_bindings" in fields:
             if payload.video_reference_bindings is None:
                 raise _fail(422, "invalid_shot_plan", "视频参考绑定不能为 null")
@@ -9127,6 +9231,104 @@ class ProductionService:
                         field_name="提示词资产名称",
                         max_length=120,
                     ),
+                )
+            )
+        return normalized
+
+    async def _validate_video_prompt_mentions(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        mentions: list[VideoPromptMention],
+        *,
+        managed_asset_bindings=None,
+        video_reference_bindings=None,
+    ) -> list[VideoPromptMention]:
+        assets = {item.id: item for item in await self._list_reference_assets(project.id)}
+        managed = {
+            item.id: item
+            for item in (
+                plan.managed_asset_bindings
+                if managed_asset_bindings is None
+                else managed_asset_bindings
+            )
+        }
+        video_bindings = {
+            item.id: item
+            for item in (
+                plan.video_reference_bindings
+                if video_reference_bindings is None
+                else video_reference_bindings
+            )
+        }
+        depth_assets = {item.id: item for item in plan.depth_control_assets}
+        approved_candidates = {
+            item.approved_image_candidate_id
+            for item in plan.visual_beats
+            if item.approved_image_candidate_id is not None
+        }
+        normalized: list[VideoPromptMention] = []
+        for mention in sorted(mentions, key=lambda item: item.order):
+            kind = mention.reference_kind
+            reference_id = mention.reference_id
+            if kind == VideoPromptReferenceKind.PROJECT_ASSET:
+                asset = assets.get(reference_id)
+                if asset is None or asset.archived_at is not None:
+                    raise _fail(
+                        422,
+                        "video_prompt_reference_not_found",
+                        "视频提示词关联的项目资产不存在或已归档",
+                    )
+                if not asset.rights_confirmed:
+                    raise _fail(
+                        422,
+                        "reference_rights_required",
+                        "视频提示词关联的项目资产尚未完成权利确认",
+                    )
+            elif kind == VideoPromptReferenceKind.APPROVED_IMAGE:
+                if reference_id not in approved_candidates:
+                    raise _fail(
+                        422,
+                        "video_prompt_reference_not_approved",
+                        "视频提示词关联的分镜图已失效或尚未采用",
+                    )
+            elif kind == VideoPromptReferenceKind.PROVIDER_MANAGED_ASSET:
+                if reference_id not in managed:
+                    raise _fail(
+                        422,
+                        "video_prompt_managed_asset_not_bound",
+                        "视频提示词关联的托管角色尚未绑定到当前分镜",
+                    )
+            elif kind == VideoPromptReferenceKind.REFERENCE_VIDEO:
+                binding = video_bindings.get(reference_id)
+                if (
+                    binding is None
+                    or binding.media_type.value != "video"
+                    or not binding.enabled
+                ):
+                    raise _fail(
+                        422,
+                        "video_prompt_reference_video_not_bound",
+                        "视频提示词关联的参考视频不存在、已停用或不是视频",
+                    )
+            elif kind == VideoPromptReferenceKind.DEPTH_CONTROL:
+                depth = depth_assets.get(reference_id)
+                if depth is None or not depth.enabled or not depth.usable_for_generation:
+                    raise _fail(
+                        422,
+                        "video_prompt_depth_control_not_ready",
+                        "视频提示词关联的深度视频尚未启用或不可用于生成",
+                    )
+            normalized.append(
+                mention.model_copy(
+                    update={
+                        "label": _simplified_text(
+                            mention.label,
+                            field_name="视频提示词引用名称",
+                            max_length=260,
+                        ),
+                        "order": len(normalized) + 1,
+                    }
                 )
             )
         return normalized
