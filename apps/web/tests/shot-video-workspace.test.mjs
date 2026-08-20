@@ -12,13 +12,19 @@ import {
 } from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
 import {
   buildVideoPromptHighlightSegments,
+  buildVideoReferenceSystemConstraints,
   buildVideoReferenceOptions,
+  compileVideoPromptWithReferences,
+  deleteVideoMentionAtSelection,
+  ensureVideoGenerationReference,
   insertVideoMentionIntoPrompt,
   normalizeVideoPromptMentions,
   selectedVideoReferenceOptions,
   removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
+  stripLegacyVideoReferencePolicies,
   videoMentionToken,
+  videoReferenceConflictPriority,
 } from "../src/video-inputs/video-prompt-references.js";
 
 const workspaceSource = readFileSync(
@@ -46,6 +52,10 @@ const generationDraftSource = readFileSync(
 );
 const videoPromptReferenceEditorSource = readFileSync(
   new URL("../src/video-inputs/VideoPromptReferenceEditor.jsx", import.meta.url),
+  "utf8",
+);
+const videoPromptReferencePolicySource = readFileSync(
+  new URL("../src/video-inputs/VideoPromptReferencePolicy.jsx", import.meta.url),
   "utf8",
 );
 const generationReferenceComposerSource = readFileSync(
@@ -138,6 +148,19 @@ test("keeps the production workspace on a readable semantic type ramp", () => {
   assert.match(readableSection, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-size:\s*var\(--production-type-body\)/s);
   assert.match(readableSection, /\.production-export-status/);
   assert.doesNotMatch(readableSection, /font-size:\s*(?:7|8|9|10|11)px/);
+});
+
+test("keeps video candidates usable when the shot input has changed", () => {
+  assert.match(workspaceSource, /status === "stale" \? "旧输入"/);
+  assert.match(workspaceSource, /分镜输入已更新/);
+  assert.match(workspaceSource, /当前候选基于修改前的输入生成，仍可继续使用/);
+  assert.match(workspaceSource, /plan\.video_status === "stale"/);
+  assert.match(candidateLibrarySource, /const oldInput = plan\?\.video_status === "stale"/);
+  assert.match(candidateLibrarySource, /可采用.*旧输入/s);
+  assert.match(productionWorkflowSource, /基于修改前的分镜输入生成。确认仍采用当前画面吗/);
+  assert.match(productionWorkflowSource, /confirm_stale_input: usesOldInput/);
+  assert.match(workflowStyles, /\.shot-video-input-version-notice\s*\{/);
+  assert.match(workflowStyles, /\.shot-candidate-current-detail > em\.old-input\s*\{/);
 });
 
 test("uses a compact generation command bar with upward anchored model and setting popovers", () => {
@@ -472,6 +495,17 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
     managed.preview_url,
     "/api/v1/managed-assets/providers/volc_ark/assets/managed-person-1/preview",
   );
+  assert.deepEqual(ensureVideoGenerationReference([], managed), [{
+    reference_kind: "provider_managed_asset",
+    reference_id: managed.reference_id,
+    label: managed.label,
+    role: "actor_identity",
+    order: 1,
+  }]);
+  assert.equal(
+    ensureVideoGenerationReference([managed], managed).length,
+    1,
+  );
 
   const prompt = "保持 @资产/小喵酱/面部 的身份，动作参考深度视频。";
   const normalized = normalizeVideoPromptMentions(prompt, [{
@@ -500,7 +534,92 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.deepEqual(highlighted.map((item) => item.type), ["text", "mention", "text"]);
   assert.equal(highlighted[1].text, "@资产/小喵酱/面部");
 
+  const atomicPrompt = "替换为 @托管角色/小喵酱，然后抬手。";
+  const atomicMention = {
+    reference_kind: managed.reference_kind,
+    reference_id: managed.reference_id,
+    label: "托管角色/小喵酱",
+    role: managed.role,
+    order: 1,
+  };
+  const tokenStart = atomicPrompt.indexOf("@托管角色/小喵酱");
+  const tokenEnd = tokenStart + "@托管角色/小喵酱".length;
+  assert.deepEqual(
+    deleteVideoMentionAtSelection(atomicPrompt, [atomicMention], {
+      key: "Backspace",
+      selectionStart: tokenEnd,
+      selectionEnd: tokenEnd,
+    }),
+    { value: "替换为，然后抬手。", cursor: tokenStart - 1 },
+  );
+  assert.deepEqual(
+    deleteVideoMentionAtSelection(atomicPrompt, [atomicMention], {
+      key: "Delete",
+      selectionStart: tokenStart + 2,
+      selectionEnd: tokenStart + 2,
+    }),
+    { value: "替换为，然后抬手。", cursor: tokenStart - 1 },
+  );
+  assert.deepEqual(
+    deleteVideoMentionAtSelection(atomicPrompt, [atomicMention], {
+      key: "Delete",
+      selectionStart: tokenStart + 2,
+      selectionEnd: tokenEnd - 2,
+    }),
+    { value: "替换为，然后抬手。", cursor: tokenStart - 1 },
+  );
+  assert.equal(
+    deleteVideoMentionAtSelection(atomicPrompt, [atomicMention], {
+      key: "Backspace",
+      selectionStart: 2,
+      selectionEnd: 2,
+    }),
+    null,
+  );
+
+  const depthReference = {
+    reference_kind: "depth_control",
+    reference_id: "77efbb39-8414-496d-bcd7-705482f36f25",
+    label: "深度视频/分镜动作1",
+    role: "depth",
+    order: 1,
+  };
+  const managedReference = {
+    reference_kind: managed.reference_kind,
+    reference_id: managed.reference_id,
+    label: "托管角色/小喵酱",
+    role: managed.role,
+    order: 2,
+  };
+  const systemConstraints = buildVideoReferenceSystemConstraints([
+    depthReference,
+    managedReference,
+  ]);
+  assert.equal(systemConstraints.length, 2);
+  assert.match(systemConstraints[0].text, /严格逐帧遵循深度视频/);
+  assert.match(systemConstraints[0].text, /不得重新设计、简化、增加、删除、交换或提前任何动作/);
+  assert.match(systemConstraints[1].text, /唯一的人物身份来源/);
+  assert.match(systemConstraints[1].text, /不得继承深度视频或其他参考画面中的人物身份/);
+  assert.match(
+    videoReferenceConflictPriority([depthReference, managedReference]),
+    /人物身份以托管角色为准.*镜头关系以深度视频为准/,
+  );
+  const compiledPrompt = compileVideoPromptWithReferences(
+    "人物在公园中抬手调整口罩。",
+    [depthReference, managedReference],
+  );
+  assert.match(compiledPrompt, /用户视频提示词/);
+  assert.match(compiledPrompt, /@深度视频\/分镜动作1/);
+  assert.match(compiledPrompt, /@托管角色\/小喵酱/);
+  assert.equal(
+    stripLegacyVideoReferencePolicies(
+      "@托管角色/小喵酱 是画面中唯一的人物身份来源。 人物的面部、年龄、发型、体型和身份特征必须来自该托管角色，不继承深度视频或其他参考画面中的人物身份。 @深度视频/分镜动作1 是唯一的动作、姿态、运动节奏、空间位置、镜头关系和遮挡转场来源。严格逐帧遵循深度视频中的身体姿态、手臂轨迹、动作顺序、速度、停顿、主体位置、景别变化和镜头运动。不得重新设计、简化、增加、删除、交换或提前任何动作。 【目标画面】 公园中的人物。",
+    ),
+    "【目标画面】 公园中的人物。",
+  );
+
   assert.match(workspaceSource, /<VideoPromptReferenceEditor/);
+  assert.match(workspaceSource, /<VideoPromptReferencePolicy/);
   assert.match(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(workspaceSource, /requiredInputSource/);
   assert.match(workspaceSource, /videoPromptMentions/);
@@ -512,6 +631,12 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(videoPromptReferenceEditorSource, /onSelect=\{updateSelectionState\}/);
   assert.match(videoPromptReferenceEditorSource, /new ResizeObserver/);
   assert.match(videoPromptReferenceEditorSource, /textarea\.clientWidth \+ horizontalBorder/);
+  assert.match(videoPromptReferenceEditorSource, /视频提示词快捷引用/);
+  assert.match(videoPromptReferenceEditorSource, /加入生成参考并插入提示词/);
+  assert.match(videoPromptReferenceEditorSource, /deleteVideoMentionAtSelection/);
+  assert.match(videoPromptReferenceEditorSource, /event\.nativeEvent\?\.isComposing/);
+  assert.match(videoPromptReferencePolicySource, /复制可编辑提示词/);
+  assert.match(videoPromptReferencePolicySource, /复制模型输入/);
 });
 
 test("keeps provider failures in notifications and scopes model warnings", () => {

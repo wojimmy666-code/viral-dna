@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -147,8 +148,28 @@ def _positive_prompt(
     shot: ShotPlan,
     reference_frames: tuple[OrderedReferenceFrame, ...],
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = (),
+    input_plan: VideoGenerationInputPlan | None = None,
 ) -> str:
-    lines = [f"动作与运镜要求：{shot.video_prompt.strip()}"]
+    editable_prompt = shot.video_prompt.strip()
+    legacy_policy_patterns = (
+        (
+            r"@托管角色/[^@\n]+?\s+是画面中唯一的人物身份来源。\s*"
+            r"人物的面部、年龄、发型、体型和身份特征必须来自该托管角色[，,]\s*"
+            r"不(?:得)?继承深度视频或其他参考画面中的人物身份。\s*"
+            r"(?:该引用不改变动作、时序、主体位置或镜头运动。\s*)?"
+        ),
+        (
+            r"@深度视频/[^@\n]+?\s+是唯一的动作、姿态、运动节奏、空间位置、"
+            r"镜头关系和遮挡转场来源。\s*严格逐帧遵循深度视频中的身体姿态、"
+            r"手臂轨迹、动作顺序、速度、停顿、主体位置、景别变化和镜头运动。\s*"
+            r"不得重新设计、简化、增加、删除、交换或提前任何动作。\s*"
+            r"(?:该引用不提供人物身份、面部或外观特征。\s*)?"
+        ),
+    )
+    for pattern in legacy_policy_patterns:
+        editable_prompt = re.sub(pattern, "", editable_prompt)
+    editable_prompt = re.sub(r"\n{3,}", "\n\n", editable_prompt).strip()
+    lines = [f"动作与运镜要求：{editable_prompt}"]
     if shot.video_prompt_mentions:
         role_labels = {
             "actor_identity": "人物身份",
@@ -171,6 +192,38 @@ def _positive_prompt(
         lines.append(
             f"人物身份只使用已绑定的 Provider 托管演员（{names}）；"
             "不要从本地动作、构图或场景参考中继承年龄、五官或可识别身份。"
+        )
+    references = sorted(
+        (input_plan.references if input_plan else ()),
+        key=lambda item: item.order,
+    )
+    has_depth_control = any(
+        item.reference_kind.value == "depth_control" for item in references
+    )
+    has_managed_identity = any(
+        item.reference_kind.value == "provider_managed_asset" for item in references
+    )
+    for reference in references:
+        token = f"@{reference.label}"
+        if reference.reference_kind.value == "depth_control":
+            lines.append(
+                f"{token} 是唯一的动作、姿态、运动节奏、空间位置、镜头关系和遮挡转场来源。"
+                "严格逐帧遵循深度视频中的身体姿态、手臂轨迹、动作顺序、速度、停顿、"
+                "主体位置、景别变化和镜头运动。"
+                "不得重新设计、简化、增加、删除、交换或提前任何动作。"
+                "该引用不提供人物身份、面部或外观特征。"
+            )
+        elif reference.reference_kind.value == "provider_managed_asset":
+            lines.append(
+                f"{token} 是画面中唯一的人物身份来源。"
+                "人物的面部、年龄、发型、体型和身份特征必须来自该托管角色，"
+                "不得继承深度视频或其他参考画面中的人物身份。"
+                "该引用不改变动作、时序、主体位置或镜头运动。"
+            )
+    if has_depth_control and has_managed_identity:
+        lines.append(
+            "发生冲突时按职责分离处理：人物身份以托管角色为准；"
+            "动作、姿态、节奏、空间位置和镜头关系以深度视频为准。"
         )
     if reference_frames:
         lines.extend(
@@ -761,7 +814,7 @@ class VideoGenerationGateway:
         _filesystem_path(run_root).mkdir(parents=True, exist_ok=True)
         selected_resolution = resolved_remote.resolution if resolved_remote else resolution
         width, height = _compiled_dimensions(project, capability, selected_resolution)
-        prompt = _positive_prompt(shot, ordered_frames, managed_references)
+        prompt = _positive_prompt(shot, ordered_frames, managed_references, input_plan)
         negative_prompt = _negative_prompt(shot)
         request = VideoGenerationRequest(
             project=project,

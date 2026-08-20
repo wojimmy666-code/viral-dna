@@ -153,6 +153,64 @@ def test_video_prompt_mentions_keep_stable_ids_and_compile_reference_roles() -> 
         )
 
 
+def test_selected_depth_and_managed_references_compile_separated_responsibilities() -> None:
+    shot = ShotPlan(
+        project_id=uuid4(),
+        revision_id=uuid4(),
+        source_shot_id="shot-reference-policy-001",
+        index=1,
+        start_seconds=0,
+        end_seconds=3,
+        duration_seconds=3,
+        image_prompt="保持公园场景",
+        video_prompt=(
+            "@托管角色/小喵酱 是画面中唯一的人物身份来源。"
+            "人物的面部、年龄、发型、体型和身份特征必须来自该托管角色，"
+            "不继承深度视频或其他参考画面中的人物身份。"
+            "@深度视频/分镜动作1 是唯一的动作、姿态、运动节奏、空间位置、"
+            "镜头关系和遮挡转场来源。严格逐帧遵循深度视频中的身体姿态、"
+            "手臂轨迹、动作顺序、速度、停顿、主体位置、景别变化和镜头运动。"
+            "不得重新设计、简化、增加、删除、交换或提前任何动作。"
+            "【目标画面】 人物抬手调整口罩。"
+        ),
+    )
+    input_plan = VideoGenerationInputPlan(
+        sources=[
+            VideoGenerationInputSource.DEPTH_CONTROL,
+            VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS,
+        ],
+        references=[
+            VideoGenerationReference(
+                reference_kind=VideoPromptReferenceKind.DEPTH_CONTROL,
+                reference_id=uuid4(),
+                label="深度视频/分镜动作1",
+                role=VideoPromptReferenceRole.DEPTH,
+                order=1,
+            ),
+            VideoGenerationReference(
+                reference_kind=VideoPromptReferenceKind.PROVIDER_MANAGED_ASSET,
+                reference_id=uuid4(),
+                label="托管角色/小喵酱",
+                role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+                order=2,
+            ),
+        ],
+    )
+
+    compiled = _positive_prompt(shot, (), input_plan=input_plan)
+
+    assert "@深度视频/分镜动作1 是唯一的动作、姿态、运动节奏" in compiled
+    assert "严格逐帧遵循深度视频中的身体姿态、手臂轨迹、动作顺序" in compiled
+    assert "不得重新设计、简化、增加、删除、交换或提前任何动作" in compiled
+    assert "@托管角色/小喵酱 是画面中唯一的人物身份来源" in compiled
+    assert "不得继承深度视频或其他参考画面中的人物身份" in compiled
+    assert "人物身份以托管角色为准" in compiled
+    assert "镜头关系以深度视频为准" in compiled
+    assert compiled.count("是画面中唯一的人物身份来源") == 1
+    assert compiled.count("是唯一的动作、姿态、运动节奏") == 1
+    assert "动作与运镜要求：【目标画面】 人物抬手调整口罩。" in compiled
+
+
 def test_video_gateway_creates_persistent_simulated_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

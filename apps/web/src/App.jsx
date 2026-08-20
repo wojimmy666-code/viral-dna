@@ -57,6 +57,7 @@ import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsP
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
 import { PromptEditor } from "./prompt-editor/index.js";
+import { PromptSectionView } from "./prompt-presentation/PromptSectionView.jsx";
 import {
   NotificationDrawer,
   ToastViewport,
@@ -5629,7 +5630,7 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
 
               <details className="prompt-box shot-prompt-disclosure">
                 <summary><span><MagicWand size={17} weight="fill" /><strong>逐镜头复刻提示词</strong></span><CaretDown size={16} /></summary>
-                <p>{activeShot.prompt}</p>
+                <PromptSectionView prompt={activeShot.prompt} />
                 <button type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")}><Copy size={16} />复制提示词</button>
               </details>
             </>

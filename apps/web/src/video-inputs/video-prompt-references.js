@@ -20,6 +20,89 @@ export const VIDEO_REFERENCE_CATEGORY_BY_KIND = Object.freeze({
   depth_control: "depth",
 });
 
+export const VIDEO_REFERENCE_ROLE_LABELS = Object.freeze({
+  actor_identity: "人物身份",
+  composition: "构图与画面",
+  scene: "场景",
+  product: "产品外观",
+  wardrobe: "服装",
+  motion: "人物动作",
+  camera: "镜头运动",
+  depth: "动作与空间",
+});
+
+export function videoReferenceRoleLabel(item = {}) {
+  return VIDEO_REFERENCE_ROLE_LABELS[item.role] || "参考输入";
+}
+
+export function buildVideoReferenceSystemConstraints(references = []) {
+  const ordered = [...(references || [])].sort(
+    (left, right) => Number(left.order || 0) - Number(right.order || 0),
+  );
+  const entries = [];
+  const seen = new Set();
+  for (const reference of ordered) {
+    const key = videoReferenceKey(reference);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const token = videoMentionToken(reference);
+    if (reference.reference_kind === "depth_control") {
+      entries.push({
+        key,
+        kind: "depth_control",
+        roleLabel: "动作与空间",
+        token,
+        summary: "唯一的动作、节奏、空间与镜头关系来源",
+        text: `${token} 是唯一的动作、姿态、运动节奏、空间位置、镜头关系和遮挡转场来源。严格逐帧遵循深度视频中的身体姿态、手臂轨迹、动作顺序、速度、停顿、主体位置、景别变化和镜头运动。不得重新设计、简化、增加、删除、交换或提前任何动作。该引用不提供人物身份、面部或外观特征。`,
+      });
+    } else if (reference.reference_kind === "provider_managed_asset") {
+      entries.push({
+        key,
+        kind: "provider_managed_asset",
+        roleLabel: "人物身份",
+        token,
+        summary: "唯一的人物身份与外观来源",
+        text: `${token} 是画面中唯一的人物身份来源。人物的面部、年龄、发型、体型和身份特征必须来自该托管角色，不得继承深度视频或其他参考画面中的人物身份。该引用不改变动作、时序、主体位置或镜头运动。`,
+      });
+    }
+  }
+  return entries;
+}
+
+export function videoReferenceConflictPriority(references = []) {
+  const kinds = new Set((references || []).map((item) => item.reference_kind));
+  if (!kinds.has("depth_control") || !kinds.has("provider_managed_asset")) return "";
+  return "发生冲突时按职责分离处理：人物身份以托管角色为准；动作、姿态、节奏、空间位置和镜头关系以深度视频为准。";
+}
+
+export function compileVideoPromptWithReferences(prompt, references = []) {
+  const userPrompt = String(prompt || "").trim();
+  const constraints = buildVideoReferenceSystemConstraints(references);
+  const priority = videoReferenceConflictPriority(references);
+  if (constraints.length === 0) return userPrompt;
+  return [
+    `用户视频提示词：\n${userPrompt}`,
+    `系统引用约束：\n${constraints.map((item) => `- ${item.text}`).join("\n")}`,
+    priority,
+  ].filter(Boolean).join("\n\n");
+}
+
+const LEGACY_REFERENCE_POLICY_PATTERNS = Object.freeze([
+  /@托管角色\/[^@\n]+?\s+是画面中唯一的人物身份来源。\s*人物的面部、年龄、发型、体型和身份特征必须来自该托管角色[，,]\s*不(?:得)?继承深度视频或其他参考画面中的人物身份。\s*(?:该引用不改变动作、时序、主体位置或镜头运动。\s*)?/gu,
+  /@深度视频\/[^@\n]+?\s+是唯一的动作、姿态、运动节奏、空间位置、镜头关系和遮挡转场来源。\s*严格逐帧遵循深度视频中的身体姿态、手臂轨迹、动作顺序、速度、停顿、主体位置、景别变化和镜头运动。\s*不得重新设计、简化、增加、删除、交换或提前任何动作。\s*(?:该引用不提供人物身份、面部或外观特征。\s*)?/gu,
+]);
+
+export function stripLegacyVideoReferencePolicies(prompt) {
+  let nextPrompt = String(prompt || "");
+  for (const pattern of LEGACY_REFERENCE_POLICY_PATTERNS) {
+    nextPrompt = nextPrompt.replace(pattern, "");
+  }
+  return nextPrompt
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function videoReferenceSourceSupported(capabilities = {}, source = "") {
   if (Array.isArray(capabilities.supported_input_sources)) {
     return capabilities.supported_input_sources.includes(source);
@@ -83,6 +166,24 @@ export function normalizeVideoGenerationReferences(references = [], options = []
     });
   }
   return normalized;
+}
+
+export function ensureVideoGenerationReference(references = [], option = {}) {
+  const key = videoReferenceKey(option);
+  const normalized = normalizeVideoGenerationReferences(references);
+  if (!key || normalized.some((item) => videoReferenceKey(item) === key)) {
+    return normalized;
+  }
+  return [
+    ...normalized,
+    {
+      reference_kind: option.reference_kind,
+      reference_id: option.reference_id,
+      label: option.label,
+      role: option.role,
+      order: normalized.length + 1,
+    },
+  ];
 }
 
 export function selectedVideoReferenceOptions(options = [], selectedReferences = []) {
@@ -161,6 +262,65 @@ export function buildVideoPromptHighlightSegments(prompt, mentions = []) {
     segments.push({ type: "text", text: source.slice(cursor) });
   }
   return segments.length ? segments : [{ type: "text", text: source }];
+}
+
+function videoMentionRanges(prompt, mentions = []) {
+  const source = String(prompt || "");
+  const ranges = [];
+  const uniqueTokens = new Set(mentions.map(videoMentionToken).filter(Boolean));
+  for (const token of uniqueTokens) {
+    let cursor = 0;
+    while (cursor < source.length) {
+      const start = source.indexOf(token, cursor);
+      if (start < 0) break;
+      ranges.push({ start, end: start + token.length, token });
+      cursor = start + token.length;
+    }
+  }
+  return ranges.sort((left, right) => left.start - right.start);
+}
+
+export function deleteVideoMentionAtSelection(
+  prompt,
+  mentions = [],
+  { key = "", selectionStart = 0, selectionEnd = selectionStart } = {},
+) {
+  if (!["Backspace", "Delete"].includes(key)) return null;
+  const source = String(prompt || "");
+  const start = Math.max(0, Math.min(Number(selectionStart) || 0, source.length));
+  const end = Math.max(start, Math.min(Number(selectionEnd) || start, source.length));
+  const ranges = videoMentionRanges(source, mentions);
+  let affected = [];
+  if (start !== end) {
+    affected = ranges.filter((range) => start < range.end && end > range.start);
+  } else if (key === "Backspace") {
+    affected = ranges.filter((range) => (
+      (start > range.start && start <= range.end)
+      || (start === range.end + 1 && /\s/u.test(source[range.end] || ""))
+    ));
+  } else {
+    affected = ranges.filter((range) => (
+      (start >= range.start && start < range.end)
+      || (start + 1 === range.start && /\s/u.test(source[start] || ""))
+    ));
+  }
+  if (affected.length === 0) return null;
+
+  let deleteStart = start === end
+    ? Math.min(...affected.map((range) => range.start))
+    : Math.min(start, ...affected.map((range) => range.start));
+  let deleteEnd = start === end
+    ? Math.max(...affected.map((range) => range.end))
+    : Math.max(end, ...affected.map((range) => range.end));
+  if (/\s/u.test(source[deleteEnd] || "")) {
+    deleteEnd += 1;
+  } else if (deleteStart > 0 && /\s/u.test(source[deleteStart - 1] || "")) {
+    deleteStart -= 1;
+  }
+  return {
+    value: `${source.slice(0, deleteStart)}${source.slice(deleteEnd)}`,
+    cursor: deleteStart,
+  };
 }
 
 export function removeVideoMentionFromPrompt(prompt, mention) {

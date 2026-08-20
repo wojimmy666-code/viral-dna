@@ -6567,8 +6567,6 @@ class ProductionService:
                     "video_already_approved",
                     "当前已有采用视频，请直接使用“改用此视频”切换候选",
                 )
-            if run.kind != GenerationKind.IMAGE and target_status == WorkflowItemStatus.STALE:
-                raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
             shot_runs = [
                 item
                 for item in await self.repository.list_generation_runs(
@@ -6619,7 +6617,11 @@ class ProductionService:
                 if project.active_step != ProductionStep.SHOT_VIDEOS:
                     raise _fail(409, "video_stage_not_active", "当前方案不在分段视频阶段")
                 plan_updates = {
-                    "video_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                    "video_status": (
+                        WorkflowItemStatus.STALE
+                        if target_status == WorkflowItemStatus.STALE
+                        else WorkflowItemStatus.REVIEW_REQUIRED
+                    ),
                     "approved_video_candidate_id": None,
                 }
                 change_kind = ProductionChangeKind.VIDEO_CANDIDATE_SELECTED
@@ -6736,8 +6738,17 @@ class ProductionService:
                 not direct_image_approval or is_user_deleted_candidate(candidate)
             ):
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
-            if target_status == WorkflowItemStatus.STALE and not direct_image_approval:
-                raise _fail(409, "candidate_stale", "分镜输入已修改，请重新生成候选")
+            if (
+                run.kind == GenerationKind.VIDEO
+                and target_status == WorkflowItemStatus.STALE
+                and payload.decision == ApprovalDecision.APPROVED
+                and not payload.confirm_stale_input
+            ):
+                raise _fail(
+                    409,
+                    "stale_input_confirmation_required",
+                    "该候选基于修改前的分镜输入生成，请确认后再采用",
+                )
             shot_runs = [
                 item
                 for item in await self.repository.list_generation_runs(
@@ -7472,7 +7483,11 @@ class ProductionService:
         if pending:
             blockers.append(f"仍有 {pending} 个{pending_label}未审批")
         if stale:
-            blockers.append(f"有 {len(stale)} 个分镜结果已过期")
+            blockers.append(
+                f"有 {len(stale)} 个分镜使用旧输入，尚未确认采用"
+                if video_stage
+                else f"有 {len(stale)} 个分镜结果已过期"
+            )
         continuity_report = await self.continuity.latest_report(project.id) if video_stage else None
         continuity_status = "not_run"
         continuity_verification_state = None

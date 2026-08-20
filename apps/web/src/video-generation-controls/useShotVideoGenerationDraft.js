@@ -4,6 +4,7 @@ import {
   normalizeVideoGenerationReferences,
   normalizeVideoPromptMentions,
   requiredSourceForVideoMention,
+  stripLegacyVideoReferencePolicies,
 } from "../video-inputs/video-prompt-references.js";
 
 export const EMPTY_VIDEO_DRAFT = Object.freeze({
@@ -75,7 +76,7 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
   const durationSeconds = selectedModel
     ? normalizeVideoDuration(rawDuration, selectedModel)
     : normalizedDuration(rawDuration);
-  const videoPrompt = detail?.plan?.video_prompt || "";
+  const videoPrompt = stripLegacyVideoReferencePolicies(detail?.plan?.video_prompt || "");
   const legacyMentions = detail?.plan?.video_prompt_mentions || [];
   const selectedReferences = normalizeVideoGenerationReferences(
     persistedDraft?.input_plan?.references?.length

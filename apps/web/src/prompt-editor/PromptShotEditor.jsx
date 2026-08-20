@@ -8,6 +8,7 @@ import {
 import { PromptTimelineEditor } from "./PromptTimelineEditor.jsx";
 import { PromptVisualHelp } from "./PromptVisualHelp.jsx";
 import { promptDraftContainsUnlabeledEnglish } from "./prompt-editor-ui.js";
+import { PromptSectionView } from "../prompt-presentation/PromptSectionView.jsx";
 
 const VISUAL_FIELDS = [
   ["subjects", "主体与服装"],
@@ -44,7 +45,7 @@ export function PromptShotEditor({
         </summary>
         <div className="prompt-shot-editor-body">
           <div className="prompt-legacy-preview">
-            <pre>{shot.prompt}</pre>
+            <PromptSectionView introTitle="提示词正文" prompt={shot.prompt} />
             <button
               className="prompt-editor-secondary-action"
               type="button"
@@ -274,7 +275,7 @@ export function PromptShotEditor({
             <CaretDown size={16} />
           </summary>
           <div>
-            <pre>{shot.prompt}</pre>
+            <PromptSectionView className="prompt-compiled-content" introTitle="模型输入" prompt={shot.prompt} />
             <button
               className="prompt-editor-secondary-action"
               type="button"

@@ -8,10 +8,14 @@ import {
 import {
   buildVideoReferenceOptions,
   buildVideoPromptHighlightSegments,
+  deleteVideoMentionAtSelection,
+  ensureVideoGenerationReference,
   insertVideoMentionIntoPrompt,
   normalizeVideoPromptMentions,
   requiredSourceForVideoMention,
   selectedVideoReferenceOptions,
+  videoMentionToken,
+  videoReferenceRoleLabel,
   videoReferenceKey,
 } from "./video-prompt-references.js";
 import "./video-prompt-reference-editor.css";
@@ -61,6 +65,21 @@ export function VideoPromptReferenceEditor({
     () => selectedVideoReferenceOptions(options, selectedReferences),
     [options, selectedReferences],
   );
+  const selectedKeys = useMemo(
+    () => new Set((selectedReferences || []).map(videoReferenceKey)),
+    [selectedReferences],
+  );
+  const quickOptions = useMemo(() => {
+    const quickKinds = new Set(["provider_managed_asset", "depth_control"]);
+    const quickKeys = new Set();
+    return [...selectedOptions, ...options.filter((item) => quickKinds.has(item.reference_kind))]
+      .filter((item) => {
+        const key = videoReferenceKey(item);
+        if (!key || quickKeys.has(key)) return false;
+        quickKeys.add(key);
+        return true;
+      });
+  }, [options, selectedOptions]);
   const mentionedKeys = useMemo(
     () => new Set((videoPromptMentions || []).map(videoReferenceKey)),
     [videoPromptMentions],
@@ -68,11 +87,11 @@ export function VideoPromptReferenceEditor({
   const filteredOptions = useMemo(() => {
     if (!mentionMenu) return [];
     const query = mentionMenu.query.trim().toLocaleLowerCase("zh-CN");
-    return selectedOptions.filter((item) => (
+    return quickOptions.filter((item) => (
       !mentionedKeys.has(videoReferenceKey(item))
       && (!query || `${item.label} ${item.search_text}`.toLocaleLowerCase("zh-CN").includes(query))
     ));
-  }, [mentionMenu, mentionedKeys, selectedOptions]);
+  }, [mentionMenu, mentionedKeys, quickOptions]);
   const highlightSegments = useMemo(
     () => buildVideoPromptHighlightSegments(value, videoPromptMentions),
     [value, videoPromptMentions],
@@ -164,6 +183,31 @@ export function VideoPromptReferenceEditor({
   }
 
   function handlePromptKeyDown(event) {
+    if (!event.isComposing && !event.nativeEvent?.isComposing) {
+      const deletion = deleteVideoMentionAtSelection(value, videoPromptMentions, {
+        key: event.key,
+        selectionStart: event.currentTarget.selectionStart,
+        selectionEnd: event.currentTarget.selectionEnd,
+      });
+      if (deletion) {
+        event.preventDefault();
+        onChange({
+          videoPrompt: deletion.value,
+          videoPromptMentions: normalizeVideoPromptMentions(
+            deletion.value,
+            videoPromptMentions,
+            options,
+          ),
+        });
+        setMentionMenu(null);
+        requestAnimationFrame(() => {
+          promptRef.current?.focus();
+          promptRef.current?.setSelectionRange(deletion.cursor, deletion.cursor);
+          setSelectionActive(false);
+        });
+        return;
+      }
+    }
     if (event.key === "Escape" && mentionMenu) {
       event.preventDefault();
       setMentionMenu(null);
@@ -184,9 +228,9 @@ export function VideoPromptReferenceEditor({
     }
   }
 
-  function insertMention(option) {
-    if (!mentionMenu) return;
-    const insertion = insertVideoMentionIntoPrompt(value, mentionMenu, option);
+  function insertMention(option, range = mentionMenu) {
+    if (!range) return;
+    const insertion = insertVideoMentionIntoPrompt(value, range, option);
     const nextMentions = normalizeVideoPromptMentions(insertion.value, [
       ...(videoPromptMentions || []).filter(
         (item) => videoReferenceKey(item) !== videoReferenceKey(option),
@@ -203,6 +247,7 @@ export function VideoPromptReferenceEditor({
       videoPrompt: insertion.value,
       videoPromptMentions: nextMentions,
       requiredInputSource: requiredSourceForVideoMention(option),
+      selectedReferences: ensureVideoGenerationReference(selectedReferences, option),
     });
     setMentionMenu(null);
     requestAnimationFrame(() => {
@@ -212,9 +257,56 @@ export function VideoPromptReferenceEditor({
     });
   }
 
+  function focusExistingMention(option) {
+    const token = videoMentionToken(option);
+    const start = String(value || "").indexOf(token);
+    if (start < 0) return;
+    promptRef.current?.focus();
+    promptRef.current?.setSelectionRange(start, start + token.length);
+    setSelectionActive(true);
+  }
+
   return (
     <div className="video-prompt-reference-field">
       <label htmlFor={editorId}>视频提示词</label>
+      {quickOptions.length > 0 && (
+        <div className="video-prompt-quick-references" aria-label="视频提示词快捷引用">
+          <span>快捷引用</span>
+          <div>
+            {quickOptions.map((option) => {
+              const mentioned = mentionedKeys.has(videoReferenceKey(option));
+              const selected = selectedKeys.has(videoReferenceKey(option));
+              return (
+                <button
+                  aria-pressed={mentioned}
+                  className={`${mentioned ? "active" : ""}${selected ? " selected" : ""}`.trim()}
+                  key={videoReferenceKey(option)}
+                  onClick={() => {
+                    if (mentioned) {
+                      focusExistingMention(option);
+                    } else {
+                      insertMention(option, {
+                        start: String(value || "").length,
+                        end: String(value || "").length,
+                      });
+                    }
+                  }}
+                  title={mentioned
+                    ? "已引用，点击定位"
+                    : selected
+                      ? "插入到提示词末尾"
+                      : "加入生成参考并插入提示词"}
+                  type="button"
+                >
+                  <small>{videoReferenceRoleLabel(option)}</small>
+                  <strong>@{option.label}</strong>
+                  <em>{mentioned ? "已引用" : selected ? "点击插入" : "加入并引用"}</em>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div
         className={`video-prompt-reference-editor${selectionActive ? " selecting" : ""}`}
         ref={editorRootRef}
@@ -252,7 +344,7 @@ export function VideoPromptReferenceEditor({
             <header><MagnifyingGlass size={15} /><span>选择生成输入</span></header>
             <div>
               {filteredOptions.length === 0 ? (
-                <p>{selectedOptions.length === 0 ? "请先通过 +参考 添加图片、角色、视频或深度输入" : "没有匹配或尚未引用的素材"}</p>
+                <p>{quickOptions.length === 0 ? "请先绑定托管角色或通过 +参考 添加素材" : "没有匹配或尚未引用的素材"}</p>
               ) : filteredOptions.map((option, index) => (
                 <button
                   aria-selected={activeOptionIndex === index}
@@ -276,7 +368,7 @@ export function VideoPromptReferenceEditor({
         )}
       </div>
       <small className="video-prompt-reference-help">
-        输入 @ 选择具体素材；名称用于阅读，系统会保存对象 ID，并按当前模型编译成真实输入参数。
+        输入 @ 或点击上方快捷引用；系统按对象 ID 绑定素材，并自动附加与其职责对应的生成约束。
       </small>
     </div>
   );

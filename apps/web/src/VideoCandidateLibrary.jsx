@@ -189,6 +189,7 @@ export function VideoCandidateLibrary({
     0,
   );
   const approvedCandidateId = plan?.approved_video_candidate_id || "";
+  const oldInput = plan?.video_status === "stale";
   const archivableIds = activeCandidates
     .filter((candidate) => candidate.id !== approvedCandidateId)
     .map((candidate) => candidate.id);
@@ -301,11 +302,14 @@ export function VideoCandidateLibrary({
     );
     const isPreviewing = candidate.id === displayedCandidate?.id;
     const sequence = candidate.sequence || candidate.ordinal;
-    const stateLabel = isApproved
+    const candidateStateLabel = isApproved
       ? "已采用"
       : candidate.status === "selected"
         ? "已选择"
         : "可采用";
+    const stateLabel = oldInput && !isApproved
+      ? `${candidateStateLabel} · 旧输入`
+      : candidateStateLabel;
     return (
       <button
         aria-label={`视频 ${sequence}，${title}，${stateLabel}`}
@@ -520,6 +524,8 @@ export function VideoCandidateLibrary({
             plan.video_status === "approved"
             && approvedCandidateId === displayedCandidate.id
               ? "approved"
+              : oldInput
+                ? "old-input"
               : displayedCandidate.status === "selected"
                 ? "selected"
                 : ""
@@ -527,6 +533,8 @@ export function VideoCandidateLibrary({
             {plan.video_status === "approved"
             && approvedCandidateId === displayedCandidate.id
               ? "已采用"
+              : oldInput
+                ? `${displayedCandidate.status === "selected" ? "已选择" : "可采用"} · 旧输入`
               : displayedCandidate.status === "selected"
                 ? "已选择"
                 : "可采用"}

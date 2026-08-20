@@ -2591,6 +2591,52 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             assert approved.approval_event is not None
             assert approved.approval_event.target_kind == "video"
 
+            if index == 0:
+                stale = await service.update_shot(
+                    shot.plan.id,
+                    ShotPlanUpdate(
+                        expected_revision_id=approved.shot.current_revision_id,
+                        confirm_stale=True,
+                        video_prompt=(
+                            "镜头缓慢向人物推进，人物自然抬手展示产品，结尾停顿。"
+                        ),
+                    ),
+                )
+                assert stale.plan.video_status == WorkflowItemStatus.STALE
+                stale_gate = await service.gate_status(detail.project.id)
+                assert "有 1 个分镜使用旧输入，尚未确认采用" in (
+                    stale_gate.blocker_messages
+                )
+
+                selected_old_input = await service.select_candidate(
+                    candidate.id,
+                    CandidateSelectRequest(
+                        expected_revision_id=stale.current_revision_id,
+                    ),
+                )
+                assert selected_old_input.candidate.status == GenerationCandidateStatus.SELECTED
+                assert selected_old_input.shot.plan.video_status == WorkflowItemStatus.STALE
+
+                with pytest.raises(ProductionServiceError) as stale_confirmation:
+                    await service.approve_candidate(
+                        candidate.id,
+                        CandidateApprovalRequest(
+                            expected_revision_id=selected_old_input.shot.current_revision_id,
+                            decision=ApprovalDecision.APPROVED,
+                        ),
+                    )
+                assert stale_confirmation.value.code == "stale_input_confirmation_required"
+
+                approved = await service.approve_candidate(
+                    candidate.id,
+                    CandidateApprovalRequest(
+                        expected_revision_id=selected_old_input.shot.current_revision_id,
+                        decision=ApprovalDecision.APPROVED,
+                        confirm_stale_input=True,
+                    ),
+                )
+                assert approved.shot.plan.video_status == WorkflowItemStatus.APPROVED
+
             # The last shot intentionally skips the legacy preparation record. An
             # approved candidate must still be allowed into the independent editor.
             if index == len(shots) - 1:

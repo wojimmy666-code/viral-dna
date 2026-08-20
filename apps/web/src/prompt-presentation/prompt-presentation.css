@@ -1,0 +1,131 @@
+.prompt-section-view {
+  width: min(100%, 78ch);
+  min-width: 0;
+  display: grid;
+  gap: 1rem;
+  color: var(--text-secondary);
+  font-size: var(--type-body-size);
+  line-height: var(--type-leading-copy);
+}
+
+.prompt-section-block {
+  min-width: 0;
+  display: grid;
+  gap: 0.625rem;
+}
+
+.prompt-section-block + .prompt-section-block {
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.prompt-section-block h5 {
+  margin: 0;
+  color: var(--purple-dark);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+  line-height: var(--type-leading-ui);
+}
+
+.prompt-section-block p {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--type-body-size);
+  line-height: var(--type-leading-copy);
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.prompt-section-intro p {
+  color: var(--text-primary);
+}
+
+.prompt-field-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.prompt-field-list > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.375rem 0;
+}
+
+.prompt-field-list > div + div {
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.prompt-field-list dt,
+.prompt-field-list dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.prompt-field-list dt {
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+}
+
+.prompt-field-list dd {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.prompt-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.prompt-timeline > li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 6rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+}
+
+.prompt-timeline > li + li {
+  border-top: 1px solid var(--line);
+}
+
+.prompt-timeline time {
+  width: fit-content;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.375rem;
+  color: var(--purple-dark);
+  background: var(--purple-soft);
+  font-family: var(--font-family-mono);
+  font-size: var(--type-label-size);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--type-weight-semibold);
+  white-space: nowrap;
+}
+
+.prompt-timeline > li > div {
+  min-width: 0;
+  display: grid;
+  gap: 0.375rem;
+}
+
+@media (max-width: 760px) {
+  .prompt-timeline > li {
+    grid-template-columns: 1fr;
+    gap: 0.375rem;
+  }
+
+  .prompt-field-list > div {
+    grid-template-columns: 3.5rem minmax(0, 1fr);
+    gap: 0.625rem;
+  }
+}

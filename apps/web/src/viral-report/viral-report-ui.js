@@ -5,19 +5,16 @@ export const STRATEGY_META = Object.freeze({
     label: "结构忠实复刻",
     tone: "faithful",
     changeLevel: "低",
-    goal: "最大限度复现原片的观看节奏和镜头关系",
   },
   differentiated: {
     label: "差异化同构",
     tone: "differentiated",
     changeLevel: "中",
-    goal: "保留流量功能，建立新的视觉记忆点",
   },
   enhanced: {
     label: "强化改进版",
     tone: "enhanced",
     changeLevel: "高",
-    goal: "重排信息密度，强化首屏钩子与结尾兑现",
   },
 });
 

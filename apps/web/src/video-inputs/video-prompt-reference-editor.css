@@ -6,6 +6,90 @@
   display: block;
 }
 
+.video-prompt-quick-references {
+  width: min(100%, 90ch);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 10px;
+  margin: 7px 0 9px;
+}
+
+.video-prompt-quick-references > span {
+  padding-top: 6px;
+  color: #8c8697;
+  font-size: var(--production-type-caption, 12px);
+  font-weight: 600;
+}
+
+.video-prompt-quick-references > div {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.video-prompt-quick-references button {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid #ded9ed;
+  border-radius: 7px;
+  color: #5f5869;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.video-prompt-quick-references button.selected:not(.active) {
+  border-color: #cfc8ea;
+  background: #faf9ff;
+}
+
+.video-prompt-quick-references button:hover,
+.video-prompt-quick-references button:focus-visible {
+  border-color: #8e80ef;
+  outline: none;
+}
+
+.video-prompt-quick-references button.active {
+  border-color: #d7d0ff;
+  color: #5947dc;
+  background: #f2efff;
+}
+
+.video-prompt-quick-references button small {
+  color: #918a9b;
+  font-size: var(--production-type-caption, 12px);
+  font-weight: 500;
+}
+
+.video-prompt-quick-references button strong {
+  min-width: 0;
+  max-width: 34ch;
+  overflow: hidden;
+  font-size: var(--production-type-caption, 12px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-prompt-quick-references button em {
+  padding-left: 6px;
+  border-left: 1px solid #ded9ed;
+  color: #81798b;
+  font-size: var(--production-type-caption, 12px);
+  font-style: normal;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.video-prompt-quick-references button.active em {
+  border-color: #d7d0ff;
+  color: #5947dc;
+}
+
 .video-prompt-reference-editor {
   width: min(100%, 90ch);
   min-width: 0;
@@ -182,6 +266,14 @@
 }
 
 @media (max-width: 620px) {
+  .video-prompt-quick-references {
+    grid-template-columns: 1fr;
+  }
+
+  .video-prompt-quick-references > span {
+    padding-top: 0;
+  }
+
   .video-prompt-mention-menu {
     width: calc(100% - 12px);
     left: 6px;

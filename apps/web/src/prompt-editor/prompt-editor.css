@@ -615,33 +615,18 @@
   gap: 12px;
 }
 
-.prompt-legacy-preview pre {
-  margin: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text-secondary);
-  font: inherit;
-  line-height: var(--type-leading-copy);
-}
-
 .prompt-legacy-preview .prompt-editor-secondary-action {
   justify-self: end;
 }
 
-.prompt-compiled-preview pre {
+.prompt-compiled-content {
   max-height: 28rem;
-  margin: 0;
   padding: 0.875rem;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 0.5rem;
   color: var(--text-secondary);
   background: #f8f8fb;
-  font-family: inherit;
-  font-size: var(--type-label-size);
-  line-height: var(--type-leading-copy);
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
 }
 
 .prompt-compiled-preview > div > button {

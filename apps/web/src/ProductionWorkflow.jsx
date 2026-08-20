@@ -2557,6 +2557,7 @@ export function ProductionHub({
 
   async function approveVideoCandidate(candidateId) {
     if (!shotDetail?.plan) return;
+    const usesOldInput = shotDetail.plan.video_status === "stale";
     const replacingApproved = (
       shotDetail.plan.video_status === "approved"
       && shotDetail.plan.approved_video_candidate_id !== candidateId
@@ -2571,6 +2572,12 @@ export function ProductionHub({
     ) {
       return;
     }
+    if (
+      usesOldInput
+      && !window.confirm("该候选基于修改前的分镜输入生成。确认仍采用当前画面吗？")
+    ) {
+      return;
+    }
     await executeAction(async () => {
       await request(`/generation-candidates/${candidateId}/approvals`, {
         method: "POST",
@@ -2579,6 +2586,7 @@ export function ProductionHub({
           expected_revision_id: detail.project.current_revision_id,
           decision: "approved",
           confirm_downstream_stale: hasDownstreamImpact,
+          confirm_stale_input: usesOldInput,
         }),
       });
       await Promise.all([

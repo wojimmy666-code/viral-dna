@@ -3182,6 +3182,7 @@ class CandidateApprovalRequest(BaseModel):
     decision: ApprovalDecision
     reason: str | None = Field(default=None, max_length=1000)
     confirm_downstream_stale: bool = False
+    confirm_stale_input: bool = False
 
     @model_validator(mode="after")
     def require_candidate_rejection_reason(self) -> CandidateApprovalRequest:

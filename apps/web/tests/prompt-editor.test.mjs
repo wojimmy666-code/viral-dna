@@ -55,8 +55,11 @@ test("prompt editing separates visual facts, timeline, transition, and compiled 
   assert.match(timeline, /新增阶段/);
   assert.match(timeline, /主体动作/);
   assert.match(timeline, /镜头运动/);
-  assert.match(css, /\.prompt-compiled-preview pre\s*\{[^}]*white-space:\s*pre-wrap/s);
-  assert.match(css, /\.prompt-legacy-preview pre\s*\{[^}]*white-space:\s*pre-wrap/s);
+  assert.match(shot, /import \{ PromptSectionView \} from "\.\.\/prompt-presentation\/PromptSectionView\.jsx"/);
+  assert.match(shot, /<PromptSectionView introTitle="提示词正文" prompt=\{shot\.prompt\} \/>/);
+  assert.match(shot, /<PromptSectionView className="prompt-compiled-content" introTitle="模型输入" prompt=\{shot\.prompt\} \/>/);
+  assert.doesNotMatch(shot, /<pre>\{shot\.prompt\}<\/pre>/);
+  assert.match(css, /\.prompt-compiled-content\s*\{[^}]*max-height:\s*28rem[^}]*overflow:\s*auto/s);
 });
 
 test("prompt draft helpers preserve pending edits during server revision merges", async () => {

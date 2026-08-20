@@ -26,6 +26,7 @@ import { DepthControlPanel } from "./video-controls/DepthControlPanel.jsx";
 import { useDepthControlJob } from "./video-controls/depth/useDepthControlJob.js";
 import { GenerationReferenceComposer } from "./video-inputs/reference-composer/GenerationReferenceComposer.jsx";
 import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
+import { VideoPromptReferencePolicy } from "./video-inputs/VideoPromptReferencePolicy.jsx";
 import {
   removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
@@ -40,6 +41,10 @@ const ACTIVE_RUN_STATUSES = new Set([
   "running",
   "cancellation_requested",
 ]);
+
+function videoWorkflowStatusLabel(status) {
+  return status === "stale" ? "旧输入" : workflowStatusLabel(status);
+}
 
 function approvedVisualBeatFrames(detail) {
   const beats = [...(detail?.plan?.visual_beats || [])]
@@ -127,7 +132,7 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
                 <small>{plan.start_seconds.toFixed(1)}s–{plan.end_seconds.toFixed(1)}s · {plan.duration_seconds.toFixed(1)}s</small>
               </span>
               <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
-                {workflowStatusLabel(plan.video_status)}
+                {videoWorkflowStatusLabel(plan.video_status)}
               </span>
             </button>
           );
@@ -699,7 +704,19 @@ export function ShotVideoWorkspace({
         report={continuityReport}
       />
 
-      {error && <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>}
+      {error && !String(error).includes("分镜输入已修改") && (
+        <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>
+      )}
+
+      {plan.video_status === "stale" && (
+        <div className="shot-video-input-version-notice" role="status">
+          <WarningCircle size={18} />
+          <div>
+            <strong>分镜输入已更新</strong>
+            <span>当前候选基于修改前的输入生成，仍可继续使用；如需匹配最新输入，也可以重新生成。</span>
+          </div>
+        </div>
+      )}
 
       <div className="shot-video-layout">
         <ShotVideoList
@@ -716,7 +733,7 @@ export function ShotVideoWorkspace({
               <strong>{plan.start_seconds.toFixed(1)}s–{plan.end_seconds.toFixed(1)}s</strong>
             </div>
             <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
-              {workflowStatusLabel(plan.video_status)}
+              {videoWorkflowStatusLabel(plan.video_status)}
             </span>
           </header>
 
@@ -884,10 +901,12 @@ export function ShotVideoWorkspace({
                 videoPrompt,
                 videoPromptMentions,
                 requiredInputSource,
+                selectedReferences,
               }) => setVideoDraft((current) => ({
                 ...current,
                 videoPrompt,
                 videoPromptMentions,
+                selectedReferences: selectedReferences || current.selectedReferences,
                 inputSources: requiredInputSource
                   ? Array.from(new Set([
                       ...(current.inputSources || []),
@@ -901,6 +920,11 @@ export function ShotVideoWorkspace({
               value={videoDraft.videoPrompt}
               videoPromptMentions={videoDraft.videoPromptMentions || []}
               videoReferenceBindings={plan?.video_reference_bindings || []}
+            />
+            <VideoPromptReferencePolicy
+              onNotice={onNotice}
+              prompt={videoDraft.videoPrompt}
+              references={videoDraft.selectedReferences || []}
             />
             <details className="shot-video-negative-constraints">
               <summary>视频负面约束（可选）</summary>
