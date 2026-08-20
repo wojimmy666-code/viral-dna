@@ -125,10 +125,10 @@ test("shot prompts recover semantic sections from flattened legacy text", async 
 test("structured prompt typography uses the report type system and responsive timeline", async () => {
   const source = await readFile(PROMPT_PRESENTATION_CSS_URL, "utf8");
   assert.match(source, /\.prompt-section-view\s*\{[^}]*width:\s*min\(100%, 78ch\)[^}]*font-size:\s*var\(--type-body-size\)[^}]*line-height:\s*var\(--type-leading-copy\)/s);
-  assert.match(source, /\.prompt-section-block h5\s*\{[^}]*color:\s*var\(--purple-dark\)[^}]*font-size:\s*var\(--type-label-size\)/s);
+  assert.match(source, /\.prompt-section-block h5\s*\{[^}]*color:\s*var\(--accent-hover\)[^}]*font-size:\s*var\(--type-label-size\)/s);
   assert.match(source, /\.prompt-field-list > div\s*\{[^}]*grid-template-columns:\s*4rem minmax\(0, 1fr\)/s);
   assert.match(source, /\.prompt-timeline > li\s*\{[^}]*grid-template-columns:\s*6rem minmax\(0, 1fr\)/s);
-  assert.match(source, /\.prompt-timeline time\s*\{[^}]*color:\s*var\(--purple-dark\)[^}]*background:\s*var\(--purple-soft\)/s);
+  assert.match(source, /\.prompt-timeline time\s*\{[^}]*color:\s*var\(--accent-hover\)[^}]*background:\s*var\(--accent-soft\)/s);
   assert.match(source, /@media \(max-width: 760px\)[\s\S]*\.prompt-timeline > li\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 

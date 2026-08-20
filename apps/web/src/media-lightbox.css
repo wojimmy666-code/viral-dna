@@ -28,7 +28,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 10px 14px;
-  color: #f7f6fa;
+  color: var(--text-on-dark);
   background: #222129;
 }
 
@@ -51,7 +51,7 @@
 
 .media-lightbox-panel > header small,
 .media-lightbox-panel > footer {
-  color: #b9b6c3;
+  color: var(--text-on-dark-muted);
   font-size: var(--type-caption-size);
 }
 
@@ -65,7 +65,7 @@
   padding: 7px 10px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 8px;
-  color: #f7f6fa;
+  color: var(--text-on-dark);
   background: #302e39;
   cursor: pointer;
   font: inherit;
@@ -111,7 +111,7 @@
 }
 
 .media-lightbox-canvas > p {
-  color: #c8c5cf;
+  color: var(--text-on-dark-muted);
 }
 
 .media-lightbox-nav {
@@ -136,7 +136,7 @@
 
 .media-lightbox-panel > footer output {
   min-width: 52px;
-  color: #f7f6fa;
+  color: var(--text-on-dark);
   text-align: center;
 }
 

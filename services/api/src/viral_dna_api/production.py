@@ -147,8 +147,7 @@ from .production_media import (
     map_timed_text,
     playback_alignment,
 )
-from .quality.continuity_service import ContinuityService, ContinuityServiceError
-from .quality.contracts import ContinuityReportStatus
+from .quality.continuity_service import ContinuityService
 from .storage_errors import IncompatibleShotPlanSchemaError
 from .video_generation import (
     OrderedReferenceFrame,
@@ -2267,8 +2266,11 @@ class ProductionService:
             for candidate in candidates
             if candidate.kind == kind
             and candidate.thumbnail_relative_path is not None
-            and candidate.status
-            not in {GenerationCandidateStatus.REJECTED, GenerationCandidateStatus.ARCHIVED}
+            and candidate.status != GenerationCandidateStatus.ARCHIVED
+            and (
+                kind == GenerationKind.VIDEO
+                or candidate.status != GenerationCandidateStatus.REJECTED
+            )
         ]
         if not available:
             return None
@@ -6374,13 +6376,14 @@ class ProductionService:
                 not in {
                     GenerationCandidateStatus.READY,
                     GenerationCandidateStatus.SELECTED,
+                    GenerationCandidateStatus.REJECTED,
                 }
             ]
             if unavailable:
                 raise _fail(
                     409,
                     "video_candidate_archive_unavailable",
-                    "所选视频包含已退回或已归档候选，请刷新后重试",
+                    "所选视频包含已归档候选，请刷新后重试",
                 )
 
             now = utc_now()
@@ -6404,6 +6407,7 @@ class ProductionService:
                     in {
                         GenerationCandidateStatus.READY,
                         GenerationCandidateStatus.SELECTED,
+                        GenerationCandidateStatus.REJECTED,
                     }
                 )
 
@@ -6688,6 +6692,9 @@ class ProductionService:
             direct_image_approval = (
                 run.kind == GenerationKind.IMAGE and payload.decision == ApprovalDecision.APPROVED
             )
+            direct_video_approval = (
+                run.kind == GenerationKind.VIDEO and payload.decision == ApprovalDecision.APPROVED
+            )
             replacing_image_approval = (
                 direct_image_approval
                 and target_status == WorkflowItemStatus.APPROVED
@@ -6707,7 +6714,7 @@ class ProductionService:
                 and plan.approved_video_candidate_id != candidate.id
             )
             replacing_approved = replacing_image_approval or replacing_video_approval
-            direct_approval = direct_image_approval or replacing_video_approval
+            direct_approval = direct_image_approval or direct_video_approval
             if (
                 target_status == WorkflowItemStatus.APPROVED
                 and payload.decision == ApprovalDecision.APPROVED
@@ -6732,10 +6739,14 @@ class ProductionService:
                 and candidate.status != GenerationCandidateStatus.SELECTED
             ):
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
-            if candidate.status == GenerationCandidateStatus.REJECTED:
+            if (
+                candidate.status == GenerationCandidateStatus.REJECTED
+                and not direct_video_approval
+            ):
                 raise _fail(409, "candidate_unavailable", "已退回候选不能审批")
             if candidate.status == GenerationCandidateStatus.ARCHIVED and (
-                not direct_image_approval or is_user_deleted_candidate(candidate)
+                not (direct_image_approval or direct_video_approval)
+                or is_user_deleted_candidate(candidate)
             ):
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
             if (
@@ -7488,20 +7499,6 @@ class ProductionService:
                 if video_stage
                 else f"有 {len(stale)} 个分镜结果已过期"
             )
-        continuity_report = await self.continuity.latest_report(project.id) if video_stage else None
-        continuity_status = "not_run"
-        continuity_verification_state = None
-        continuity_blocker_count = 0
-        continuity_warning_count = 0
-        if continuity_report is not None:
-            continuity_status = continuity_report.status.value
-            continuity_verification_state = continuity_report.verification_state.value
-            continuity_blocker_count = continuity_report.blocker_count
-            continuity_warning_count = continuity_report.warning_count
-            if continuity_report.status == ContinuityReportStatus.STALE:
-                blockers.append("相邻分镜连续性质检已过期，请重新检查")
-            elif continuity_report.blocker_count:
-                blockers.append(f"连续性质检仍有 {continuity_report.blocker_count} 个阻断问题")
         return ProductionGateStatus(
             project_id=project.id,
             current_step=project.active_step,
@@ -7512,10 +7509,10 @@ class ProductionService:
             prepared_shot_count=len(prepared),
             quality_warning_shot_count=len(quality_warnings),
             stale_shot_count=len(stale),
-            continuity_status=continuity_status,
-            continuity_verification_state=continuity_verification_state,
-            continuity_blocker_count=continuity_blocker_count,
-            continuity_warning_count=continuity_warning_count,
+            continuity_status="not_run",
+            continuity_verification_state=None,
+            continuity_blocker_count=0,
+            continuity_warning_count=0,
             blocker_messages=blockers,
         )
 
@@ -7745,11 +7742,6 @@ class ProductionService:
                     "unsupported_target_step",
                     f"当前阶段只能推进到 {expected_target.value}",
                 )
-            if payload.target_step == ProductionStep.EDITING:
-                try:
-                    await self.continuity.ensure_current_report(project.id)
-                except ContinuityServiceError as exc:
-                    raise _fail(exc.status_code, exc.code, str(exc)) from exc
             gate = await self.gate_status(project.id)
             if not gate.allowed:
                 raise _fail(

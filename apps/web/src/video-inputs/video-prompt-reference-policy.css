@@ -19,7 +19,7 @@
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
-  color: var(--production-text-secondary, #625d6d);
+  color: var(--text-secondary);
   cursor: pointer;
   list-style: none;
 }
@@ -41,24 +41,24 @@
 }
 
 .video-reference-policy summary strong {
-  color: var(--production-text-primary, #292531);
-  font-size: var(--production-type-secondary, 14px);
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
   line-height: 1.4;
 }
 
 .video-reference-policy summary small {
-  color: #8d8798;
-  font-size: var(--production-type-caption, 12px);
-  font-weight: 400;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-regular);
 }
 
 .video-reference-policy-count {
   padding: 3px 7px;
   border-radius: 999px;
-  color: #5d4bd8;
+  color: var(--accent);
   background: #eeebff;
-  font-size: var(--production-type-caption, 12px);
-  font-weight: 700;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
   white-space: nowrap;
 }
 
@@ -92,32 +92,32 @@
 }
 
 .video-reference-policy-content article header span {
-  color: #5d4bd8;
-  font-size: var(--production-type-caption, 12px);
-  font-weight: 700;
+  color: var(--accent);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .video-reference-policy-content code {
   max-width: 100%;
   overflow: hidden;
-  color: #5c5666;
+  color: var(--text-secondary);
   font-family: var(--font-family-ui);
-  font-size: var(--production-type-caption, 12px);
+  font-size: var(--type-caption-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .video-reference-policy-content article > strong {
-  color: var(--production-text-primary, #292531);
-  font-size: var(--production-type-secondary, 14px);
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
   line-height: 1.5;
 }
 
 .video-reference-policy-content p {
   margin: 0;
-  color: var(--production-text-secondary, #625d6d);
-  font-size: var(--production-type-secondary, 14px);
-  font-weight: 400;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-regular);
   line-height: 1.75;
 }
 
@@ -142,11 +142,11 @@
   padding: 7px 10px;
   border: 1px solid #dcd8ea;
   border-radius: 8px;
-  color: #625b70;
+  color: var(--text-secondary);
   background: #fff;
   font: inherit;
-  font-size: var(--production-type-caption, 12px);
-  font-weight: 700;
+  font-size: var(--type-body-size);
+  font-weight: var(--type-weight-semibold);
   cursor: pointer;
 }
 
@@ -158,7 +158,7 @@
 
 .video-reference-policy-actions button.primary {
   border-color: #6654df;
-  color: #fff;
+  color: var(--text-on-accent);
   background: #6654df;
 }
 

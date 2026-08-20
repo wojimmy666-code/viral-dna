@@ -3,12 +3,12 @@
   background: #fff;
   border: 1px solid #dcd9ef;
   border-radius: 10px;
-  color: #514b68;
+  color: var(--text-secondary);
   cursor: pointer;
   display: inline-flex;
   font: inherit;
-  font-size: .875rem;
-  font-weight: 600;
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
   gap: 6px;
   justify-content: center;
   min-height: 36px;
@@ -18,7 +18,7 @@
 
 .generated-asset-button:hover:not(:disabled) {
   border-color: #7562f5;
-  color: #5b46ef;
+  color: var(--accent);
 }
 
 .generated-asset-button:disabled {
@@ -29,5 +29,5 @@
 .generated-asset-button[data-asset-id] {
   background: #eff9f3;
   border-color: #ccebd8;
-  color: #258554;
+  color: var(--status-success-text);
 }

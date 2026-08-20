@@ -29,13 +29,13 @@
 
 .managed-asset-binding-heading strong,
 .managed-asset-binding-copy strong {
-  color: var(--ink, #20202a);
+  color: var(--text-primary);
 }
 
 .managed-asset-binding-heading small,
 .managed-asset-binding-copy span,
 .managed-asset-binding-copy small {
-  color: var(--muted, #777788);
+  color: var(--text-secondary);
 }
 
 .managed-asset-binding-icon,
@@ -44,7 +44,7 @@
   flex: 0 0 auto;
   place-items: center;
   overflow: hidden;
-  color: #5e4cf2;
+  color: var(--accent);
   background: #efecff;
 }
 
@@ -72,17 +72,17 @@
   margin-left: auto;
   padding: 4px 8px;
   border-radius: 999px;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .managed-asset-compatibility.ready {
-  color: #16784b;
+  color: var(--status-success-text);
   background: #e8f7ef;
 }
 
 .managed-asset-compatibility.warning {
-  color: #a05b16;
+  color: var(--status-warning-text);
   background: #fff1da;
 }
 
@@ -105,9 +105,9 @@
   min-height: 44px;
   border: 1px dashed #c9c3f7;
   border-radius: 11px;
-  color: #5e4cf2;
+  color: var(--accent);
   background: #fff;
-  font-weight: 650;
+  font-weight: var(--type-weight-semibold);
 }
 
 .managed-asset-picker-backdrop {
@@ -146,9 +146,9 @@
 }
 
 .managed-asset-picker-header span {
-  color: #5e4cf2;
-  font-size: 12px;
-  font-weight: 700;
+  color: var(--accent);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .managed-asset-picker-header h3,
@@ -157,7 +157,7 @@
 }
 
 .managed-asset-picker-header p {
-  color: #777788;
+  color: var(--text-secondary);
 }
 
 .managed-asset-kind-tabs {
@@ -171,13 +171,13 @@
   padding: 0 14px;
   border: 0;
   border-radius: 10px;
-  color: #6e6c7b;
+  color: var(--text-secondary);
   background: transparent;
-  font-weight: 650;
+  font-weight: var(--type-weight-semibold);
 }
 
 .managed-asset-kind-tabs button.active {
-  color: #5543ec;
+  color: var(--accent);
   background: #efecff;
 }
 
@@ -226,13 +226,13 @@
   padding: 0 10px;
   border: 0;
   border-radius: 9px;
-  color: #676575;
+  color: var(--text-secondary);
   background: transparent;
   text-align: left;
 }
 
 .managed-asset-group-list button.active {
-  color: #5543ec;
+  color: var(--accent);
   background: #ece9ff;
 }
 
@@ -267,7 +267,7 @@
   overflow: hidden;
   border: 1px solid #e1dfeb;
   border-radius: 12px;
-  color: #292832;
+  color: var(--text-primary);
   background: #fff;
   text-align: left;
 }
@@ -284,7 +284,7 @@
   place-items: center;
   width: 100%;
   aspect-ratio: 4 / 3;
-  color: #8b87a1;
+  color: var(--text-secondary);
   background: #f3f2f7;
 }
 
@@ -297,7 +297,7 @@
   height: 25px;
   place-items: center;
   border-radius: 50%;
-  color: #fff;
+  color: var(--text-on-accent);
   background: #5e4cf2;
 }
 
@@ -311,7 +311,7 @@
 
 .managed-asset-grid > button small {
   margin-top: 3px;
-  color: #7b788a;
+  color: var(--text-secondary);
 }
 
 .managed-asset-loading-grid span {
@@ -332,7 +332,7 @@
   place-content: center;
   justify-items: center;
   gap: 8px;
-  color: #777486;
+  color: var(--text-secondary);
   text-align: center;
 }
 
@@ -342,7 +342,7 @@
 }
 
 .managed-asset-picker-state.error {
-  color: #a53c4b;
+  color: var(--status-danger-text);
 }
 
 .managed-asset-picker-pagination {
@@ -351,7 +351,7 @@
   justify-content: space-between;
   padding: 10px 16px;
   border-top: 1px solid #eceaf2;
-  color: #777486;
+  color: var(--text-secondary);
 }
 
 .managed-asset-picker-pagination > div {

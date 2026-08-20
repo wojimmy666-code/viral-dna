@@ -13,9 +13,9 @@
   min-width: 0;
   min-height: 112px;
   padding: 14px;
-  border: 1px solid var(--line, #e3e4ef);
-  border-radius: 14px;
-  background: var(--surface, #fff);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-panel);
+  background: var(--surface-panel);
   color: inherit;
   display: grid;
   grid-template-columns: 36px minmax(0, 1fr) auto;
@@ -27,7 +27,7 @@
 
 .depth-mode-option:hover:not(:disabled),
 .depth-mode-option.selected {
-  border-color: var(--primary, #5b4cf5);
+  border-color: var(--accent);
   box-shadow: 0 0 0 3px rgb(91 76 245 / 10%);
 }
 
@@ -39,11 +39,11 @@
 .depth-mode-icon {
   width: 36px;
   height: 36px;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   display: grid;
   place-items: center;
-  color: var(--primary, #5b4cf5);
-  background: #f0edff;
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .depth-mode-copy {
@@ -53,34 +53,35 @@
 }
 
 .depth-mode-copy strong {
-  font-size: 15px;
+  font-size: var(--type-label-size);
 }
 
 .depth-mode-copy small {
-  color: var(--muted, #74798d);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
   line-height: 1.55;
 }
 
 .depth-mode-state {
   padding: 3px 7px;
-  border-radius: 999px;
-  background: #f1f2f6;
-  color: var(--muted, #74798d);
-  font-size: 12px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
   white-space: nowrap;
 }
 
 .depth-mode-state.available {
-  background: #eaf8ef;
-  color: #238253;
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
 }
 
 .depth-resolution-summary {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #238253;
-  font-size: 14px;
+  color: var(--status-success-text);
+  font-size: var(--type-label-size);
 }
 
 .depth-installation {
@@ -97,7 +98,7 @@
 .depth-installation progress {
   width: 100%;
   height: 8px;
-  accent-color: var(--primary, #5b4cf5);
+  accent-color: var(--accent);
 }
 
 .depth-settings-actions {

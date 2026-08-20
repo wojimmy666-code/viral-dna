@@ -31,10 +31,6 @@ const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
   "utf8",
 );
-const continuityPanelSource = readFileSync(
-  new URL("../src/ContinuityQualityPanel.jsx", import.meta.url),
-  "utf8",
-);
 const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
   "utf8",
@@ -56,6 +52,10 @@ const videoPromptReferenceEditorSource = readFileSync(
 );
 const videoPromptReferencePolicySource = readFileSync(
   new URL("../src/video-inputs/VideoPromptReferencePolicy.jsx", import.meta.url),
+  "utf8",
+);
+const videoPromptReferencePolicyStyles = readFileSync(
+  new URL("../src/video-inputs/video-prompt-reference-policy.css", import.meta.url),
   "utf8",
 );
 const generationReferenceComposerSource = readFileSync(
@@ -137,16 +137,19 @@ function cssRule(selector, source = workflowStyles) {
 
 test("keeps the production workspace on a readable semantic type ramp", () => {
   const readableSection = workflowStyles.slice(
-    workflowStyles.indexOf("/* ViralDNA Typography System 1.0"),
+    workflowStyles.indexOf("/* Production consumes the global ViralDNA UI System"),
   );
 
   assert.match(baseStyles, /--type-caption-size:\s*0\.75rem/);
   assert.match(baseStyles, /--type-label-size:\s*0\.875rem/);
-  assert.match(baseStyles, /--type-body-size:\s*1rem/);
+  assert.match(baseStyles, /--type-body-size:\s*0\.875rem/);
+  assert.match(baseStyles, /--type-heading-size:\s*1rem/);
+  assert.match(baseStyles, /--type-page-size:\s*1\.25rem/);
   assert.match(readableSection, /\.production-workspace\s*\{/);
-  assert.match(readableSection, /font-size:\s*var\(--production-type-body\)/);
-  assert.match(readableSection, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-size:\s*var\(--production-type-body\)/s);
+  assert.match(readableSection, /font-size:\s*var\(--type-body-size\)/);
+  assert.match(readableSection, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-size:\s*var\(--type-body-size\)/s);
   assert.match(readableSection, /\.production-export-status/);
+  assert.doesNotMatch(readableSection, /--production-(?:type|text|leading)-/);
   assert.doesNotMatch(readableSection, /font-size:\s*(?:7|8|9|10|11)px/);
 });
 
@@ -161,6 +164,28 @@ test("keeps video candidates usable when the shot input has changed", () => {
   assert.match(productionWorkflowSource, /confirm_stale_input: usesOldInput/);
   assert.match(workflowStyles, /\.shot-video-input-version-notice\s*\{/);
   assert.match(workflowStyles, /\.shot-candidate-current-detail > em\.old-input\s*\{/);
+});
+
+test("adopts a video candidate in one step without a selected intermediate state", () => {
+  assert.match(workspaceSource, /"采用此视频"/);
+  assert.match(workspaceSource, /"仍然采用"/);
+  assert.doesNotMatch(workspaceSource, /选择此候选|确认采用|onSelectCandidate/);
+  assert.doesNotMatch(productionWorkflowSource, /async function selectVideoCandidate/);
+  assert.doesNotMatch(candidateLibrarySource, /"已选择"/);
+  assert.match(productionWorkflowSource, /async function approveVideoCandidate/);
+});
+
+test("keeps rejected videos visible until the user explicitly deletes them", () => {
+  assert.match(workspaceSource, /function isUserDeletedVideoCandidate/);
+  assert.match(workspaceSource, /filter\(\(candidate\) => !isUserDeletedVideoCandidate\(candidate\)\)/);
+  assert.match(workspaceSource, /displayedCandidate\.status === "rejected"/);
+  assert.match(workspaceSource, />重新采用</);
+  assert.match(candidateLibrarySource, /shot-candidate-review-state rejected/);
+  assert.match(candidateLibrarySource, /"已退回"/);
+  assert.match(productionWorkflowSource, /已退回并保留在历史中，可随时重新采用/);
+  assert.match(candidateLibraryStyles, /\.shot-candidate-review-state\.rejected\s*\{/);
+  assert.match(workflowStyles, /\.shot-candidate-tile\.rejected\s*\{/);
+  assert.doesNotMatch(workspaceSource, /!\["rejected", "archived"\]\.includes/);
 });
 
 test("uses a compact generation command bar with upward anchored model and setting popovers", () => {
@@ -361,7 +386,8 @@ test("composes optional video inputs without exposing audio as a generation inpu
   assert.match(referencePickerSource, /选择托管人物/);
   assert.match(referencePickerSource, /创建或管理深度视频/);
   assert.match(referencePickerSource, /preferredWidth=\{480\}/);
-  assert.match(referenceComposerStyles, /--reference-picker-title-size:\s*0\.875rem/);
+  assert.match(referenceComposerStyles, /\.generation-reference-picker \.generation-reference-picker-heading h4\s*\{[^}]*font-size:\s*var\(--type-subheading-size\)/s);
+  assert.doesNotMatch(referenceComposerStyles, /--reference-picker-(?:title|body|meta)-size/);
   assert.match(referenceComposerStyles, /grid-template-columns:\s*44px minmax\(0, 1fr\) 22px/);
   assert.match(referenceComposerStyles, /min-height:\s*56px/);
   assert.doesNotMatch(generationReferenceComposerSource, /id:\s*"audio"/);
@@ -637,6 +663,14 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(videoPromptReferenceEditorSource, /event\.nativeEvent\?\.isComposing/);
   assert.match(videoPromptReferencePolicySource, /复制可编辑提示词/);
   assert.match(videoPromptReferencePolicySource, /复制模型输入/);
+  assert.match(
+    videoPromptReferencePolicyStyles,
+    /\.video-reference-policy-actions button\.primary\s*\{[^}]*color:\s*var\(--text-on-accent\)/s,
+  );
+  assert.match(
+    workflowStyles,
+    /\.production-workspace \.video-reference-policy-actions button:not\(\.primary\)\s*\{[^}]*color:\s*var\(--text-primary\)/s,
+  );
 });
 
 test("keeps provider failures in notifications and scopes model warnings", () => {
@@ -732,30 +766,18 @@ test("advances after approval and keeps editing controls in the video editor mod
   assert.match(videoEditorSource, /timeline\/background-audio/);
 });
 
-test("checks adjacent-shot continuity before entering the editor", () => {
-  assert.match(workspaceSource, /<ContinuityQualityPanel/);
-  assert.match(continuityPanelSource, /跨分镜连续性/);
-  assert.match(continuityPanelSource, /规则检查完成/);
-  assert.match(continuityPanelSource, /尚未执行 VLM 视觉验证/);
-  assert.match(continuityPanelSource, /标记为有意变化/);
-  assert.match(continuityPanelSource, /重新打开/);
-  assert.match(productionWorkflowSource, /continuity-reports\/latest/);
+test("removes automated continuity checks from entry to the editor", () => {
+  assert.doesNotMatch(workspaceSource, /ContinuityQualityPanel/);
+  assert.doesNotMatch(workspaceSource, /进入剪辑前，请人工检查/);
+  assert.doesNotMatch(productionWorkflowSource, /continuity-reports/);
+  assert.doesNotMatch(productionWorkflowSource, /ContinuityReport/);
+  assert.doesNotMatch(productionWorkflowSource, /runContinuityCheck/);
+  assert.doesNotMatch(productionWorkflowSource, /decideContinuityFinding/);
   assert.match(
     productionWorkflowSource,
-    /async function loadContinuityReport[\s\S]*error\?\.status === 404[\s\S]*return null/,
+    /async function advanceToEditing\(\)[\s\S]*target_step: "editing"/,
   );
-  assert.match(
-    productionWorkflowSource,
-    /Promise\.all\([\s\S]*loadContinuityReport\(projectId\)/,
-  );
-  assert.match(productionWorkflowSource, /async function runContinuityCheck/);
-  assert.match(productionWorkflowSource, /async function decideContinuityFinding/);
-  assert.match(
-    productionWorkflowSource,
-    /async function advanceToEditing\(\)[\s\S]*continuity-reports[\s\S]*target_step: "editing"/,
-  );
-  assert.match(workflowStyles, /\.continuity-quality-panel\s*\{/);
-  assert.match(workflowStyles, /\.continuity-quality-findings\s*\{/);
+  assert.doesNotMatch(workflowStyles, /\.shot-video-gate-summary\s*\{/);
 });
 
 test("shows clip quality warnings inside the independent editor inspector", () => {

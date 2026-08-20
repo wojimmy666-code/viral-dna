@@ -1,26 +1,27 @@
 import "./settings-primitives.css";
-
-function joinClasses(...values) {
-  return values.filter(Boolean).join(" ");
-}
+import {
+  joinClasses,
+  PageShell,
+  SurfacePanel,
+} from "../system/SystemPrimitives.jsx";
 
 export function SettingsShell({ children, className = "", ...props }) {
   return (
-    <main className={joinClasses("settings-surface", className)} {...props}>
+    <PageShell className={joinClasses("settings-surface", className)} {...props}>
       {children}
-    </main>
+    </PageShell>
   );
 }
 
 export function SettingsPanel({ busy, children, className = "", ...props }) {
   return (
-    <section
+    <SurfacePanel
       aria-busy={busy || undefined}
       className={joinClasses("settings-panel", className)}
       {...props}
     >
       {children}
-    </section>
+    </SurfacePanel>
   );
 }
 

@@ -20,23 +20,23 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  color: var(--purple);
-  font-size: 13px;
+  color: var(--accent);
+  font-size: var(--type-label-size);
   font-weight: var(--type-weight-bold);
-  letter-spacing: 0.02em;
+  letter-spacing: normal;
 }
 
 .platform-connections-header h1 {
   margin: 8px 0 6px;
-  font-size: 36px;
-  letter-spacing: -0.03em;
+  font-size: var(--type-page-size);
+  letter-spacing: normal;
 }
 
 .platform-connections-header p,
 .platform-method-heading p,
 .platform-editor header p {
   margin: 0;
-  color: var(--muted);
+  color: var(--text-secondary);
   line-height: 1.6;
 }
 
@@ -56,10 +56,10 @@
   padding: 9px 13px;
   border: 1px solid #cae8d5;
   border-radius: 11px;
-  color: #267a4d;
+  color: var(--status-success-text);
   background: #f3fbf6;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
   white-space: nowrap;
 }
 
@@ -69,29 +69,29 @@
   align-items: center;
   gap: 14px;
   padding: 18px 20px;
-  border: 1px solid var(--purple-border);
+  border: 1px solid var(--accent-border);
   border-radius: 16px;
   background: #f8f7ff;
-  color: var(--purple-dark);
+  color: var(--accent-hover);
   margin-bottom: 22px;
 }
 
 .platform-privacy-note strong {
   display: block;
   margin-bottom: 3px;
-  color: var(--ink);
+  color: var(--text-primary);
 }
 
 .platform-privacy-note p {
   margin: 0;
-  color: #6d6983;
-  font-size: 13px;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
   line-height: 1.55;
 }
 
 .platform-privacy-note > span {
-  color: #77718f;
-  font-size: 13px;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
   white-space: nowrap;
 }
 
@@ -106,9 +106,9 @@
   display: flex;
   flex-direction: column;
   padding: 24px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-default);
   border-radius: 16px;
-  background: var(--panel);
+  background: var(--surface-panel);
 }
 
 .platform-card-topline {
@@ -117,7 +117,7 @@
   gap: 14px;
   align-items: center;
   padding-bottom: 20px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .platform-logo {
@@ -126,8 +126,8 @@
   width: 48px;
   height: 48px;
   border-radius: 15px;
-  color: white;
-  font-size: 20px;
+  color: var(--text-on-accent);
+  font-size: var(--type-page-size);
   font-weight: var(--type-weight-bold);
   background: #181821;
 }
@@ -138,37 +138,37 @@
 
 .platform-card h2 {
   margin: 0 0 4px;
-  font-size: 21px;
+  font-size: var(--type-page-size);
 }
 
 .platform-card-topline p {
   margin: 0;
-  color: var(--muted);
-  font-size: 13px;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
 }
 
 .platform-health {
   padding: 6px 9px;
   border-radius: 999px;
   background: #f0f1f5;
-  color: #71717d;
-  font-size: 12px;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
   font-weight: var(--type-weight-bold);
   white-space: nowrap;
 }
 
 .platform-health.success {
-  color: #218052;
+  color: var(--status-success-text);
   background: #eaf8ef;
 }
 
 .platform-health.warning {
-  color: #9a6a1d;
+  color: var(--status-warning-text);
   background: #fff6de;
 }
 
 .platform-health.danger {
-  color: #bd4553;
+  color: var(--status-danger-text);
   background: #fff0f2;
 }
 
@@ -187,14 +187,14 @@
 
 .platform-card-metadata dt {
   margin-bottom: 5px;
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
 }
 
 .platform-card-metadata dd {
   margin: 0;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .platform-card-warning,
@@ -202,9 +202,9 @@
   padding: 11px 13px;
   border: 1px solid #f0d5a3;
   border-radius: 11px;
-  color: #8d621d;
+  color: var(--status-warning-text);
   background: #fff9eb;
-  font-size: 12px;
+  font-size: var(--type-caption-size);
   line-height: 1.55;
   margin-bottom: 14px;
 }
@@ -213,9 +213,9 @@
 .platform-field {
   display: grid;
   gap: 8px;
-  color: #4e4d5b;
-  font-size: 13px;
-  font-weight: 700;
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .platform-strategy-field {
@@ -236,7 +236,7 @@
   border: 1px solid #dedfe8;
   border-radius: 11px;
   padding: 0 38px 0 13px;
-  color: var(--ink);
+  color: var(--text-primary);
   background: white;
   appearance: none;
 }
@@ -250,7 +250,7 @@
   right: 13px;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--muted);
+  color: var(--text-secondary);
   pointer-events: none;
 }
 
@@ -271,19 +271,19 @@
   border-radius: 11px;
   padding: 0 14px;
   background: white;
-  font-weight: 700;
+  font-weight: var(--type-weight-semibold);
   cursor: pointer;
 }
 
 .platform-card-actions button.danger {
   margin-left: auto;
-  color: #b64855;
+  color: var(--status-danger-text);
 }
 
 .platform-primary-button {
-  border-color: var(--purple);
-  color: white;
-  background: var(--purple);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+  background: var(--accent);
 }
 
 .platform-empty-state {
@@ -296,7 +296,7 @@
 .platform-empty-state p {
   max-width: 390px;
   margin: 0 0 22px;
-  color: var(--muted);
+  color: var(--text-secondary);
   line-height: 1.7;
 }
 
@@ -307,9 +307,9 @@
   padding: 12px 14px;
   border: 1px solid #f0c5cb;
   border-radius: 11px;
-  color: #b63e4d;
+  color: var(--status-danger-text);
   background: #fff4f5;
-  font-size: 13px;
+  font-size: var(--type-label-size);
   line-height: 1.5;
   margin: 0 0 16px;
 }
@@ -340,18 +340,18 @@
   justify-content: space-between;
   gap: 18px;
   padding: 24px 26px 20px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .platform-editor header span {
-  color: var(--purple);
-  font-size: 12px;
+  color: var(--accent);
+  font-size: var(--type-caption-size);
   font-weight: var(--type-weight-bold);
 }
 
 .platform-editor header h2 {
   margin: 5px 0;
-  font-size: 25px;
+  font-size: var(--type-page-size);
 }
 
 .platform-editor header > button {
@@ -361,7 +361,7 @@
   height: 38px;
   border: 0;
   border-radius: 10px;
-  color: var(--muted);
+  color: var(--text-secondary);
   background: transparent;
   cursor: pointer;
 }
@@ -389,21 +389,21 @@
   min-height: 42px;
   border: 0;
   border-radius: 9px;
-  color: #6f6e7d;
+  color: var(--text-secondary);
   background: transparent;
-  font-weight: 700;
+  font-weight: var(--type-weight-semibold);
   cursor: pointer;
 }
 
 .platform-method-tabs button.active {
-  color: var(--purple);
+  color: var(--accent);
   background: white;
   box-shadow: 0 3px 10px rgba(32, 31, 52, 0.08);
 }
 
 .platform-method-panel {
   padding: 18px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-default);
   border-radius: 15px;
   margin-bottom: 18px;
 }
@@ -418,17 +418,17 @@
 
 .platform-method-heading h3 {
   margin: 0 0 4px;
-  font-size: 16px;
+  font-size: var(--type-subheading-size);
 }
 
 .platform-method-heading p {
-  font-size: 12px;
+  font-size: var(--type-caption-size);
 }
 
 .platform-method-heading button {
   min-height: 34px;
   padding: 0 10px;
-  font-size: 12px;
+  font-size: var(--type-caption-size);
   white-space: nowrap;
 }
 
@@ -443,8 +443,8 @@
   gap: 9px;
   align-items: flex-start;
   margin: 17px 0 13px;
-  color: #5f5d6d;
-  font-size: 12px;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
   line-height: 1.55;
   cursor: pointer;
 }
@@ -462,13 +462,13 @@
   margin-top: 1px;
   border: 1px solid #c8c8d4;
   border-radius: 5px;
-  color: white;
+  color: var(--text-on-accent);
   background: white;
 }
 
 .platform-consent input:checked + .platform-checkbox {
-  border-color: var(--purple);
-  background: var(--purple);
+  border-color: var(--accent);
+  background: var(--accent);
 }
 
 .platform-file-picker {
@@ -479,7 +479,7 @@
   padding: 17px;
   border: 1px dashed #c9c7df;
   border-radius: 13px;
-  color: var(--purple);
+  color: var(--accent);
   background: #fbfaff;
   text-align: left;
   cursor: pointer;
@@ -491,22 +491,22 @@
 }
 
 .platform-file-picker strong {
-  color: var(--ink);
+  color: var(--text-primary);
 }
 
 .platform-file-picker small {
-  color: var(--muted);
+  color: var(--text-secondary);
 }
 
 .platform-file-picker.selected {
   border-style: solid;
-  border-color: var(--purple-border);
+  border-color: var(--accent-border);
 }
 
 .platform-editor footer {
   justify-content: flex-end;
   padding: 16px 26px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-default);
   background: #fbfbfd;
 }
 

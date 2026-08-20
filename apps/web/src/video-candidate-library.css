@@ -32,11 +32,11 @@
   padding: 5px 8px;
   border: 0;
   border-radius: 7px;
-  color: #5f53ae;
-  background: #f3f0ff;
+  color: var(--text-primary);
+  background: #f4f4f7;
   cursor: pointer;
   font: inherit;
-  font-size: var(--type-caption-size);
+  font-size: var(--type-label-size);
   font-weight: var(--type-weight-semibold);
   white-space: nowrap;
 }
@@ -44,12 +44,12 @@
 .shot-candidate-library-heading > .shot-candidate-library-actions > button:hover,
 .candidate-recycle-panel button:hover,
 .candidate-lifecycle-confirm button:hover {
-  background: #ebe7ff;
+  background: #ececf1;
 }
 
 .shot-candidate-library-heading > .shot-candidate-library-actions > button.danger,
 .candidate-lifecycle-confirm button.danger {
-  color: #a23645;
+  color: var(--status-danger-text);
   background: #fff0f2;
 }
 
@@ -87,15 +87,15 @@
   gap: 12px;
   padding: 7px 10px;
   border-bottom: 1px solid #f0d9dd;
-  color: #6f343d;
+  color: var(--status-danger-text);
   background: #fff7f8;
-  font-size: var(--type-caption-size);
+  font-size: var(--type-label-size);
 }
 
 .candidate-lifecycle-confirm.restore {
   border-top: 1px solid #e2ddf5;
   border-bottom-color: #e2ddf5;
-  color: #504789;
+  color: var(--accent);
   background: #faf8ff;
 }
 
@@ -165,6 +165,23 @@
   z-index: 3;
 }
 
+.shot-candidate-review-state {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 3;
+  padding: 2px 5px;
+  border-radius: 5px;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
+  line-height: 1.35;
+}
+
+.shot-candidate-review-state.rejected {
+  color: var(--status-danger-text);
+  background: #fff0f2;
+}
+
 .shot-candidate-tile.lifecycle-locked {
   cursor: not-allowed;
 }
@@ -179,7 +196,7 @@
   display: grid;
   place-items: center;
   border-radius: 999px;
-  color: #26734e;
+  color: var(--status-success-text);
   background: #eaf7f0;
 }
 

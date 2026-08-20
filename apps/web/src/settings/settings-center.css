@@ -44,9 +44,9 @@
 
 .settings-account-chip {
   align-items: center;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-panel);
   display: flex;
   gap: 10px;
   padding: 10px 13px;
@@ -58,7 +58,7 @@
 }
 
 .settings-account-chip small {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
 }
 
@@ -82,7 +82,7 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-control);
   color: var(--text-secondary);
   display: flex;
   gap: 10px;
@@ -94,21 +94,21 @@
   font-size: var(--type-label-size);
   font-weight: var(--type-weight-regular);
   line-height: var(--type-leading-ui);
-  transition: background 150ms ease, color 150ms ease;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
 .settings-section-nav button:hover,
 .settings-section-nav button.active {
-  background: var(--purple-soft);
-  color: var(--purple);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .settings-section-nav button.active {
-  font-weight: 700;
+  font-weight: var(--type-weight-semibold);
 }
 
 .settings-nav-divider {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-default);
   margin: 8px 0;
 }
 
@@ -121,7 +121,7 @@
 }
 
 .settings-panel-heading {
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .settings-panel-heading h2 {
@@ -149,8 +149,8 @@
 
 .settings-money-input {
   align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   overflow: hidden;
@@ -158,8 +158,8 @@
 }
 
 .settings-money-input > span {
-  background: var(--canvas);
-  color: var(--purple);
+  background: var(--surface-subtle);
+  color: var(--accent);
   display: grid;
   height: 100%;
   place-items: center;
@@ -179,9 +179,9 @@
 
 .settings-boundary-note {
   align-items: flex-start;
-  background: #f0faf4;
-  border-bottom: 1px solid #d6eddf;
-  color: #237a4b;
+  background: var(--status-success-bg);
+  border-bottom: 1px solid var(--status-success-border);
+  color: var(--status-success-text);
   display: flex;
   gap: 9px;
   padding: 14px 24px;
@@ -202,7 +202,7 @@
 
 .device-settings-list div {
   align-items: center;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-default);
   display: grid;
   gap: 16px;
   grid-template-columns: 120px minmax(0, 1fr);
@@ -226,7 +226,7 @@
 }
 
 .device-workspace-editor {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-default);
   padding: 20px 24px 24px;
 }
 
@@ -239,7 +239,7 @@
 
 .device-workspace-valid {
   align-items: center;
-  color: var(--green);
+  color: var(--status-success-text);
   display: flex;
   gap: 7px;
   margin: 12px 0 0;
@@ -251,9 +251,9 @@
 }
 
 .settings-page-error {
-  background: #fff1f2;
-  border-radius: 10px;
-  color: #b42336;
+  background: var(--status-danger-bg);
+  border-radius: var(--radius-panel);
+  color: var(--status-danger-text);
   font-size: var(--type-label-size);
   line-height: var(--type-leading-copy);
   margin: 0 24px 20px;

@@ -2574,16 +2574,10 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             assert thumbnail_type == "image/webp"
 
             current = await service.get_project(detail.project.id)
-            selected = await service.select_candidate(
-                candidate.id,
-                CandidateSelectRequest(
-                    expected_revision_id=current.project.current_revision_id,
-                ),
-            )
             approved = await service.approve_candidate(
                 candidate.id,
                 CandidateApprovalRequest(
-                    expected_revision_id=selected.shot.current_revision_id,
+                    expected_revision_id=current.project.current_revision_id,
                     decision=ApprovalDecision.APPROVED,
                 ),
             )
@@ -2608,20 +2602,11 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     stale_gate.blocker_messages
                 )
 
-                selected_old_input = await service.select_candidate(
-                    candidate.id,
-                    CandidateSelectRequest(
-                        expected_revision_id=stale.current_revision_id,
-                    ),
-                )
-                assert selected_old_input.candidate.status == GenerationCandidateStatus.SELECTED
-                assert selected_old_input.shot.plan.video_status == WorkflowItemStatus.STALE
-
                 with pytest.raises(ProductionServiceError) as stale_confirmation:
                     await service.approve_candidate(
                         candidate.id,
                         CandidateApprovalRequest(
-                            expected_revision_id=selected_old_input.shot.current_revision_id,
+                            expected_revision_id=stale.current_revision_id,
                             decision=ApprovalDecision.APPROVED,
                         ),
                     )
@@ -2630,7 +2615,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 approved = await service.approve_candidate(
                     candidate.id,
                     CandidateApprovalRequest(
-                        expected_revision_id=selected_old_input.shot.current_revision_id,
+                        expected_revision_id=stale.current_revision_id,
                         decision=ApprovalDecision.APPROVED,
                         confirm_stale_input=True,
                     ),
@@ -2730,6 +2715,32 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 assert repaired_old.status == GenerationCandidateStatus.SELECTED
 
                 current = await service.get_project(detail.project.id)
+                rejected_alternative = await service.approve_candidate(
+                    alternative.id,
+                    CandidateApprovalRequest(
+                        expected_revision_id=current.project.current_revision_id,
+                        decision=ApprovalDecision.REJECTED,
+                        reason="动作节奏暂不符合当前选择",
+                    ),
+                )
+                assert (
+                    rejected_alternative.candidate.status
+                    == GenerationCandidateStatus.REJECTED
+                )
+                assert (
+                    rejected_alternative.shot.plan.approved_video_candidate_id
+                    == candidate.id
+                )
+                rejected_history = await service.get_shot(shot.plan.id)
+                retained_rejected = next(
+                    item
+                    for run in rejected_history.generation_runs
+                    for item in run.candidates
+                    if item.id == alternative.id
+                )
+                assert retained_rejected.status == GenerationCandidateStatus.REJECTED
+
+                current = await service.get_project(detail.project.id)
                 with pytest.raises(ProductionServiceError) as protected_archive:
                     await service.archive_video_candidates(
                         CandidateBatchLifecycleRequest(
@@ -2745,7 +2756,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     alternative.id
                 )
                 assert unchanged_alternative is not None
-                assert unchanged_alternative.status == GenerationCandidateStatus.READY
+                assert unchanged_alternative.status == GenerationCandidateStatus.REJECTED
 
                 actor_account_id = uuid4()
                 archived = await service.archive_video_candidates(
@@ -2786,15 +2797,24 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 assert restored.candidates[0].archive_reason is None
                 assert restored.candidates[0].archived_at is None
 
-                current = await service.get_project(detail.project.id)
+                rejected_again = await service.approve_candidate(
+                    alternative.id,
+                    CandidateApprovalRequest(
+                        expected_revision_id=restored.current_revision_id,
+                        decision=ApprovalDecision.REJECTED,
+                        reason="保留历史候选，稍后复核",
+                    ),
+                )
+                assert rejected_again.candidate.status == GenerationCandidateStatus.REJECTED
                 switched = await service.approve_candidate(
                     alternative.id,
                     CandidateApprovalRequest(
-                        expected_revision_id=current.project.current_revision_id,
+                        expected_revision_id=rejected_again.shot.current_revision_id,
                         decision=ApprovalDecision.APPROVED,
                     ),
                 )
                 assert switched.shot.plan.approved_video_candidate_id == alternative.id
+                assert switched.candidate.status == GenerationCandidateStatus.SELECTED
                 switched_detail = await service.get_shot(shot.plan.id)
                 assert switched_detail.video_preparation is not None
                 assert (
@@ -2869,6 +2889,20 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             "video",
             "image",
         ]
+
+        async def unexpected_continuity_call(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("进入剪辑不应触发跨分镜连续性检查")
+
+        monkeypatch.setattr(
+            service.continuity,
+            "latest_report",
+            unexpected_continuity_call,
+        )
+        monkeypatch.setattr(
+            service.continuity,
+            "ensure_current_report",
+            unexpected_continuity_call,
+        )
         gate = await service.gate_status(detail.project.id)
         assert gate.current_step == ProductionStep.SHOT_VIDEOS
         assert gate.next_step == ProductionStep.EDITING
@@ -2876,6 +2910,8 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
         assert gate.approved_shot_count == len(shots)
         assert gate.prepared_shot_count == len(shots) - 1
         assert gate.quality_warning_shot_count == 1
+        assert gate.continuity_status == "not_run"
+        assert gate.continuity_blocker_count == 0
         assert await repository.get_video_clip_preparation(shots[-1].plan.id) is None
 
         current = await service.get_project(detail.project.id)

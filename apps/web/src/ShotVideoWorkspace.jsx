@@ -19,7 +19,6 @@ import {
 } from "./production-ui.js";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import { VideoCandidateLibrary } from "./VideoCandidateLibrary.jsx";
-import { ContinuityQualityPanel } from "./ContinuityQualityPanel.jsx";
 import { ShotVideoGenerationControls } from "./ShotVideoGenerationControls.jsx";
 import { ManagedAssetPicker } from "./managed-assets/ManagedAssetPicker.jsx";
 import { DepthControlPanel } from "./video-controls/DepthControlPanel.jsx";
@@ -44,6 +43,16 @@ const ACTIVE_RUN_STATUSES = new Set([
 
 function videoWorkflowStatusLabel(status) {
   return status === "stale" ? "旧输入" : workflowStatusLabel(status);
+}
+
+function isUserDeletedVideoCandidate(candidate) {
+  return (
+    candidate.status === "archived"
+    && (
+      candidate.archive_reason === "user_deleted"
+      || candidate.quality_report?.archive_reason === "user_deleted"
+    )
+  );
 }
 
 function approvedVisualBeatFrames(detail) {
@@ -146,7 +155,6 @@ export function ShotVideoWorkspace({
   advanced,
   assets = [],
   busy,
-  continuityReport,
   error,
   gate,
   initialCandidateId = "",
@@ -156,20 +164,17 @@ export function ShotVideoWorkspace({
   onCancelRun,
   onClearError,
   onCreateDepthControl,
-  onDecideContinuity,
   onDeleteDepthControl,
   onToggleDepthControl,
   onGenerate,
   onManagedAssetChange,
   onNotice,
   onNotificationsChanged,
-  onRunContinuity,
   onOpenModelSettings,
   onReject,
   onRetryRun,
   onRestoreCandidates,
   onRevokeApproval,
-  onSelectCandidate,
   onSelectShot,
   project,
   request,
@@ -237,7 +242,7 @@ export function ShotVideoWorkspace({
       .map((run) => ({
         run,
         candidates: (run.candidates || [])
-          .filter((candidate) => !["rejected", "archived"].includes(candidate.status))
+          .filter((candidate) => !isUserDeletedVideoCandidate(candidate))
           .sort((left, right) => left.ordinal - right.ordinal)
           .map((candidate) => ({
             ...candidate,
@@ -697,13 +702,6 @@ export function ShotVideoWorkspace({
         </div>
       </header>
 
-      <ContinuityQualityPanel
-        busy={busy}
-        onDecide={onDecideContinuity}
-        onRun={onRunContinuity}
-        report={continuityReport}
-      />
-
       {error && !String(error).includes("分镜输入已修改") && (
         <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>
       )}
@@ -997,13 +995,15 @@ export function ShotVideoWorkspace({
                 <button className="secondary-button compact" disabled={busy} onClick={onRevokeApproval} type="button">取消采用</button>
               ) : (
                 <>
-                  <button className="secondary-button compact" disabled={busy || displayedCandidate.status === "rejected"} onClick={rejectDisplayedCandidate} type="button">退回</button>
-                  {plan.video_status === "approved" ? (
+                  {displayedCandidate.status !== "rejected" && (
+                    <button className="secondary-button compact" disabled={busy} onClick={rejectDisplayedCandidate} type="button">退回</button>
+                  )}
+                  {displayedCandidate.status === "rejected" ? (
+                    <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />重新采用</button>
+                  ) : plan.video_status === "approved" ? (
                     <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />改用此视频</button>
-                  ) : displayedCandidate.status === "selected" ? (
-                    <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />确认采用</button>
                   ) : (
-                    <button className="primary-button compact" disabled={busy} onClick={() => onSelectCandidate(displayedCandidate.id)} type="button">选择此候选</button>
+                    <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />{plan.video_status === "stale" ? "仍然采用" : "采用此视频"}</button>
                   )}
                 </>
               )}

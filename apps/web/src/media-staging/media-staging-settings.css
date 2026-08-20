@@ -2,9 +2,9 @@
   display: grid;
   gap: 18px;
   padding: 18px;
-  border: 1px solid #dedceb;
-  border-radius: 14px;
-  background: #fbfbfe;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-panel);
+  background: var(--surface-subtle);
 }
 
 .media-staging-heading {
@@ -16,16 +16,16 @@
 
 .media-staging-heading strong {
   display: block;
-  color: #242330;
-  font-size: 16px;
+  color: var(--text-primary);
+  font-size: var(--type-subheading-size);
   line-height: 1.4;
 }
 
 .media-staging-heading p {
   max-width: 72ch;
   margin: 3px 0 0;
-  color: #696879;
-  font-size: 14px;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
   line-height: 1.55;
 }
 
@@ -34,16 +34,16 @@
   width: 40px;
   height: 40px;
   place-items: center;
-  border-radius: 10px;
-  color: #5947ea;
-  background: #efedff;
+  border-radius: var(--radius-control);
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .media-staging-oss-fields {
   display: grid;
   gap: 16px;
   padding-top: 16px;
-  border-top: 1px solid #e5e3ef;
+  border-top: 1px solid var(--border-default);
 }
 
 .media-staging-role-field {
@@ -55,17 +55,17 @@
   min-width: 0;
   align-items: center;
   gap: 8px;
-  color: #6b6978;
-  font-size: 14px;
+  color: var(--text-secondary);
+  font-size: var(--type-label-size);
   line-height: 1.45;
 }
 
 .media-staging-status.success {
-  color: #17784a;
+  color: var(--status-success-text);
 }
 
 .media-staging-status.warning {
-  color: #96600c;
+  color: var(--status-warning-text);
 }
 
 .media-staging-footer {
@@ -74,7 +74,7 @@
   justify-content: space-between;
   gap: 16px;
   padding-top: 14px;
-  border-top: 1px solid #e5e3ef;
+  border-top: 1px solid var(--border-default);
 }
 
 .media-staging-footer .secondary-button {

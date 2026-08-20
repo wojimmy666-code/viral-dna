@@ -7,7 +7,7 @@
 }
 
 .video-prompt-quick-references {
-  width: min(100%, 90ch);
+  width: 100%;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
@@ -17,9 +17,9 @@
 
 .video-prompt-quick-references > span {
   padding-top: 6px;
-  color: #8c8697;
-  font-size: var(--production-type-caption, 12px);
-  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
 }
 
 .video-prompt-quick-references > div {
@@ -37,7 +37,7 @@
   padding: 5px 8px;
   border: 1px solid #ded9ed;
   border-radius: 7px;
-  color: #5f5869;
+  color: var(--text-secondary);
   background: #fff;
   font: inherit;
   cursor: pointer;
@@ -56,21 +56,21 @@
 
 .video-prompt-quick-references button.active {
   border-color: #d7d0ff;
-  color: #5947dc;
+  color: var(--accent);
   background: #f2efff;
 }
 
 .video-prompt-quick-references button small {
-  color: #918a9b;
-  font-size: var(--production-type-caption, 12px);
-  font-weight: 500;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-regular);
 }
 
 .video-prompt-quick-references button strong {
   min-width: 0;
   max-width: 34ch;
   overflow: hidden;
-  font-size: var(--production-type-caption, 12px);
+  font-size: var(--type-body-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -78,20 +78,20 @@
 .video-prompt-quick-references button em {
   padding-left: 6px;
   border-left: 1px solid #ded9ed;
-  color: #81798b;
-  font-size: var(--production-type-caption, 12px);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
   font-style: normal;
-  font-weight: 600;
+  font-weight: var(--type-weight-semibold);
   white-space: nowrap;
 }
 
 .video-prompt-quick-references button.active em {
   border-color: #d7d0ff;
-  color: #5947dc;
+  color: var(--accent);
 }
 
 .video-prompt-reference-editor {
-  width: min(100%, 90ch);
+  width: 100%;
   min-width: 0;
   position: relative;
   border-radius: 10px;
@@ -105,7 +105,7 @@
   display: block;
   color: transparent;
   background: transparent;
-  caret-color: var(--production-text-primary, #24212b);
+  caret-color: var(--text-primary);
   -webkit-text-fill-color: transparent;
   text-wrap: wrap;
   tab-size: 4;
@@ -116,8 +116,8 @@
 }
 
 .video-prompt-reference-editor.selecting .prompt-editor-textarea {
-  color: var(--production-text-primary, #24212b);
-  -webkit-text-fill-color: var(--production-text-primary, #24212b);
+  color: var(--text-primary);
+  -webkit-text-fill-color: var(--text-primary);
 }
 
 .video-prompt-reference-editor:not(.selecting) .prompt-editor-textarea::selection {
@@ -127,8 +127,8 @@
 }
 
 .video-prompt-reference-editor .prompt-editor-textarea::placeholder {
-  color: #817b8b;
-  -webkit-text-fill-color: #817b8b;
+  color: var(--text-secondary);
+  -webkit-text-fill-color: var(--text-secondary);
 }
 
 .video-prompt-highlight {
@@ -139,13 +139,13 @@
   z-index: 0;
   box-sizing: border-box;
   overflow: hidden;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border: 1px solid transparent;
-  color: var(--production-text-primary, #24212b);
+  color: var(--text-primary);
   font-family: var(--font-family-ui);
-  font-size: var(--production-type-body);
+  font-size: var(--type-body-size);
   font-weight: var(--type-weight-regular);
-  line-height: var(--production-leading-editor);
+  line-height: var(--type-leading-editor);
   overflow-wrap: anywhere;
   pointer-events: none;
   tab-size: 4;
@@ -156,7 +156,7 @@
 
 .video-prompt-highlight mark {
   border-radius: 4px;
-  color: #5947dc;
+  color: var(--accent);
   background: #eeeaff;
 }
 
@@ -182,9 +182,9 @@
   gap: 7px;
   padding: 10px 12px;
   border-bottom: 1px solid #ece9f4;
-  color: #625b70;
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
-  font-weight: 700;
+  font-weight: var(--type-weight-semibold);
 }
 
 .video-prompt-mention-menu > div {
@@ -195,9 +195,9 @@
 .video-prompt-mention-menu p {
   margin: 0;
   padding: 18px 12px;
-  color: #918b9c;
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
-  font-weight: 400;
+  font-weight: var(--type-weight-regular);
   text-align: center;
 }
 
@@ -210,7 +210,7 @@
   padding: 8px 10px;
   border: 0;
   border-bottom: 1px solid #f0eef5;
-  color: #3f3a49;
+  color: var(--text-primary);
   background: #fff;
   text-align: left;
   cursor: pointer;
@@ -242,9 +242,9 @@
 
 .video-prompt-mention-menu small,
 .video-prompt-reference-help {
-  color: #918b9c;
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
-  font-weight: 400;
+  font-weight: var(--type-weight-regular);
 }
 
 .video-prompt-mention-thumb {
@@ -254,7 +254,7 @@
   place-items: center;
   overflow: hidden;
   border-radius: 7px;
-  color: #7568de;
+  color: var(--accent);
   background: #efecff;
 }
 

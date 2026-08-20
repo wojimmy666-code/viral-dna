@@ -1,5 +1,5 @@
 .platform-admin-shell {
-  background: var(--canvas);
+  background: var(--surface-canvas);
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -11,7 +11,7 @@
 
 .platform-admin-sidebar {
   background: #20202a;
-  color: #fff;
+  color: var(--text-on-accent);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -30,7 +30,7 @@
 }
 
 .platform-admin-brand > span {
-  background: var(--purple);
+  background: var(--accent);
   border-radius: 9px;
   display: grid;
   height: 38px;
@@ -51,7 +51,7 @@
 
 .platform-admin-brand small,
 .platform-admin-sidebar button {
-  color: #b8b8c5;
+  color: var(--text-on-dark-muted);
 }
 
 .platform-admin-brand small {
@@ -83,7 +83,7 @@
 .platform-admin-sidebar button:hover,
 .platform-admin-sidebar button.active {
   background: rgba(255, 255, 255, .1);
-  color: #fff;
+  color: var(--text-on-accent);
 }
 
 .platform-admin-sidebar button.active {
@@ -115,7 +115,7 @@
 }
 
 .platform-admin-header p {
-  color: var(--purple);
+  color: var(--accent);
   font-size: var(--type-label-size);
   font-weight: var(--type-weight-semibold);
   line-height: var(--type-leading-ui);
@@ -136,7 +136,7 @@
 }
 
 .platform-admin-principal small {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
 }
 
@@ -158,7 +158,7 @@
   align-items: flex-start;
   background: #eef8f2;
   border: 1px solid #d3eadb;
-  color: #28764b;
+  color: var(--status-success-text);
   display: flex;
   gap: 9px;
   margin-bottom: 16px;
@@ -172,8 +172,8 @@
 }
 
 .admin-settings-section {
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
   border-radius: 14px;
   overflow: hidden;
 }
@@ -181,7 +181,7 @@
 .admin-settings-section > header,
 .admin-subsection-heading {
   align-items: center;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-default);
   display: flex;
   justify-content: space-between;
   padding: 20px 24px;
@@ -201,7 +201,7 @@
 
 .admin-settings-section header span,
 .admin-provider-list article > span {
-  background: var(--canvas);
+  background: var(--surface-canvas);
   border-radius: 999px;
   color: var(--text-secondary);
   font-size: var(--type-label-size);
@@ -211,7 +211,7 @@
 .admin-settings-section header span.ready,
 .admin-provider-list article > span.ready {
   background: #e8f7ed;
-  color: #24804e;
+  color: var(--status-success-text);
 }
 
 .admin-settings-grid {
@@ -228,7 +228,7 @@
 
 .admin-provider-list article {
   align-items: end;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border-default);
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(180px, 1fr) auto minmax(220px, 1fr) minmax(220px, 1fr);
@@ -238,7 +238,7 @@
 .admin-managed-assets,
 .admin-public-media,
 .admin-runtime-tool {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-default);
   padding-top: 20px;
 }
 
@@ -263,7 +263,7 @@
 
 .admin-public-media,
 .admin-runtime-tool {
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-default);
   border-radius: 12px;
   margin-bottom: 18px;
 }
@@ -280,13 +280,13 @@
 
 .admin-provider-list small,
 .admin-model-catalog small {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: var(--type-caption-size);
   overflow-wrap: anywhere;
 }
 
 .admin-model-catalog {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-default);
   padding: 20px 22px;
 }
 
@@ -297,7 +297,7 @@
 
 .admin-model-catalog > div {
   align-items: center;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border-default);
   display: flex;
   justify-content: space-between;
   padding: 12px 0;
@@ -316,7 +316,7 @@
 .admin-settings-error {
   background: #fff1f2;
   border-radius: 10px;
-  color: #b42336;
+  color: var(--status-danger-text);
   font-size: var(--type-label-size);
   line-height: var(--type-leading-copy);
   margin-top: 14px;

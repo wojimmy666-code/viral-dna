@@ -21,26 +21,26 @@
   height: 32px;
   place-items: center;
   border-radius: 9px;
-  color: #5b4cf0;
+  color: var(--accent);
   background: #ebe8ff;
 }
 
 .depth-job-status header > div { display: grid; gap: 2px; min-width: 0; }
-.depth-job-status strong { color: #35323f; font-size: 14px; }
+.depth-job-status strong { color: var(--text-primary); font-size: var(--type-label-size); }
 .depth-job-status header span,
-.depth-job-status footer span { color: #777386; font-size: 13px; line-height: 1.45; }
-.depth-job-status output { color: #5b4cf0; font-size: 15px; font-weight: 800; }
+.depth-job-status footer span { color: var(--text-secondary); font-size: var(--type-caption-size); line-height: 1.45; }
+.depth-job-status output { color: var(--accent); font-size: var(--type-label-size); font-weight: var(--type-weight-semibold); }
 .depth-job-status progress { width: 100%; height: 9px; accent-color: #5b4cf0; }
 .depth-job-status footer { display: flex; gap: 12px; align-items: center; justify-content: space-between; }
 
 .depth-job-status.failed { border-color: #efcaca; background: #fff5f5; }
-.depth-job-status.failed .depth-job-status-icon { color: #b34242; background: #ffe4e4; }
+.depth-job-status.failed .depth-job-status-icon { color: var(--status-danger-text); background: #ffe4e4; }
 .depth-job-status.cancelled { border-color: #e1deea; background: #f7f6fa; }
-.depth-job-status.cancelled .depth-job-status-icon { color: #777386; background: #eceaf0; }
-.depth-job-status.succeeded { grid-template-columns: auto minmax(0, 1fr); align-items: center; color: #19744b; border-color: #cfe9dc; background: #f0faf5; }
+.depth-job-status.cancelled .depth-job-status-icon { color: var(--text-secondary); background: #eceaf0; }
+.depth-job-status.succeeded { grid-template-columns: auto minmax(0, 1fr); align-items: center; color: var(--status-success-text); border-color: #cfe9dc; background: #f0faf5; }
 .depth-job-status details { padding-top: 8px; border-top: 1px solid rgba(163, 73, 73, .18); }
-.depth-job-status summary { display: inline-flex; gap: 5px; align-items: center; color: #8f4b4b; cursor: pointer; font-size: 13px; font-weight: 700; }
-.depth-job-status pre { max-height: 180px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 8px; color: #724848; background: #fff; font: 12px/1.55 Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.depth-job-status summary { display: inline-flex; gap: 5px; align-items: center; color: var(--status-danger-text); cursor: pointer; font-size: var(--type-caption-size); font-weight: var(--type-weight-semibold); }
+.depth-job-status pre { max-height: 180px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 8px; color: var(--status-danger-text); background: #fff; font-family: var(--font-family-mono); font-size: var(--type-caption-size); line-height: var(--type-leading-copy); white-space: pre-wrap; word-break: break-word; }
 
 @container (max-width: 560px) {
   .depth-job-status > header { grid-template-columns: 32px minmax(0, 1fr); }

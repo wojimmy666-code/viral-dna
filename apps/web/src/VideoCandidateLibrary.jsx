@@ -110,6 +110,9 @@ function HoverVideoThumbnail({
           tabIndex={-1}
         />
       )}
+      {candidate.status === "rejected" && (
+        <span className="shot-candidate-review-state rejected">已退回</span>
+      )}
       <small>{formatVideoDuration(candidate.duration_seconds || 0)}s</small>
     </span>
   );
@@ -191,7 +194,10 @@ export function VideoCandidateLibrary({
   const approvedCandidateId = plan?.approved_video_candidate_id || "";
   const oldInput = plan?.video_status === "stale";
   const archivableIds = activeCandidates
-    .filter((candidate) => candidate.id !== approvedCandidateId)
+    .filter((candidate) => (
+      candidate.id !== approvedCandidateId
+      && candidate.status !== "archived"
+    ))
     .map((candidate) => candidate.id);
   const archivedIds = archivedCandidates.map((candidate) => candidate.id);
   const allArchivableSelected = (
@@ -304,9 +310,11 @@ export function VideoCandidateLibrary({
     const sequence = candidate.sequence || candidate.ordinal;
     const candidateStateLabel = isApproved
       ? "已采用"
-      : candidate.status === "selected"
-        ? "已选择"
-        : "可采用";
+      : candidate.status === "rejected"
+        ? "已退回"
+        : candidate.status === "archived"
+          ? "历史候选"
+          : "可采用";
     const stateLabel = oldInput && !isApproved
       ? `${candidateStateLabel} · 旧输入`
       : candidateStateLabel;
@@ -318,6 +326,7 @@ export function VideoCandidateLibrary({
           "shot-candidate-tile",
           isPreviewing ? "previewing active" : "",
           isApproved ? "approved" : "",
+          candidate.status === "rejected" ? "rejected" : "",
         ].filter(Boolean).join(" ")}
         disabled={interactionBusy}
         key={candidate.id}
@@ -524,19 +533,19 @@ export function VideoCandidateLibrary({
             plan.video_status === "approved"
             && approvedCandidateId === displayedCandidate.id
               ? "approved"
+              : displayedCandidate.status === "rejected"
+                ? "rejected"
               : oldInput
                 ? "old-input"
-              : displayedCandidate.status === "selected"
-                ? "selected"
                 : ""
           }>
             {plan.video_status === "approved"
             && approvedCandidateId === displayedCandidate.id
               ? "已采用"
+              : displayedCandidate.status === "rejected"
+                ? `已退回${oldInput ? " · 旧输入" : ""}`
               : oldInput
-                ? `${displayedCandidate.status === "selected" ? "已选择" : "可采用"} · 旧输入`
-              : displayedCandidate.status === "selected"
-                ? "已选择"
+                ? "可采用 · 旧输入"
                 : "可采用"}
           </em>
           <AddToAssetsButton
