@@ -238,6 +238,81 @@ class InMemoryStore:
             projects = [project for project in projects if project.record_id == record_id]
         return sorted(projects, key=lambda project: project.created_at)
 
+    async def delete_production_project(self, project_id: UUID) -> None:
+        async with self._lock:
+            shot_plan_ids = {
+                item.id for item in self.shot_plans.values() if item.project_id == project_id
+            }
+            generation_run_ids = {
+                item.id for item in self.generation_runs.values() if item.project_id == project_id
+            }
+            self.reference_bindings = {
+                key: item
+                for key, item in self.reference_bindings.items()
+                if item.shot_plan_id not in shot_plan_ids
+            }
+            self.generation_candidates = {
+                key: item
+                for key, item in self.generation_candidates.items()
+                if item.generation_run_id not in generation_run_ids
+            }
+            self.video_provider_tasks = {
+                key: item
+                for key, item in self.video_provider_tasks.items()
+                if item.generation_run_id not in generation_run_ids
+            }
+            self.production_revisions = {
+                key: item
+                for key, item in self.production_revisions.items()
+                if item.project_id != project_id
+            }
+            self.reference_assets = {
+                key: item
+                for key, item in self.reference_assets.items()
+                if item.project_id != project_id
+            }
+            self.shot_plans = {
+                key: item
+                for key, item in self.shot_plans.items()
+                if item.project_id != project_id
+            }
+            self.generation_runs = {
+                key: item
+                for key, item in self.generation_runs.items()
+                if item.project_id != project_id
+            }
+            self.video_clip_preparations = {
+                key: item
+                for key, item in self.video_clip_preparations.items()
+                if item.project_id != project_id
+            }
+            self.approval_events = {
+                key: item
+                for key, item in self.approval_events.items()
+                if item.project_id != project_id
+            }
+            self.project_asset_links = {
+                key: item
+                for key, item in self.project_asset_links.items()
+                if item.project_id != project_id
+            }
+            self.continuity_reports = {
+                key: item
+                for key, item in self.continuity_reports.items()
+                if item.project_id != project_id
+            }
+            self.shot_video_generation_drafts = {
+                key: item
+                for key, item in self.shot_video_generation_drafts.items()
+                if item.project_id != project_id
+            }
+            self.depth_control_jobs = {
+                key: item
+                for key, item in self.depth_control_jobs.items()
+                if item.project_id != project_id
+            }
+            self.production_projects.pop(project_id, None)
+
     async def count_production_projects_by_record(
         self,
         record_ids: list[UUID],
@@ -245,7 +320,7 @@ class InMemoryStore:
         selected_ids = set(record_ids)
         counts = {record_id: 0 for record_id in selected_ids}
         for project in self.production_projects.values():
-            if project.record_id in selected_ids:
+            if project.record_id in selected_ids and project.trashed_at is None:
                 counts[project.record_id] += 1
         return counts
 

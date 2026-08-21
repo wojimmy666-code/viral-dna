@@ -7,6 +7,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -79,6 +80,7 @@ from .models import (
     ProductionProject,
     ProductionProjectCreate,
     ProductionProjectDetail,
+    ProductionProjectLifecycle,
     ProductionProjectStatus,
     ProductionProjectUpdate,
     ProductionPromptFieldDiff,
@@ -322,6 +324,8 @@ class ProductionRepository(Protocol):
         self,
         record_id: UUID | None = None,
     ) -> list[ProductionProject]: ...
+
+    async def delete_production_project(self, project_id: UUID) -> None: ...
 
     async def get_production_revision(
         self,
@@ -1462,14 +1466,125 @@ class ProductionService:
             shot_count=len(shot_plans),
         )
 
-    async def list_projects(self, record_id: UUID) -> list[ProductionProject]:
+    async def list_projects(
+        self,
+        record_id: UUID,
+        lifecycle: ProductionProjectLifecycle = ProductionProjectLifecycle.ACTIVE,
+    ) -> list[ProductionProject]:
         if await self.repository.get_record(record_id) is None:
             raise _fail(404, "record_not_found", "分析记录不存在")
         projects = [
             _normalize_optional_preparation_project(project)
             for project in await self.repository.list_production_projects(record_id)
         ]
+        if lifecycle == ProductionProjectLifecycle.ACTIVE:
+            projects = [project for project in projects if project.trashed_at is None]
+        elif lifecycle == ProductionProjectLifecycle.TRASHED:
+            projects = [project for project in projects if project.trashed_at is not None]
         return sorted(projects, key=lambda item: item.updated_at, reverse=True)
+
+    async def trash_project(self, project_id: UUID) -> ProductionProject:
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id, include_trashed=True)
+            if project.trashed_at is not None:
+                return project
+            await self._cancel_project_generation_runs(project.id)
+            now = utc_now()
+            updated = project.model_copy(
+                update={
+                    "trashed_at": now,
+                    "updated_at": now,
+                }
+            )
+            await self.repository.save_production_project(updated)
+            await self._write_current_project_metadata(updated)
+            return updated
+
+    async def restore_project(self, project_id: UUID) -> ProductionProject:
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id, include_trashed=True)
+            if project.trashed_at is None:
+                return project
+            updated = project.model_copy(
+                update={
+                    "trashed_at": None,
+                    "updated_at": utc_now(),
+                }
+            )
+            await self.repository.save_production_project(updated)
+            await self._write_current_project_metadata(updated)
+            return updated
+
+    async def permanently_delete_project(self, project_id: UUID) -> None:
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id, include_trashed=True)
+            if project.trashed_at is None:
+                raise _fail(
+                    409,
+                    "production_not_trashed",
+                    "只有回收站中的创作方案可以永久删除",
+                )
+            await self._cancel_project_generation_runs(project.id)
+            project_root = self.workspace.production_root(project.record_id, project.id).resolve()
+            productions_root = self.workspace.productions_root(project.record_id).resolve()
+            try:
+                project_root.relative_to(productions_root)
+            except ValueError as exc:
+                raise _fail(
+                    409,
+                    "invalid_production_delete_path",
+                    "创作方案目录路径无效",
+                ) from exc
+            if project_root.parent != productions_root:
+                raise _fail(
+                    409,
+                    "invalid_production_delete_path",
+                    "创作方案目录路径无效",
+                )
+
+            deleting_root = productions_root / f".deleting-{project.id}"
+            if deleting_root.exists():
+                raise _fail(
+                    409,
+                    "production_delete_incomplete",
+                    "上一次文件清理尚未完成，请稍后重试",
+                )
+            moved = False
+            try:
+                if project_root.exists():
+                    project_root.rename(deleting_root)
+                    moved = True
+                await self.repository.delete_production_project(project.id)
+            except Exception:
+                if moved and deleting_root.exists() and not project_root.exists():
+                    deleting_root.rename(project_root)
+                raise
+
+            if moved:
+                try:
+                    await asyncio.to_thread(shutil.rmtree, _filesystem_path(deleting_root))
+                except OSError as exc:
+                    raise _fail(
+                        500,
+                        "production_file_cleanup_failed",
+                        "方案记录已删除，但本地文件清理失败",
+                    ) from exc
+
+    async def _cancel_project_generation_runs(self, project_id: UUID) -> None:
+        terminal_statuses = {
+            ProductionRunStatus.COMPLETED,
+            ProductionRunStatus.CACHED,
+            ProductionRunStatus.FAILED,
+            ProductionRunStatus.BLOCKED,
+            ProductionRunStatus.CANCELLED,
+        }
+        runs = await self.repository.list_generation_runs(project_id)
+        for run in runs:
+            if run.status not in terminal_statuses:
+                await self.cancel_generation_run(run.id)
 
     async def get_project(self, project_id: UUID) -> ProductionProjectDetail:
         project = await self._require_project(project_id)
@@ -5624,6 +5739,8 @@ class ProductionService:
         interrupted = 0
         cancelled = 0
         for project in await self.repository.list_production_projects():
+            if project.trashed_at is not None:
+                continue
             for run in await self.repository.list_generation_runs(project.id):
                 if run.status == ProductionRunStatus.QUEUED and run.request_payload:
                     if run.kind == GenerationKind.VIDEO:
@@ -10087,9 +10204,16 @@ class ProductionService:
             raise _fail(409, "analysis_report_missing", "指定分析版本缺少分析报告")
         return analysis, report
 
-    async def _require_project(self, project_id: UUID) -> ProductionProject:
+    async def _require_project(
+        self,
+        project_id: UUID,
+        *,
+        include_trashed: bool = False,
+    ) -> ProductionProject:
         project = await self.repository.get_production_project(project_id)
         if project is None:
+            raise _fail(404, "production_not_found", "创作方案不存在")
+        if project.trashed_at is not None and not include_trashed:
             raise _fail(404, "production_not_found", "创作方案不存在")
         return _normalize_optional_preparation_project(project)
 
@@ -10310,6 +10434,14 @@ class ProductionService:
         except ValueError as exc:
             raise _fail(409, "invalid_revision_path", "创作方案版本路径无效") from exc
         self._write_json_atomic(snapshot_path, snapshot)
+        self._write_project_metadata(project, revision)
+
+    def _write_project_metadata(
+        self,
+        project: ProductionProject,
+        revision: ProductionRevision,
+    ) -> None:
+        paths = self.workspace.production_paths(project.record_id, project.id)
         self._write_json_atomic(
             paths.project_metadata,
             {
@@ -10318,6 +10450,14 @@ class ProductionService:
                 "current_revision": _revision_response(revision).model_dump(mode="json"),
             },
         )
+
+    async def _write_current_project_metadata(self, project: ProductionProject) -> None:
+        if project.current_revision_id is None:
+            return
+        revision = await self.repository.get_production_revision(project.current_revision_id)
+        if revision is None or revision.project_id != project.id:
+            return
+        self._write_project_metadata(project, revision)
 
     def _write_reference_files(
         self,

@@ -2604,7 +2604,11 @@ export function App() {
                     onReloadVideoGenerationSettings={() => (
                       loadVideoGenerationSettings({ retryCount: 1 })
                     )}
-                    onProjectsChanged={() => loadProductions(video.record_id, { quiet: true })}
+                    onProjectsChanged={async () => {
+                      const next = await loadProductions(video.record_id, { quiet: true });
+                      refreshHistory({ quiet: true }).catch(() => undefined);
+                      return next;
+                    }}
                     projects={productionProjects}
                     recordId={video.record_id}
                     request={apiRequest}

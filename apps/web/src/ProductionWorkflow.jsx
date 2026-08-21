@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  CaretRight,
+  ArrowClockwise,
   Check,
   CheckCircle,
   CircleNotch,
   ClockCounterClockwise,
+  DotsThree,
   FileImage,
   FloppyDisk,
   FolderOpen,
@@ -320,22 +321,154 @@ function ReferenceThumbnail({ asset, resolveUrl }) {
   );
 }
 
-function ProductionList({ projects, loading, error, onCreate, onOpen }) {
+function ProductionProjectCard({
+  project,
+  lifecycle,
+  busy,
+  onOpen,
+  onRestore,
+  onTrash,
+  onPurge,
+}) {
+  const copy = (
+    <>
+      <span className="production-project-icon"><MagicWand size={21} weight="fill" /></span>
+      <span className="production-project-copy">
+        <span className="production-project-title-line">
+          <strong>{project.name}</strong>
+          <small className={`production-status ${projectStatusClass(project.status)}`}>
+            {projectStatusLabel(project.status)}
+          </small>
+        </span>
+        <span>{project.output_aspect_ratio} · {project.output_width} × {project.output_height}</span>
+        <span>
+          {lifecycle === "trashed" ? "删除于" : "更新于"} {formatProductionDate(
+            lifecycle === "trashed" ? project.trashed_at : project.updated_at,
+          )}
+        </span>
+      </span>
+    </>
+  );
+
+  return (
+    <article className={`production-project-card ${lifecycle === "trashed" ? "is-trashed" : ""}`}>
+      {lifecycle === "active" ? (
+        <button
+          aria-label={`打开创作方案“${project.name}”`}
+          className="production-project-open"
+          onClick={() => onOpen(project.id)}
+          type="button"
+        >
+          {copy}
+        </button>
+      ) : (
+        <div className="production-project-summary">{copy}</div>
+      )}
+
+      {lifecycle === "active" && (
+        <details className="production-project-menu">
+          <summary aria-label={`${project.name}的更多操作`} title="更多操作">
+            <DotsThree size={20} weight="bold" />
+          </summary>
+          <div role="menu">
+            <button
+              className="danger"
+              disabled={busy}
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                onTrash(project);
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Trash size={16} />移入回收站
+            </button>
+          </div>
+        </details>
+      )}
+
+      <footer>
+        <span>
+          {lifecycle === "trashed"
+            ? "分镜、生成结果与版本历史仍保留"
+            : `当前版本 ${project.current_revision_id ? "已保存" : "未创建"}`}
+        </span>
+        {lifecycle === "active" ? (
+          project.source_project_id && <span><GitBranch size={14} /> 历史分支</span>
+        ) : (
+          <span className="production-project-recycle-actions">
+            <button
+              className="secondary-button compact"
+              disabled={busy}
+              onClick={() => onRestore(project)}
+              type="button"
+            >
+              <ArrowClockwise size={15} />恢复
+            </button>
+            <button
+              className="danger-button compact"
+              disabled={busy}
+              onClick={() => onPurge(project)}
+              type="button"
+            >
+              <Trash size={15} />永久删除
+            </button>
+          </span>
+        )}
+      </footer>
+    </article>
+  );
+}
+
+function ProductionList({
+  projects,
+  lifecycle,
+  trashedCount,
+  loading,
+  error,
+  busy,
+  onCreate,
+  onOpen,
+  onLifecycleChange,
+  onRestore,
+  onTrash,
+  onPurge,
+}) {
+  const inRecycleBin = lifecycle === "trashed";
   return (
     <section className="production-list-view">
       <header className="production-section-header">
         <div>
-          <h3>创作方案</h3>
-          <p>每个方案独立保存输出设置、参考资产和版本历史，不会改动原分析报告。</p>
+          <h3>{inRecycleBin ? "方案回收站" : "创作方案"}</h3>
+          <p>
+            {inRecycleBin
+              ? "恢复误删方案，或永久移除不再需要的方案。"
+              : "每个方案独立保存输出设置、参考资产和版本历史，不会改动原分析报告。"}
+          </p>
         </div>
-        <button className="primary-button compact" onClick={onCreate} type="button">
-          <Plus size={16} weight="bold" />
-          创建方案
-        </button>
+        <div className="production-section-actions">
+          <button
+            className="secondary-button compact"
+            onClick={() => onLifecycleChange(inRecycleBin ? "active" : "trashed")}
+            type="button"
+          >
+            {inRecycleBin ? <ArrowLeft size={16} /> : <Trash size={16} />}
+            {inRecycleBin ? "返回创作方案" : `回收站${trashedCount ? `（${trashedCount}）` : ""}`}
+          </button>
+          {!inRecycleBin && (
+            <button className="primary-button compact" onClick={onCreate} type="button">
+              <Plus size={16} weight="bold" />
+              创建方案
+            </button>
+          )}
+        </div>
       </header>
 
       {loading && (
-        <div className="production-list-skeleton" aria-label="正在加载创作方案">
+        <div
+          className="production-list-skeleton"
+          aria-label={inRecycleBin ? "正在加载方案回收站" : "正在加载创作方案"}
+        >
           {[0, 1, 2].map((item) => <span key={item} />)}
         </div>
       )}
@@ -347,39 +480,37 @@ function ProductionList({ projects, loading, error, onCreate, onOpen }) {
       )}
       {!loading && !error && projects.length === 0 && (
         <div className="production-empty-state">
-          <span className="production-empty-icon"><MagicWand size={28} /></span>
+          <span className="production-empty-icon">
+            {inRecycleBin ? <Trash size={28} /> : <MagicWand size={28} />}
+          </span>
           <div>
-            <h4>从当前分析创建第一个方案</h4>
-            <p>基础镜头、实体和提示词会冻结到首个版本，之后可以安全修改和回退。</p>
+            <h4>{inRecycleBin ? "回收站为空" : "从当前分析创建第一个方案"}</h4>
+            <p>
+              {inRecycleBin
+                ? "移入回收站的方案会显示在这里，并可随时恢复。"
+                : "基础镜头、实体和提示词会冻结到首个版本，之后可以安全修改和回退。"}
+            </p>
           </div>
-          <button className="primary-button compact" onClick={onCreate} type="button">
-            创建创作方案
-          </button>
+          {!inRecycleBin && (
+            <button className="primary-button compact" onClick={onCreate} type="button">
+              创建创作方案
+            </button>
+          )}
         </div>
       )}
       {!loading && !error && projects.length > 0 && (
         <div className="production-project-grid">
           {projects.map((project) => (
-            <article className="production-project-card" key={project.id}>
-              <button className="production-project-open" onClick={() => onOpen(project.id)} type="button">
-                <span className="production-project-icon"><MagicWand size={21} weight="fill" /></span>
-                <span className="production-project-copy">
-                  <span className="production-project-title-line">
-                    <strong>{project.name}</strong>
-                    <small className={`production-status ${projectStatusClass(project.status)}`}>
-                      {projectStatusLabel(project.status)}
-                    </small>
-                  </span>
-                  <span>{project.output_aspect_ratio} · {project.output_width} × {project.output_height}</span>
-                  <span>更新于 {formatProductionDate(project.updated_at)}</span>
-                </span>
-                <CaretRight size={18} />
-              </button>
-              <footer>
-                <span>当前版本 {project.current_revision_id ? "已保存" : "未创建"}</span>
-                {project.source_project_id && <span><GitBranch size={14} /> 历史分支</span>}
-              </footer>
-            </article>
+            <ProductionProjectCard
+              busy={busy}
+              key={project.id}
+              lifecycle={lifecycle}
+              onOpen={onOpen}
+              onPurge={onPurge}
+              onRestore={onRestore}
+              onTrash={onTrash}
+              project={project}
+            />
           ))}
         </div>
       )}
@@ -1083,6 +1214,52 @@ function ArchiveDialog({ asset, busy, error, onClose, onConfirm }) {
   );
 }
 
+function ProductionLifecycleDialog({ project, action, busy, error, onClose, onConfirm }) {
+  const permanent = action === "purge";
+  return (
+    <ProductionDialog
+      busy={busy}
+      description={permanent
+        ? "该操作不可恢复。原分析报告和资产库中的共享资产不会被删除。"
+        : "方案会移入回收站，分镜、生成结果和版本历史暂时保留。"}
+      onClose={onClose}
+      title={permanent ? `永久删除“${project.name}”？` : `删除“${project.name}”？`}
+    >
+      <div className={`production-lifecycle-dialog-copy ${permanent ? "is-danger" : ""}`}>
+        <span><Trash size={22} /></span>
+        <div>
+          <strong>{project.name}</strong>
+          <p>
+            {permanent
+              ? "将移除该方案的版本、分镜、生成任务、候选和本地输出文件。"
+              : "如有正在运行的生成任务，将先停止任务再移入回收站。"}
+          </p>
+        </div>
+      </div>
+      {error && (
+        <div className="production-inline-error modal-inline-error" role="alert">
+          <WarningCircle size={17} />{error}
+        </div>
+      )}
+      <footer className="production-modal-actions">
+        <button
+          autoFocus
+          className="secondary-button compact"
+          disabled={busy}
+          onClick={onClose}
+          type="button"
+        >
+          取消
+        </button>
+        <button className="danger-button compact" disabled={busy} onClick={onConfirm} type="button">
+          {busy ? <CircleNotch className="spin" size={16} /> : <Trash size={16} />}
+          {permanent ? "永久删除" : "移入回收站"}
+        </button>
+      </footer>
+    </ProductionDialog>
+  );
+}
+
 function RevisionPreviewDialog({ revision, detail, busy, error, onClose, onBranch }) {
   const snapshot = detail?.snapshot;
   return (
@@ -1181,6 +1358,14 @@ export function ProductionHub({
   const [contentError, setContentError] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [projectLifecycle, setProjectLifecycle] = useState("active");
+  const [trashedProjects, setTrashedProjects] = useState([]);
+  const [trashedProjectsLoading, setTrashedProjectsLoading] = useState(false);
+  const [trashedProjectsError, setTrashedProjectsError] = useState("");
+  const [projectLifecycleAction, setProjectLifecycleAction] = useState(null);
+  const [projectLifecycleBusy, setProjectLifecycleBusy] = useState(false);
+  const [projectLifecycleError, setProjectLifecycleError] = useState("");
+  const trashedProjectsRequestIdRef = useRef(0);
   const [createOpen, setCreateOpen] = useState(false);
   const [createDraft, setCreateDraft] = useState({
     ...EMPTY_CREATE_DRAFT,
@@ -1251,6 +1436,9 @@ export function ProductionHub({
     setContentError("");
     setActionError("");
     setActiveSection("project_setup");
+    setProjectLifecycle("active");
+    setProjectLifecycleAction(null);
+    setProjectLifecycleError("");
   }, [listSignal]);
 
   useEffect(() => {
@@ -1283,6 +1471,11 @@ export function ProductionHub({
     setImpactReview(null);
     setActiveSection("project_setup");
     setCreateOpen(false);
+    setProjectLifecycle("active");
+    setTrashedProjects([]);
+    setTrashedProjectsError("");
+    setProjectLifecycleAction(null);
+    setProjectLifecycleError("");
     setReferenceMode(null);
     setArchiveAsset(null);
     setPreviewRevision(null);
@@ -1294,6 +1487,10 @@ export function ProductionHub({
     setGenerationInputMode("keyframe_edit");
     setGenerationCandidateCount(1);
     setFocusedCandidateId("");
+  }, [recordId]);
+
+  useEffect(() => {
+    loadTrashedProjects({ quiet: true }).catch(() => undefined);
   }, [recordId]);
 
   useEffect(() => {
@@ -2642,6 +2839,126 @@ export function ProductionHub({
     });
   }
 
+  async function loadTrashedProjects({ quiet = false } = {}) {
+    if (!recordId) return [];
+    const requestId = ++trashedProjectsRequestIdRef.current;
+    if (!quiet) setTrashedProjectsLoading(true);
+    setTrashedProjectsError("");
+    try {
+      const next = await request(`/records/${recordId}/productions?lifecycle=trashed`);
+      if (requestId === trashedProjectsRequestIdRef.current) {
+        setTrashedProjects(next || []);
+      }
+      return next || [];
+    } catch (requestError) {
+      if (requestId === trashedProjectsRequestIdRef.current) {
+        setTrashedProjectsError(requestError.message);
+      }
+      throw requestError;
+    } finally {
+      if (requestId === trashedProjectsRequestIdRef.current && !quiet) {
+        setTrashedProjectsLoading(false);
+      }
+    }
+  }
+
+  function changeProjectLifecycle(nextLifecycle) {
+    setProjectLifecycle(nextLifecycle);
+    setProjectLifecycleAction(null);
+    setProjectLifecycleError("");
+    if (nextLifecycle === "trashed") {
+      loadTrashedProjects().catch(() => undefined);
+    }
+  }
+
+  function openProjectLifecycleAction(project, action) {
+    setProjectLifecycleError("");
+    setProjectLifecycleAction({ project, action });
+  }
+
+  async function restoreTrashedProject(
+    project,
+    { rethrow = false, announce = true } = {},
+  ) {
+    if (!project?.id || projectLifecycleBusy) return false;
+    setProjectLifecycleBusy(true);
+    setProjectLifecycleError("");
+    try {
+      await request(`/productions/${project.id}/restore`, { method: "POST" });
+      await Promise.all([
+        onProjectsChanged(),
+        loadTrashedProjects({ quiet: true }),
+      ]);
+      if (announce) {
+        onNotice({
+          type: "success",
+          title: "方案已恢复",
+          message: `“${project.name}”已返回创作方案列表。`,
+        });
+      }
+      return true;
+    } catch (requestError) {
+      setProjectLifecycleError(requestError.message);
+      onNotice({
+        type: "error",
+        title: "恢复方案失败",
+        message: requestError.message,
+      });
+      if (rethrow) throw requestError;
+      return false;
+    } finally {
+      setProjectLifecycleBusy(false);
+    }
+  }
+
+  async function confirmProjectLifecycleAction() {
+    const pending = projectLifecycleAction;
+    if (!pending?.project?.id || projectLifecycleBusy) return;
+    const { action, project } = pending;
+    setProjectLifecycleBusy(true);
+    setProjectLifecycleError("");
+    try {
+      if (action === "purge") {
+        await request(`/productions/${project.id}/permanent`, { method: "DELETE" });
+        setProjectLifecycleAction(null);
+        await loadTrashedProjects({ quiet: true });
+        onNotice({
+          type: "success",
+          title: "方案已永久删除",
+          message: `“${project.name}”及其项目内文件已移除。`,
+        });
+        return;
+      }
+
+      await request(`/productions/${project.id}`, { method: "DELETE" });
+      if (selectedProjectId === project.id) {
+        setSelectedProjectId(null);
+        setDetail(null);
+        setActiveSection("project_setup");
+      }
+      setProjectLifecycleAction(null);
+      await Promise.all([
+        onProjectsChanged(),
+        loadTrashedProjects({ quiet: true }),
+      ]);
+      onNotice({
+        type: "success",
+        title: "方案已移入回收站",
+        message: `“${project.name}”仍可从回收站恢复。`,
+        duration: 8000,
+        actionLabel: "撤销",
+        onAction: () => restoreTrashedProject(
+          project,
+          { rethrow: true, announce: true },
+        ),
+      });
+    } catch (requestError) {
+      setProjectLifecycleError(requestError.message);
+    } finally {
+      setProjectLifecycleBusy(false);
+    }
+  }
+
   function openCreate() {
     setCreateDraft({
       ...EMPTY_CREATE_DRAFT,
@@ -2932,9 +3249,25 @@ export function ProductionHub({
   }
 
   if (!selectedProjectId) {
+    const lifecycleProjects = projectLifecycle === "trashed" ? trashedProjects : projects;
+    const lifecycleLoading = projectLifecycle === "trashed" ? trashedProjectsLoading : loading;
+    const lifecycleError = projectLifecycle === "trashed" ? trashedProjectsError : error;
     return (
       <>
-        <ProductionList error={error} loading={loading} onCreate={openCreate} onOpen={openProject} projects={projects} />
+        <ProductionList
+          busy={projectLifecycleBusy}
+          error={lifecycleError}
+          lifecycle={projectLifecycle}
+          loading={lifecycleLoading}
+          onCreate={openCreate}
+          onLifecycleChange={changeProjectLifecycle}
+          onOpen={openProject}
+          onPurge={(project) => openProjectLifecycleAction(project, "purge")}
+          onRestore={restoreTrashedProject}
+          onTrash={(project) => openProjectLifecycleAction(project, "trash")}
+          projects={lifecycleProjects}
+          trashedCount={trashedProjects.length}
+        />
         {createOpen && (
           <CreateProjectDialog
             busy={busy}
@@ -2944,6 +3277,19 @@ export function ProductionHub({
             onSubmit={submitCreate}
             setDraft={setCreateDraft}
             sourceDefaultRatio={sourceProductionDefaults.outputAspectRatio}
+          />
+        )}
+        {projectLifecycleAction && (
+          <ProductionLifecycleDialog
+            action={projectLifecycleAction.action}
+            busy={projectLifecycleBusy}
+            error={projectLifecycleError}
+            onClose={() => {
+              setProjectLifecycleAction(null);
+              setProjectLifecycleError("");
+            }}
+            onConfirm={confirmProjectLifecycleAction}
+            project={projectLifecycleAction.project}
           />
         )}
       </>
@@ -2957,7 +3303,28 @@ export function ProductionHub({
         {detail && (
           <div className="production-workspace-title">
             <div><h3>{detail.project.name}</h3><p>{detail.project.output_aspect_ratio} · {detail.project.output_width} × {detail.project.output_height} · Revision {detail.current_revision?.revision_number || 1}</p></div>
-            <button className="secondary-button compact" onClick={() => { setActionError(""); setActiveSection("revisions"); }} type="button"><ClockCounterClockwise size={16} />版本记录</button>
+            <div className="production-workspace-actions">
+              <button className="secondary-button compact" onClick={() => { setActionError(""); setActiveSection("revisions"); }} type="button"><ClockCounterClockwise size={16} />版本记录</button>
+              <details className="production-workspace-menu">
+                <summary aria-label={`${detail.project.name}的更多操作`} title="更多操作">
+                  <DotsThree size={20} weight="bold" />
+                </summary>
+                <div role="menu">
+                  <button
+                    className="danger"
+                    disabled={projectLifecycleBusy}
+                    onClick={(event) => {
+                      event.currentTarget.closest("details")?.removeAttribute("open");
+                      openProjectLifecycleAction(detail.project, "trash");
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <Trash size={16} />移入回收站
+                  </button>
+                </div>
+              </details>
+            </div>
           </div>
         )}
       </header>
@@ -3136,6 +3503,19 @@ export function ProductionHub({
       )}
       {previewRevision && <RevisionPreviewDialog busy={busy} detail={previewDetail} error={previewError} onBranch={() => openBranch(previewRevision)} onClose={() => setPreviewRevision(null)} revision={previewRevision} />}
       {branchRevision && <BranchDialog busy={busy} error={actionError} name={branchName} onClose={() => setBranchRevision(null)} onSubmit={submitBranch} revision={branchRevision} setName={setBranchName} />}
+      {projectLifecycleAction && (
+        <ProductionLifecycleDialog
+          action={projectLifecycleAction.action}
+          busy={projectLifecycleBusy}
+          error={projectLifecycleError}
+          onClose={() => {
+            setProjectLifecycleAction(null);
+            setProjectLifecycleError("");
+          }}
+          onConfirm={confirmProjectLifecycleAction}
+          project={projectLifecycleAction.project}
+        />
+      )}
       <ChangeImpactPanel
         busy={busy}
         onCancel={() => setImpactReview(null)}

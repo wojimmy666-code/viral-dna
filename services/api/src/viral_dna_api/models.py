@@ -137,6 +137,12 @@ class ProductionProjectStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class ProductionProjectLifecycle(StrEnum):
+    ACTIVE = "active"
+    TRASHED = "trashed"
+    ALL = "all"
+
+
 class ProductionStep(StrEnum):
     PROJECT_SETUP = "project_setup"
     REFERENCE_ASSETS = "reference_assets"
@@ -1775,6 +1781,7 @@ class ProductionProject(BaseModel):
     actual_cost_micros: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+    trashed_at: datetime | None = None
 
     @field_validator("output_aspect_ratio")
     @classmethod

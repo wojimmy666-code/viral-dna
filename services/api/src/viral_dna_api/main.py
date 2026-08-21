@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
@@ -110,6 +110,7 @@ from .models import (
     ProductionProject,
     ProductionProjectCreate,
     ProductionProjectDetail,
+    ProductionProjectLifecycle,
     ProductionProjectUpdate,
     ProductionPromptSyncRequest,
     ProductionRevisionDetail,
@@ -800,9 +801,15 @@ async def create_production(
     f"{API_PREFIX}/records/{{record_id}}/productions",
     response_model=list[ProductionProject],
 )
-async def list_productions(record_id: UUID) -> list[ProductionProject]:
+async def list_productions(
+    record_id: UUID,
+    lifecycle: Annotated[
+        ProductionProjectLifecycle,
+        Query(),
+    ] = ProductionProjectLifecycle.ACTIVE,
+) -> list[ProductionProject]:
     try:
-        return await production_service.list_projects(record_id)
+        return await production_service.list_projects(record_id, lifecycle=lifecycle)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -830,6 +837,40 @@ async def update_production(
         return await production_service.update_project(project_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.delete(
+    f"{API_PREFIX}/productions/{{project_id}}",
+    response_model=ProductionProject,
+)
+async def trash_production(project_id: UUID) -> ProductionProject:
+    try:
+        return await production_service.trash_project(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/restore",
+    response_model=ProductionProject,
+)
+async def restore_production(project_id: UUID) -> ProductionProject:
+    try:
+        return await production_service.restore_project(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.delete(
+    f"{API_PREFIX}/productions/{{project_id}}/permanent",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def permanently_delete_production(project_id: UUID) -> Response:
+    try:
+        await production_service.permanently_delete_project(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post(

@@ -1245,6 +1245,81 @@ def test_production_http_api_revision_reference_and_branch_flow(
     assert (project_root / "references" / asset_id / "asset.json").is_file()
 
 
+def test_production_http_api_recycle_bin_and_permanent_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recycle-workspace"
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+    monkeypatch.setenv("VIRAL_DNA_ENV_FILE", str(tmp_path / ".env.local"))
+    workspace = WorkspaceManager()
+    repository = SQLiteStore(workspace.database_path)
+    service = ProductionService(
+        repository,
+        workspace,
+        image_gateway=FakeRealImageGateway(workspace),
+    )
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        create_response = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={
+                "base_analysis_id": str(analysis.id),
+                "name": "可删除创作方案",
+            },
+        )
+        assert create_response.status_code == 201, create_response.text
+        project_id = create_response.json()["project"]["id"]
+        project_root = workspace.production_root(record.id, UUID(project_id))
+        assert project_root.is_dir()
+
+        active_delete = client.delete(f"/api/v1/productions/{project_id}/permanent")
+        assert active_delete.status_code == 409
+        assert active_delete.json()["detail"] == "只有回收站中的创作方案可以永久删除"
+
+        trash_response = client.delete(f"/api/v1/productions/{project_id}")
+        assert trash_response.status_code == 200, trash_response.text
+        assert trash_response.json()["trashed_at"] is not None
+        assert client.get(f"/api/v1/productions/{project_id}").status_code == 404
+        assert client.get(
+            f"/api/v1/records/{record.id}/productions"
+        ).json() == []
+        trashed_projects = client.get(
+            f"/api/v1/records/{record.id}/productions",
+            params={"lifecycle": "trashed"},
+        ).json()
+        assert [item["id"] for item in trashed_projects] == [project_id]
+        all_projects = client.get(
+            f"/api/v1/records/{record.id}/productions",
+            params={"lifecycle": "all"},
+        ).json()
+        assert [item["id"] for item in all_projects] == [project_id]
+
+        restore_response = client.post(f"/api/v1/productions/{project_id}/restore")
+        assert restore_response.status_code == 200, restore_response.text
+        assert restore_response.json()["trashed_at"] is None
+        assert client.get(f"/api/v1/productions/{project_id}").status_code == 200
+
+        assert client.delete(f"/api/v1/productions/{project_id}").status_code == 200
+        permanent_response = client.delete(
+            f"/api/v1/productions/{project_id}/permanent"
+        )
+        assert permanent_response.status_code == 204, permanent_response.text
+        assert permanent_response.content == b""
+
+    async def verify_cleanup() -> None:
+        project_uuid = UUID(project_id)
+        assert await repository.get_production_project(project_uuid) is None
+        assert await repository.list_production_revisions(project_uuid) == []
+        assert await repository.list_shot_plans(project_uuid) == []
+        assert await repository.get_record(record.id) is not None
+
+    asyncio.run(verify_cleanup())
+    assert not project_root.exists()
+
+
 def test_production_service_survives_sqlite_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

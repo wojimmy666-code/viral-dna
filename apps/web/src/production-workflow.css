@@ -81,6 +81,14 @@
   margin-bottom: 18px;
 }
 
+.production-section-actions,
+.production-workspace-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .production-section-header.compact-heading {
   margin-bottom: 16px;
 }
@@ -190,34 +198,54 @@
 }
 
 .production-project-card {
-  overflow: hidden;
+  position: relative;
+  overflow: visible;
   border: 1px solid var(--border-default);
   border-radius: 12px;
-  background: #fff;
+  background: var(--surface-panel);
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .production-project-card:hover {
   border-color: #d4d1f8;
-  box-shadow: 0 9px 24px rgba(43, 41, 80, 0.07);
+  box-shadow: 0 3px 8px rgba(43, 41, 80, 0.07);
 }
 
-.production-project-open {
+.production-project-open,
+.production-project-summary {
   width: 100%;
   min-height: 96px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  padding: 15px;
-  border: 0;
-  background: #fff;
-  cursor: pointer;
+  padding: 15px 62px 15px 15px;
   text-align: left;
 }
 
-.production-project-open > svg {
-  color: var(--text-disabled);
+.production-project-open {
+  border: 0;
+  border-radius: 12px 12px 0 0;
+  background: var(--surface-panel);
+  cursor: pointer;
+}
+
+.production-project-open:hover,
+.production-project-open:focus-visible {
+  background: var(--surface-subtle);
+}
+
+.production-project-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.production-project-card.is-trashed {
+  background: var(--surface-subtle);
+}
+
+.production-project-card.is-trashed .production-project-summary {
+  background: var(--surface-subtle);
 }
 
 .production-project-icon {
@@ -273,6 +301,102 @@
   background: #f0f0f4;
 }
 
+.production-project-menu,
+.production-workspace-menu {
+  position: absolute;
+  z-index: var(--z-dropdown);
+}
+
+.production-project-menu {
+  top: 10px;
+  right: 10px;
+}
+
+.production-workspace-menu {
+  position: relative;
+}
+
+.production-project-menu > summary,
+.production-workspace-menu > summary {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.production-project-menu > summary::-webkit-details-marker,
+.production-workspace-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.production-project-menu[open] > summary,
+.production-workspace-menu[open] > summary,
+.production-project-menu > summary:hover,
+.production-workspace-menu > summary:hover,
+.production-project-menu > summary:focus-visible,
+.production-workspace-menu > summary:focus-visible {
+  color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.production-project-menu > div,
+.production-workspace-menu > div {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: var(--z-dropdown);
+  width: max-content;
+  min-width: 164px;
+  display: grid;
+  padding: 5px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  box-shadow: 0 4px 8px rgba(37, 35, 57, 0.12);
+}
+
+.production-project-menu button,
+.production-workspace-menu button {
+  min-height: var(--control-height-compact);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-regular);
+  text-align: left;
+}
+
+.production-project-menu button.danger,
+.production-workspace-menu button.danger {
+  color: var(--status-danger-text);
+}
+
+.production-project-menu button.danger:hover:not(:disabled),
+.production-workspace-menu button.danger:hover:not(:disabled),
+.production-project-menu button.danger:focus-visible,
+.production-workspace-menu button.danger:focus-visible {
+  color: var(--status-danger-text);
+  background: var(--status-danger-bg);
+  outline: none;
+}
+
+.production-project-menu button:disabled,
+.production-workspace-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .production-project-card footer {
   min-height: 38px;
   display: flex;
@@ -290,6 +414,16 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+.production-project-card.is-trashed footer {
+  min-height: 56px;
+}
+
+.production-project-card footer .production-project-recycle-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
 }
 
 .production-workspace-header {
@@ -1540,14 +1674,16 @@
   padding-inline: 13px;
 }
 
-.archive-dialog-copy {
+.archive-dialog-copy,
+.production-lifecycle-dialog-copy {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 20px;
 }
 
-.archive-dialog-copy > span {
+.archive-dialog-copy > span,
+.production-lifecycle-dialog-copy > span {
   width: 42px;
   height: 42px;
   display: grid;
@@ -1557,15 +1693,24 @@
   background: #fff0f2;
 }
 
-.archive-dialog-copy strong {
+.production-lifecycle-dialog-copy:not(.is-danger) > span {
+  color: var(--status-warning-text);
+  background: var(--status-warning-bg);
+}
+
+.archive-dialog-copy strong,
+.production-lifecycle-dialog-copy strong {
   color: var(--text-primary);
   font-size: var(--type-label-size);
 }
 
-.archive-dialog-copy p {
+.archive-dialog-copy p,
+.production-lifecycle-dialog-copy p {
   margin: 5px 0 0;
+  max-width: 64ch;
   color: var(--text-secondary);
   font-size: var(--type-caption-size);
+  line-height: var(--type-leading-copy);
 }
 
 .modal-inline-error {
@@ -1711,6 +1856,45 @@
   .production-form-heading .primary-button,
   .production-workspace-title .secondary-button {
     width: 100%;
+  }
+
+  .production-section-actions,
+  .production-workspace-actions {
+    width: 100%;
+  }
+
+  .production-section-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .production-section-actions .secondary-button,
+  .production-section-actions .primary-button {
+    width: 100%;
+  }
+
+  .production-workspace-actions .secondary-button {
+    flex: 1 1 auto;
+  }
+
+  .production-workspace-actions .production-workspace-menu {
+    flex: 0 0 auto;
+  }
+
+  .production-project-card.is-trashed footer {
+    align-items: stretch;
+    flex-direction: column;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .production-project-card footer .production-project-recycle-actions,
+  .production-project-recycle-actions button {
+    width: 100%;
+  }
+
+  .production-project-recycle-actions button {
+    flex: 1 1 0;
   }
 
   .production-settings-form,

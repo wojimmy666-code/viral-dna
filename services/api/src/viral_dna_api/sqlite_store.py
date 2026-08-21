@@ -572,6 +572,102 @@ class SQLiteStore:
             else:
                 connection.commit()
 
+    def _delete_production_project(self, project_id: UUID) -> None:
+        project_key = str(project_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                def keys_for(table: str, field: str, values: set[str]) -> set[str]:
+                    if not values:
+                        return set()
+                    safe_table = self._table(table)
+                    rows = connection.execute(
+                        f"SELECT record_key, payload FROM {safe_table}"  # noqa: S608
+                    ).fetchall()
+                    return {
+                        str(record_key)
+                        for record_key, payload in rows
+                        if self._payload_value(str(payload), field) in values
+                    }
+
+                shot_plan_ids = keys_for("shot_plans", "project_id", {project_key})
+                generation_run_ids = keys_for(
+                    "generation_runs",
+                    "project_id",
+                    {project_key},
+                )
+                deletions = {
+                    "reference_bindings": keys_for(
+                        "reference_bindings",
+                        "shot_plan_id",
+                        shot_plan_ids,
+                    ),
+                    "generation_candidates": keys_for(
+                        "generation_candidates",
+                        "generation_run_id",
+                        generation_run_ids,
+                    ),
+                    "video_provider_tasks": keys_for(
+                        "video_provider_tasks",
+                        "generation_run_id",
+                        generation_run_ids,
+                    ),
+                    "production_revisions": keys_for(
+                        "production_revisions",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "reference_assets": keys_for(
+                        "reference_assets",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "video_clip_preparations": keys_for(
+                        "video_clip_preparations",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "approval_events": keys_for(
+                        "approval_events",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "project_asset_links": keys_for(
+                        "project_asset_links",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "continuity_reports": keys_for(
+                        "continuity_reports",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "shot_video_generation_drafts": keys_for(
+                        "shot_video_generation_drafts",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "depth_control_jobs": keys_for(
+                        "depth_control_jobs",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "generation_runs": generation_run_ids,
+                    "shot_plans": shot_plan_ids,
+                    "production_projects": {project_key},
+                }
+                for table, record_keys in deletions.items():
+                    safe_table = self._table(table)
+                    connection.executemany(
+                        f"DELETE FROM {safe_table} WHERE record_key = ?",  # noqa: S608
+                        [(record_key,) for record_key in record_keys],
+                    )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+
     def _count_production_projects_by_record(
         self,
         record_ids: list[UUID],
@@ -584,6 +680,7 @@ class SQLiteStore:
                 "SELECT json_extract(payload, '$.record_id') AS record_id, COUNT(*) "
                 "FROM production_projects "
                 f"WHERE json_extract(payload, '$.record_id') IN ({placeholders}) "  # noqa: S608
+                "AND json_extract(payload, '$.trashed_at') IS NULL "
                 "GROUP BY record_id",
                 tuple(str(record_id) for record_id in record_ids),
             ).fetchall()
@@ -750,6 +847,10 @@ class SQLiteStore:
         if record_id is not None:
             projects = [project for project in projects if project.record_id == record_id]
         return sorted(projects, key=lambda project: project.created_at)
+
+    async def delete_production_project(self, project_id: UUID) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._delete_production_project, project_id)
 
     async def count_production_projects_by_record(
         self,

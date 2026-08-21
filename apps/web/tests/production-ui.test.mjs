@@ -123,6 +123,18 @@ test("detects analysis updates and synchronizes only selected prompt fields", ()
   assert.match(productionWorkflowStyles, /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
 });
 
+test("supports recoverable production project deletion", () => {
+  assert.match(productionWorkflowSource, /function ProductionLifecycleDialog/);
+  assert.match(productionWorkflowSource, /productions\?lifecycle=trashed/);
+  assert.match(productionWorkflowSource, /\/productions\/\$\{project\.id\}\/restore/);
+  assert.match(productionWorkflowSource, /\/productions\/\$\{project\.id\}\/permanent/);
+  assert.match(productionWorkflowSource, /actionLabel:\s*"撤销"/);
+  assert.match(productionWorkflowSource, /className="production-project-menu"/);
+  assert.match(productionWorkflowSource, /className="production-workspace-menu"/);
+  assert.match(productionWorkflowStyles, /\.production-project-menu/);
+  assert.match(productionWorkflowStyles, /\.production-lifecycle-dialog-copy/);
+});
+
 test("labels video candidate recycle-bin revisions", () => {
   assert.equal(productionChangeLabel("image_candidates_archived"), "删除图片候选");
   assert.equal(productionChangeLabel("image_candidates_restored"), "恢复图片候选");
