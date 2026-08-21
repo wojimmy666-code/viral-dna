@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowsOut,
+  ArrowClockwise,
+  ArrowCounterClockwise,
   ArrowDown,
   ArrowUp,
   CheckCircle,
   CircleNotch,
   ClockCounterClockwise,
-  FilmSlate,
   FloppyDisk,
   Pause,
   Play,
+  Plus,
   SpeakerHigh,
   SpeakerSlash,
-  Subtitles,
+  Trash,
   WarningCircle,
 } from "@phosphor-icons/react";
 import {
@@ -21,9 +23,45 @@ import {
   formatEditorSeconds,
   revisionChangeLabel,
 } from "./editor-state.js";
+import { TimelineCanvas } from "./TimelineCanvas.jsx";
+import {
+  createTimelineSubtitle,
+  nextTimelineClip,
+  reflowTimelineDraft,
+  reorderTimelineClips,
+  sourceTimeToTimelineTime,
+  timelineClipAtTime,
+  timelineTimeToSourceTime,
+} from "./timeline-math.js";
 import "./video-editor.css";
 
 const PREVIEW_MAX_HEIGHT_PX = 600;
+const LOCAL_HISTORY_LIMIT = 20;
+
+function cloneTimelineDraft(timeline) {
+  return typeof structuredClone === "function"
+    ? structuredClone(timeline)
+    : JSON.parse(JSON.stringify(timeline));
+}
+
+function readAudioFileDuration(file) {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const audio = document.createElement("audio");
+    let settled = false;
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(objectUrl);
+      resolve(Number.isFinite(value) && value > 0 ? value : null);
+    }
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => finish(audio.duration);
+    audio.onerror = () => finish(null);
+    audio.src = objectUrl;
+    window.setTimeout(() => finish(null), 5000);
+  });
+}
 
 function TimelineSkeleton() {
   return (
@@ -38,47 +76,177 @@ function TimelineSkeleton() {
 function TimelinePreviewPlayer({
   aspectHeight,
   aspectWidth,
-  sourceUrl,
+  isScrubbing,
+  onTimelineTimeChange,
+  previewUrl,
+  resolveUrl,
   subtitleUrl,
+  timeline,
+  timelineCurrentTime,
 }) {
   const playerRef = useRef(null);
   const videoRef = useRef(null);
-  const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
+  const frameCallbackRef = useRef(null);
+  const playIntentRef = useRef(false);
+  const lastPublishedTimeRef = useRef(-1);
   const [playing, setPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const safeWidth = Math.max(1, Number(aspectWidth) || 16);
   const safeHeight = Math.max(1, Number(aspectHeight) || 9);
   const maxWidth = Math.round(PREVIEW_MAX_HEIGHT_PX * safeWidth / safeHeight);
+  const timelineDuration = Math.max(0, Number(timeline?.duration_seconds) || 0);
+  const displayTime = Math.min(
+    timelineDuration,
+    Math.max(0, Number(timelineCurrentTime) || 0),
+  );
+  const usingCompositePreview = Boolean(previewUrl);
+  const activeClip = useMemo(
+    () => timelineClipAtTime(timeline, displayTime),
+    [displayTime, timeline],
+  );
+  const sourceUrl = usingCompositePreview
+    ? previewUrl
+    : resolveUrl(activeClip?.candidate_content_url);
+  const atTimelineEnd = timelineDuration > 0 && displayTime >= timelineDuration - 0.01;
 
-  useEffect(() => {
-    setDuration(0);
-    setCurrentTime(0);
-    setPlaying(false);
-  }, [sourceUrl]);
-
-  async function togglePlayback() {
+  function cancelFrameLoop() {
     const video = videoRef.current;
-    if (!video) return;
-    if (video.paused || video.ended) {
-      if (video.ended) video.currentTime = 0;
-      try {
-        await video.play();
-      } catch {
-        setPlaying(false);
+    if (frameCallbackRef.current == null) return;
+    if (video?.cancelVideoFrameCallback && typeof frameCallbackRef.current === "number") {
+      video.cancelVideoFrameCallback(frameCallbackRef.current);
+    } else {
+      window.cancelAnimationFrame(frameCallbackRef.current);
+    }
+    frameCallbackRef.current = null;
+  }
+
+  function finishPlayback() {
+    playIntentRef.current = false;
+    setPlaying(false);
+    videoRef.current?.pause();
+    onTimelineTimeChange?.(timelineDuration);
+  }
+
+  function advanceFromClipBoundary() {
+    if (!activeClip) {
+      finishPlayback();
+      return;
+    }
+    const nextClip = nextTimelineClip(timeline, activeClip.id);
+    if (!nextClip || !playIntentRef.current) {
+      finishPlayback();
+      return;
+    }
+    onTimelineTimeChange?.(Number(nextClip.timeline_start_seconds));
+  }
+
+  function publishMediaTime(mediaTime) {
+    if (!Number.isFinite(mediaTime)) return;
+    if (usingCompositePreview) {
+      const nextTime = Math.min(timelineDuration, Math.max(0, mediaTime));
+      if (Math.abs(nextTime - lastPublishedTimeRef.current) >= 0.008) {
+        lastPublishedTimeRef.current = nextTime;
+        onTimelineTimeChange?.(nextTime);
       }
       return;
     }
-    video.pause();
+    if (!activeClip) return;
+    const sourceEnd = Number(activeClip.trim_out_seconds);
+    if (mediaTime >= sourceEnd - 0.02) {
+      advanceFromClipBoundary();
+      return;
+    }
+    const nextTime = sourceTimeToTimelineTime(activeClip, mediaTime);
+    if (Math.abs(nextTime - lastPublishedTimeRef.current) >= 0.008) {
+      lastPublishedTimeRef.current = nextTime;
+      onTimelineTimeChange?.(nextTime);
+    }
+  }
+
+  function beginFrameLoop(video) {
+    cancelFrameLoop();
+    if (video.requestVideoFrameCallback) {
+      const tick = (_timestamp, metadata) => {
+        publishMediaTime(metadata.mediaTime);
+        if (!video.paused && !video.ended) {
+          frameCallbackRef.current = video.requestVideoFrameCallback(tick);
+        }
+      };
+      frameCallbackRef.current = video.requestVideoFrameCallback(tick);
+      return;
+    }
+    const tick = () => {
+      publishMediaTime(video.currentTime);
+      if (!video.paused && !video.ended) {
+        frameCallbackRef.current = window.requestAnimationFrame(tick);
+      }
+    };
+    frameCallbackRef.current = window.requestAnimationFrame(tick);
+  }
+
+  function syncVideoToTimeline(video, timelineTime = displayTime, clip = activeClip) {
+    if (!video || !Number.isFinite(timelineTime)) return;
+    const nextTime = usingCompositePreview
+      ? timelineTime
+      : timelineTimeToSourceTime(clip, timelineTime);
+    video.playbackRate = usingCompositePreview ? 1 : Number(clip?.playback_rate || 1);
+    if (Math.abs(video.currentTime - nextTime) > 0.06) {
+      video.currentTime = nextTime;
+    }
+  }
+
+  useEffect(() => {
+    setPlaying(false);
+    lastPublishedTimeRef.current = -1;
+    cancelFrameLoop();
+  }, [sourceUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 1) return;
+    syncVideoToTimeline(video);
+  }, [activeClip?.id, displayTime, sourceUrl, usingCompositePreview]);
+
+  useEffect(() => {
+    if (!isScrubbing) return;
+    playIntentRef.current = false;
+    videoRef.current?.pause();
+    setPlaying(false);
+  }, [isScrubbing]);
+
+  useEffect(() => () => cancelFrameLoop(), []);
+
+  async function togglePlayback() {
+    const video = videoRef.current;
+    if (!video || !sourceUrl) return;
+    if (playing || !video.paused) {
+      playIntentRef.current = false;
+      video.pause();
+      return;
+    }
+    const requestedTime = atTimelineEnd ? 0 : displayTime;
+    const requestedClip = timelineClipAtTime(timeline, requestedTime);
+    const requestedSource = usingCompositePreview
+      ? previewUrl
+      : resolveUrl(requestedClip?.candidate_content_url);
+    playIntentRef.current = true;
+    if (requestedTime !== displayTime) onTimelineTimeChange?.(requestedTime);
+    if (requestedSource !== sourceUrl) return;
+    syncVideoToTimeline(video, requestedTime, requestedClip);
+    try {
+      await video.play();
+    } catch {
+      playIntentRef.current = false;
+      setPlaying(false);
+    }
   }
 
   function seek(event) {
     const video = videoRef.current;
     const nextTime = Number(event.target.value);
     if (!video || !Number.isFinite(nextTime)) return;
-    video.currentTime = nextTime;
-    setCurrentTime(nextTime);
+    onTimelineTimeChange?.(nextTime);
   }
 
   function changeVolume(event) {
@@ -133,19 +301,34 @@ function TimelinePreviewPlayer({
         <div className="timeline-preview-stage">
           <video
             aria-label="剪辑时间线视频预览"
-            key={sourceUrl}
             onClick={togglePlayback}
-            onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
-            onEnded={() => setPlaying(false)}
+            onEnded={() => {
+              if (usingCompositePreview) finishPlayback();
+              else advanceFromClipBoundary();
+            }}
             onLoadedMetadata={(event) => {
               const video = event.currentTarget;
-              setDuration(Number.isFinite(video.duration) ? video.duration : 0);
               setVolume(video.volume);
               setMuted(video.muted);
+              syncVideoToTimeline(video);
+              if (playIntentRef.current && !isScrubbing) {
+                video.play().catch(() => {
+                  playIntentRef.current = false;
+                  setPlaying(false);
+                });
+              }
             }}
-            onPause={() => setPlaying(false)}
-            onPlay={() => setPlaying(true)}
-            onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+            onPause={() => {
+              cancelFrameLoop();
+              setPlaying(false);
+            }}
+            onPlay={(event) => {
+              setPlaying(true);
+              beginFrameLoop(event.currentTarget);
+            }}
+            onTimeUpdate={(event) => {
+              publishMediaTime(event.currentTarget.currentTime);
+            }}
             onVolumeChange={(event) => {
               setVolume(event.currentTarget.volume);
               setMuted(event.currentTarget.muted);
@@ -155,32 +338,36 @@ function TimelinePreviewPlayer({
             ref={videoRef}
             src={sourceUrl}
           >
-            {subtitleUrl && <track default kind="subtitles" label="简体中文" src={subtitleUrl} srcLang="zh-CN" />}
+            {usingCompositePreview && subtitleUrl && <track default kind="subtitles" label="简体中文" src={subtitleUrl} srcLang="zh-CN" />}
           </video>
         </div>
         <div className="timeline-preview-controls" role="group" aria-label="视频播放控制">
           <button
-            aria-label={playing ? "暂停" : "播放"}
+            aria-label={playing ? "暂停" : atTimelineEnd ? "重新播放" : `从 ${formatEditorSeconds(displayTime)} 播放`}
             className="timeline-player-button primary"
             disabled={!sourceUrl}
             onClick={togglePlayback}
             type="button"
           >
-            {playing ? <Pause size={17} weight="fill" /> : <Play size={17} weight="fill" />}
+            {playing
+              ? <Pause size={17} weight="fill" />
+              : atTimelineEnd
+                ? <ArrowCounterClockwise size={17} />
+                : <Play size={17} weight="fill" />}
           </button>
           <input
             aria-label="播放进度"
             className="timeline-player-progress"
-            disabled={!duration}
-            max={duration || 0}
+            disabled={!timelineDuration}
+            max={timelineDuration || 0}
             min="0"
             onChange={seek}
             step="0.01"
             type="range"
-            value={Math.min(currentTime, duration || 0)}
+            value={displayTime}
           />
           <output className="timeline-player-time" aria-live="off">
-            {formatEditorSeconds(currentTime)} / {formatEditorSeconds(duration)}
+            {formatEditorSeconds(displayTime)} / {formatEditorSeconds(timelineDuration)}
           </output>
           <button
             aria-label={muted || volume === 0 ? "取消静音" : "静音"}
@@ -205,71 +392,6 @@ function TimelinePreviewPlayer({
           <button aria-label="全屏播放" className="timeline-player-button" disabled={!sourceUrl} onClick={enterFullscreen} type="button">
             <ArrowsOut size={17} />
           </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TimelineTrack({ timeline, selectedClipId, onSelect, resolveUrl }) {
-  const enabledClipIds = new Set(
-    timeline.clips.filter((clip) => clip.enabled).map((clip) => clip.id),
-  );
-  return (
-    <div className="timeline-tracks" role="region" aria-label="受控时间线轨道">
-      <div className="timeline-track-row video-track-row">
-        <span className="timeline-track-label"><FilmSlate size={17} />V1 视频</span>
-        <div className="timeline-track-scroll">
-          {timeline.clips.map((clip) => (
-            <button
-              aria-pressed={selectedClipId === clip.id}
-              className={`timeline-clip ${selectedClipId === clip.id ? "selected" : ""} ${clip.enabled ? "" : "disabled"}`}
-              key={clip.id}
-              onClick={() => onSelect(clip.id)}
-              style={{ "--clip-grow": Math.max(1.5, clip.timeline_duration_seconds) }}
-              type="button"
-            >
-              <img alt="" src={resolveUrl(clip.cover_url)} />
-              <span>
-                <strong>分镜 {clip.shot_index}</strong>
-                <small>{formatEditorSeconds(clip.timeline_start_seconds)}–{formatEditorSeconds(clip.timeline_end_seconds)}</small>
-              </span>
-              {!clip.enabled && <em>已停用</em>}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="timeline-track-row audio-track-row">
-        <span className="timeline-track-label">
-          {timeline.audio_track.enabled ? <SpeakerHigh size={17} /> : <SpeakerSlash size={17} />}
-          A1 原音
-        </span>
-        <div className={`timeline-audio-strip ${timeline.audio_track.enabled ? "" : "muted"}`}>
-          {timeline.audio_track.enabled ? "映射源视频音频" : "全局静音"}
-        </div>
-      </div>
-      <div className="timeline-track-row audio-track-row secondary-audio-track-row">
-        <span className="timeline-track-label">
-          {timeline.background_audio_track.enabled ? <SpeakerHigh size={17} /> : <SpeakerSlash size={17} />}
-          A2 附加
-        </span>
-        <div className={`timeline-audio-strip secondary ${timeline.background_audio_track.enabled ? "" : "muted"}`}>
-          {timeline.background_audio_track.enabled
-            ? timeline.background_audio_track.name || "附加背景音频"
-            : timeline.background_audio_track.source_url
-              ? "附加音轨已关闭"
-              : "尚未添加音频"}
-        </div>
-      </div>
-      <div className="timeline-track-row subtitle-track-row">
-        <span className="timeline-track-label"><Subtitles size={17} />T1 字幕</span>
-        <div className="timeline-subtitle-strip">
-          {timeline.subtitle_cues.filter(
-            (cue) => cue.enabled && (cue.clip_id === null || enabledClipIds.has(cue.clip_id)),
-          ).map((cue) => (
-            <span key={cue.id} title={cue.text}>{cue.text}</span>
-          ))}
-          {!timeline.subtitle_cues.some((cue) => cue.enabled) && <small>字幕轨已关闭</small>}
         </div>
       </div>
     </div>
@@ -413,8 +535,10 @@ function AudioInspector({
   background,
   busy,
   dirty,
+  duration,
   onBackgroundChange,
   onChange,
+  onDeleteBackground,
   onUploadBackground,
 }) {
   return (
@@ -448,6 +572,33 @@ function AudioInspector({
         <input checked={audio.normalize_loudness} disabled={!audio.enabled} onChange={(event) => onChange({ normalize_loudness: event.target.checked })} type="checkbox" />
         <span>预览时执行响度标准化</span>
       </label>
+      <label className="timeline-toggle standalone">
+        <input
+          checked={audio.linked_to_video !== false}
+          disabled={!audio.enabled}
+          onChange={(event) => onChange({
+            linked_to_video: event.target.checked,
+            source_trim_in_seconds: event.target.checked ? 0 : audio.source_trim_in_seconds,
+            source_trim_out_seconds: event.target.checked ? duration : audio.source_trim_out_seconds,
+            timeline_start_seconds: event.target.checked ? 0 : audio.timeline_start_seconds,
+            timeline_end_seconds: event.target.checked ? duration : audio.timeline_end_seconds,
+          })}
+          type="checkbox"
+        />
+        <span>跟随视频轨同步</span>
+      </label>
+      {audio.enabled && audio.linked_to_video === false && (
+        <div className="timeline-field-pair">
+          <label>
+            <span>原音开始</span>
+            <div><input max={(audio.timeline_end_seconds ?? duration) - 0.1} min="0" onChange={(event) => onChange({ timeline_start_seconds: Number(event.target.value) })} step="0.05" type="number" value={audio.timeline_start_seconds || 0} /><small>秒</small></div>
+          </label>
+          <label>
+            <span>原音结束</span>
+            <div><input max={duration} min={(audio.timeline_start_seconds || 0) + 0.1} onChange={(event) => onChange({ timeline_end_seconds: Number(event.target.value) })} step="0.05" type="number" value={audio.timeline_end_seconds ?? duration} /><small>秒</small></div>
+          </label>
+        </div>
+      )}
       <div className="timeline-inspector-divider" />
       <div className="timeline-inspector-heading">
         <div><small>A2 轻量轨道</small><h4>附加音频</h4></div>
@@ -478,6 +629,11 @@ function AudioInspector({
       <small className="timeline-audio-file-name">
         {background.name || "支持 MP3、WAV、M4A、AAC、OGG、FLAC，最大 100 MB"}
       </small>
+      {background.source_url && (
+        <button className="timeline-destructive-button" onClick={onDeleteBackground} type="button">
+          <Trash size={15} />删除附加音频
+        </button>
+      )}
       <label className="timeline-field">
         <span>附加音量 · {Math.round(background.volume * 100)}%</span>
         <input
@@ -499,27 +655,57 @@ function AudioInspector({
         />
         <span>音频不足成片时循环播放</span>
       </label>
+      {background.source_url && (
+        <>
+          <div className="timeline-field-pair">
+            <label>
+              <span>轨道开始</span>
+              <div><input max={(background.timeline_end_seconds ?? duration) - 0.1} min="0" onChange={(event) => onBackgroundChange({ timeline_start_seconds: Number(event.target.value) })} step="0.05" type="number" value={background.timeline_start_seconds || 0} /><small>秒</small></div>
+            </label>
+            <label>
+              <span>轨道结束</span>
+              <div><input max={duration} min={(background.timeline_start_seconds || 0) + 0.1} onChange={(event) => onBackgroundChange({ timeline_end_seconds: Number(event.target.value) })} step="0.05" type="number" value={background.timeline_end_seconds ?? duration} /><small>秒</small></div>
+            </label>
+          </div>
+          <div className="timeline-field-pair">
+            <label>
+              <span>素材入点</span>
+              <div><input max={(background.source_trim_out_seconds ?? background.source_duration_seconds ?? duration) - 0.1} min="0" onChange={(event) => onBackgroundChange({ source_trim_in_seconds: Number(event.target.value) })} step="0.05" type="number" value={background.source_trim_in_seconds || 0} /><small>秒</small></div>
+            </label>
+            <label>
+              <span>素材出点</span>
+              <div><input max={background.source_duration_seconds || duration} min={(background.source_trim_in_seconds || 0) + 0.1} onChange={(event) => onBackgroundChange({ source_trim_out_seconds: Number(event.target.value) })} step="0.05" type="number" value={background.source_trim_out_seconds ?? background.source_duration_seconds ?? duration} /><small>秒</small></div>
+            </label>
+          </div>
+        </>
+      )}
       {dirty && <em className="timeline-audio-help">请先保存当前修改，再上传或替换音频。</em>}
     </div>
   );
 }
 
-function SubtitleInspector({ cues, onChange }) {
+function SubtitleInspector({ cues, onAdd, onChange, onDelete, onSelect, selectedCueId }) {
   return (
     <div className="timeline-subtitle-editor">
       <div className="timeline-inspector-heading">
         <div><small>文本轨道</small><h4>字幕与对白</h4></div>
-        <span>{cues.filter((cue) => cue.enabled).length}/{cues.length} 条启用</span>
+        <button className="secondary-button compact" onClick={onAdd} type="button"><Plus size={15} />添加字幕</button>
       </div>
-      {cues.length === 0 && <div className="timeline-inspector-empty">交接清单中没有字幕或对白。</div>}
+      <small className="timeline-subtitle-count">{cues.filter((cue) => cue.enabled).length}/{cues.length} 条启用</small>
+      {cues.length === 0 && <div className="timeline-inspector-empty">播放头移动到目标位置后添加第一条字幕。</div>}
       {cues.map((cue) => (
-        <label className={`timeline-subtitle-item ${cue.enabled ? "" : "disabled"}`} key={cue.id}>
-          <input checked={cue.enabled} onChange={(event) => onChange(cue.id, { enabled: event.target.checked })} type="checkbox" />
+        <div className={`timeline-subtitle-item ${cue.enabled ? "" : "disabled"} ${selectedCueId === cue.id ? "selected" : ""}`} key={cue.id} onClick={() => onSelect(cue.id)}>
+          <input aria-label="启用字幕" checked={cue.enabled} onChange={(event) => onChange(cue.id, { enabled: event.target.checked })} type="checkbox" />
           <span>
             <small>{formatEditorSeconds(cue.start_seconds)}–{formatEditorSeconds(cue.end_seconds)}</small>
             <textarea rows="2" value={cue.text} onChange={(event) => onChange(cue.id, { text: event.target.value })} />
+            <span className="timeline-subtitle-time-fields">
+              <label>开始<input max={cue.end_seconds - 0.1} min="0" onChange={(event) => onChange(cue.id, { clip_id: null, clip_start_seconds: null, clip_end_seconds: null, start_seconds: Number(event.target.value) })} step="0.05" type="number" value={cue.start_seconds} /></label>
+              <label>结束<input min={cue.start_seconds + 0.1} onChange={(event) => onChange(cue.id, { clip_id: null, clip_start_seconds: null, clip_end_seconds: null, end_seconds: Number(event.target.value) })} step="0.05" type="number" value={cue.end_seconds} /></label>
+            </span>
           </span>
-        </label>
+          <button aria-label="删除字幕" className="timeline-subtitle-delete" onClick={(event) => { event.stopPropagation(); onDelete(cue.id); }} title="删除字幕" type="button"><Trash size={15} /></button>
+        </div>
       ))}
     </div>
   );
@@ -537,12 +723,21 @@ export function VideoEditorWorkspace({
   const [validation, setValidation] = useState(null);
   const [revisions, setRevisions] = useState([]);
   const [selectedClipId, setSelectedClipId] = useState("");
+  const [selectedCueId, setSelectedCueId] = useState("");
+  const [selectedTrack, setSelectedTrack] = useState("");
+  const [playheadSeconds, setPlayheadSeconds] = useState(0);
+  const [isScrubbing, setIsScrubbing] = useState(false);
   const [inspectorTab, setInspectorTab] = useState("clip");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [renderJob, setRenderJob] = useState(null);
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const timelineRef = useRef(timeline);
+  const gestureSnapshotRef = useRef(null);
+  timelineRef.current = timeline;
   const dirty = Boolean(timeline && editableTimelineSnapshot(timeline) !== savedSnapshot);
   const selectedClip = useMemo(
     () => timeline?.clips.find((clip) => clip.id === selectedClipId) || timeline?.clips[0] || null,
@@ -554,6 +749,76 @@ export function VideoEditorWorkspace({
   const previewSubtitleUrl = renderJob?.status === "succeeded" && renderJob.subtitle_url
     ? resolveUrl(renderJob.subtitle_url)
     : "";
+  const compositePreviewUrl = (
+    previewUrl
+    && !dirty
+    && renderJob?.timeline_revision_id === timeline?.revision_id
+  ) ? previewUrl : "";
+  const playheadClip = useMemo(
+    () => timelineClipAtTime(timeline, playheadSeconds),
+    [playheadSeconds, timeline],
+  );
+
+  function rememberSnapshot(snapshot) {
+    if (!snapshot) return;
+    setUndoStack((current) => [
+      ...current.slice(-(LOCAL_HISTORY_LIMIT - 1)),
+      cloneTimelineDraft(snapshot),
+    ]);
+    setRedoStack([]);
+  }
+
+  function applyTimelineEdit(updater, { record = true } = {}) {
+    const current = timelineRef.current;
+    if (!current) return;
+    const next = updater(current);
+    if (!next || editableTimelineSnapshot(next) === editableTimelineSnapshot(current)) return;
+    if (record) rememberSnapshot(current);
+    timelineRef.current = next;
+    setTimeline(next);
+  }
+
+  function beginTimelineGesture() {
+    if (!gestureSnapshotRef.current && timelineRef.current) {
+      gestureSnapshotRef.current = cloneTimelineDraft(timelineRef.current);
+    }
+  }
+
+  function endTimelineGesture() {
+    const before = gestureSnapshotRef.current;
+    gestureSnapshotRef.current = null;
+    if (
+      before
+      && timelineRef.current
+      && editableTimelineSnapshot(before) !== editableTimelineSnapshot(timelineRef.current)
+    ) {
+      rememberSnapshot(before);
+    }
+  }
+
+  function undoTimelineEdit() {
+    if (!undoStack.length || !timelineRef.current) return;
+    const previous = undoStack.at(-1);
+    setUndoStack((current) => current.slice(0, -1));
+    setRedoStack((current) => [
+      ...current.slice(-(LOCAL_HISTORY_LIMIT - 1)),
+      cloneTimelineDraft(timelineRef.current),
+    ]);
+    timelineRef.current = cloneTimelineDraft(previous);
+    setTimeline(timelineRef.current);
+  }
+
+  function redoTimelineEdit() {
+    if (!redoStack.length || !timelineRef.current) return;
+    const next = redoStack.at(-1);
+    setRedoStack((current) => current.slice(0, -1));
+    setUndoStack((current) => [
+      ...current.slice(-(LOCAL_HISTORY_LIMIT - 1)),
+      cloneTimelineDraft(timelineRef.current),
+    ]);
+    timelineRef.current = cloneTimelineDraft(next);
+    setTimeline(timelineRef.current);
+  }
 
   async function loadTimeline() {
     setLoading(true);
@@ -564,6 +829,7 @@ export function VideoEditorWorkspace({
         request(`/productions/${project.id}/timeline/revisions`),
         request(`/productions/${project.id}/timeline/validation`),
       ]);
+      timelineRef.current = nextTimeline;
       setTimeline(nextTimeline);
       setSavedSnapshot(editableTimelineSnapshot(nextTimeline));
       setSelectedClipId((current) => (
@@ -573,6 +839,9 @@ export function VideoEditorWorkspace({
       ));
       setRevisions(nextRevisions.items || []);
       setValidation(nextValidation);
+      setUndoStack([]);
+      setRedoStack([]);
+      setPlayheadSeconds((current) => Math.min(current, nextTimeline.duration_seconds));
       if (nextTimeline.last_preview_job_id) {
         try {
           const job = await request(
@@ -619,9 +888,14 @@ export function VideoEditorWorkspace({
     };
   }, [project.id, renderJob?.id, renderJob?.status]);
 
+  useEffect(() => {
+    if (!timeline) return;
+    setPlayheadSeconds((current) => Math.min(current, timeline.duration_seconds));
+  }, [timeline?.duration_seconds]);
+
   function updateClip(values) {
     if (!selectedClip) return;
-    setTimeline((current) => ({
+    applyTimelineEdit((current) => reflowTimelineDraft({
       ...current,
       clips: current.clips.map((clip) => (
         clip.id === selectedClip.id ? { ...clip, ...values } : clip
@@ -629,38 +903,93 @@ export function VideoEditorWorkspace({
     }));
   }
 
+  function updateCanvasClip(clipId, nextClip, options = {}) {
+    applyTimelineEdit((current) => reflowTimelineDraft({
+      ...current,
+      clips: current.clips.map((clip) => clip.id === clipId ? nextClip : clip),
+    }), { record: !options.transient });
+  }
+
+  function reorderCanvasClip(clipId, targetIndex, options = {}) {
+    applyTimelineEdit((current) => reflowTimelineDraft({
+      ...current,
+      clips: reorderTimelineClips(current.clips, clipId, targetIndex),
+    }), { record: !options.transient });
+  }
+
   function moveSelectedClip(direction) {
-    setTimeline((current) => {
-      const clips = [...current.clips];
+    applyTimelineEdit((current) => {
+      const clips = [...current.clips].sort((first, second) => first.order - second.order);
       const index = clips.findIndex((clip) => clip.id === selectedClipId);
       const target = index + direction;
       if (index < 0 || target < 0 || target >= clips.length) return current;
-      [clips[index], clips[target]] = [clips[target], clips[index]];
-      return { ...current, clips: clips.map((clip, order) => ({ ...clip, order: order + 1 })) };
+      return reflowTimelineDraft({
+        ...current,
+        clips: reorderTimelineClips(clips, selectedClipId, target),
+      });
     });
   }
 
-  function updateAudio(values) {
-    setTimeline((current) => ({
+  function updateAudio(values, options = {}) {
+    applyTimelineEdit((current) => reflowTimelineDraft({
       ...current,
       audio_track: { ...current.audio_track, ...values },
-    }));
+    }), { record: !options.transient });
   }
 
-  function updateBackgroundAudio(values) {
-    setTimeline((current) => ({
+  function updateBackgroundAudio(values, options = {}) {
+    applyTimelineEdit((current) => ({
       ...current,
       background_audio_track: { ...current.background_audio_track, ...values },
-    }));
+    }), { record: !options.transient });
   }
 
-  function updateSubtitle(cueId, values) {
-    setTimeline((current) => ({
+  function updateSubtitle(cueId, values, options = {}) {
+    applyTimelineEdit((current) => reflowTimelineDraft({
       ...current,
       subtitle_cues: current.subtitle_cues.map((cue) => (
         cue.id === cueId ? { ...cue, ...values } : cue
       )),
+    }), { record: !options.transient });
+  }
+
+  function addSubtitle() {
+    if (!timeline) return;
+    const cue = createTimelineSubtitle(playheadSeconds, timeline.duration_seconds);
+    applyTimelineEdit((current) => ({
+      ...current,
+      subtitle_cues: [...current.subtitle_cues, cue],
     }));
+    setSelectedCueId(cue.id);
+    setInspectorTab("subtitles");
+  }
+
+  function deleteSubtitle(cueId) {
+    applyTimelineEdit((current) => ({
+      ...current,
+      subtitle_cues: current.subtitle_cues.filter((cue) => cue.id !== cueId),
+    }));
+    setSelectedCueId((current) => current === cueId ? "" : current);
+  }
+
+  function deleteBackgroundAudio() {
+    applyTimelineEdit((current) => ({
+      ...current,
+      background_audio_track: {
+        source_relative_path: null,
+        source_url: null,
+        name: null,
+        enabled: false,
+        volume: current.background_audio_track.volume,
+        loop: true,
+        source_duration_seconds: null,
+        source_trim_in_seconds: 0,
+        source_trim_out_seconds: null,
+        timeline_start_seconds: 0,
+        timeline_end_seconds: null,
+      },
+    }));
+    setSelectedTrack("");
   }
 
   async function saveTimeline() {
@@ -700,11 +1029,14 @@ export function VideoEditorWorkspace({
         request(`/productions/${project.id}/timeline/validation`),
         request(`/productions/${project.id}/timeline/revisions`),
       ]);
+      timelineRef.current = saved;
       setTimeline(saved);
       setSavedSnapshot(editableTimelineSnapshot(saved));
       setValidation(nextValidation);
       setRevisions(nextRevisions.items || []);
       setRenderJob(null);
+      setUndoStack([]);
+      setRedoStack([]);
       onNotice({ type: "success", title: "时间线已保存", message: `已创建版本 ${saved.revision_number}` });
     } catch (requestError) {
       setError(requestError.message);
@@ -719,18 +1051,23 @@ export function VideoEditorWorkspace({
     setBusy(true);
     setError("");
     try {
+      const durationSeconds = await readAudioFileDuration(file);
       const form = new FormData();
       form.append("expected_revision_id", timeline.revision_id);
+      if (durationSeconds) form.append("duration_seconds", String(durationSeconds));
       form.append("file", file);
       const updated = await request(
         `/productions/${project.id}/timeline/background-audio`,
         { method: "POST", body: form },
       );
       const nextRevisions = await request(`/productions/${project.id}/timeline/revisions`);
+      timelineRef.current = updated;
       setTimeline(updated);
       setSavedSnapshot(editableTimelineSnapshot(updated));
       setRevisions(nextRevisions.items || []);
       setRenderJob(null);
+      setUndoStack([]);
+      setRedoStack([]);
       onNotice({ type: "success", title: "附加音轨已添加", message: file.name });
     } catch (requestError) {
       setError(requestError.message);
@@ -757,11 +1094,14 @@ export function VideoEditorWorkspace({
         request(`/productions/${project.id}/timeline/validation`),
         request(`/productions/${project.id}/timeline/revisions`),
       ]);
+      timelineRef.current = inspected;
       setTimeline(inspected);
       setSavedSnapshot(editableTimelineSnapshot(inspected));
       setValidation(nextValidation);
       setRevisions(nextRevisions.items || []);
       setRenderJob(null);
+      setUndoStack([]);
+      setRedoStack([]);
       const inspectedClip = inspected.clips.find((item) => item.id === selectedClip.id);
       onNotice({
         type: inspectedClip?.quality_status === "passed" ? "success" : "warning",
@@ -817,11 +1157,17 @@ export function VideoEditorWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expected_revision_id: timeline.revision_id }),
       });
+      timelineRef.current = restored;
       setTimeline(restored);
       setSavedSnapshot(editableTimelineSnapshot(restored));
       setSelectedClipId(restored.clips[0]?.id || "");
+      setSelectedCueId("");
+      setSelectedTrack("");
+      setPlayheadSeconds(0);
       setHistoryOpen(false);
       setRenderJob(null);
+      setUndoStack([]);
+      setRedoStack([]);
       const next = await request(`/productions/${project.id}/timeline/revisions`);
       setRevisions(next.items || []);
       onNotice({ type: "success", title: "时间线已恢复", message: `已从版本 ${revision.revision_number} 创建新版本。` });
@@ -854,6 +1200,10 @@ export function VideoEditorWorkspace({
               <button onClick={cancelPreview} type="button">取消</button>
             </div>
           )}
+          <div className="timeline-local-history" role="group" aria-label="本地编辑历史">
+            <button aria-label="撤销" disabled={!undoStack.length || busy} onClick={undoTimelineEdit} title="撤销" type="button"><ArrowCounterClockwise size={16} /></button>
+            <button aria-label="重做" disabled={!redoStack.length || busy} onClick={redoTimelineEdit} title="重做" type="button"><ArrowClockwise size={16} /></button>
+          </div>
           <button className="secondary-button compact" onClick={() => setHistoryOpen((value) => !value)} type="button">
             <ClockCounterClockwise size={16} />版本 {timeline.revision_number}
           </button>
@@ -892,21 +1242,54 @@ export function VideoEditorWorkspace({
           <div className="timeline-preview-panel">
             <div className="timeline-preview-heading">
               <div>
-                <strong>{previewUrl ? "低清合成预览" : `分镜 ${selectedClip?.shot_index || "-"} 源片段`}</strong>
-                <small>{previewUrl ? "已包含原音轨映射、字幕轨和转场" : "保存时间线后生成完整预览"}</small>
+                <strong>{compositePreviewUrl ? "低清合成预览" : `分镜 ${playheadClip?.shot_index || "-"} 实时预览`}</strong>
+                <small>{compositePreviewUrl ? "已包含原音轨映射、字幕轨和转场" : "画面跟随播放轴；生成预览后可检查完整转场与混音"}</small>
               </div>
-              {renderJob?.status === "succeeded" && <span><CheckCircle size={15} weight="fill" />预览就绪</span>}
+              {compositePreviewUrl && <span><CheckCircle size={15} weight="fill" />预览就绪</span>}
               {renderJob?.status === "failed" && <span className="failed"><WarningCircle size={15} />生成失败</span>}
             </div>
             <TimelinePreviewPlayer
               aspectHeight={timeline.output_height}
               aspectWidth={timeline.output_width}
-              sourceUrl={previewUrl || resolveUrl(selectedClip?.candidate_content_url)}
+              isScrubbing={isScrubbing}
+              onTimelineTimeChange={setPlayheadSeconds}
+              previewUrl={compositePreviewUrl}
+              resolveUrl={resolveUrl}
               subtitleUrl={previewSubtitleUrl}
+              timeline={timeline}
+              timelineCurrentTime={playheadSeconds}
             />
           </div>
           <div className="timeline-track-zone">
-            <TimelineTrack timeline={timeline} selectedClipId={selectedClip?.id} onSelect={(clipId) => { setSelectedClipId(clipId); setInspectorTab("clip"); }} resolveUrl={resolveUrl} />
+            <TimelineCanvas
+              activeClipId={playheadClip?.id}
+              onAddSubtitle={addSubtitle}
+              onAudioChange={updateAudio}
+              onBackgroundChange={updateBackgroundAudio}
+              onClipChange={updateCanvasClip}
+              onClipReorder={reorderCanvasClip}
+              onCueChange={updateSubtitle}
+              onDeleteBackground={deleteBackgroundAudio}
+              onDeleteCue={deleteSubtitle}
+              onGestureEnd={endTimelineGesture}
+              onGestureStart={beginTimelineGesture}
+              onPlayheadChange={setPlayheadSeconds}
+              onScrubEnd={() => setIsScrubbing(false)}
+              onScrubStart={() => setIsScrubbing(true)}
+              onSelectAudio={(track) => { setSelectedTrack(track); setInspectorTab("audio"); }}
+              onSelectClip={(clipId) => { setSelectedClipId(clipId); setInspectorTab("clip"); }}
+              onSelectCue={(cueId) => { setSelectedCueId(cueId); setInspectorTab("subtitles"); }}
+              playheadSeconds={playheadSeconds}
+              previewFrameUrl={(clip, frameIndex, frameCount) => resolveUrl(
+                `/api/v1/productions/${project.id}/timeline/clips/${clip.id}/preview-frames/${frameIndex}`
+                + `?count=${frameCount}&v=${encodeURIComponent(`${clip.candidate_id}:${clip.trim_in_seconds}:${clip.trim_out_seconds}`)}`,
+              )}
+              resolveUrl={resolveUrl}
+              selectedClipId={selectedClip?.id}
+              selectedCueId={selectedCueId}
+              selectedTrack={selectedTrack}
+              timeline={timeline}
+            />
           </div>
         </div>
 
@@ -933,12 +1316,23 @@ export function VideoEditorWorkspace({
               background={timeline.background_audio_track}
               busy={busy}
               dirty={dirty}
+              duration={timeline.duration_seconds}
               onBackgroundChange={updateBackgroundAudio}
               onChange={updateAudio}
+              onDeleteBackground={deleteBackgroundAudio}
               onUploadBackground={uploadBackgroundAudio}
             />
           )}
-          {inspectorTab === "subtitles" && <SubtitleInspector cues={timeline.subtitle_cues} onChange={updateSubtitle} />}
+          {inspectorTab === "subtitles" && (
+            <SubtitleInspector
+              cues={timeline.subtitle_cues}
+              onAdd={addSubtitle}
+              onChange={updateSubtitle}
+              onDelete={deleteSubtitle}
+              onSelect={setSelectedCueId}
+              selectedCueId={selectedCueId}
+            />
+          )}
         </aside>
       </div>
     </section>

@@ -12,6 +12,7 @@ from uuid import UUID
 from .media import MediaProcessor
 from .models import (
     ProductionTimeline,
+    TimelineBackgroundAudioTrack,
     TimelineClip,
     TimelineTransitionKind,
     VideoClipAudioMode,
@@ -211,6 +212,23 @@ class TimelinePreviewRenderer:
                 is_cancelled,
                 profile=profile,
             )
+            if not timeline.audio_track.linked_to_video:
+                placed_audio = intermediate_root / "audio-track-placed.m4a"
+                await self._render_placed_audio(
+                    audio_path,
+                    placed_audio,
+                    duration_seconds=timeline.duration_seconds,
+                    source_trim_in_seconds=timeline.audio_track.source_trim_in_seconds,
+                    source_trim_out_seconds=timeline.audio_track.source_trim_out_seconds,
+                    timeline_start_seconds=timeline.audio_track.timeline_start_seconds,
+                    timeline_end_seconds=timeline.audio_track.timeline_end_seconds,
+                    volume=1,
+                    loop=False,
+                    is_cancelled=is_cancelled,
+                    profile=profile,
+                    kind="原音轨",
+                )
+                audio_path = placed_audio
 
         if (
             timeline.background_audio_track.enabled
@@ -222,8 +240,7 @@ class TimelinePreviewRenderer:
                 background_audio_path,
                 rendered_background,
                 duration_seconds=timeline.duration_seconds,
-                volume=timeline.background_audio_track.volume,
-                loop=timeline.background_audio_track.loop,
+                track=timeline.background_audio_track,
                 is_cancelled=is_cancelled,
                 profile=profile,
             )
@@ -265,11 +282,72 @@ class TimelinePreviewRenderer:
         output_path: Path,
         *,
         duration_seconds: float,
+        track: TimelineBackgroundAudioTrack,
+        is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
+    ) -> None:
+        await self._render_placed_audio(
+            source_path,
+            output_path,
+            duration_seconds=duration_seconds,
+            source_trim_in_seconds=track.source_trim_in_seconds,
+            source_trim_out_seconds=track.source_trim_out_seconds,
+            timeline_start_seconds=track.timeline_start_seconds,
+            timeline_end_seconds=track.timeline_end_seconds,
+            volume=track.volume,
+            loop=track.loop,
+            is_cancelled=is_cancelled,
+            profile=profile,
+            kind="附加音轨",
+        )
+
+    async def _render_placed_audio(
+        self,
+        source_path: Path,
+        output_path: Path,
+        *,
+        duration_seconds: float,
+        source_trim_in_seconds: float,
+        source_trim_out_seconds: float | None,
+        timeline_start_seconds: float,
+        timeline_end_seconds: float | None,
         volume: float,
         loop: bool,
         is_cancelled: CancellationCheck,
         profile: TimelineRenderProfile,
+        kind: str,
     ) -> None:
+        start = min(max(0.0, timeline_start_seconds), duration_seconds)
+        end = min(
+            duration_seconds,
+            max(start + 0.05, timeline_end_seconds or duration_seconds),
+        )
+        placed_duration = max(0.05, end - start)
+        source_start = max(0.0, source_trim_in_seconds)
+        source_end = source_trim_out_seconds or (source_start + placed_duration)
+        source_span = max(0.05, source_end - source_start)
+        filters = [
+            f"atrim=start={source_start:.6f}:end={source_end:.6f}",
+            "asetpts=PTS-STARTPTS",
+            f"volume={volume:.6f}",
+        ]
+        if loop:
+            sample_count = max(1, round(source_span * 48000))
+            filters.extend(
+                [
+                    "aresample=48000",
+                    f"aloop=loop=-1:size={sample_count}",
+                ]
+            )
+        filters.extend(
+            [
+                "apad",
+                f"atrim=duration={placed_duration:.6f}",
+                f"adelay={round(start * 1000)}:all=1",
+                "apad",
+                f"atrim=duration={duration_seconds:.6f}",
+            ]
+        )
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -277,29 +355,23 @@ class TimelinePreviewRenderer:
             "error",
             "-nostdin",
             "-y",
+            "-i",
+            str(source_path),
+            "-filter:a",
+            ",".join(filters),
+            "-t",
+            f"{duration_seconds:.6f}",
+            "-c:a",
+            "aac",
+            "-b:a",
+            profile.audio_bitrate,
+            str(output_path),
         ]
-        if loop:
-            command.extend(["-stream_loop", "-1"])
-        command.extend(
-            [
-                "-i",
-                str(source_path),
-                "-filter:a",
-                f"volume={volume:.6f},atrim=duration={duration_seconds:.6f},asetpts=PTS-STARTPTS",
-                "-t",
-                f"{duration_seconds:.6f}",
-                "-c:a",
-                "aac",
-                "-b:a",
-                profile.audio_bitrate,
-                str(output_path),
-            ]
-        )
         await self._run(
             command,
             is_cancelled=is_cancelled,
             code=f"{profile.error_prefix}_background_audio_failed",
-            message=f"{profile.operation_label}附加音轨处理失败",
+            message=f"{profile.operation_label}{kind}处理失败",
             timeout_seconds=profile.timeout_seconds,
         )
 

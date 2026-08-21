@@ -3372,11 +3372,33 @@ class TimelineAudioTrack(BaseModel):
     enabled: bool = True
     volume: float = Field(default=1, ge=0, le=2)
     normalize_loudness: bool = True
+    linked_to_video: bool = True
+    source_duration_seconds: float | None = Field(default=None, gt=0)
+    source_trim_in_seconds: float = Field(default=0, ge=0)
+    source_trim_out_seconds: float | None = Field(default=None, gt=0)
+    timeline_start_seconds: float = Field(default=0, ge=0)
+    timeline_end_seconds: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_source(self) -> TimelineAudioTrack:
         if self.strategy != "muted" and not self.source_audio_url:
             raise ValueError("启用原音轨时必须存在音频来源")
+        if (
+            self.source_trim_out_seconds is not None
+            and self.source_trim_out_seconds <= self.source_trim_in_seconds
+        ):
+            raise ValueError("原音轨出点必须晚于入点")
+        if (
+            self.source_duration_seconds is not None
+            and self.source_trim_out_seconds is not None
+            and self.source_trim_out_seconds > self.source_duration_seconds + 0.05
+        ):
+            raise ValueError("原音轨出点不能超过音频时长")
+        if (
+            self.timeline_end_seconds is not None
+            and self.timeline_end_seconds <= self.timeline_start_seconds
+        ):
+            raise ValueError("原音轨结束时间必须晚于开始时间")
         return self
 
 
@@ -3387,6 +3409,11 @@ class TimelineBackgroundAudioTrack(BaseModel):
     enabled: bool = False
     volume: float = Field(default=0.35, ge=0, le=2)
     loop: bool = True
+    source_duration_seconds: float | None = Field(default=None, gt=0)
+    source_trim_in_seconds: float = Field(default=0, ge=0)
+    source_trim_out_seconds: float | None = Field(default=None, gt=0)
+    timeline_start_seconds: float = Field(default=0, ge=0)
+    timeline_end_seconds: float | None = Field(default=None, gt=0)
 
     @field_validator("source_relative_path")
     @classmethod
@@ -3397,6 +3424,22 @@ class TimelineBackgroundAudioTrack(BaseModel):
     def validate_source(self) -> TimelineBackgroundAudioTrack:
         if self.enabled and (not self.source_relative_path or not self.source_url):
             raise ValueError("启用附加音轨时必须先上传音频文件")
+        if (
+            self.source_trim_out_seconds is not None
+            and self.source_trim_out_seconds <= self.source_trim_in_seconds
+        ):
+            raise ValueError("附加音轨出点必须晚于入点")
+        if (
+            self.source_duration_seconds is not None
+            and self.source_trim_out_seconds is not None
+            and self.source_trim_out_seconds > self.source_duration_seconds + 0.05
+        ):
+            raise ValueError("附加音轨出点不能超过音频时长")
+        if (
+            self.timeline_end_seconds is not None
+            and self.timeline_end_seconds <= self.timeline_start_seconds
+        ):
+            raise ValueError("附加音轨结束时间必须晚于开始时间")
         return self
 
 

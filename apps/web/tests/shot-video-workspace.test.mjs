@@ -115,6 +115,10 @@ const videoEditorSource = readFileSync(
   new URL("../src/video-editor/VideoEditorWorkspace.jsx", import.meta.url),
   "utf8",
 );
+const timelineCanvasSource = readFileSync(
+  new URL("../src/video-editor/TimelineCanvas.jsx", import.meta.url),
+  "utf8",
+);
 const videoEditorStyles = readFileSync(
   new URL("../src/video-editor/video-editor.css", import.meta.url),
   "utf8",
@@ -759,10 +763,10 @@ test("advances after approval and keeps editing controls in the video editor mod
   assert.match(videoEditorSource, /cover_timestamp_seconds/);
   assert.match(videoEditorSource, /audio_mode/);
   assert.match(videoEditorSource, /background_audio_track/);
-  assert.match(videoEditorSource, /V1 视频/);
-  assert.match(videoEditorSource, /A1 原音/);
-  assert.match(videoEditorSource, /A2 附加/);
-  assert.match(videoEditorSource, /T1 字幕/);
+  assert.match(timelineCanvasSource, /V1 视频/);
+  assert.match(timelineCanvasSource, /A1 原音/);
+  assert.match(timelineCanvasSource, /A2 附加/);
+  assert.match(timelineCanvasSource, /T1 字幕/);
   assert.match(videoEditorSource, /timeline\/background-audio/);
 });
 

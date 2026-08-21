@@ -1837,6 +1837,35 @@ async def get_production_timeline_clip_cover(
     )
 
 
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/clips/{{clip_id}}/preview-frames/{{frame_index}}",
+)
+async def get_production_timeline_clip_preview_frame(
+    project_id: UUID,
+    clip_id: UUID,
+    frame_index: int,
+    count: Annotated[int, Query(ge=1, le=5)] = 3,
+) -> FileResponse:
+    try:
+        path, media_type = await timeline_service.resolve_clip_preview_frame(
+            project_id,
+            clip_id,
+            frame_index,
+            count=count,
+        )
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.post(
     f"{API_PREFIX}/productions/{{project_id}}/timeline/background-audio",
     response_model=ProductionTimeline,
@@ -1845,6 +1874,7 @@ async def upload_production_timeline_background_audio(
     project_id: UUID,
     expected_revision_id: Annotated[UUID, Form()],
     file: Annotated[UploadFile, File()],
+    duration_seconds: Annotated[float | None, Form()] = None,
 ) -> ProductionTimeline:
     try:
         content = await file.read(100 * 1024 * 1024 + 1)
@@ -1854,6 +1884,7 @@ async def upload_production_timeline_background_audio(
             filename=file.filename or "background-audio",
             content_type=file.content_type,
             content=content,
+            duration_seconds=duration_seconds,
         )
     except TimelineServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

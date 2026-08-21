@@ -107,6 +107,24 @@ class ProductionVideoInspector:
         )
         self.ffmpeg = self.media_processor.ffmpeg
 
+    async def extract_preview_frame(
+        self,
+        source_path: Path,
+        destination_path: Path,
+        *,
+        timestamp_seconds: float,
+    ) -> None:
+        timestamp = max(0.0, round(float(timestamp_seconds), 3))
+        try:
+            await asyncio.to_thread(
+                destination_path.parent.mkdir,
+                parents=True,
+                exist_ok=True,
+            )
+            await self._extract_cover(source_path, destination_path, timestamp)
+        except (OSError, ProductionVideoInspectionError):
+            raise
+
     async def inspect(
         self,
         source_path: Path,

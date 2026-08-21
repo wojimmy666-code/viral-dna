@@ -184,6 +184,12 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
         audio_track=TimelineAudioTrack(
             strategy="per_shot",
             source_audio_url="/source.wav",
+            linked_to_video=False,
+            source_duration_seconds=1.8,
+            source_trim_in_seconds=0.2,
+            source_trim_out_seconds=1.4,
+            timeline_start_seconds=0.3,
+            timeline_end_seconds=1.5,
         ),
         background_audio_track=TimelineBackgroundAudioTrack(
             source_relative_path="timeline/audio/background.wav",
@@ -192,6 +198,11 @@ async def test_real_ffmpeg_preview_renders_video_audio_subtitles_and_crossfade(t
             enabled=True,
             volume=0.25,
             loop=True,
+            source_duration_seconds=2,
+            source_trim_in_seconds=0.2,
+            source_trim_out_seconds=1,
+            timeline_start_seconds=0.4,
+            timeline_end_seconds=1.5,
         ),
         subtitle_cues=[
             TimelineSubtitleCue(

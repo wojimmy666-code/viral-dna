@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -102,6 +103,8 @@ class TimelineService:
         self.video_inspector = video_inspector or ProductionVideoInspector()
         self.notification_publisher = notification_publisher
         self._project_locks: dict[UUID, asyncio.Lock] = {}
+        self._preview_frame_locks: dict[tuple[UUID, UUID, str], asyncio.Lock] = {}
+        self._preview_frame_semaphore = asyncio.Semaphore(2)
         self._render_tasks: dict[UUID, asyncio.Task[None]] = {}
         self._render_cancellations: set[UUID] = set()
 
@@ -112,6 +115,7 @@ class TimelineService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._render_tasks.clear()
+        self._preview_frame_locks.clear()
 
     async def get_timeline(self, project_id: UUID) -> ProductionTimeline:
         project = await self._require_project(project_id)
@@ -269,6 +273,85 @@ class TimelineService:
             raise _fail(404, "timeline_clip_cover_missing", "片段封面文件不存在")
         return path, "image/webp"
 
+    async def resolve_clip_preview_frame(
+        self,
+        project_id: UUID,
+        clip_id: UUID,
+        frame_index: int,
+        *,
+        count: int,
+    ) -> tuple[Path, str]:
+        if count < 1 or count > 5:
+            raise _fail(422, "timeline_preview_frame_count_invalid", "预览帧数量必须为 1–5")
+        if frame_index < 0 or frame_index >= count:
+            raise _fail(422, "timeline_preview_frame_index_invalid", "预览帧序号超出范围")
+
+        project = await self._require_project(project_id)
+        timeline = await self.get_timeline(project_id)
+        clip = next((item for item in timeline.clips if item.id == clip_id), None)
+        if clip is None:
+            raise _fail(404, "timeline_clip_missing", "时间线片段不存在")
+
+        signature = self._preview_frame_signature(clip, count)
+        frame_root = self._timeline_root(project) / "pf" / clip.id.hex[:12] / signature
+        frame_paths = [frame_root / f"frame-{index + 1:02d}.webp" for index in range(count)]
+        lock_key = (project.id, clip.id, signature)
+        lock = self._preview_frame_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            missing = [path for path in frame_paths if not path.is_file()]
+            if missing:
+                source_path, _ = await self.handoff_provider.resolve_candidate_content(
+                    clip.candidate_id
+                )
+                timestamps = self._preview_frame_timestamps(clip, count)
+                async with self._preview_frame_semaphore:
+                    for path, timestamp in zip(frame_paths, timestamps, strict=True):
+                        if path.is_file():
+                            continue
+                        try:
+                            await self.video_inspector.extract_preview_frame(
+                                source_path,
+                                path,
+                                timestamp_seconds=timestamp,
+                            )
+                        except ProductionVideoInspectionError as exc:
+                            raise _fail(409, exc.code, str(exc)) from exc
+                        except OSError as exc:
+                            raise _fail(
+                                409,
+                                "timeline_preview_frame_failed",
+                                "无法生成时间线预览帧",
+                            ) from exc
+
+        frame_path = frame_paths[frame_index].resolve()
+        try:
+            frame_path.relative_to(self._timeline_root(project).resolve())
+        except ValueError as exc:
+            raise _fail(409, "timeline_preview_frame_invalid", "预览帧路径无效") from exc
+        if not frame_path.is_file():
+            raise _fail(404, "timeline_preview_frame_missing", "时间线预览帧不存在")
+        return frame_path, "image/webp"
+
+    @staticmethod
+    def _preview_frame_signature(clip: TimelineClip, count: int) -> str:
+        payload = (
+            f"{clip.candidate_id}:{clip.trim_in_seconds:.3f}:"
+            f"{clip.trim_out_seconds:.3f}:{count}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+    @staticmethod
+    def _preview_frame_timestamps(clip: TimelineClip, count: int) -> list[float]:
+        if count == 1:
+            fractions = [0.5]
+        else:
+            fractions = [0.1 + 0.8 * index / (count - 1) for index in range(count)]
+        trim_in = float(clip.trim_in_seconds)
+        trim_out = float(clip.trim_out_seconds)
+        safe_upper = max(trim_in, min(trim_out, float(clip.candidate_duration_seconds) - 0.04))
+        available = max(0.0, safe_upper - trim_in)
+        return [round(trim_in + available * fraction, 3) for fraction in fractions]
+
     async def set_background_audio(
         self,
         project_id: UUID,
@@ -277,6 +360,7 @@ class TimelineService:
         filename: str,
         content_type: str | None,
         content: bytes,
+        duration_seconds: float | None = None,
     ) -> ProductionTimeline:
         project = await self._require_project(project_id)
         suffix = Path(filename or "background-audio").suffix.lower()
@@ -296,6 +380,8 @@ class TimelineService:
             raise _fail(422, "background_audio_empty", "上传的音频文件为空")
         if len(content) > 100 * 1024 * 1024:
             raise _fail(413, "background_audio_too_large", "附加音频不能超过 100 MB")
+        if duration_seconds is not None and not 0.05 <= duration_seconds <= 24 * 60 * 60:
+            raise _fail(422, "background_audio_duration_invalid", "附加音频时长无效")
 
         lock = self._project_locks.setdefault(project_id, asyncio.Lock())
         async with lock:
@@ -318,6 +404,15 @@ class TimelineService:
                 enabled=True,
                 volume=current.background_audio_track.volume,
                 loop=True,
+                source_duration_seconds=(
+                    round(duration_seconds, 3) if duration_seconds is not None else None
+                ),
+                source_trim_in_seconds=0,
+                source_trim_out_seconds=(
+                    round(duration_seconds, 3) if duration_seconds is not None else None
+                ),
+                timeline_start_seconds=0,
+                timeline_end_seconds=current.duration_seconds,
             )
             next_timeline = current.model_copy(
                 update={
@@ -785,6 +880,9 @@ class TimelineService:
                 strategy=handoff.audio_strategy,
                 source_audio_url=handoff.source_audio_url,
                 enabled=handoff.audio_strategy != "muted",
+                source_duration_seconds=handoff.timeline_duration_seconds,
+                source_trim_out_seconds=handoff.timeline_duration_seconds,
+                timeline_end_seconds=handoff.timeline_duration_seconds,
             ),
             subtitle_cues=subtitles,
         )
@@ -914,6 +1012,11 @@ class TimelineService:
                 )
             next_clips.append(updated)
         duration = round(max(cursor, 0.001), 3)
+        audio_track = self._normalize_audio_track(timeline.audio_track, duration)
+        background_audio_track = self._normalize_background_audio_track(
+            timeline.background_audio_track,
+            duration,
+        )
         next_cues: list[TimelineSubtitleCue] = []
         for cue in timeline.subtitle_cues:
             clip = enabled_positions.get(cue.clip_id) if cue.clip_id is not None else None
@@ -939,9 +1042,89 @@ class TimelineService:
         return timeline.model_copy(
             update={
                 "clips": next_clips,
+                "audio_track": audio_track,
+                "background_audio_track": background_audio_track,
                 "subtitle_cues": next_cues,
                 "duration_seconds": duration,
                 "updated_at": utc_now(),
+            }
+        )
+
+    @staticmethod
+    def _normalize_audio_track(
+        track: TimelineAudioTrack,
+        duration: float,
+    ) -> TimelineAudioTrack:
+        if track.linked_to_video:
+            return track.model_copy(
+                update={
+                    "source_duration_seconds": duration,
+                    "source_trim_in_seconds": 0.0,
+                    "source_trim_out_seconds": duration,
+                    "timeline_start_seconds": 0.0,
+                    "timeline_end_seconds": duration,
+                }
+            )
+        source_duration = duration
+        minimum_span = min(0.05, source_duration)
+        trim_in = min(
+            max(0.0, track.source_trim_in_seconds),
+            max(0.0, source_duration - minimum_span),
+        )
+        requested_trim_out = track.source_trim_out_seconds or source_duration
+        trim_out = min(source_duration, max(trim_in + minimum_span, requested_trim_out))
+        start = min(
+            max(0.0, track.timeline_start_seconds),
+            max(0.0, duration - minimum_span),
+        )
+        placed_duration = min(trim_out - trim_in, duration - start)
+        end = round(start + max(minimum_span, placed_duration), 3)
+        trim_out = round(trim_in + (end - start), 3)
+        return track.model_copy(
+            update={
+                "source_duration_seconds": source_duration,
+                "source_trim_in_seconds": round(trim_in, 3),
+                "source_trim_out_seconds": trim_out,
+                "timeline_start_seconds": round(start, 3),
+                "timeline_end_seconds": min(duration, end),
+            }
+        )
+
+    @staticmethod
+    def _normalize_background_audio_track(
+        track: TimelineBackgroundAudioTrack,
+        duration: float,
+    ) -> TimelineBackgroundAudioTrack:
+        if not track.source_url:
+            return track
+        source_duration = track.source_duration_seconds
+        minimum_source_span = min(0.05, source_duration) if source_duration else 0.05
+        trim_in = max(0.0, track.source_trim_in_seconds)
+        if source_duration is not None:
+            trim_in = min(trim_in, max(0.0, source_duration - minimum_source_span))
+        trim_out = track.source_trim_out_seconds or source_duration
+        if trim_out is not None:
+            if source_duration is not None:
+                trim_out = min(trim_out, source_duration)
+            trim_out = max(trim_in + minimum_source_span, trim_out)
+        minimum_timeline_span = min(0.05, duration)
+        start = min(
+            max(0.0, track.timeline_start_seconds),
+            max(0.0, duration - minimum_timeline_span),
+        )
+        requested_end = track.timeline_end_seconds
+        if requested_end is None:
+            source_span = (trim_out - trim_in) if trim_out is not None else duration
+            requested_end = start + source_span
+        end = min(duration, max(start + minimum_timeline_span, requested_end))
+        if not track.loop and trim_out is not None:
+            end = min(end, start + (trim_out - trim_in))
+        return track.model_copy(
+            update={
+                "source_trim_in_seconds": round(trim_in, 3),
+                "source_trim_out_seconds": round(trim_out, 3) if trim_out is not None else None,
+                "timeline_start_seconds": round(start, 3),
+                "timeline_end_seconds": round(end, 3),
             }
         )
 

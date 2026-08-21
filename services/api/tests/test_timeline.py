@@ -49,15 +49,38 @@ class FakeRepository:
 
 
 class FakeHandoffProvider:
-    def __init__(self, manifest: EditingHandoffManifest) -> None:
+    def __init__(self, manifest: EditingHandoffManifest, source_path: Path | None = None) -> None:
         self.manifest = manifest
+        self.source_path = source_path
 
     async def get_editing_handoff(self, project_id):
         assert project_id == self.manifest.project_id
         return self.manifest
 
     async def resolve_candidate_content(self, candidate_id, *, thumbnail=False):
+        if self.source_path is not None:
+            return self.source_path, "video/mp4"
         raise AssertionError("测试渲染器不应解析候选媒体")
+
+
+class FakeFrameInspector:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, float]] = []
+
+    async def extract_preview_frame(
+        self,
+        source_path: Path,
+        destination_path: Path,
+        *,
+        timestamp_seconds: float,
+    ) -> None:
+        assert await asyncio.to_thread(source_path.is_file)
+        await asyncio.to_thread(destination_path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            destination_path.write_bytes,
+            f"frame:{timestamp_seconds:.3f}".encode(),
+        )
+        self.calls.append((destination_path, timestamp_seconds))
 
 
 class FakeRenderer:
@@ -200,6 +223,49 @@ async def test_timeline_initializes_from_handoff_and_persists_revision(timeline_
     root = workspace.production_paths(project.record_id, project.id).timelines
     assert (root / "timeline.json").is_file()
     assert workspace.resolve(revisions.items[0].snapshot_relative_path).is_file()
+
+
+@pytest.mark.asyncio
+async def test_timeline_preview_frames_are_extracted_at_safe_cached_positions(
+    timeline_context,
+    tmp_path,
+):
+    original_service, workspace, project, _ = timeline_context
+    source_path = tmp_path / "candidate.mp4"
+    source_path.write_bytes(b"video")
+    inspector = FakeFrameInspector()
+    service = TimelineService(
+        original_service.repository,
+        workspace,
+        FakeHandoffProvider(original_service.handoff_provider.manifest, source_path),
+        renderer=FakeRenderer(),
+        video_inspector=inspector,
+    )
+    timeline = await service.get_timeline(project.id)
+    clip = timeline.clips[0]
+
+    first_path, media_type = await service.resolve_clip_preview_frame(
+        project.id,
+        clip.id,
+        0,
+        count=3,
+    )
+    second_path, _ = await service.resolve_clip_preview_frame(
+        project.id,
+        clip.id,
+        1,
+        count=3,
+    )
+
+    assert media_type == "image/webp"
+    assert first_path.read_bytes() == b"frame:0.400"
+    assert second_path.read_bytes() == b"frame:2.000"
+    assert [timestamp for _, timestamp in inspector.calls] == [0.4, 2.0, 3.6]
+    assert len(inspector.calls) == 3
+
+    with pytest.raises(TimelineServiceError) as exc_info:
+        await service.resolve_clip_preview_frame(project.id, clip.id, 3, count=3)
+    assert exc_info.value.code == "timeline_preview_frame_index_invalid"
 
 
 @pytest.mark.asyncio
@@ -403,11 +469,15 @@ async def test_background_audio_is_versioned_and_can_be_adjusted(timeline_contex
         filename="music.wav",
         content_type="audio/wav",
         content=b"RIFF-test-audio",
+        duration_seconds=12.5,
     )
 
     assert uploaded.revision_number == 2
     assert uploaded.background_audio_track.enabled is True
     assert uploaded.background_audio_track.name == "music.wav"
+    assert uploaded.background_audio_track.source_duration_seconds == pytest.approx(12.5)
+    assert uploaded.background_audio_track.source_trim_out_seconds == pytest.approx(12.5)
+    assert uploaded.background_audio_track.timeline_end_seconds == pytest.approx(8)
     audio_path, media_type = await service.resolve_background_audio(project.id)
     assert audio_path.read_bytes() == b"RIFF-test-audio"
     assert media_type in {"audio/wav", "audio/x-wav"}
@@ -427,6 +497,50 @@ async def test_background_audio_is_versioned_and_can_be_adjusted(timeline_contex
     assert adjusted.revision_number == 3
     assert adjusted.background_audio_track.volume == pytest.approx(0.2)
     assert adjusted.background_audio_track.loop is False
+
+
+@pytest.mark.asyncio
+async def test_timeline_normalizes_unlinked_audio_and_manual_subtitle_ranges(
+    timeline_context,
+):
+    service, _, project, _ = timeline_context
+    original = await service.get_timeline(project.id)
+    detached_cue = original.subtitle_cues[0].model_copy(
+        update={
+            "clip_id": None,
+            "clip_start_seconds": None,
+            "clip_end_seconds": None,
+            "start_seconds": 2.25,
+            "end_seconds": 3.75,
+        }
+    )
+    audio = original.audio_track.model_copy(
+        update={
+            "linked_to_video": False,
+            "source_trim_in_seconds": 1,
+            "source_trim_out_seconds": 5,
+            "timeline_start_seconds": 2,
+            "timeline_end_seconds": 6,
+        }
+    )
+
+    updated = await service.update_timeline(
+        project.id,
+        TimelineUpdateRequest(
+            expected_revision_id=original.revision_id,
+            audio_track=audio,
+            subtitle_cues=[detached_cue],
+            summary="调整原音与字幕位置",
+        ),
+    )
+
+    assert updated.audio_track.linked_to_video is False
+    assert updated.audio_track.source_duration_seconds == pytest.approx(8)
+    assert updated.audio_track.timeline_start_seconds == pytest.approx(2)
+    assert updated.audio_track.timeline_end_seconds == pytest.approx(6)
+    assert updated.subtitle_cues[0].clip_id is None
+    assert updated.subtitle_cues[0].start_seconds == pytest.approx(2.25)
+    assert updated.subtitle_cues[0].end_seconds == pytest.approx(3.75)
 
 
 @pytest.mark.asyncio
