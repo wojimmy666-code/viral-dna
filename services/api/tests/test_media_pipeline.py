@@ -23,6 +23,8 @@ def test_platform_title_replaces_only_generated_record_placeholder() -> None:
 
     assert resolve_record_name_from_video("抖音链接视频", source_title) == source_title
     assert resolve_record_name_from_video("小红书链接视频", source_title) == source_title
+    assert resolve_record_name_from_video("TikTok链接视频", source_title) == source_title
+    assert resolve_record_name_from_video("Instagram链接视频", source_title) == source_title
     assert (
         resolve_record_name_from_video("人工命名的活动素材", source_title)
         == "人工命名的活动素材"

@@ -54,6 +54,7 @@ import { AssetLibrary } from "./AssetLibrary.jsx";
 import { PlatformAdminConsole } from "./admin/PlatformAdminConsole.jsx";
 import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsPanel.jsx";
+import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
 import { PromptEditor } from "./prompt-editor/index.js";
@@ -93,6 +94,8 @@ import {
   findPlatformConnection,
   isCredentialAnalysisError,
   platformLabel,
+  sourceTypeLabel,
+  SUPPORTED_PLATFORM_NAMES,
 } from "./platform-connection-ui.js";
 import { preferredVideoResolution } from "./production-ui.js";
 import {
@@ -1814,7 +1817,7 @@ export function App() {
       return;
     }
     if (sourceMode === "link" && !url.trim()) {
-      setError("请粘贴抖音或小红书公开链接");
+      setError(`请粘贴以下平台的公开链接：${SUPPORTED_PLATFORM_NAMES}`);
       return;
     }
     if (sourceMode === "file" && !file) {
@@ -2760,7 +2763,6 @@ function HistoryPage({
   onOpenProductions,
   onCreate,
 }) {
-  const sourceLabels = { upload: "本地文件", douyin: "抖音", xiaohongshu: "小红书" };
   const folderNames = new Map(folders.map((folder) => [folder.id, folder.name]));
   const paginationItems = buildPaginationItems(page, totalPages);
   const firstResult = total > 0 ? (page - 1) * pageSize + 1 : 0;
@@ -3016,7 +3018,7 @@ function HistoryPage({
                         {recordStatusLabels[record.status] || record.status}
                       </span>
                       <span className="record-source-cell">
-                        {sourceLabels[record.source_type] || record.source_type}
+                        {sourceTypeLabel(record.source_type)}
                       </span>
                       <label className="record-folder-cell">
                         <Folder aria-hidden="true" size={15} />
@@ -4689,7 +4691,7 @@ const ImportPanel = forwardRef(function ImportPanel({
         <div>
           <span className="eyebrow">新建任务</span>
           <h2>导入一个短视频</h2>
-          <p>支持本地文件，以及公开的抖音、小红书视频链接。</p>
+          <p>支持本地文件，以及来自{SUPPORTED_PLATFORM_NAMES}的公开视频链接。</p>
         </div>
         <span className="supported-formats">MP4 · MOV · WebM · 最长 5 分钟</span>
       </div>
@@ -4724,7 +4726,7 @@ const ImportPanel = forwardRef(function ImportPanel({
             <input
               value={url}
               onChange={(event) => setUrl(event.target.value)}
-              placeholder="粘贴抖音或小红书公开分享链接"
+              placeholder="粘贴公开视频分享链接"
               aria-label="视频链接"
             />
             {url && (
@@ -4739,9 +4741,10 @@ const ImportPanel = forwardRef(function ImportPanel({
           </p>
           {detectedPlatform && (
             <div className={`link-platform-status ${connectionEnabled ? "ready" : "attention"}`}>
-              <span className="link-platform-mark" aria-hidden="true">
-                {detectedPlatform === "douyin" ? "抖" : "红"}
-              </span>
+              <PlatformBrandLogo
+                className="link-platform-mark"
+                platform={detectedPlatform}
+              />
               <span>
                 <strong>{platformLabel(detectedPlatform)}</strong>
                 <small>

@@ -127,6 +127,31 @@ def test_cookie_filter_rejects_file_without_platform_cookies() -> None:
     assert caught.value.code == "platform_cookie_missing"
 
 
+@pytest.mark.parametrize(
+    ("platform", "selected_domain", "other_domain"),
+    [
+        (PlatformKind.TIKTOK, ".tiktok.com", ".instagram.com"),
+        (PlatformKind.INSTAGRAM, ".instagram.com", ".tiktok.com"),
+    ],
+)
+def test_cookie_filter_isolates_international_platforms(
+    platform: PlatformKind,
+    selected_domain: str,
+    other_domain: str,
+) -> None:
+    payload = cookie_file(
+        cookie_row(selected_domain, "selected", "selected-secret"),
+        cookie_row(other_domain, "other", "other-secret"),
+    )
+
+    filtered, metadata = filter_netscape_cookie_file(payload, platform)
+
+    text = filtered.decode()
+    assert "selected-secret" in text
+    assert "other-secret" not in text
+    assert metadata.cookie_count == 1
+
+
 def test_browser_discovery_lists_chromium_profiles_without_reading_cookie_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -226,8 +251,14 @@ async def test_legacy_file_is_split_by_platform_without_overwriting_connections(
 
     response = await service.list_connections()
 
-    assert [item.configured for item in response.items] == [True, True]
-    assert all(item.legacy_imported for item in response.items)
+    configured = {item.platform: item for item in response.items}
+    assert list(configured) == list(PlatformKind)
+    assert configured[PlatformKind.DOUYIN].configured is True
+    assert configured[PlatformKind.XIAOHONGSHU].configured is True
+    assert configured[PlatformKind.TIKTOK].configured is False
+    assert configured[PlatformKind.INSTAGRAM].configured is False
+    assert configured[PlatformKind.DOUYIN].legacy_imported is True
+    assert configured[PlatformKind.XIAOHONGSHU].legacy_imported is True
     douyin_secret = await secret_store.read(
         context.account_id,
         context.device_id,

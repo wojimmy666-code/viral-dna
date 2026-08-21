@@ -18,7 +18,7 @@ const RESOLUTION_OPTIONS = [
 ];
 
 const SUBTITLE_OPTIONS = [
-  { value: "burned", label: "烧录字幕", description: "兼容抖音、小红书等平台" },
+  { value: "burned", label: "烧录字幕", description: "兼容主流短视频平台" },
   { value: "embedded", label: "内嵌字幕", description: "播放器可开关字幕轨" },
   { value: "none", label: "无字幕", description: "输出清洁版画面" },
 ];

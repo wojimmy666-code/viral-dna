@@ -813,15 +813,7 @@ button:disabled {
 }
 
 .link-platform-mark {
-  width: 31px;
-  height: 31px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  color: var(--text-on-accent);
-  background: #25252e;
-  font-size: var(--type-label-size);
-  font-weight: var(--type-weight-bold);
+  align-self: center;
 }
 
 .link-platform-status > span:nth-child(2) {

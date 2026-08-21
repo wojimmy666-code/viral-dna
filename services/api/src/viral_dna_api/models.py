@@ -49,6 +49,8 @@ class SourceType(StrEnum):
     UPLOAD = "upload"
     DOUYIN = "douyin"
     XIAOHONGSHU = "xiaohongshu"
+    TIKTOK = "tiktok"
+    INSTAGRAM = "instagram"
 
 
 class VideoStatus(StrEnum):

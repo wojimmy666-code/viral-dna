@@ -5,21 +5,21 @@
 .platform-connections-page {
   width: min(1180px, 100%);
   margin: 0 auto;
-  padding: 36px 30px 64px;
+  padding: 32px 24px;
 }
 
 .platform-connections-header {
   display: flex;
   justify-content: space-between;
-  gap: 28px;
+  gap: 24px;
   align-items: flex-end;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 
 .platform-page-kicker {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   color: var(--accent);
   font-size: var(--type-label-size);
   font-weight: var(--type-weight-bold);
@@ -27,7 +27,7 @@
 }
 
 .platform-connections-header h1 {
-  margin: 8px 0 6px;
+  margin: 8px 0 4px;
   font-size: var(--type-page-size);
   letter-spacing: normal;
 }
@@ -46,14 +46,14 @@
 .platform-editor footer {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .platform-local-badge {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 9px 13px;
+  gap: 8px;
+  padding: 8px 12px;
   border: 1px solid #cae8d5;
   border-radius: 11px;
   color: var(--status-success-text);
@@ -67,18 +67,18 @@
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 14px;
-  padding: 18px 20px;
+  gap: 12px;
+  padding: 12px 16px;
   border: 1px solid var(--accent-border);
   border-radius: 16px;
   background: #f8f7ff;
   color: var(--accent-hover);
-  margin-bottom: 22px;
+  margin-bottom: 16px;
 }
 
 .platform-privacy-note strong {
   display: block;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   color: var(--text-primary);
 }
 
@@ -98,14 +98,14 @@
 .platform-card-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  align-items: start;
+  gap: 16px;
 }
 
 .platform-card {
-  min-height: 340px;
   display: flex;
   flex-direction: column;
-  padding: 24px;
+  padding: 16px;
   border: 1px solid var(--border-default);
   border-radius: 16px;
   background: var(--surface-panel);
@@ -114,26 +114,10 @@
 .platform-card-topline {
   display: grid;
   grid-template-columns: auto 1fr auto;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
-  padding-bottom: 20px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--border-default);
-}
-
-.platform-logo {
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 15px;
-  color: var(--text-on-accent);
-  font-size: var(--type-page-size);
-  font-weight: var(--type-weight-bold);
-  background: #181821;
-}
-
-.platform-xiaohongshu .platform-logo {
-  background: #ff3c4e;
 }
 
 .platform-card h2 {
@@ -148,7 +132,7 @@
 }
 
 .platform-health {
-  padding: 6px 9px;
+  padding: 4px 8px;
   border-radius: 999px;
   background: #f0f1f5;
   color: var(--text-secondary);
@@ -175,18 +159,29 @@
 .platform-card-metadata {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin: 20px 0;
+  gap: 0;
+  margin: 12px 0;
 }
 
 .platform-card-metadata div {
-  padding: 12px;
-  border-radius: 12px;
-  background: #f7f7fa;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.platform-card-metadata div:first-child {
+  padding-left: 0;
+}
+
+.platform-card-metadata div + div {
+  border-left: 1px solid var(--border-default);
+}
+
+.platform-card-metadata div:last-child {
+  padding-right: 0;
 }
 
 .platform-card-metadata dt {
-  margin-bottom: 5px;
+  margin-bottom: 4px;
   color: var(--text-secondary);
   font-size: var(--type-caption-size);
 }
@@ -221,7 +216,7 @@
 .platform-strategy-field {
   grid-template-columns: auto 1fr;
   align-items: center;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 
 .platform-select-wrap {
@@ -255,7 +250,11 @@
 }
 
 .platform-card-actions {
-  margin-top: auto;
+  gap: 8px;
+}
+
+.platform-card .platform-select-wrap select {
+  height: 40px;
 }
 
 .platform-card-actions button,
@@ -287,15 +286,14 @@
 }
 
 .platform-empty-state {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-height: 230px;
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
 }
 
 .platform-empty-state p {
   max-width: 390px;
-  margin: 0 0 22px;
+  margin: 0;
   color: var(--text-secondary);
   line-height: 1.7;
 }
@@ -317,7 +315,7 @@
 .platform-editor-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: var(--z-modal-backdrop);
   display: flex;
   justify-content: flex-end;
   background: rgba(29, 29, 39, 0.28);
@@ -523,7 +521,7 @@
 
 @media (max-width: 640px) {
   .platform-connections-page {
-    padding: 24px 16px 48px;
+    padding: 24px 16px 32px;
   }
 
   .platform-privacy-note {
@@ -535,11 +533,20 @@
   }
 
   .platform-card {
-    padding: 18px;
+    padding: 16px;
   }
 
   .platform-card-metadata {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .platform-card-metadata div {
+    padding: 0 8px;
+  }
+
+  .platform-card-actions button,
+  .platform-empty-state button {
+    min-height: 44px;
   }
 
   .platform-card-actions,

@@ -15,11 +15,12 @@ import {
 import {
   connectionHealthMeta,
   findPlatformConnection,
+  PLATFORM_IDS,
   platformLabel,
 } from "./platform-connection-ui.js";
+import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import "./platform-connections.css";
 
-const PLATFORMS = ["douyin", "xiaohongshu"];
 const STRATEGIES = [
   { value: "on_auth_required", label: "平台要求登录时使用" },
   { value: "always", label: "所有链接始终使用" },
@@ -272,7 +273,7 @@ export function PlatformConnections({
         <div>
           <span className="platform-page-kicker"><LinkSimple size={15} /> 本机平台会话</span>
           <h1>平台连接</h1>
-          <p>连接已经登录的抖音和小红书，只在采集平台视频时使用。</p>
+          <p>连接已经登录的平台账户，只在采集对应平台视频时使用。</p>
         </div>
         <div className="platform-header-actions">
           <span className="platform-local-badge"><ShieldCheck size={15} weight="fill" /> 仅此设备</span>
@@ -292,7 +293,7 @@ export function PlatformConnections({
             Cookie 按账户和当前设备隔离；导入文件使用 Windows 加密保存，API、日志和分析报告只记录状态。
           </p>
         </div>
-        <span>{configuredCount}/2 已配置</span>
+        <span>{configuredCount}/{PLATFORM_IDS.length} 已配置</span>
       </section>
 
       {error && <div className="platform-page-error" role="alert"><X size={17} />{error}</div>}
@@ -301,15 +302,17 @@ export function PlatformConnections({
       )}
 
       <section className="platform-card-grid" aria-busy={loading}>
-        {PLATFORMS.map((platform) => {
+        {PLATFORM_IDS.map((platform) => {
           const connection = findPlatformConnection(data, platform);
           const health = connectionHealthMeta(connection);
+          const cardState = connection?.configured ? "is-configured" : "is-empty";
           return (
-            <article className={`platform-card platform-${platform}`} key={platform}>
+            <article
+              className={`platform-card platform-${platform} ${cardState}`}
+              key={platform}
+            >
               <div className="platform-card-topline">
-                <span className="platform-logo" aria-hidden="true">
-                  {platform === "douyin" ? "抖" : "红"}
-                </span>
+                <PlatformBrandLogo className="platform-logo" platform={platform} />
                 <div>
                   <h2>{platformLabel(platform)}</h2>
                   <p>{sourceLabel(connection)}</p>

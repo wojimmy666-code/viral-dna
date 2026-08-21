@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ..platform_catalog import platform_label
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -15,6 +17,8 @@ def utc_now() -> datetime:
 class PlatformKind(StrEnum):
     DOUYIN = "douyin"
     XIAOHONGSHU = "xiaohongshu"
+    TIKTOK = "tiktok"
+    INSTAGRAM = "instagram"
 
 
 class PlatformConnectionSource(StrEnum):
@@ -44,10 +48,7 @@ class SupportedBrowser(StrEnum):
     BRAVE = "brave"
 
 
-PLATFORM_LABELS = {
-    PlatformKind.DOUYIN: "抖音",
-    PlatformKind.XIAOHONGSHU: "小红书",
-}
+PLATFORM_LABELS = {platform: platform_label(platform) for platform in PlatformKind}
 
 
 class PlatformConnection(BaseModel):
@@ -175,4 +176,4 @@ class PlatformConnectionErrorPayload(BaseModel):
     platform: PlatformKind | None = None
 
 
-PlatformValue = Literal["douyin", "xiaohongshu"]
+PlatformValue = Literal["douyin", "xiaohongshu", "tiktok", "instagram"]

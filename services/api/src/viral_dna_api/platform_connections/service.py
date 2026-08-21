@@ -18,6 +18,7 @@ from ..link_ingestion import (
     normalize_platform_url,
 )
 from ..models import SourceType
+from ..platform_catalog import SUPPORTED_PLATFORM_TEXT
 from ..runtime_config import get_config_value
 from .browser import BrowserCookieError, BrowserProfileDetector
 from .cookies import CookieFileError, filter_netscape_cookie_file
@@ -73,7 +74,7 @@ def normalize_platform(value: PlatformKind | SourceType | str) -> PlatformKind:
     except ValueError as exc:
         raise PlatformConnectionServiceError(
             "platform_connection_unsupported",
-            "当前只支持抖音和小红书平台连接",
+            f"当前只支持以下平台连接：{SUPPORTED_PLATFORM_TEXT}",
             status_code=404,
         ) from exc
 

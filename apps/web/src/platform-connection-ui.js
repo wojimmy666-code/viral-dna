@@ -1,7 +1,37 @@
-const PLATFORM_DOMAINS = {
-  douyin: ["douyin.com", "iesdouyin.com"],
-  xiaohongshu: ["xiaohongshu.com", "xhslink.com", "rednote.com"],
-};
+export const PLATFORM_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: "douyin",
+    label: "抖音",
+    domains: Object.freeze(["douyin.com", "iesdouyin.com"]),
+  }),
+  Object.freeze({
+    id: "xiaohongshu",
+    label: "小红书",
+    domains: Object.freeze(["xiaohongshu.com", "xhslink.com", "rednote.com"]),
+  }),
+  Object.freeze({
+    id: "tiktok",
+    label: "TikTok",
+    domains: Object.freeze(["tiktok.com"]),
+  }),
+  Object.freeze({
+    id: "instagram",
+    label: "Instagram",
+    domains: Object.freeze(["instagram.com", "instagr.am"]),
+  }),
+]);
+
+const PLATFORM_BY_ID = new Map(
+  PLATFORM_DEFINITIONS.map((platform) => [platform.id, platform]),
+);
+
+export const PLATFORM_IDS = Object.freeze(
+  PLATFORM_DEFINITIONS.map((platform) => platform.id),
+);
+
+export const SUPPORTED_PLATFORM_NAMES = PLATFORM_DEFINITIONS
+  .map((platform) => platform.label)
+  .join("、");
 
 export function detectPlatformFromUrl(value) {
   const normalized = String(value || "").trim();
@@ -9,9 +39,11 @@ export function detectPlatformFromUrl(value) {
   try {
     const url = new URL(normalized);
     const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
-    return Object.entries(PLATFORM_DOMAINS).find(([, domains]) =>
-      domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`)),
-    )?.[0] || null;
+    return PLATFORM_DEFINITIONS.find((platform) =>
+      platform.domains.some(
+        (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+      ),
+    )?.id || null;
   } catch {
     return null;
   }
@@ -54,5 +86,10 @@ export function connectionHealthMeta(connection) {
 }
 
 export function platformLabel(platform) {
-  return platform === "douyin" ? "抖音" : platform === "xiaohongshu" ? "小红书" : "平台";
+  return PLATFORM_BY_ID.get(platform)?.label || "平台";
+}
+
+export function sourceTypeLabel(sourceType) {
+  if (sourceType === "upload") return "本地文件";
+  return PLATFORM_BY_ID.get(sourceType)?.label || sourceType || "未知来源";
 }

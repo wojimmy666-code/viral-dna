@@ -22,9 +22,8 @@ from .models import (
     Video,
     VideoStatus,
 )
+from .platform_catalog import DEFAULT_LINK_RECORD_NAMES
 from .workspace import WorkspaceError, workspace_manager
-
-DEFAULT_LINK_RECORD_NAMES = frozenset({"抖音链接视频", "小红书链接视频"})
 
 
 class RecordRepository(Protocol):

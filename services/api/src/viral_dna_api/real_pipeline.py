@@ -32,12 +32,12 @@ from .models import (
     Shot,
     ShotTransitionFact,
     ShotVisualFacts,
-    SourceType,
     Video,
     VideoOverview,
     VideoStatus,
 )
 from .pipeline import SimulatedAnalysisPipeline
+from .platform_catalog import is_platform_source
 from .prompt_engine.compiler import compile_prompt_draft, draft_from_shot
 from .records import (
     DEFAULT_LINK_RECORD_NAMES,
@@ -119,7 +119,7 @@ class HybridAnalysisPipeline:
                 analysis.updated_at = utc_now()
                 await self.repository.save_analysis(analysis)
 
-            is_link = video.source_type in {SourceType.DOUYIN, SourceType.XIAOHONGSHU}
+            is_link = is_platform_source(video.source_type)
             if is_link and not (video.stored_path or video.stored_relative_path):
                 await progress(AnalysisStage.INGESTING, 3, "正在校验平台链接并读取视频信息")
                 collected = await LinkCollector(self.credential_resolver).collect(video)

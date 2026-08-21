@@ -4,6 +4,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 os.environ["VIRAL_DNA_SIMULATION_DELAY"] = "0.01"
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -169,6 +171,38 @@ def test_rejects_non_platform_link() -> None:
             },
         )
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("url", "source_type", "title"),
+    [
+        (
+            "https://www.tiktok.com/@creator/video/123456789",
+            "tiktok",
+            "TikTok链接视频",
+        ),
+        (
+            "https://www.instagram.com/reel/example/",
+            "instagram",
+            "Instagram链接视频",
+        ),
+    ],
+)
+def test_creates_international_platform_link_records(
+    url: str,
+    source_type: str,
+    title: str,
+) -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/videos/link",
+            json={"url": url, "rights_confirmed": True},
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["source_type"] == source_type
+    assert payload["title"] == title
 
 
 def test_requires_rights_confirmation() -> None:

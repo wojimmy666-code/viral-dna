@@ -19,16 +19,15 @@ from yt_dlp.version import __version__ as yt_dlp_version
 
 from .media import MAX_VIDEO_SECONDS, get_storage_root
 from .models import SourceType, Video
+from .platform_catalog import PLATFORM_SPECS, SUPPORTED_PLATFORM_TEXT
 
 COLLECTOR_VERSION = "yt-dlp-link-v1"
 DEFAULT_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 SUPPORTED_MEDIA_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".m4v", ".flv"}
 PLATFORM_DOMAINS = {
-    "douyin.com": SourceType.DOUYIN,
-    "iesdouyin.com": SourceType.DOUYIN,
-    "xiaohongshu.com": SourceType.XIAOHONGSHU,
-    "xhslink.com": SourceType.XIAOHONGSHU,
-    "rednote.com": SourceType.XIAOHONGSHU,
+    domain: SourceType(spec.key)
+    for spec in PLATFORM_SPECS
+    for domain in spec.link_domains
 }
 DOUYIN_CANONICAL_HOST = "www.douyin.com"
 DOUYIN_VIDEO_PATH = re.compile(
@@ -138,7 +137,7 @@ def identify_platform(url: str) -> SourceType:
             return platform
     raise LinkIngestionError(
         "link_platform_unsupported",
-        "当前只支持抖音和小红书公开链接",
+        f"当前只支持以下平台的公开链接：{SUPPORTED_PLATFORM_TEXT}",
     )
 
 

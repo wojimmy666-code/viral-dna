@@ -26,6 +26,10 @@ from viral_dna_api.models import SourceType, Video
         ("https://xhslink.com/m/abc123", SourceType.XIAOHONGSHU),
         ("https://www.xiaohongshu.com/explore/abc123", SourceType.XIAOHONGSHU),
         ("https://www.rednote.com/explore/abc123", SourceType.XIAOHONGSHU),
+        ("https://www.tiktok.com/@creator/video/123456789", SourceType.TIKTOK),
+        ("https://vm.tiktok.com/ZMexample/", SourceType.TIKTOK),
+        ("https://www.instagram.com/reel/example/", SourceType.INSTAGRAM),
+        ("https://instagr.am/p/example/", SourceType.INSTAGRAM),
     ],
 )
 def test_identify_platform(url: str, expected: SourceType) -> None:
@@ -37,6 +41,8 @@ def test_identify_platform(url: str, expected: SourceType) -> None:
     [
         "https://example.com/video.mp4",
         "https://xiaohongshu.com.evil.example/video",
+        "https://tiktok.com.evil.example/@creator/video/123",
+        "https://instagram.com.evil.example/reel/example",
         "https://127.0.0.1/video",
         "https://user:password@www.douyin.com/video/123",
         "https://www.douyin.com:8080/video/123",
@@ -85,6 +91,23 @@ def test_normalize_douyin_rejects_invalid_modal_video_ids(url: str) -> None:
     with pytest.raises(LinkIngestionError) as caught:
         normalize_platform_url(url)
     assert caught.value.code == "link_douyin_video_id_invalid"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://www.tiktok.com/@creator/video/123?lang=en#share",
+            "https://www.tiktok.com/@creator/video/123?lang=en",
+        ),
+        (
+            "https://www.instagram.com/reel/example/?utm_source=share#fragment",
+            "https://www.instagram.com/reel/example/?utm_source=share",
+        ),
+    ],
+)
+def test_normalize_international_platform_links(url: str, expected: str) -> None:
+    assert normalize_platform_url(url) == expected
 
 
 def test_collect_persists_sanitized_metadata(

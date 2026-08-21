@@ -1,0 +1,63 @@
+.platform-brand-logo {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 15px;
+  color: var(--text-on-dark);
+  background: #15151d;
+}
+
+.platform-brand-logo svg {
+  display: block;
+  width: 27px;
+  height: 27px;
+  fill: currentColor;
+}
+
+.platform-brand-logo-xiaohongshu {
+  background: #ff2442;
+}
+
+.platform-brand-logo-xiaohongshu svg {
+  width: 36px;
+  height: 36px;
+}
+
+.platform-brand-logo-instagram {
+  background:
+    radial-gradient(circle at 30% 105%, #ffd36b 0 17%, #f15245 36%, transparent 58%),
+    linear-gradient(135deg, #833ab4 8%, #c13584 42%, #e1306c 68%, #f77737 100%);
+}
+
+.platform-brand-note-cyan {
+  fill: #25f4ee;
+  transform: translate(-0.45px, 0.45px);
+}
+
+.platform-brand-note-pink {
+  fill: #fe2c55;
+  transform: translate(0.45px, -0.45px);
+}
+
+.platform-brand-note-main {
+  fill: #fff;
+}
+
+.platform-brand-logo.link-platform-mark {
+  width: 31px;
+  height: 31px;
+  border-radius: 9px;
+}
+
+.platform-brand-logo.link-platform-mark svg {
+  width: 19px;
+  height: 19px;
+}
+
+.platform-brand-logo-xiaohongshu.link-platform-mark svg {
+  width: 25px;
+  height: 25px;
+}

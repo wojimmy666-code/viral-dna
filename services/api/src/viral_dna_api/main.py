@@ -172,6 +172,7 @@ from .notifications import (
     create_notification_service,
 )
 from .pipeline import create_replacement_version
+from .platform_catalog import default_link_record_name
 from .platform_connections import (
     BrowserDiscoveryResponse,
     PlatformBrowserConnectionUpdate,
@@ -2241,8 +2242,7 @@ async def create_link_video(payload: LinkVideoCreate) -> Video:
         raise HTTPException(status_code=422, detail="请先确认拥有分析和使用该视频的权利")
 
     source_type = resolve_platform(str(payload.url))
-    platform_name = "抖音" if source_type == SourceType.DOUYIN else "小红书"
-    title = normalize_name(payload.title or f"{platform_name}链接视频")
+    title = normalize_name(payload.title or default_link_record_name(source_type))
     record_id = uuid4()
     video = Video(
         record_id=record_id,

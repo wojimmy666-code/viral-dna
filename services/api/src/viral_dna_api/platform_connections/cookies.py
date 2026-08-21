@@ -2,18 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from ..platform_catalog import get_platform_spec
 from .models import CookieJarMetadata, PlatformKind
 
 MAX_COOKIE_FILE_BYTES = 2 * 1024 * 1024
 NETSCAPE_HEADERS = {"# Netscape HTTP Cookie File", "# HTTP Cookie File"}
 PLATFORM_COOKIE_DOMAINS = {
-    PlatformKind.DOUYIN: ("douyin.com", "iesdouyin.com"),
-    PlatformKind.XIAOHONGSHU: (
-        "xiaohongshu.com",
-        "xhslink.com",
-        "xhscdn.com",
-        "rednote.com",
-    ),
+    platform: get_platform_spec(platform).cookie_domains for platform in PlatformKind
 }
 
 
