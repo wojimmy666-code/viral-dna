@@ -57,7 +57,11 @@ import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsP
 import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
-import { PromptEditor } from "./prompt-editor/index.js";
+import {
+  PromptEditor,
+  promptPackageToPlainText,
+  promptTextFilename,
+} from "./prompt-editor/index.js";
 import { PromptSectionView } from "./prompt-presentation/PromptSectionView.jsx";
 import {
   NotificationDrawer,
@@ -1985,6 +1989,26 @@ export function App() {
     showNotice("替换版提示词包已下载");
   }
 
+  function downloadPromptText(packageOverride = null) {
+    const packageToDownload = Array.isArray(packageOverride?.shots)
+      ? packageOverride
+      : currentPromptPackage;
+    if (!packageToDownload) return;
+    const blob = new Blob(["\uFEFF" + promptPackageToPlainText(packageToDownload)], {
+      type: "text/plain;charset=utf-8",
+    });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = promptTextFilename(packageToDownload);
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
+    showNotice("提示词 TXT 已下载");
+  }
+
   async function openAnalysisVersion(analysisId) {
     if (!analysisId || analysisId === report?.analysis_id) return;
     const selected = analysisVersions.find((item) => item.id === analysisId);
@@ -2579,7 +2603,7 @@ export function App() {
                       request={apiRequest}
                       readOnly={Boolean(replacementVersion)}
                       onCopy={copyText}
-                      onDownload={downloadPromptPackage}
+                      onDownload={downloadPromptText}
                       onNotice={showNotice}
                       onPromptPackageChange={updateCurrentPromptPackage}
                     />

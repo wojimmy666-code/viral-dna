@@ -1,15 +1,18 @@
 import {
-  BracketsCurly,
-  CaretDown,
   CheckCircle,
   CircleNotch,
   Copy,
   DownloadSimple,
+  FileText,
   LockSimple,
   ShieldCheck,
+  Translate,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  promptPackageToPlainText,
+} from "./prompt-document.js";
 import { PromptShotEditor } from "./PromptShotEditor.jsx";
 import {
   hasReportableGlobalPrompt,
@@ -27,7 +30,7 @@ function SaveState({ promptPackage, status }) {
       ? WarningCircle
       : CheckCircle;
   return (
-    <span className={`prompt-save-state ${status}`} role="status" aria-live="polite">
+    <span className={"prompt-save-state " + status} role="status" aria-live="polite">
       <Icon className={status === "saving" || status === "loading" ? "spin" : ""} size={16} />
       {promptSaveLabel(status, promptPackage?.revision_number)}
     </span>
@@ -70,7 +73,7 @@ export function PromptEditor({
     }
     if (mountedRef.current) setSaveStatus("saving");
     try {
-      const saved = await request(`/analyses/${analysisId}/prompt-draft`, {
+      const saved = await request("/analyses/" + analysisId + "/prompt-draft", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -86,7 +89,7 @@ export function PromptEditor({
     } catch (error) {
       if (error.status === 409) {
         try {
-          const latest = await request(`/analyses/${analysisId}/prompt-draft`);
+          const latest = await request("/analyses/" + analysisId + "/prompt-draft");
           const local = new Map([...snapshot, ...pendingDraftsRef.current]);
           for (const [shotId, draft] of local) pendingDraftsRef.current.set(shotId, draft);
           applyPackage(mergePendingDrafts(latest, local));
@@ -128,7 +131,7 @@ export function PromptEditor({
         window.clearTimeout(saveTimerRef.current);
       };
     }
-    request(`/analyses/${analysisId}/prompt-draft`)
+    request("/analyses/" + analysisId + "/prompt-draft")
       .then((nextPackage) => {
         if (cancelled) return;
         applyPackage(nextPackage);
@@ -171,10 +174,10 @@ export function PromptEditor({
     saveChainRef.current = saveChainRef.current.then(flushPending, flushPending);
     await saveChainRef.current;
     if (pendingDraftsRef.current.size > 0) {
-      onNotice?.({ type: "error", message: "提示词尚未保存，暂时不能导出" });
+      onNotice?.({ type: "error", message: "提示词尚未保存，暂时不能下载" });
       return;
     }
-    onDownload(packageRef.current);
+    onDownload?.(packageRef.current);
   }
 
   function saveWhenLeavingEditor(event) {
@@ -185,81 +188,122 @@ export function PromptEditor({
 
   if (!workingPackage) return null;
   const showGlobalPrompt = hasReportableGlobalPrompt(workingPackage.global_prompt);
+  const showGlobalRules = workingPackage.continuity_locks?.length > 0
+    || workingPackage.negative_constraints?.length > 0;
 
   return (
     <div className="prompt-editor" onBlurCapture={saveWhenLeavingEditor}>
-      <header className="prompt-editor-header">
-        <div>
-          <span>全局视觉路径</span>
-          <h3>{workingPackage.target_model} · Prompt V{workingPackage.version}</h3>
-          {showGlobalPrompt && <p>{workingPackage.global_prompt}</p>}
+      <header className="prompt-document-toolbar">
+        <div className="prompt-document-title">
+          <span className="prompt-document-title-icon"><FileText size={18} /></span>
+          <span>
+            <h2>提示词文档</h2>
+            <small>
+              {workingPackage.target_model} · Prompt V{workingPackage.version}
+              {workingPackage.aspect_ratio ? " · " + workingPackage.aspect_ratio : ""}
+            </small>
+          </span>
         </div>
-        <div className="prompt-editor-header-actions">
+        <div className="prompt-document-toolbar-actions">
           <SaveState promptPackage={workingPackage} status={saveStatus} />
           {saveStatus === "error" && pendingDraftsRef.current.size > 0 && (
-            <button className="prompt-editor-secondary-action" type="button" onClick={retrySave}>
+            <button
+              className="secondary-button compact"
+              type="button"
+              onClick={retrySave}
+            >
               重试保存
             </button>
           )}
-          {showGlobalPrompt && (
-            <button
-              className="prompt-editor-icon-button"
-              type="button"
-              onClick={() => onCopy(workingPackage.global_prompt, "全局提示词已复制")}
-              aria-label="复制全局提示词"
-            ><Copy size={17} /></button>
-          )}
+          <button
+            className="secondary-button compact"
+            type="button"
+            disabled={saveStatus === "loading"}
+            onClick={() => onCopy(
+              promptPackageToPlainText(workingPackage),
+              "全部提示词已复制",
+            )}
+          >
+            <Copy size={16} />
+            复制全文
+          </button>
+          <button
+            className="primary-button compact"
+            type="button"
+            disabled={saveStatus === "loading"}
+            onClick={downloadAfterSave}
+          >
+            <DownloadSimple size={16} />
+            下载 TXT
+          </button>
         </div>
       </header>
 
-      {loadError && <div className="prompt-editor-error"><WarningCircle size={18} />{loadError}</div>}
+      {loadError && (
+        <div className="prompt-document-error" role="alert">
+          <WarningCircle size={18} />
+          {loadError}
+        </div>
+      )}
       {readOnly && (
-        <div className="prompt-editor-readonly">
-          当前查看的是替换版提示词包。切换到原始分析版本后可以编辑结构化草稿。
+        <div className="prompt-document-readonly">
+          当前查看的是替换版提示词。切换到原始分析版本后可编辑结构化草稿。
         </div>
       )}
 
-      {(workingPackage.continuity_locks?.length > 0
-        || workingPackage.negative_constraints?.length > 0) && (
-        <div className="prompt-package-disclosures">
-          {workingPackage.continuity_locks?.length > 0 && (
-            <details>
-              <summary><LockSimple size={17} />连续性锁 · {workingPackage.continuity_locks.length} 项<CaretDown size={15} /></summary>
-              <ul>{workingPackage.continuity_locks.map((item) => <li key={item}>{item}</li>)}</ul>
-            </details>
-          )}
-          {workingPackage.negative_constraints?.length > 0 && (
-            <details>
-              <summary><ShieldCheck size={17} />全局负面约束 · {workingPackage.negative_constraints.length} 项<CaretDown size={15} /></summary>
-              <ul>{workingPackage.negative_constraints.map((item) => <li key={item}>{item}</li>)}</ul>
-            </details>
-          )}
-        </div>
-      )}
+      <main className="prompt-document-surface" aria-label="提示词文档">
+        {(showGlobalPrompt || showGlobalRules) && (
+          <section className="prompt-document-global">
+            <header>
+              <h2>全局视觉路径</h2>
+              <span>应用于全部分镜</span>
+            </header>
+            {showGlobalPrompt && <p className="prompt-document-global-copy">{workingPackage.global_prompt}</p>}
+            {showGlobalRules && (
+              <div className="prompt-document-global-rules">
+                {workingPackage.continuity_locks?.length > 0 && (
+                  <section>
+                    <h3><LockSimple size={16} />连续性锁定</h3>
+                    <ul>
+                      {workingPackage.continuity_locks.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </section>
+                )}
+                {workingPackage.negative_constraints?.length > 0 && (
+                  <section>
+                    <h3><ShieldCheck size={16} />全局负面约束</h3>
+                    <ul>
+                      {workingPackage.negative_constraints.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </section>
+                )}
+              </div>
+            )}
+          </section>
+        )}
 
-      <div className="prompt-shot-editor-list">
-        {(workingPackage.shots || []).map((shot, index) => (
-          <PromptShotEditor
-            disabled={readOnly || saveStatus === "loading"}
-            index={index}
-            key={shot.shot_id}
-            shot={shot}
-            onCopy={onCopy}
-            onChange={(draft) => changeShotDraft(shot.shot_id, draft)}
-            onRestore={() => changeShotDraft(shot.shot_id, shot.source_draft)}
-          />
-        ))}
-      </div>
-
-      <footer className="prompt-editor-export">
-        <div>
-          <BracketsCurly size={21} />
-          <span><strong>机器可读 Prompt Package</strong><small>同时包含结构化草稿、修订号和模型编译结果</small></span>
+        <div className="prompt-document-guidance">
+          <Translate size={17} />
+          <p>
+            <strong>默认使用简体中文</strong>
+            <span>英文仅保留原文台词、字幕或画面标识；粘贴内容会自动移除外部样式。</span>
+          </p>
         </div>
-        <button className="primary-button compact" type="button" onClick={downloadAfterSave}>
-          <DownloadSimple size={17} />下载 JSON
-        </button>
-      </footer>
+
+        <div className="prompt-document-shot-list">
+          {(workingPackage.shots || []).map((shot, index) => (
+            <PromptShotEditor
+              disabled={readOnly || saveStatus === "loading"}
+              index={index}
+              key={`${analysisId}:${shot.shot_id}`}
+              shot={shot}
+              onCopy={onCopy}
+              onChange={(draft) => changeShotDraft(shot.shot_id, draft)}
+              onRestore={() => changeShotDraft(shot.shot_id, shot.source_draft)}
+            />
+          ))}
+        </div>
+      </main>
     </div>
   );
 }

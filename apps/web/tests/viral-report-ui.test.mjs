@@ -81,7 +81,9 @@ test("long report content uses progressive disclosure", async () => {
   assert.match(app, /<PromptSectionView prompt=\{activeShot\.prompt\} \/>/);
   assert.doesNotMatch(app, /<p>\{activeShot\.prompt\}<\/p>/);
   assert.match(promptEditor, /workingPackage\.continuity_locks\?\.length > 0/);
-  assert.match(promptShot, /<details className="prompt-shot-editor" defaultOpen=\{index === 0\}>/);
+  assert.match(promptShot, /prompt-document-shot-row/);
+  assert.match(promptShot, /<PromptRichTextEditor/);
+  assert.doesNotMatch(promptShot, /prompt-document-compiled|PromptSectionView/);
 });
 
 test("concept details reduce locked DNA to disclosure metadata", async () => {
