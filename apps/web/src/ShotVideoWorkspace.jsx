@@ -199,8 +199,6 @@ export function ShotVideoWorkspace({
   const [depthEngineInstallation, setDepthEngineInstallation] = useState(null);
   const [depthEngineInstallError, setDepthEngineInstallError] = useState("");
   const depthEnginePollTimer = useRef(null);
-  const [referenceStrategy, setReferenceStrategy] = useState(null);
-  const [referenceStrategyError, setReferenceStrategyError] = useState("");
   const [depthSettingsOpen, setDepthSettingsOpen] = useState(false);
   const plan = shotDetail?.plan;
   const depthGeneration = useDepthControlJob({
@@ -426,7 +424,7 @@ export function ShotVideoWorkspace({
 
   useEffect(() => {
     let cancelled = false;
-    if (!plan?.id || !selectedModel?.alias || !usesDepthControl) {
+    if (!plan?.id || !usesDepthControl) {
       setDepthEngineCapabilities([]);
       setDepthEngineLoadError("");
       return () => {
@@ -453,48 +451,7 @@ export function ShotVideoWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [plan?.id, request, selectedModel?.alias, usesDepthControl]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!plan?.id || !selectedModel?.alias || selectedInputSources.size === 0) {
-      setReferenceStrategy(null);
-      setReferenceStrategyError("");
-      return () => {
-        cancelled = true;
-      };
-    }
-    setReferenceStrategyError("");
-    request(
-      `/video-references/shots/${plan.id}/strategy?model_alias=${encodeURIComponent(selectedModel.alias)}`,
-    )
-      .then((payload) => {
-        if (!cancelled) setReferenceStrategy(payload);
-      })
-      .catch((strategyError) => {
-        if (!cancelled) {
-          setReferenceStrategy(null);
-          setReferenceStrategyError(
-            strategyError?.message || "无法解析当前模型的人物与动作参考路由",
-          );
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    plan?.id,
-    request,
-    selectedModel?.alias,
-    selectedDepthCount,
-    usesApprovedImages,
-    usesDepthControl,
-    usesManagedAssets,
-    usesProjectAssets,
-    usesReferenceVideo,
-    managedAssetBinding?.id,
-    shotDetail?.current_revision_id,
-  ]);
+  }, [plan?.id, request, usesDepthControl]);
   const managedAssetCompatible = !routeUsesManagedIdentity || !managedAssetBinding || Boolean(
     selectedManagedAssetCapability?.supported
     && selectedManagedAssetCapability.provider === managedAssetBinding.provider
@@ -862,7 +819,7 @@ export function ShotVideoWorkspace({
                 onToggle={(event) => setDepthSettingsOpen(event.currentTarget.open)}
                 open={depthSettingsOpen}
               >
-                <summary><span>深度控制（高级）</span><small>查看输入计划、预览、重建或停用</small></summary>
+                <summary><span>深度视频</span><small>仅使用原始分镜生成，可预览、重建或停用</small></summary>
                 <DepthControlPanel
                   busy={busy || depthEngineLoadBusy}
                   engineCapabilities={depthEngineCapabilities}
@@ -871,23 +828,17 @@ export function ShotVideoWorkspace({
                   generationJob={depthGeneration.job}
                   installation={depthEngineInstallation}
                   installationError={depthEngineInstallError}
-                  managedAssetBinding={managedAssetBinding}
-                  model={selectedModel}
                   onCancelGeneration={depthGeneration.cancel}
                   onCreate={depthGeneration.start}
                   onDelete={onDeleteDepthControl}
                   onInstall={installDepthEngine}
-                  onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
                   onRetryGeneration={depthGeneration.retry}
                   onToggle={onToggleDepthControl}
                   onNotice={onNotice}
                   plan={plan}
-                  referenceFrames={referenceFrames}
                   request={request}
                   resolveUrl={resolveUrl}
                   sourceVideoUrl={sourceVideoUrl}
-                  strategy={referenceStrategy}
-                  strategyError={referenceStrategyError}
                 />
               </details>
             )}

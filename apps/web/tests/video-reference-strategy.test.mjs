@@ -19,20 +19,32 @@ const workflowSource = readFileSync(
   "utf8",
 );
 
-test("renders identity, appearance and full-scene depth as separate sources", () => {
-  assert.match(panelSource, /className="depth-source-grid"/);
-  assert.match(panelSource, /managedAssetBinding/);
-  assert.match(panelSource, /appearanceCount/);
+test("treats the original shot as the only input for depth generation", () => {
+  assert.match(panelSource, /从原始分镜生成深度视频/);
+  assert.match(panelSource, /唯一输入：原始视频/);
+  assert.match(panelSource, /不使用人物身份或外观资产/);
+  assert.match(panelSource, /无需人物或场景资产/);
+  assert.match(panelSource, /className="depth-source-note"/);
   assert.match(panelSource, /activeDepth/);
-  assert.match(panelSource, /full_scene_depth_video|depth_control_assets/);
+  assert.match(panelSource, /depth_control_assets/);
+  assert.doesNotMatch(panelSource, /managedAssetBinding|appearanceCount|onOpenManagedAssets|选择托管演员/);
 });
 
-test("keeps depth controls advanced and collapsed by default", () => {
-  assert.match(panelSource, /<details className="depth-control-advanced">/);
-  assert.doesNotMatch(panelSource, /<details className="depth-control-advanced" open/);
+test("keeps one depth section collapsed by default without nesting another disclosure", () => {
+  assert.match(workspaceSource, /useState\(false\)[\s\S]*className="shot-video-depth-input-details"/);
+  assert.match(workspaceSource, /<summary><span>深度视频<\/span><small>仅使用原始分镜生成/);
+  assert.doesNotMatch(panelSource, /<details className="depth-control-advanced"/);
   assert.match(panelSource, /sourceVideoUrl/);
   assert.match(panelSource, /thumbnail: true/);
   assert.match(panelSource, /<video/);
+});
+
+test("keeps managed actor validation in final video generation only", () => {
+  assert.match(workspaceSource, /managedIdentityRequired && !managedAssetBinding/);
+  assert.match(workspaceSource, /当前模型不接收原始真人身份素材，请先绑定 Provider 托管演员/);
+  assert.doesNotMatch(workspaceSource, /\/video-references\/shots\/\$\{plan\.id\}\/strategy/);
+  assert.match(workspaceSource, /if \(!plan\?\.id \|\| !usesDepthControl\)/);
+  assert.match(panelSource, /disabled=\{busy \|\| generationRunning\}/);
 });
 
 test("persists depth assets through dedicated create toggle and delete endpoints", () => {
@@ -60,11 +72,12 @@ test("installs the isolated depth engine with visible progress", () => {
   assert.match(panelStyles, /\.depth-engine-installation/);
 });
 
-test("uses responsive grids without allowing source labels to overflow", () => {
-  assert.match(panelStyles, /\.depth-source-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/s);
+test("uses a compact responsive source note without allowing labels to overflow", () => {
+  assert.match(panelStyles, /\.depth-source-note\s*\{[^}]*grid-template-columns:\s*20px minmax\(0, 1fr\) auto/s);
   assert.match(panelStyles, /\.depth-reference-copy\s*\{[^}]*min-width:\s*0/s);
   assert.match(panelStyles, /text-overflow:\s*ellipsis/);
   assert.match(panelStyles, /@container \(max-width: 760px\)/);
+  assert.match(panelStyles, /@container \(max-width: 520px\)[\s\S]*\.depth-source-note/s);
 });
 
 test("does not retain legacy white-model or DWPose compatibility hooks", () => {
