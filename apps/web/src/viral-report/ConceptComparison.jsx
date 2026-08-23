@@ -11,7 +11,7 @@ import { findConceptDuplicateFields, STRATEGY_META } from "./viral-report-ui.js"
 
 const LEVEL_LABELS = { low: "较低", medium: "中等", high: "较高" };
 
-export function ConceptComparison({ conceptSet, publishingId, onPublish }) {
+export function ConceptComparison({ conceptSet, historical = false, publishingId, onPublish }) {
   const [selectedId, setSelectedId] = useStateSafe(conceptSet?.concepts?.[0]?.id || "");
   const selected = conceptSet?.concepts?.find((item) => item.id === selectedId) || conceptSet?.concepts?.[0];
   if (!conceptSet || !selected) return null;
@@ -22,10 +22,12 @@ export function ConceptComparison({ conceptSet, publishingId, onPublish }) {
     <section className="concept-comparison">
       <header className="viral-section-header">
         <div>
-          <h2>比较并选择新视频方案</h2>
+          <h2>{historical ? "最近生成的方案" : "比较并选择新视频方案"}</h2>
           <p>
             {conceptSet.category_profile
-              ? `三套方案均基于“${conceptSet.category_profile.display_name}”生成；选择后只创建可编辑方案。`
+              ? historical
+                ? `历史方案基于“${conceptSet.category_profile.display_name}”生成；不会自动成为本次品类选择。`
+                : `三套方案均基于“${conceptSet.category_profile.display_name}”生成；选择后只创建可编辑方案。`
               : "选择后只创建可编辑方案，不会立即生成图片或视频。"}
           </p>
         </div>

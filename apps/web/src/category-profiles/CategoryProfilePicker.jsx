@@ -25,15 +25,21 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
       const payload = await request("/me/category-profiles");
       const items = payload?.items || [];
       setProfiles(items);
-      if (!items.some((item) => item.id === value)) onChange(items[0]?.id || "");
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setLoading(false);
     }
-  }, [onChange, request, value]);
+  }, [request]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (loading || !value || profiles.some((item) => item.id === value)) return;
+    onChange("");
+    setOpen(false);
+    setQuery("");
+  }, [loading, onChange, profiles, value]);
 
   const selected = profiles.find((profile) => profile.id === value) || null;
   const filtered = useMemo(() => {
@@ -53,7 +59,7 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
     <section className="category-profile-picker" aria-label="本次生成使用的品类档案">
       <header>
         <div>
-          <strong>本次使用的品类档案</strong>
+          <strong>本次使用的品类档案 <span>必选</span></strong>
           <p>三套方案都会遵循同一份品牌、受众、卖点和禁用约束。</p>
         </div>
         <button className="text-button compact" onClick={onManage} type="button">管理品类库</button>
@@ -71,14 +77,15 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
         <>
           <button
             aria-expanded={open}
-            className="category-picker-trigger"
+            aria-haspopup="listbox"
+            className={`category-picker-trigger ${selected ? "" : "is-empty"}`}
             onClick={() => setOpen((current) => !current)}
             type="button"
           >
             <span className="category-picker-icon"><Tag size={18} /></span>
             <span>
-              <strong>{selected?.display_name || "选择品类档案"}</strong>
-              <small>{selected ? [selected.brand_name, selected.category_name].filter(Boolean).join(" · ") : "未选择"}</small>
+              <strong>{selected?.display_name || "选择本次使用的品类档案"}</strong>
+              <small>{selected ? [selected.brand_name, selected.category_name].filter(Boolean).join(" · ") : "必选 · 选择后才可生成"}</small>
             </span>
             {selected && <em>{selected.brief}</em>}
             <CaretDown size={17} />

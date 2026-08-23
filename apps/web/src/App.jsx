@@ -2599,6 +2599,7 @@ export function App() {
                   )}
                   {activeReportTab === "replicate" && (
                     <ReplicationWorkspace
+                      key={report.analysis_id}
                       analysisId={report.analysis_id}
                       recordId={video.record_id}
                       request={apiRequest}

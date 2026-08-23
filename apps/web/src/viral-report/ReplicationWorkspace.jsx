@@ -9,7 +9,7 @@ import {
   Sparkle,
   Swap,
 } from "@phosphor-icons/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CategoryProfilePicker } from "../category-profiles/index.js";
 import { ConceptComparison } from "./ConceptComparison.jsx";
 import { useViralInsight } from "./viral-report-ui.js";
@@ -23,23 +23,20 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
   const [publishingId, setPublishingId] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
 
-  const loadLatest = useCallback(async () => {
-    if (!analysisId) return;
-    try {
-      const suffix = selectedCategoryId
-        ? `?category_profile_id=${encodeURIComponent(selectedCategoryId)}`
-        : "";
-      const payload = await request(`/analyses/${analysisId}/viral-concepts/latest${suffix}`);
-      setConceptSet(payload);
-      if (!selectedCategoryId && payload?.category_profile?.id) {
-        setSelectedCategoryId(payload.category_profile.id);
-      }
-    } catch {
-      // The latest batch is optional; generation remains available.
-    }
-  }, [analysisId, request, selectedCategoryId]);
+  useEffect(() => {
+    let active = true;
+    setConceptSet(null);
+    if (!analysisId) return () => { active = false; };
 
-  useEffect(() => { loadLatest(); }, [loadLatest]);
+    const suffix = selectedCategoryId
+      ? `?category_profile_id=${encodeURIComponent(selectedCategoryId)}`
+      : "";
+    request(`/analyses/${analysisId}/viral-concepts/latest${suffix}`)
+      .then((payload) => { if (active) setConceptSet(payload); })
+      .catch(() => { if (active) setConceptSet(null); });
+
+    return () => { active = false; };
+  }, [analysisId, request, selectedCategoryId]);
 
   const selectedReplacements = useMemo(
     () => Object.entries(replacementValues)
@@ -47,6 +44,18 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
       .map(([entity_id, replacement]) => ({ entity_id, replacement: replacement.trim() })),
     [replacementValues],
   );
+
+  const hasSelectedCategoryConcepts = Boolean(
+    selectedCategoryId && conceptSet?.category_profile?.id === selectedCategoryId,
+  );
+
+  function chooseCategory(categoryId) {
+    if (categoryId !== selectedCategoryId) {
+      setConceptSet(null);
+      setConceptError("");
+    }
+    setSelectedCategoryId(categoryId);
+  }
 
   async function generateConcepts() {
     if (!selectedCategoryId) {
@@ -104,7 +113,7 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
       </header>
 
       <CategoryProfilePicker
-        onChange={setSelectedCategoryId}
+        onChange={chooseCategory}
         onManage={onManageCategories}
         request={request}
         value={selectedCategoryId}
@@ -131,10 +140,10 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
       </div>
 
       <section className="replication-generate-bar">
-        <div><strong>{selectedCategoryId ? (selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案") : "请先选择品类档案"}</strong><span>一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00</span></div>
+        <div><strong>{selectedCategoryId ? (selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案") : "尚未选择品类档案"}</strong><span>{selectedCategoryId ? "一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00" : "必须手动选择本次品类；历史方案不会自动回填。"}</span></div>
         <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading || !selectedCategoryId}>
           {conceptLoading ? <CircleNotch className="spin" size={19} /> : <MagicWand size={19} weight="fill" />}
-          {conceptSet ? "重新生成三套方案" : "生成三套方案"}
+          {hasSelectedCategoryConcepts ? "重新生成三套方案" : "生成三套方案"}
         </button>
       </section>
 
@@ -146,13 +155,13 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
             <strong>现有三套方案需要更新</strong>
             <p>{conceptSet.stale_reason || "方案来自旧版生成规则，请重新生成后再创建创作方案。"}</p>
           </div>
-          <button type="button" onClick={generateConcepts} disabled={conceptLoading}>
+          <button type="button" onClick={generateConcepts} disabled={conceptLoading || !selectedCategoryId}>
             {conceptLoading ? <CircleNotch className="spin" size={17} /> : <ArrowClockwise size={17} />}
-            重新生成
+            {selectedCategoryId ? "重新生成" : "选择品类后重新生成"}
           </button>
         </section>
       )}
-      <ConceptComparison conceptSet={conceptSet} publishingId={publishingId} onPublish={publishConcept} />
+      <ConceptComparison conceptSet={conceptSet} historical={!selectedCategoryId} publishingId={publishingId} onPublish={publishConcept} />
     </div>
   );
 }

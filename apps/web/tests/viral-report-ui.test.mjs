@@ -25,6 +25,7 @@ test("analysis report exposes the five-step viral decision navigation", async ()
   assert.match(source, /<ViralMechanismWorkspace/);
   assert.match(source, /<ShotTrafficRoles/);
   assert.match(source, /<ReplicationWorkspace/);
+  assert.match(source, /<ReplicationWorkspace\s+key=\{report\.analysis_id\}/s);
 });
 
 test("overview omits internal narrative placeholders without hiding real structure", async () => {
@@ -173,9 +174,14 @@ test("replication concepts expose distinct change levels and stale-batch recover
   assert.match(concept, /保留 \{selected\.retained_dna\.length\} 项 DNA/);
   assert.doesNotMatch(concept, /本方案重点改进|本策略锁定|concept-strategy-goal|meta\.goal/);
   assert.match(concept, /重新生成后可创建/);
+  assert.match(concept, /历史方案基于/);
+  assert.match(concept, /不会自动成为本次品类选择/);
   assert.match(replication, /conceptSet\?\.status === "stale"/);
   assert.match(replication, /现有三套方案需要更新/);
   assert.match(replication, /category_profile_id: selectedCategoryId/);
+  assert.match(replication, /historical=\{!selectedCategoryId\}/);
+  assert.match(replication, /历史方案不会自动回填/);
+  assert.doesNotMatch(replication, /setSelectedCategoryId\(payload/);
   assert.match(replication, /\["faithful", "scenario", "proof"\]/);
   assert.match(replication, /仅生成创意与分镜，不会立即生成图片或视频/);
 });
