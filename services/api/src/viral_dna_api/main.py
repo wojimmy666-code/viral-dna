@@ -27,6 +27,8 @@ from .asset_library import AssetLibraryService
 from .asset_promotion import GeneratedAssetPromotionService
 from .asset_promotion.routes import create_generated_asset_promotion_router
 from .asset_routes import create_asset_router
+from .category_profiles.routes import create_category_profile_router
+from .category_profiles.service import CategoryProfileService
 from .chinese import to_simplified
 from .control_assets.jobs.service import DepthControlJobService
 from .control_assets.routes import (
@@ -306,6 +308,7 @@ image_generation_gateway = ImageGenerationGateway(
 public_media_stager = PublicMediaStager(workspace_manager)
 account_context_service = create_account_context_service(workspace_manager)
 user_preferences_service = UserPreferencesService(account_context_service)
+category_profile_service = CategoryProfileService(account_context_service)
 platform_connection_service = create_platform_connection_service(account_context_service)
 pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
 notification_service = create_notification_service(account_context_service)
@@ -373,6 +376,7 @@ depth_control_job_service = DepthControlJobService(
 viral_insight_service = ViralInsightService(
     store,
     publisher=ProductionConceptPublisher(production_service),
+    category_profiles=category_profile_service,
 )
 prompt_draft_service = PromptDraftService(store)
 timeline_service = TimelineService(
@@ -436,6 +440,7 @@ app.include_router(
 )
 app.include_router(create_identity_router(account_context_service), prefix=API_PREFIX)
 app.include_router(create_user_preferences_router(user_preferences_service), prefix=API_PREFIX)
+app.include_router(create_category_profile_router(category_profile_service), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)

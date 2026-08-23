@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
+from viral_dna_api.category_profiles.service import (
+    CategoryProfileService,
+    CategoryProfileServiceError,
+)
 from viral_dna_api.models import AnalysisReport
 
 from .concept_strategies import (
@@ -83,9 +87,11 @@ class ViralInsightService:
         self,
         repository: ViralInsightRepository,
         publisher: ViralConceptPublisher | None = None,
+        category_profiles: CategoryProfileService | None = None,
     ) -> None:
         self.repository = repository
         self.publisher = publisher
+        self.category_profiles = category_profiles
 
     async def _source_report(self, analysis_id: UUID) -> AnalysisReport:
         report = await self.repository.get_report_by_analysis(analysis_id)
@@ -106,11 +112,24 @@ class ViralInsightService:
         generated = build_viral_insight(source)
         return await self.repository.save_viral_insight(generated)
 
-    async def latest_concepts(self, analysis_id: UUID) -> ViralConceptSet | None:
+    async def latest_concepts(
+        self,
+        analysis_id: UUID,
+        category_profile_id: UUID | None = None,
+    ) -> ViralConceptSet | None:
         insight = await self.get_insight(analysis_id)
         items = await self.repository.list_viral_concept_sets(analysis_id)
         if not items:
             return None
+        if category_profile_id is not None:
+            items = [
+                item
+                for item in items
+                if item.category_profile is not None
+                and item.category_profile.id == category_profile_id
+            ]
+            if not items:
+                return None
         current_items = [
             item
             for item in items
@@ -133,6 +152,18 @@ class ViralInsightService:
     ) -> ViralConceptSet:
         source = await self._source_report(analysis_id)
         insight = await self.get_insight(analysis_id)
+        if self.category_profiles is None:
+            raise ViralInsightServiceError(
+                503,
+                "category_profile_service_unavailable",
+                "品类档案服务尚未就绪",
+            )
+        try:
+            category_profile = await self.category_profiles.snapshot(
+                payload.category_profile_id
+            )
+        except CategoryProfileServiceError as exc:
+            raise ViralInsightServiceError(exc.status_code, exc.code, str(exc)) from exc
         known_entities = {item.entity_id for item in insight.replacement_opportunities}
         unknown = [
             item.entity_id for item in payload.replacements if item.entity_id not in known_entities
@@ -149,6 +180,7 @@ class ViralInsightService:
                 insight,
                 payload.strategies,
                 payload.replacements,
+                category_profile,
             )
         except ConceptDiversityError as exc:
             raise ViralInsightServiceError(
@@ -156,7 +188,9 @@ class ViralInsightService:
                 "concept_diversity_failed",
                 str(exc),
             ) from exc
-        return await self.repository.save_viral_concept_set(concept_set)
+        saved = await self.repository.save_viral_concept_set(concept_set)
+        await self.category_profiles.mark_used(payload.category_profile_id)
+        return saved
 
     async def publish_concept(
         self,

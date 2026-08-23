@@ -21,7 +21,14 @@ export function ConceptComparison({ conceptSet, publishingId, onPublish }) {
   return (
     <section className="concept-comparison">
       <header className="viral-section-header">
-        <div><h2>比较并选择新视频方案</h2><p>选择后只创建可编辑方案，不会立即生成图片或视频。</p></div>
+        <div>
+          <h2>比较并选择新视频方案</h2>
+          <p>
+            {conceptSet.category_profile
+              ? `三套方案均基于“${conceptSet.category_profile.display_name}”生成；选择后只创建可编辑方案。`
+              : "选择后只创建可编辑方案，不会立即生成图片或视频。"}
+          </p>
+        </div>
       </header>
 
       {duplicateFields.length > 0 && (
@@ -38,8 +45,11 @@ export function ConceptComparison({ conceptSet, publishingId, onPublish }) {
           return (
             <button className={`concept-summary-card ${meta.tone} ${active ? "active" : ""}`} type="button" role="radio" aria-checked={active} key={concept.id} onClick={() => setSelectedId(concept.id)}>
               <span className="concept-radio">{active && <Check size={13} weight="bold" />}</span>
+              <span className="concept-strategy-label">{meta.label}</span>
               <h3>{concept.name}</h3>
               <p>{concept.one_liner}</p>
+              {concept.hook && <span className="concept-card-signal"><small>钩子</small>{concept.hook}</span>}
+              {concept.visual_memory && <span className="concept-card-signal"><small>记忆点</small>{concept.visual_memory}</span>}
               <dl><div><dt>制作难度</dt><dd>{LEVEL_LABELS[concept.difficulty]}</dd></div><div><dt>成本等级</dt><dd>{LEVEL_LABELS[concept.estimated_cost_level]}</dd></div><div><dt>改动幅度</dt><dd>{meta.changeLevel}</dd></div></dl>
             </button>
           );
@@ -47,6 +57,15 @@ export function ConceptComparison({ conceptSet, publishingId, onPublish }) {
       </div>
 
       <article className="concept-detail">
+        <div className="concept-creative-brief">
+          <div><small>创意主张</small><strong>{selected.thesis || selected.why_it_can_work}</strong></div>
+          <div><small>叙事结构</small><span>{selected.narrative_structure || "沿原片结构推进"}</span></div>
+          <div><small>结尾兑现</small><span>{selected.payoff || selected.one_liner}</span></div>
+          <div><small>品类适配</small><span>{selected.category_fit_summary || selected.target_audience}</span></div>
+          {selected.changed_elements?.length > 0 && (
+            <div className="concept-change-list"><small>核心改动</small><span>{selected.changed_elements.map((item) => <em key={item}>{item}</em>)}</span></div>
+          )}
+        </div>
         <div className="concept-detail-actions">
           <button className="primary-button" type="button" onClick={() => onPublish(selected)} disabled={Boolean(publishingId) || isStale}>
             {publishingId === selected.id ? <CircleNotch className="spin" size={18} /> : <MagicWand size={18} weight="fill" />}

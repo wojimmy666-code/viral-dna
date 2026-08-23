@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
 from viral_dna_api.chinese import to_simplified
 from viral_dna_api.models import AnalysisReport, Entity, Shot
 
@@ -391,10 +392,11 @@ def build_concept_set(
     insight: ViralInsightReport,
     strategies: list[ViralStrategy],
     selections: list[ViralReplacementSelection],
+    category_profile: CategoryProfileSnapshot,
 ) -> ViralConceptSet:
-    context = build_strategy_context(report, insight, selections)
+    context = build_strategy_context(report, insight, selections, category_profile)
     concepts = [get_strategy_builder(strategy).build(context) for strategy in strategies]
-    validate_concept_diversity(concepts)
+    validate_concept_diversity(concepts, category_profile)
     fingerprint = _fingerprint(
         {
             "generator_id": CONCEPT_GENERATOR_ID,
@@ -402,6 +404,7 @@ def build_concept_set(
             "insight": insight.input_fingerprint,
             "strategies": [item.value for item in strategies],
             "replacements": [item.model_dump(mode="json") for item in selections],
+            "category_profile_fingerprint": category_profile.fingerprint,
         }
     )
     return ViralConceptSet(
@@ -413,5 +416,6 @@ def build_concept_set(
         source_insight_fingerprint=insight.input_fingerprint,
         strategy_contract_version=STRATEGY_CONTRACT_VERSION,
         generator_id=CONCEPT_GENERATOR_ID,
+        category_profile=category_profile,
         concepts=concepts,
     )

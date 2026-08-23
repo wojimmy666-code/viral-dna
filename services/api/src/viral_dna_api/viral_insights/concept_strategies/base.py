@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
 from viral_dna_api.chinese import to_simplified
 from viral_dna_api.models import AnalysisReport, Entity, PromptShot, Shot
 
@@ -15,9 +16,9 @@ from ..contracts import (
     ViralStrategy,
 )
 
-CONCEPT_SCHEMA_VERSION = "viral-dna-concepts-v2"
-CONCEPT_GENERATOR_ID = "replication-rules-v2"
-STRATEGY_CONTRACT_VERSION = "strategy-contract-v2"
+CONCEPT_SCHEMA_VERSION = "viral-dna-concepts-v3"
+CONCEPT_GENERATOR_ID = "category-grounded-rules-v1"
+STRATEGY_CONTRACT_VERSION = "strategy-contract-v3"
 
 ROLE_LABELS = {
     "hook": "开场钩子",
@@ -57,6 +58,13 @@ class StrategyDecision:
     improvements: list[str]
     required_assets: list[str]
     risks: list[str]
+    thesis: str = ""
+    hook: str = ""
+    narrative_structure: str = ""
+    visual_memory: str = ""
+    payoff: str = ""
+    category_fit_summary: str = ""
+    changed_elements: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,7 @@ class ConceptGenerationContext:
     replacement_clause: str
     prompt_shots: dict[str, PromptShot]
     roles: dict[str, ViralShotRole]
+    category_profile: CategoryProfileSnapshot
 
     @property
     def mechanism_titles(self) -> list[str]:
@@ -77,11 +86,45 @@ class ConceptGenerationContext:
     def strongest_mechanism(self) -> str:
         return self.mechanism_titles[0] if self.mechanism_titles else "原片核心流量机制"
 
+    @property
+    def primary_audience(self) -> str:
+        return "、".join(self.category_profile.audiences[:3])
+
+    @property
+    def primary_selling_point(self) -> str:
+        return self.category_profile.selling_points[0]
+
+    @property
+    def primary_scene(self) -> str:
+        return (
+            self.category_profile.scenes[0]
+            if self.category_profile.scenes
+            else "目标用户的真实使用场景"
+        )
+
+    @property
+    def category_clause(self) -> str:
+        brand = (
+            f"，品牌为{self.category_profile.brand_name}"
+            if self.category_profile.brand_name
+            else ""
+        )
+        style = (
+            f"；视觉风格：{self.category_profile.visual_style}"
+            if self.category_profile.visual_style
+            else ""
+        )
+        return (
+            f"；品类限定：{self.category_profile.category_name}{brand}；"
+            f"目标人群：{self.primary_audience}；核心卖点：{self.primary_selling_point}{style}"
+        )
+
 
 def build_strategy_context(
     report: AnalysisReport,
     insight: ViralInsightReport,
     selections: list[ViralReplacementSelection],
+    category_profile: CategoryProfileSnapshot,
 ) -> ConceptGenerationContext:
     replacements = {item.entity_id: clean_text(item.replacement) for item in selections}
     replacement_pairs = [
@@ -104,6 +147,7 @@ def build_strategy_context(
         else "",
         prompt_shots={item.shot_id: item for item in report.prompt_package.shots},
         roles={item.shot_id: item for item in insight.shot_roles},
+        category_profile=category_profile,
     )
 
 
@@ -124,7 +168,14 @@ class BaseConceptStrategyBuilder(ABC):
             strategy=self.strategy,
             name=f"{self.label}方案",
             one_liner=self.one_liner,
-            target_audience=context.insight.audience,
+            thesis=decision.thesis,
+            hook=decision.hook,
+            narrative_structure=decision.narrative_structure,
+            visual_memory=decision.visual_memory,
+            payoff=decision.payoff,
+            category_fit_summary=decision.category_fit_summary,
+            changed_elements=unique_strings(decision.changed_elements),
+            target_audience=context.primary_audience,
             why_it_can_work=decision.why_it_can_work,
             difficulty=self.difficulty,
             estimated_cost_level=self.cost,
@@ -144,12 +195,12 @@ class BaseConceptStrategyBuilder(ABC):
             source_prompt.prompt if source_prompt else shot.prompt,
             context.report.entities,
             context.replacements,
-        ) + context.replacement_clause
+        ) + context.replacement_clause + context.category_clause
         base_video = replace_entities(
             f"{shot.prompt}；动作过程：{shot.action}；运镜：{shot.camera}。",
             context.report.entities,
             context.replacements,
-        ) + context.replacement_clause
+        ) + context.replacement_clause + context.category_clause
         base_constraints = (
             source_prompt.negative_constraints
             if source_prompt
@@ -165,7 +216,14 @@ class BaseConceptStrategyBuilder(ABC):
             image_prompt=self.image_prompt(context, shot, role_label, base_image),
             video_prompt=self.video_prompt(context, shot, role_label, base_video),
             negative_constraints=unique_strings(
-                [*base_constraints, *self.strategy_constraints(context, shot)],
+                [
+                    *base_constraints,
+                    *self.strategy_constraints(context, shot),
+                    *[
+                        f"不得出现或暗示：{item}"
+                        for item in context.category_profile.forbidden_claims
+                    ],
+                ],
                 limit=40,
             ),
             retained_mechanisms=unique_strings(self.retained_mechanisms(context, role_key)),

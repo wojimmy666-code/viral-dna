@@ -44,6 +44,7 @@ import {
   SquaresFour,
   Swap,
   Target,
+  Tag,
   TextT,
   Trash,
   UploadSimple,
@@ -51,6 +52,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
+import { CategoryProfileLibrary } from "./category-profiles/index.js";
 import { PlatformAdminConsole } from "./admin/PlatformAdminConsole.jsx";
 import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsPanel.jsx";
@@ -336,6 +338,7 @@ const navItems = [
   { id: "new-analysis", label: "新建分析", icon: Plus },
   { id: "history", label: "分析记录", icon: ClockCounterClockwise },
   { id: "assets", label: "资产库", icon: FolderOpen },
+  { id: "categories", label: "品类库", icon: Tag },
 ];
 
 const reportTabs = [
@@ -2392,7 +2395,7 @@ export function App() {
 
       <div className="app-body">
         <Topbar
-          assetMode={["assets", "platform-connections"].includes(activeNav)}
+          assetMode={["assets", "categories", "platform-connections"].includes(activeNav)}
           focusMode={recordDetailMode}
           hideCreate={!shouldShowTopbarCreate(activeNav, report)}
           notificationOpen={notificationOpen}
@@ -2414,6 +2417,8 @@ export function App() {
               ? "history-layout"
               : activeNav === "assets"
                 ? "asset-library-layout"
+              : activeNav === "categories"
+                ? "category-profile-layout"
                 : "workspace-layout"
           }
         >
@@ -2466,6 +2471,11 @@ export function App() {
               onNotice={showNotice}
               request={apiRequest}
               resolveUrl={resolveArtifactUrl}
+            />
+          ) : activeNav === "categories" ? (
+            <CategoryProfileLibrary
+              onNotice={showNotice}
+              request={apiRequest}
             />
           ) : appRoute.name === "new-analysis" ? (
             <NewAnalysisPage>
@@ -2594,6 +2604,7 @@ export function App() {
                       request={apiRequest}
                       onPublished={openPublishedConcept}
                       onNotice={showNotice}
+                      onManageCategories={() => navigate(pathForNav("categories"))}
                     />
                   )}
                   {activeReportTab === "prompts" && (
@@ -3215,6 +3226,16 @@ function Sidebar({
   settingsOpen,
   historyCount,
 }) {
+  const activeNavItemRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia("(max-width: 820px)").matches) return;
+    const frame = window.requestAnimationFrame(() => {
+      activeNavItemRef.current?.scrollIntoView({ block: "nearest", inline: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeNav]);
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -3236,6 +3257,7 @@ function Sidebar({
               <button
                 className={`nav-item ${activeNav === item.id ? "active" : ""}`}
                 onClick={() => onSelect(item.id)}
+                ref={activeNav === item.id ? activeNavItemRef : undefined}
                 type="button"
               >
                 <Icon size={18} weight={activeNav === item.id ? "fill" : "regular"} />
@@ -3266,6 +3288,7 @@ function Sidebar({
         <button
           className={`nav-item ${activeNav === "platform-connections" ? "active" : ""}`}
           onClick={() => onSelect("platform-connections")}
+          ref={activeNav === "platform-connections" ? activeNavItemRef : undefined}
           type="button"
         >
           <LinkSimple
@@ -3279,6 +3302,7 @@ function Sidebar({
           aria-haspopup="dialog"
           className={`nav-item ${settingsOpen ? "active" : ""}`}
           onClick={onOpenSettings}
+          ref={settingsOpen ? activeNavItemRef : undefined}
           type="button"
         >
           <Gear size={18} weight={settingsOpen ? "fill" : "regular"} />

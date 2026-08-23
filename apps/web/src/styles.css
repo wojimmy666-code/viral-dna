@@ -5467,6 +5467,11 @@ button:disabled {
   .side-nav {
     display: flex;
     overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .side-nav::-webkit-scrollbar {
+    display: none;
   }
 
   .nav-group {
@@ -5513,6 +5518,11 @@ button:disabled {
 
   .history-toolbar {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .topbar.asset-mode,
+  .topbar.focus-mode {
+    display: none;
   }
 
   .history-search {

@@ -3,6 +3,7 @@ const NAV_PATHS = Object.freeze({
   "new-analysis": "/analyses/new",
   history: "/records",
   assets: "/assets",
+  categories: "/category-profiles",
   "platform-connections": "/settings/platform-connections",
   settings: "/settings/profile",
   admin: "/admin/providers",
@@ -44,6 +45,9 @@ export function resolveAppRoute(pathname) {
   }
   if (normalized === NAV_PATHS.assets) {
     return { name: "assets", activeNav: "assets", recordId: "" };
+  }
+  if (normalized === NAV_PATHS.categories) {
+    return { name: "category-profiles", activeNav: "categories", recordId: "" };
   }
   if (normalized === NAV_PATHS["platform-connections"]) {
     return {

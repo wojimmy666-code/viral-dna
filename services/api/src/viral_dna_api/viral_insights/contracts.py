@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -19,6 +21,9 @@ class ViralClaimKind(StrEnum):
 
 class ViralStrategy(StrEnum):
     FAITHFUL = "faithful"
+    SCENARIO = "scenario"
+    PROOF = "proof"
+    # Kept so persisted v1/v2 concept sets remain readable.
     DIFFERENTIATED = "differentiated"
     ENHANCED = "enhanced"
 
@@ -141,8 +146,15 @@ class ViralReplacementSelection(BaseModel):
 
 
 class ViralConceptGenerateRequest(BaseModel):
+    category_profile_id: UUID
     strategies: list[ViralStrategy] = Field(
-        default_factory=lambda: list(ViralStrategy), min_length=1, max_length=3
+        default_factory=lambda: [
+            ViralStrategy.FAITHFUL,
+            ViralStrategy.SCENARIO,
+            ViralStrategy.PROOF,
+        ],
+        min_length=1,
+        max_length=3,
     )
     replacements: list[ViralReplacementSelection] = Field(default_factory=list, max_length=30)
 
@@ -151,6 +163,13 @@ class ViralConceptGenerateRequest(BaseModel):
     def unique_strategies(cls, values: list[ViralStrategy]) -> list[ViralStrategy]:
         if len(values) != len(set(values)):
             raise ValueError("复刻策略不能重复")
+        current = {
+            ViralStrategy.FAITHFUL,
+            ViralStrategy.SCENARIO,
+            ViralStrategy.PROOF,
+        }
+        if any(value not in current for value in values):
+            raise ValueError("旧版复刻策略已停用，请使用结构迁移、场景叙事或证据说服")
         return values
 
     @field_validator("replacements")
@@ -182,6 +201,13 @@ class ViralConcept(BaseModel):
     strategy: ViralStrategy
     name: str = Field(min_length=1, max_length=160)
     one_liner: str = Field(min_length=1, max_length=500)
+    thesis: str = Field(default="", max_length=1000)
+    hook: str = Field(default="", max_length=1000)
+    narrative_structure: str = Field(default="", max_length=1000)
+    visual_memory: str = Field(default="", max_length=1000)
+    payoff: str = Field(default="", max_length=1000)
+    category_fit_summary: str = Field(default="", max_length=1200)
+    changed_elements: list[str] = Field(default_factory=list, max_length=20)
     target_audience: str = Field(min_length=1, max_length=1000)
     why_it_can_work: str = Field(min_length=1, max_length=1600)
     difficulty: Literal["low", "medium", "high"] = "medium"
@@ -194,8 +220,12 @@ class ViralConcept(BaseModel):
 
 
 class ViralConceptSet(BaseModel):
-    schema_version: Literal["viral-dna-concepts-v1", "viral-dna-concepts-v2"] = (
-        "viral-dna-concepts-v2"
+    schema_version: Literal[
+        "viral-dna-concepts-v1",
+        "viral-dna-concepts-v2",
+        "viral-dna-concepts-v3",
+    ] = (
+        "viral-dna-concepts-v3"
     )
     id: UUID = Field(default_factory=uuid4)
     analysis_id: UUID
@@ -216,6 +246,7 @@ class ViralConceptSet(BaseModel):
         max_length=64,
         pattern=r"^[0-9a-f]{64}$",
     )
+    category_profile: CategoryProfileSnapshot | None = None
     stale_reason: str | None = Field(default=None, max_length=500)
     model_cost_micros: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)

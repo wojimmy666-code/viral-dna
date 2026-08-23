@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from .contracts import (
     ViralConceptGenerateRequest,
@@ -37,9 +38,12 @@ def create_viral_insight_router(service: ViralInsightService) -> APIRouter:
         "/analyses/{analysis_id}/viral-concepts/latest",
         response_model=ViralConceptSet | None,
     )
-    async def latest_viral_concepts(analysis_id: UUID) -> ViralConceptSet | None:
+    async def latest_viral_concepts(
+        analysis_id: UUID,
+        category_profile_id: Annotated[UUID | None, Query()] = None,
+    ) -> ViralConceptSet | None:
         try:
-            return await service.latest_concepts(analysis_id)
+            return await service.latest_concepts(analysis_id, category_profile_id)
         except ViralInsightServiceError as exc:
             raise http_error(exc) from exc
 

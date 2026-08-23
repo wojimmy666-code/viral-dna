@@ -86,11 +86,12 @@ test("long report content uses progressive disclosure", async () => {
   assert.doesNotMatch(promptShot, /prompt-document-compiled|PromptSectionView/);
 });
 
-test("concept details reduce locked DNA to disclosure metadata", async () => {
+test("concept details expose the creative brief while keeping locked DNA in disclosure metadata", async () => {
   const source = await readFile(CONCEPT_URL, "utf8");
   assert.match(source, /保留 \{selected\.retained_dna\.length\} 项 DNA/);
   assert.match(source, /concept-detail-actions/);
-  assert.doesNotMatch(source, /selected\.name|selected\.why_it_can_work|concept-detail-heading/);
+  assert.match(source, /selected\.thesis \|\| selected\.why_it_can_work/);
+  assert.doesNotMatch(source, /selected\.name|concept-detail-heading/);
   assert.doesNotMatch(source, /本策略锁定|<strong>保留 DNA<\/strong>/);
 });
 
@@ -164,6 +165,9 @@ test("replication concepts expose distinct change levels and stale-batch recover
     "逐镜头视频提示词",
   ]);
   assert.match(concept, /改动幅度/);
+  assert.match(concept, /创意主张/);
+  assert.match(concept, /叙事结构/);
+  assert.match(concept, /品类适配/);
   assert.match(concept, /制作提醒/);
   assert.match(concept, /concept-risk-disclosure/);
   assert.match(concept, /保留 \{selected\.retained_dna\.length\} 项 DNA/);
@@ -171,6 +175,9 @@ test("replication concepts expose distinct change levels and stale-batch recover
   assert.match(concept, /重新生成后可创建/);
   assert.match(replication, /conceptSet\?\.status === "stale"/);
   assert.match(replication, /现有三套方案需要更新/);
+  assert.match(replication, /category_profile_id: selectedCategoryId/);
+  assert.match(replication, /\["faithful", "scenario", "proof"\]/);
+  assert.match(replication, /仅生成创意与分镜，不会立即生成图片或视频/);
 });
 
 test("viral report modules receive the request boundary instead of calling fetch", async () => {
@@ -189,6 +196,7 @@ test("viral report layout has responsive fallbacks without a fixed side panel", 
   assert.doesNotMatch(source, /position:\s*fixed/);
   assert.match(source, /\.concept-summary-grid/);
   assert.match(source, /overflow-x:\s*auto/);
+  assert.match(source, /@media \(max-width: 760px\)[\s\S]*\.concept-summary-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 
 test("viral workspaces use the same dense report frame and a responsive preparation grid", async () => {

@@ -2,9 +2,19 @@ import { useCallback, useEffect, useState } from "react";
 
 export const STRATEGY_META = Object.freeze({
   faithful: {
-    label: "结构忠实复刻",
+    label: "结构迁移",
     tone: "faithful",
     changeLevel: "低",
+  },
+  scenario: {
+    label: "场景叙事",
+    tone: "scenario",
+    changeLevel: "中",
+  },
+  proof: {
+    label: "证据说服",
+    tone: "proof",
+    changeLevel: "中高",
   },
   differentiated: {
     label: "差异化同构",
@@ -93,6 +103,12 @@ function normalizeConceptList(values = []) {
 export function findConceptDuplicateFields(concepts = []) {
   if (concepts.length < 2) return [];
   const fields = [
+    ["创意主张", (item) => normalizeConceptText(item.thesis)],
+    ["开场钩子", (item) => normalizeConceptText(item.hook)],
+    ["叙事结构", (item) => normalizeConceptText(item.narrative_structure)],
+    ["视觉记忆点", (item) => normalizeConceptText(item.visual_memory)],
+    ["结尾兑现", (item) => normalizeConceptText(item.payoff)],
+    ["核心改动", (item) => normalizeConceptList(item.changed_elements)],
     ["有效性说明", (item) => normalizeConceptText(item.why_it_can_work)],
     ["重点改进", (item) => normalizeConceptList(item.improvements)],
     ["制作风险", (item) => normalizeConceptList(item.risks)],
@@ -101,6 +117,9 @@ export function findConceptDuplicateFields(concepts = []) {
     ["逐镜头视频提示词", (item) => (item.shots || []).map((shot) => normalizeConceptText(shot.video_prompt)).join("|")],
   ];
   return fields
-    .filter(([, selector]) => new Set(concepts.map(selector)).size !== concepts.length)
+    .filter(([, selector]) => {
+      const values = concepts.map(selector);
+      return values.some(Boolean) && new Set(values).size !== concepts.length;
+    })
     .map(([label]) => label);
 }

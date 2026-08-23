@@ -12,9 +12,18 @@ test("maps first-phase navigation to independent page URLs", () => {
   assert.equal(pathForNav("new-analysis"), "/analyses/new");
   assert.equal(pathForNav("history"), "/records");
   assert.equal(pathForNav("assets"), "/assets");
+  assert.equal(pathForNav("categories"), "/category-profiles");
   assert.equal(pathForNav("platform-connections"), "/settings/platform-connections");
   assert.equal(pathForNav("settings"), "/settings/profile");
   assert.equal(pathForNav("admin"), "/admin/providers");
+});
+
+test("resolves the account category library as a primary page", () => {
+  assert.deepEqual(resolveAppRoute("/category-profiles"), {
+    name: "category-profiles",
+    activeNav: "categories",
+    recordId: "",
+  });
 });
 
 test("keeps user settings and platform administration on separate route trees", () => {

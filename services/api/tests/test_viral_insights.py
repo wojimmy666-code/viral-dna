@@ -9,6 +9,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from viral_dna_api.category_profiles.contracts import (
+    CategoryProfile,
+    CategoryProfileSnapshot,
+)
 from viral_dna_api.models import (
     AnalysisReport,
     Entity,
@@ -36,6 +40,35 @@ from viral_dna_api.viral_insights.engine import build_concept_set, build_viral_i
 from viral_dna_api.viral_insights.publisher import ProductionConceptPublisher
 from viral_dna_api.viral_insights.routes import create_viral_insight_router
 from viral_dna_api.viral_insights.service import ViralInsightService, ViralInsightServiceError
+
+
+def sample_category_profile() -> CategoryProfile:
+    return CategoryProfile(
+        account_id=uuid4(),
+        display_name="都市通勤女装",
+        category_name="女装",
+        brand_name="森屿",
+        brief="为通勤女性提供利落、易搭配的轻职场女装",
+        audiences=["25–35 岁通勤女性", "轻熟风用户"],
+        selling_points=["显瘦但不紧绷", "面料抗皱"],
+        scenes=["上班通勤", "客户会议"],
+        forbidden_claims=["绝对显瘦"],
+        visual_style="都市自然光与克制低饱和色",
+    )
+
+
+class FakeCategoryProfileService:
+    def __init__(self, profile: CategoryProfile | None = None) -> None:
+        self.profile = profile or sample_category_profile()
+        self.used = 0
+
+    async def snapshot(self, profile_id):
+        assert profile_id == self.profile.id
+        return CategoryProfileSnapshot.from_profile(self.profile)
+
+    async def mark_used(self, profile_id):
+        assert profile_id == self.profile.id
+        self.used += 1
 
 
 def sample_report() -> AnalysisReport:
@@ -162,21 +195,24 @@ def test_insight_preserves_evidence_and_separates_inference() -> None:
 def test_concept_generation_creates_three_distinct_routes_and_replacements() -> None:
     report = sample_report()
     insight = build_viral_insight(report)
+    profile = sample_category_profile()
+    request = ViralConceptGenerateRequest(category_profile_id=profile.id)
     concepts = build_concept_set(
         report,
         insight,
-        list(ViralConceptGenerateRequest().strategies),
+        list(request.strategies),
         [
             ViralReplacementSelection(
                 entity_id="entity-person",
                 replacement="短发男摄影师",
             )
         ],
+        CategoryProfileSnapshot.from_profile(profile),
     )
     assert [item.strategy for item in concepts.concepts] == [
         "faithful",
-        "differentiated",
-        "enhanced",
+        "scenario",
+        "proof",
     ]
     assert all(len(item.shots) == 2 for item in concepts.concepts)
     assert all("短发男摄影师" in item.shots[0].video_prompt for item in concepts.concepts)
@@ -184,6 +220,13 @@ def test_concept_generation_creates_three_distinct_routes_and_replacements() -> 
     assert concepts.generator_id == CONCEPT_GENERATOR_ID
     assert concepts.strategy_contract_version == STRATEGY_CONTRACT_VERSION
     assert concepts.source_insight_fingerprint == insight.input_fingerprint
+    assert concepts.category_profile is not None
+    assert concepts.category_profile.id == profile.id
+    assert concepts.category_profile.fingerprint
+    assert len({item.thesis for item in concepts.concepts}) == 3
+    assert len({item.hook for item in concepts.concepts}) == 3
+    assert len({item.narrative_structure for item in concepts.concepts}) == 3
+    assert len({item.visual_memory for item in concepts.concepts}) == 3
     assert len({item.why_it_can_work for item in concepts.concepts}) == 3
     assert len({tuple(item.retained_dna) for item in concepts.concepts}) == 3
     assert len({tuple(item.improvements) for item in concepts.concepts}) == 3
@@ -195,14 +238,17 @@ def test_concept_generation_creates_three_distinct_routes_and_replacements() -> 
 def test_concept_diversity_guard_rejects_duplicated_strategy_content() -> None:
     report = sample_report()
     insight = build_viral_insight(report)
+    profile = sample_category_profile()
+    request = ViralConceptGenerateRequest(category_profile_id=profile.id)
     concepts = build_concept_set(
         report,
         insight,
-        list(ViralConceptGenerateRequest().strategies),
+        list(request.strategies),
         [],
+        CategoryProfileSnapshot.from_profile(profile),
     ).concepts
     duplicate = concepts[0].model_copy(
-        update={"id": uuid4(), "strategy": "differentiated"},
+        update={"id": uuid4(), "strategy": "scenario"},
     )
 
     with pytest.raises(ConceptDiversityError) as caught:
@@ -219,11 +265,14 @@ def test_legacy_concept_batch_is_returned_as_stale_and_cannot_be_published() -> 
         await store.save_report(report)
         service = ViralInsightService(store, publisher=FakePublisher())
         insight = await service.get_insight(report.analysis_id)
+        profile = sample_category_profile()
+        request = ViralConceptGenerateRequest(category_profile_id=profile.id)
         generated = build_concept_set(
             report,
             insight,
-            list(ViralConceptGenerateRequest().strategies),
+            list(request.strategies),
             [],
+            CategoryProfileSnapshot.from_profile(profile),
         )
         legacy = generated.model_copy(
             update={
@@ -272,7 +321,12 @@ def test_service_persists_latest_concepts_and_publishes_selected_route() -> None
         report = sample_report()
         await store.save_report(report)
         publisher = FakePublisher()
-        service = ViralInsightService(store, publisher=publisher)
+        categories = FakeCategoryProfileService()
+        service = ViralInsightService(
+            store,
+            publisher=publisher,
+            category_profiles=categories,
+        )
 
         first = await service.get_insight(report.analysis_id)
         second = await service.get_insight(report.analysis_id)
@@ -293,10 +347,11 @@ def test_service_persists_latest_concepts_and_publishes_selected_route() -> None
 
         concepts = await service.generate_concepts(
             report.analysis_id,
-            ViralConceptGenerateRequest(),
+            ViralConceptGenerateRequest(category_profile_id=categories.profile.id),
         )
         latest = await service.latest_concepts(report.analysis_id)
         assert latest is not None and latest.id == concepts.id
+        assert categories.used == 1
 
         selected = concepts.concepts[1]
         record_id = uuid4()
@@ -315,7 +370,12 @@ def test_viral_insight_routes_cover_read_generate_and_publish() -> None:
     store = InMemoryStore()
     report = sample_report()
     asyncio.run(store.save_report(report))
-    service = ViralInsightService(store, publisher=FakePublisher())
+    categories = FakeCategoryProfileService()
+    service = ViralInsightService(
+        store,
+        publisher=FakePublisher(),
+        category_profiles=categories,
+    )
     app = FastAPI()
     app.include_router(create_viral_insight_router(service), prefix="/api/v1")
 
@@ -332,7 +392,8 @@ def test_viral_insight_routes_cover_read_generate_and_publish() -> None:
         concepts_response = client.post(
             f"/api/v1/analyses/{report.analysis_id}/viral-concepts",
             json={
-                "strategies": ["faithful", "differentiated", "enhanced"],
+                "category_profile_id": str(categories.profile.id),
+                "strategies": ["faithful", "scenario", "proof"],
                 "replacements": [],
             },
         )
@@ -352,11 +413,14 @@ def test_viral_insight_routes_cover_read_generate_and_publish() -> None:
 def test_production_publisher_maps_concept_prompts_through_narrow_adapter() -> None:
     report = sample_report()
     insight = build_viral_insight(report)
+    profile = sample_category_profile()
+    request = ViralConceptGenerateRequest(category_profile_id=profile.id)
     concept = build_concept_set(
         report,
         insight,
-        list(ViralConceptGenerateRequest().strategies),
+        list(request.strategies),
         [],
+        CategoryProfileSnapshot.from_profile(profile),
     ).concepts[0]
 
     class FakeProductionService:

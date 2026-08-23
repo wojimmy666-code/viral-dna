@@ -424,16 +424,29 @@
 .concept-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.625rem; }
 .concept-summary-card { position: relative; min-width: 0; display: grid; align-content: start; gap: 0.45rem; padding: 0.875rem; border: 1px solid var(--border-default); border-radius: var(--radius-panel); text-align: left; background: var(--surface-panel); cursor: pointer; }
 .concept-summary-card.active,
-.concept-summary-card.enhanced.active { border-color: var(--accent); box-shadow: var(--focus-ring); }
-.concept-radio { position: absolute; top: 0.75rem; right: 0.75rem; width: 1.25rem; height: 1.25rem; display: grid; place-items: center; border: 1px solid var(--accent-border); border-radius: 50%; color: var(--text-on-accent); }
+.concept-summary-card.enhanced.active { border-color: var(--accent); }
+.concept-summary-card:focus-visible { outline: 0; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.concept-radio { position: absolute; top: 0.75rem; right: 0.75rem; width: 1.25rem; height: 1.25rem; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--text-on-accent); }
 .concept-summary-card.active .concept-radio { border-color: var(--accent); background: var(--accent); }
-.concept-summary-card h3 { margin: 0.1rem 1.75rem 0 0; font-size: var(--type-body-size); }
-.concept-summary-card p { margin: 0; color: var(--text-secondary); font-size: var(--type-label-size); line-height: var(--type-leading-copy); }
+.concept-strategy-label { width: fit-content; color: var(--text-secondary); font-size: var(--type-caption-size); font-weight: var(--type-weight-semibold); }
+.concept-summary-card.active .concept-strategy-label { color: var(--accent); }
+.concept-summary-card h3 { margin: 0 1.75rem 0 0; font-size: var(--type-subheading-size); line-height: var(--type-leading-tight); }
+.concept-summary-card p { margin: 0; color: var(--text-secondary); font-size: var(--type-body-size); line-height: var(--type-leading-copy); }
+.concept-card-signal { display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: var(--space-2); color: var(--text-primary); font-size: var(--type-label-size); line-height: var(--type-leading-copy); }
+.concept-card-signal small { color: var(--text-secondary); font-size: var(--type-caption-size); }
 .concept-summary-card dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0.25rem 0 0; padding-top: 0.625rem; border-top: 1px solid var(--border-default); }
 .concept-summary-card dl div { min-width: 0; display: grid; gap: 0.2rem; }
 .concept-summary-card dt { color: var(--text-secondary); font-size: var(--type-caption-size); }
 .concept-summary-card dd { margin: 0; font-size: var(--type-label-size); font-weight: var(--type-weight-semibold); }
-.concept-detail { padding: 0.875rem; border: 1px solid var(--border-default); border-radius: var(--radius-panel); background: var(--surface-panel); }
+.concept-detail { margin-top: var(--space-2); padding: 0.875rem; border: 1px solid var(--border-default); border-radius: var(--radius-panel); background: var(--surface-panel); }
+.concept-creative-brief { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-default); }
+.concept-creative-brief > div { min-width: 0; display: grid; align-content: start; gap: var(--space-1); }
+.concept-creative-brief small { color: var(--text-secondary); font-size: var(--type-caption-size); }
+.concept-creative-brief strong,
+.concept-creative-brief span { max-width: 72ch; font-size: var(--type-label-size); line-height: var(--type-leading-copy); }
+.concept-change-list { grid-column: 1 / -1; }
+.concept-change-list > span { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.concept-change-list em { padding: var(--space-1) var(--space-2); border-radius: var(--radius-control); color: var(--text-secondary); background: var(--surface-hover); font-size: var(--type-caption-size); font-style: normal; }
 .concept-detail-actions { display: flex; justify-content: flex-end; }
 .concept-risk-disclosure,
 .concept-shot-disclosure { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border-default); font-size: var(--type-label-size); }
@@ -479,6 +492,9 @@
   .replication-generate-bar,
   .viral-inference-note { flex-direction: column; align-items: stretch; }
   .concept-detail-actions .primary-button { width: 100%; justify-content: center; }
+  .concept-summary-grid { overflow: visible; grid-template-columns: 1fr; padding: 0; }
+  .concept-creative-brief { grid-template-columns: 1fr; }
+  .concept-change-list { grid-column: auto; }
   .concept-stale-notice { grid-template-columns: auto minmax(0, 1fr); }
   .concept-stale-notice button { grid-column: 1 / -1; justify-content: center; }
   .viral-summary-actions { flex-wrap: wrap; }

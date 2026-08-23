@@ -10,26 +10,34 @@ import {
   Swap,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { CategoryProfilePicker } from "../category-profiles/index.js";
 import { ConceptComparison } from "./ConceptComparison.jsx";
 import { useViralInsight } from "./viral-report-ui.js";
 
-export function ReplicationWorkspace({ analysisId, recordId, request, onPublished, onNotice }) {
+export function ReplicationWorkspace({ analysisId, recordId, request, onPublished, onNotice, onManageCategories }) {
   const { insight, loading, error, reload } = useViralInsight({ analysisId, request });
   const [replacementValues, setReplacementValues] = useState({});
   const [conceptSet, setConceptSet] = useState(null);
   const [conceptLoading, setConceptLoading] = useState(false);
   const [conceptError, setConceptError] = useState("");
   const [publishingId, setPublishingId] = useState("");
+  const [selectedCategoryId, setSelectedCategoryId] = useState("");
 
   const loadLatest = useCallback(async () => {
     if (!analysisId) return;
     try {
-      const payload = await request(`/analyses/${analysisId}/viral-concepts/latest`);
+      const suffix = selectedCategoryId
+        ? `?category_profile_id=${encodeURIComponent(selectedCategoryId)}`
+        : "";
+      const payload = await request(`/analyses/${analysisId}/viral-concepts/latest${suffix}`);
       setConceptSet(payload);
+      if (!selectedCategoryId && payload?.category_profile?.id) {
+        setSelectedCategoryId(payload.category_profile.id);
+      }
     } catch {
       // The latest batch is optional; generation remains available.
     }
-  }, [analysisId, request]);
+  }, [analysisId, request, selectedCategoryId]);
 
   useEffect(() => { loadLatest(); }, [loadLatest]);
 
@@ -41,6 +49,10 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
   );
 
   async function generateConcepts() {
+    if (!selectedCategoryId) {
+      setConceptError("请先选择一个品类档案");
+      return;
+    }
     setConceptLoading(true);
     setConceptError("");
     try {
@@ -48,7 +60,8 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          strategies: ["faithful", "differentiated", "enhanced"],
+          category_profile_id: selectedCategoryId,
+          strategies: ["faithful", "scenario", "proof"],
           replacements: selectedReplacements,
         }),
       });
@@ -86,9 +99,16 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
   return (
     <div className="viral-report-page replication-workspace">
       <header className="viral-section-header">
-        <div><h2>复刻与改进工作台</h2><p>锁定有效结构，再替换人物、产品或场景。参考资产不是必填项。</p></div>
-        <span className="viral-basis-badge"><Sparkle size={15} />不会调用视频生成模型</span>
+        <div><h2>复刻与改进工作台</h2><p>先用品类档案限定目标，再从同一份原片机制生成三条独立创意路径。</p></div>
+        <span className="viral-basis-badge"><Sparkle size={15} />仅生成创意与分镜，不会立即生成图片或视频</span>
       </header>
+
+      <CategoryProfilePicker
+        onChange={setSelectedCategoryId}
+        onManage={onManageCategories}
+        request={request}
+        value={selectedCategoryId}
+      />
 
       <div className={`replication-preparation-grid ${insight.replacement_opportunities.length ? "" : "dna-only"}`}>
         <details className="replication-dna-locks">
@@ -111,8 +131,8 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
       </div>
 
       <section className="replication-generate-bar">
-        <div><strong>{selectedReplacements.length ? `已设置 ${selectedReplacements.length} 项替换` : "直接沿用原元素"}</strong><span>一次生成忠实复刻、差异化同构、强化改进三套方案 · 额外成本 ¥0.00</span></div>
-        <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading}>
+        <div><strong>{selectedCategoryId ? (selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案") : "请先选择品类档案"}</strong><span>一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00</span></div>
+        <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading || !selectedCategoryId}>
           {conceptLoading ? <CircleNotch className="spin" size={19} /> : <MagicWand size={19} weight="fill" />}
           {conceptSet ? "重新生成三套方案" : "生成三套方案"}
         </button>

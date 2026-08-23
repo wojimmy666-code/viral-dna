@@ -49,6 +49,20 @@ class FaithfulStrategyBuilder(BaseConceptStrategyBuilder):
                 "替换元素的体型、材质或比例可能不再匹配原动作与构图",
                 "人物或产品替换后仍需逐镜头核对身份一致性",
             ],
+            thesis=(
+                f"把原片已验证的“{context.strongest_mechanism}”完整迁移到"
+                f"{context.category_profile.category_name}，用最低结构改动表达"
+                f"“{context.primary_selling_point}”。"
+            ),
+            hook=f"沿用原片首镜节奏，在首秒直接呈现{context.primary_selling_point}。",
+            narrative_structure="原片钩子 → 原片推进顺序 → 同节奏品类结果兑现",
+            visual_memory=f"{context.category_profile.display_name}主体与原片标志性构图叠合",
+            payoff=f"结尾清楚兑现“{context.primary_selling_point}”，并保持原片首尾关系。",
+            category_fit_summary=(
+                f"适合希望快速验证{context.category_profile.category_name}内容方向、"
+                "同时把拍摄与剪辑变量控制在最低范围的生产方式。"
+            ),
+            changed_elements=["人物或产品身份", "品类信息", "品牌与卖点表达"],
         )
 
     def shot_description(

@@ -1,0 +1,121 @@
+import {
+  CaretDown,
+  Check,
+  CircleNotch,
+  MagnifyingGlass,
+  Plus,
+  Tag,
+  WarningCircle,
+} from "@phosphor-icons/react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { profileSearchText } from "./category-profile-ui.js";
+import "./category-profiles.css";
+
+export function CategoryProfilePicker({ onChange, onManage, request, value }) {
+  const [profiles, setProfiles] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await request("/me/category-profiles");
+      const items = payload?.items || [];
+      setProfiles(items);
+      if (!items.some((item) => item.id === value)) onChange(items[0]?.id || "");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [onChange, request, value]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const selected = profiles.find((profile) => profile.id === value) || null;
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return needle
+      ? profiles.filter((profile) => profileSearchText(profile).includes(needle))
+      : profiles;
+  }, [profiles, query]);
+
+  function choose(profile) {
+    onChange(profile.id);
+    setOpen(false);
+    setQuery("");
+  }
+
+  return (
+    <section className="category-profile-picker" aria-label="本次生成使用的品类档案">
+      <header>
+        <div>
+          <strong>本次使用的品类档案</strong>
+          <p>三套方案都会遵循同一份品牌、受众、卖点和禁用约束。</p>
+        </div>
+        <button className="text-button compact" onClick={onManage} type="button">管理品类库</button>
+      </header>
+      {loading ? (
+        <div className="category-picker-state"><CircleNotch className="spin" size={19} />正在读取品类库…</div>
+      ) : error ? (
+        <div className="category-picker-state error"><WarningCircle size={19} />{error}<button className="text-button compact" onClick={load} type="button">重试</button></div>
+      ) : profiles.length === 0 ? (
+        <div className="category-picker-empty">
+          <span><Tag size={20} /><span><strong>还没有可用的品类档案</strong><small>先建立品牌与品类约束，再生成三套方案。</small></span></span>
+          <button className="primary-button" onClick={onManage} type="button"><Plus size={17} />新建品类档案</button>
+        </div>
+      ) : (
+        <>
+          <button
+            aria-expanded={open}
+            className="category-picker-trigger"
+            onClick={() => setOpen((current) => !current)}
+            type="button"
+          >
+            <span className="category-picker-icon"><Tag size={18} /></span>
+            <span>
+              <strong>{selected?.display_name || "选择品类档案"}</strong>
+              <small>{selected ? [selected.brand_name, selected.category_name].filter(Boolean).join(" · ") : "未选择"}</small>
+            </span>
+            {selected && <em>{selected.brief}</em>}
+            <CaretDown size={17} />
+          </button>
+          {open && (
+            <div className="category-picker-options">
+              <label>
+                <MagnifyingGlass size={17} />
+                <input autoFocus onChange={(event) => setQuery(event.target.value)} placeholder="搜索品类、品牌或卖点" type="search" value={query} />
+              </label>
+              <div role="listbox" aria-label="选择品类档案">
+                {filtered.map((profile) => (
+                  <button
+                    aria-selected={profile.id === value}
+                    key={profile.id}
+                    onClick={() => choose(profile)}
+                    role="option"
+                    type="button"
+                  >
+                    <span><strong>{profile.display_name}</strong><small>{[profile.brand_name, profile.category_name].filter(Boolean).join(" · ")}</small></span>
+                    <em>{profile.brief}</em>
+                    {profile.id === value && <Check size={17} weight="bold" />}
+                  </button>
+                ))}
+                {!filtered.length && <p>没有匹配的品类档案</p>}
+              </div>
+            </div>
+          )}
+          {selected && (
+            <div className="category-picker-summary">
+              <span><small>目标人群</small><strong>{selected.audiences.slice(0, 2).join("、")}</strong></span>
+              <span><small>核心卖点</small><strong>{selected.selling_points.slice(0, 2).join("、")}</strong></span>
+              <span><small>常用场景</small><strong>{selected.scenes.slice(0, 2).join("、") || "按内容推导"}</strong></span>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}

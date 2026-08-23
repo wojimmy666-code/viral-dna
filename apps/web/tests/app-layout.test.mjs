@@ -13,6 +13,7 @@ const appStyles = readFileSync(new URL("../src/styles.css", import.meta.url), "u
 
 test("keeps the primary sidebar focused on active first-phase workflows", () => {
   assert.match(appSource, /\{ id: "assets", label: "资产库", icon: FolderOpen \}/);
+  assert.match(appSource, /\{ id: "categories", label: "品类库", icon: Tag \}/);
   assert.doesNotMatch(appSource, /\{ id: "templates", label: "提示词模板"/);
   assert.match(appSource, /\{ id: "prompts", label: "提示词", icon: TextT \}/);
 });
