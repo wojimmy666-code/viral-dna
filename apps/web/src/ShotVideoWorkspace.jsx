@@ -26,6 +26,7 @@ import { useDepthControlJob } from "./video-controls/depth/useDepthControlJob.js
 import { GenerationReferenceComposer } from "./video-inputs/reference-composer/GenerationReferenceComposer.jsx";
 import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
 import { VideoPromptReferencePolicy } from "./video-inputs/VideoPromptReferencePolicy.jsx";
+import { VideoEnhancementPanel } from "./video-enhancement/VideoEnhancementPanel.jsx";
 import {
   removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
@@ -167,6 +168,7 @@ export function ShotVideoWorkspace({
   onDeleteDepthControl,
   onToggleDepthControl,
   onGenerate,
+  onEnhancementChanged,
   onManagedAssetChange,
   onNotice,
   onNotificationsChanged,
@@ -191,6 +193,7 @@ export function ShotVideoWorkspace({
   onReloadVideoGenerationSettings,
 }) {
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
+  const [enhancementPreview, setEnhancementPreview] = useState(null);
   const [durationAdjustmentMessage, setDurationAdjustmentMessage] = useState("");
   const [managedAssetPickerOpen, setManagedAssetPickerOpen] = useState(false);
   const [depthEngineCapabilities, setDepthEngineCapabilities] = useState([]);
@@ -294,6 +297,16 @@ export function ShotVideoWorkspace({
     || null
   );
   const displayedCandidateRun = displayedCandidate?.generationRun || null;
+  const displayedCandidateApproved = Boolean(
+    displayedCandidate
+    && plan?.video_status === "approved"
+    && plan?.approved_video_candidate_id === displayedCandidate.id
+  );
+  const displayedVideoUrl = (
+    enhancementPreview?.candidateId === displayedCandidate?.id
+      ? enhancementPreview.url
+      : displayedCandidate?.content_url
+  );
   const displayedCandidateCostLabel = generationRunCostLabel(displayedCandidateRun);
   const activeRun = videoRuns.find((run) => ACTIVE_RUN_STATUSES.has(run.status)) || null;
   const videoModels = videoGenerationSettings?.models || [];
@@ -588,6 +601,10 @@ export function ShotVideoWorkspace({
     setDurationAdjustmentMessage("");
   }, [initialCandidateId, latestRun?.id, plan?.id]);
 
+  useEffect(() => {
+    setEnhancementPreview(null);
+  }, [displayedCandidate?.id]);
+
   if (!plan) {
     return (
       <div className="production-empty-state shot-video-empty">
@@ -739,17 +756,17 @@ export function ShotVideoWorkspace({
                   <>
                     <video
                       controls
-                      key={displayedCandidate.id}
+                      key={`${displayedCandidate.id}:${enhancementPreview?.key || "active"}`}
                       playsInline
                       poster={resolveUrl(displayedCandidate.thumbnail_url)}
                       preload="metadata"
-                      src={resolveUrl(displayedCandidate.content_url)}
+                      src={resolveUrl(displayedVideoUrl)}
                     />
                     <a
                       aria-label={`下载视频 ${displayedCandidate.sequence || displayedCandidate.ordinal}`}
                       className="shot-video-download-button"
                       download={`shot-${plan.index}-video-${displayedCandidate.sequence || displayedCandidate.ordinal}.mp4`}
-                      href={resolveUrl(displayedCandidate.content_url)}
+                      href={resolveUrl(displayedVideoUrl)}
                       title="下载视频候选"
                     >
                       <DownloadSimple size={16} />
@@ -959,6 +976,18 @@ export function ShotVideoWorkspace({
                 </>
               )}
             </footer>
+          )}
+
+          {displayedCandidateApproved && (
+            <VideoEnhancementPanel
+              candidate={displayedCandidate}
+              expectedRevisionId={project?.current_revision_id}
+              onChanged={onEnhancementChanged}
+              onNotificationsChanged={onNotificationsChanged}
+              onPreviewChange={setEnhancementPreview}
+              request={request}
+              resolveUrl={resolveUrl}
+            />
           )}
 
         </div>

@@ -51,6 +51,11 @@ from .quality.contracts import ContinuityReport
 from .schema import WORKSPACE_SCHEMA_VERSION
 from .storage_errors import IncompatibleShotPlanSchemaError
 from .storage_objects import ObjectReplica, StorageObject
+from .video_enhancement.domain import (
+    ACTIVE_VIDEO_ENHANCEMENT_STATUSES,
+    VideoEnhancementJob,
+    VideoEnhancementJobStatus,
+)
 from .viral_insights.contracts import ViralConceptSet, ViralInsightReport
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -181,6 +186,15 @@ _DEPTH_CONTROL_JOB_INDEXES = (
     ("idx_depth_control_jobs_status", "depth_control_jobs", "status"),
 )
 
+_VIDEO_ENHANCEMENT_JOB_TABLES = frozenset({"video_enhancement_jobs"})
+
+_VIDEO_ENHANCEMENT_JOB_INDEXES = (
+    ("idx_video_enhancement_jobs_project_id", "video_enhancement_jobs", "project_id"),
+    ("idx_video_enhancement_jobs_shot_plan_id", "video_enhancement_jobs", "shot_plan_id"),
+    ("idx_video_enhancement_jobs_candidate_id", "video_enhancement_jobs", "candidate_id"),
+    ("idx_video_enhancement_jobs_status", "video_enhancement_jobs", "status"),
+)
+
 _GENERATED_ARTIFACT_TABLES = frozenset(
     {"generated_artifacts", "storage_object_references", "asset_provenance"}
 )
@@ -220,6 +234,7 @@ class SQLiteStore:
         | _VIRAL_INSIGHT_TABLES
         | _VIDEO_GENERATION_DRAFT_TABLES
         | _DEPTH_CONTROL_JOB_TABLES
+        | _VIDEO_ENHANCEMENT_JOB_TABLES
         | _GENERATED_ARTIFACT_TABLES
         | _MEDIA_STAGING_TABLES
     )
@@ -319,6 +334,11 @@ class SQLiteStore:
                 self._create_media_staging_indexes(connection)
                 if 12 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (12)")
+
+                self._create_json_tables(connection, _VIDEO_ENHANCEMENT_JOB_TABLES)
+                self._create_video_enhancement_job_indexes(connection)
+                if 13 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (13)")
             except Exception:
                 connection.rollback()
                 raise
@@ -392,6 +412,14 @@ class SQLiteStore:
     @staticmethod
     def _create_depth_control_job_indexes(connection: sqlite3.Connection) -> None:
         for index_name, table, payload_field in _DEPTH_CONTROL_JOB_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_video_enhancement_job_indexes(connection: sqlite3.Connection) -> None:
+        for index_name, table, payload_field in _VIDEO_ENHANCEMENT_JOB_INDEXES:
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
@@ -557,6 +585,11 @@ class SQLiteStore:
                         "project_id",
                         {project_key},
                     ),
+                    "video_enhancement_jobs": keys_for(
+                        "video_enhancement_jobs",
+                        "project_id",
+                        {project_key},
+                    ),
                     "generation_runs": generation_run_ids,
                     "shot_plans": shot_plan_ids,
                 }
@@ -649,6 +682,11 @@ class SQLiteStore:
                     ),
                     "depth_control_jobs": keys_for(
                         "depth_control_jobs",
+                        "project_id",
+                        {project_key},
+                    ),
+                    "video_enhancement_jobs": keys_for(
+                        "video_enhancement_jobs",
                         "project_id",
                         {project_key},
                     ),
@@ -1224,6 +1262,85 @@ class SQLiteStore:
     ) -> DepthControlJob | None:
         async with self._lock:
             return await asyncio.to_thread(self._claim_depth_control_job, job_id)
+
+    async def save_video_enhancement_job(
+        self,
+        job: VideoEnhancementJob,
+    ) -> VideoEnhancementJob:
+        return await self._save("video_enhancement_jobs", job.id, job)
+
+    async def get_video_enhancement_job(
+        self,
+        job_id: UUID,
+    ) -> VideoEnhancementJob | None:
+        return await self._get("video_enhancement_jobs", job_id, VideoEnhancementJob)
+
+    async def list_video_enhancement_jobs(
+        self,
+        *,
+        project_id: UUID | None = None,
+        shot_plan_id: UUID | None = None,
+        candidate_id: UUID | None = None,
+        active_only: bool = False,
+    ) -> list[VideoEnhancementJob]:
+        payloads = await asyncio.to_thread(self._read_all, "video_enhancement_jobs")
+        jobs = [VideoEnhancementJob.model_validate_json(payload) for payload in payloads]
+        if project_id is not None:
+            jobs = [item for item in jobs if item.project_id == project_id]
+        if shot_plan_id is not None:
+            jobs = [item for item in jobs if item.shot_plan_id == shot_plan_id]
+        if candidate_id is not None:
+            jobs = [item for item in jobs if item.candidate_id == candidate_id]
+        if active_only:
+            jobs = [item for item in jobs if item.status in ACTIVE_VIDEO_ENHANCEMENT_STATUSES]
+        return sorted(jobs, key=lambda item: item.created_at)
+
+    def _claim_video_enhancement_job(
+        self,
+        job_id: UUID,
+    ) -> VideoEnhancementJob | None:
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT payload FROM video_enhancement_jobs WHERE record_key = ?",
+                    (str(job_id),),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                job = VideoEnhancementJob.model_validate_json(str(row[0]))
+                if job.status != VideoEnhancementJobStatus.QUEUED:
+                    connection.commit()
+                    return None
+                claimed = job.model_copy(
+                    update={
+                        "status": VideoEnhancementJobStatus.RUNNING,
+                        "started_at": job.started_at or now,
+                        "heartbeat_at": now,
+                        "updated_at": now,
+                        "progress_message": "正在准备本地清晰化",
+                    }
+                )
+                connection.execute(
+                    "UPDATE video_enhancement_jobs SET payload = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE record_key = ?",
+                    (self._serialize(claimed), str(job_id)),
+                )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+                return claimed
+
+    async def claim_video_enhancement_job(
+        self,
+        job_id: UUID,
+    ) -> VideoEnhancementJob | None:
+        async with self._lock:
+            return await asyncio.to_thread(self._claim_video_enhancement_job, job_id)
 
     def _claim_generation_run(
         self,

@@ -48,6 +48,11 @@ from .models import (
 )
 from .quality.contracts import ContinuityReport
 from .storage_objects import ObjectReplica, StorageObject
+from .video_enhancement.domain import (
+    ACTIVE_VIDEO_ENHANCEMENT_STATUSES,
+    VideoEnhancementJob,
+    VideoEnhancementJobStatus,
+)
 from .viral_insights.contracts import ViralConceptSet, ViralInsightReport
 from .workspace import WorkspaceError, workspace_manager
 
@@ -91,6 +96,7 @@ class InMemoryStore:
         self.viral_concept_sets: dict[UUID, ViralConceptSet] = {}
         self.shot_video_generation_drafts: dict[UUID, ShotVideoGenerationDraft] = {}
         self.depth_control_jobs: dict[UUID, DepthControlJob] = {}
+        self.video_enhancement_jobs: dict[UUID, VideoEnhancementJob] = {}
         self.generated_artifacts: dict[UUID, GeneratedArtifact] = {}
         self.storage_object_references: dict[UUID, StorageObjectReference] = {}
         self.asset_provenance: dict[UUID, AssetProvenance] = {}
@@ -309,6 +315,11 @@ class InMemoryStore:
             self.depth_control_jobs = {
                 key: item
                 for key, item in self.depth_control_jobs.items()
+                if item.project_id != project_id
+            }
+            self.video_enhancement_jobs = {
+                key: item
+                for key, item in self.video_enhancement_jobs.items()
                 if item.project_id != project_id
             }
             self.production_projects.pop(project_id, None)
@@ -592,6 +603,11 @@ class InMemoryStore:
                 for key, item in self.depth_control_jobs.items()
                 if item.project_id != project_id
             }
+            self.video_enhancement_jobs = {
+                key: item
+                for key, item in self.video_enhancement_jobs.items()
+                if item.project_id != project_id
+            }
             self.shot_plans = {
                 key: item
                 for key, item in self.shot_plans.items()
@@ -673,6 +689,60 @@ class InMemoryStore:
                 }
             )
             self.depth_control_jobs[job_id] = claimed
+            return claimed
+
+    async def save_video_enhancement_job(
+        self,
+        job: VideoEnhancementJob,
+    ) -> VideoEnhancementJob:
+        async with self._lock:
+            self.video_enhancement_jobs[job.id] = job
+        return job
+
+    async def get_video_enhancement_job(
+        self,
+        job_id: UUID,
+    ) -> VideoEnhancementJob | None:
+        return self.video_enhancement_jobs.get(job_id)
+
+    async def list_video_enhancement_jobs(
+        self,
+        *,
+        project_id: UUID | None = None,
+        shot_plan_id: UUID | None = None,
+        candidate_id: UUID | None = None,
+        active_only: bool = False,
+    ) -> list[VideoEnhancementJob]:
+        jobs = list(self.video_enhancement_jobs.values())
+        if project_id is not None:
+            jobs = [item for item in jobs if item.project_id == project_id]
+        if shot_plan_id is not None:
+            jobs = [item for item in jobs if item.shot_plan_id == shot_plan_id]
+        if candidate_id is not None:
+            jobs = [item for item in jobs if item.candidate_id == candidate_id]
+        if active_only:
+            jobs = [item for item in jobs if item.status in ACTIVE_VIDEO_ENHANCEMENT_STATUSES]
+        return sorted(jobs, key=lambda item: item.created_at)
+
+    async def claim_video_enhancement_job(
+        self,
+        job_id: UUID,
+    ) -> VideoEnhancementJob | None:
+        async with self._lock:
+            job = self.video_enhancement_jobs.get(job_id)
+            if job is None or job.status != VideoEnhancementJobStatus.QUEUED:
+                return None
+            now = _utc_now()
+            claimed = job.model_copy(
+                update={
+                    "status": VideoEnhancementJobStatus.RUNNING,
+                    "started_at": job.started_at or now,
+                    "heartbeat_at": now,
+                    "updated_at": now,
+                    "progress_message": "正在准备本地清晰化",
+                }
+            )
+            self.video_enhancement_jobs[job_id] = claimed
             return claimed
 
     async def claim_generation_run(

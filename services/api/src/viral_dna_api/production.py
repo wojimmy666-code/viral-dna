@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from threading import Event
-from typing import Protocol
+from typing import Literal, Protocol
 from urllib.parse import unquote
 from uuid import UUID, uuid4
 
@@ -7441,12 +7441,18 @@ class ProductionService:
         candidate_id: UUID,
         *,
         thumbnail: bool = False,
+        variant: Literal["active", "original"] = "active",
     ) -> tuple[Path, str]:
         candidate = await self._require_candidate(candidate_id)
         run = await self._require_run(candidate.generation_run_id)
         plan = await self._require_shot(run.shot_plan_id)
         project = await self._require_project(run.project_id)
         relative_path = candidate.thumbnail_relative_path if thumbnail else candidate.relative_path
+        if not thumbnail and variant == "original":
+            enhancement = (candidate.quality_report or {}).get("video_enhancement")
+            original = enhancement.get("original") if isinstance(enhancement, dict) else None
+            if isinstance(original, dict) and original.get("relative_path"):
+                relative_path = str(original["relative_path"])
         if relative_path is None:
             raise _fail(404, "candidate_thumbnail_missing", "候选缩略图不存在")
         try:

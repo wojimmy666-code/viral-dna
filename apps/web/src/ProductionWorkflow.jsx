@@ -3430,6 +3430,9 @@ export function ProductionHub({
                 onDeleteDepthControl={deleteDepthControl}
                 onToggleDepthControl={toggleDepthControl}
                 onGenerate={generateVideoCandidates}
+                onEnhancementChanged={async () => {
+                  await refreshProject(detail.project.id, shotDetail?.plan?.id);
+                }}
                 onManagedAssetChange={updateManagedAssetBinding}
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}

@@ -2365,6 +2365,7 @@ export function App() {
         onValidateWorkspace={validateWorkspace}
         onWorkspaceChange={updateWorkspaceDraft}
         preferences={userPreferences}
+        request={apiRequest}
         section={appRoute.settingsSection}
         session={userSession}
         videoSettings={serverVideoSettings}

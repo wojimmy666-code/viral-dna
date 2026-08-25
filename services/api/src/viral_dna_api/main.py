@@ -208,6 +208,9 @@ from .store import store
 from .thumbnails import thumbnail_etag, thumbnail_service
 from .timeline import TimelineService, TimelineServiceError
 from .timeline_export import TimelineExportService, TimelineExportServiceError
+from .video_enhancement.routes import create_video_enhancement_router
+from .video_enhancement.service import VideoEnhancementService
+from .video_enhancement.settings import VideoEnhancementSettingsService
 from .video_generation import VideoGenerationGateway
 from .video_generation.draft_routes import create_video_generation_draft_router
 from .video_generation.drafts import ShotVideoGenerationDraftService
@@ -267,6 +270,7 @@ async def lifespan(_app: FastAPI):
     await record_service.bootstrap(recover_interrupted=True)
     await production_service.recover_generation_runs()
     await depth_control_job_service.recover()
+    await video_enhancement_service.recover()
     media_staging_service.start_cleanup()
     try:
         yield
@@ -275,6 +279,7 @@ async def lifespan(_app: FastAPI):
         await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
         await depth_control_job_service.shutdown()
+        await video_enhancement_service.shutdown()
         await media_staging_service.shutdown()
 
 
@@ -339,6 +344,10 @@ depth_generation_settings_service = DepthGenerationSettingsService(
     workspace_manager,
     account_context_service,
 )
+video_enhancement_settings_service = VideoEnhancementSettingsService(
+    workspace_manager,
+    account_context_service,
+)
 depth_control_service = DepthControlService(
     workspace_manager,
     settings_service=depth_generation_settings_service,
@@ -371,6 +380,13 @@ depth_control_job_service = DepthControlJobService(
     store,
     production_service,
     depth_control_service,
+    notification_publisher=notification_service,
+)
+video_enhancement_service = VideoEnhancementService(
+    store,
+    workspace_manager,
+    production_service,
+    video_enhancement_settings_service,
     notification_publisher=notification_service,
 )
 viral_insight_service = ViralInsightService(
@@ -425,6 +441,13 @@ app.include_router(
     create_depth_generation_settings_router(
         depth_generation_settings_service,
         depth_control_service,
+    ),
+    prefix=API_PREFIX,
+)
+app.include_router(
+    create_video_enhancement_router(
+        video_enhancement_service,
+        video_enhancement_settings_service,
     ),
     prefix=API_PREFIX,
 )
@@ -1764,9 +1787,15 @@ async def approve_production_candidate(
 
 
 @app.get(f"{API_PREFIX}/generation-candidates/{{candidate_id}}/content")
-async def get_production_candidate_content(candidate_id: UUID) -> FileResponse:
+async def get_production_candidate_content(
+    candidate_id: UUID,
+    variant: Annotated[Literal["active", "original"], Query()] = "active",
+) -> FileResponse:
     try:
-        path, media_type = await production_service.resolve_candidate_content(candidate_id)
+        path, media_type = await production_service.resolve_candidate_content(
+            candidate_id,
+            variant=variant,
+        )
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return FileResponse(

@@ -13,6 +13,7 @@ import {
   SettingsPanel,
   SettingsShell,
 } from "../ui/settings/SettingsPrimitives.jsx";
+import { VideoEnhancementSettings } from "../video-enhancement/VideoEnhancementSettings.jsx";
 import "./settings-center.css";
 
 const SECTIONS = [
@@ -50,6 +51,7 @@ export function UserSettingsPage({
   onValidateWorkspace,
   onWorkspaceChange,
   preferences,
+  request,
   section,
   session,
   videoSettings,
@@ -258,6 +260,7 @@ export function UserSettingsPage({
                   </select>
                 </label>
               </div>
+              <VideoEnhancementSettings request={request} />
             </>
           )}
 
