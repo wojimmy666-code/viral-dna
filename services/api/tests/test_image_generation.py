@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -47,6 +48,8 @@ from viral_dna_api.image_generation.settings import (
 )
 from viral_dna_api.models import (
     GenerationCostSource,
+    GenerationKind,
+    GenerationRun,
     ImageExecutionMode,
     ImageGenerationCapability,
     ImageGenerationInputMode,
@@ -57,6 +60,7 @@ from viral_dna_api.models import (
     LocalCodexSandboxTestRequest,
     ModelUsage,
     ProductionProject,
+    ProductionRunStatus,
     ReferenceAsset,
     ReferenceAssetType,
     ReferenceBinding,
@@ -167,6 +171,7 @@ FAKE_CODEX = """
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -189,12 +194,25 @@ def main() -> None:
         raise SystemExit(2)
     run_root = Path(sys.argv[sys.argv.index("--cd") + 1])
     (run_root / "codex-exec-argv.json").write_text(json.dumps(sys.argv), "utf-8")
-    output_root = run_root / "tool-output"
-    output_root.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (320, 576), (76, 103, 220)).save(
-        output_root / "codex-candidate.png",
-        "PNG",
-    )
+    if os.getenv("FAKE_CODEX_OUTPUT_MODE") == "codex_home":
+        output_root = Path(os.environ["CODEX_HOME"]) / "generated_images" / "fake-session"
+        output_root.mkdir(parents=True, exist_ok=True)
+        output_path = output_root / "imagegen-output.png"
+        Image.new("RGB", (320, 576), (76, 103, 220)).save(output_path, "PNG")
+        print(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "image_generation",
+                "result": {"output_hint": str(output_path)},
+            },
+        }))
+    else:
+        output_root = run_root / "tool-output"
+        output_root.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (320, 576), (76, 103, 220)).save(
+            output_root / "codex-candidate.png",
+            "PNG",
+        )
     print('{"type":"turn.completed"}')
 
 
@@ -1340,6 +1358,139 @@ def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None
     assert manifest["candidates"][0]["path"] == "codex-candidate.png"
     argv = json.loads((run_root / "codex-exec-argv.json").read_text("utf-8"))
     assert "--ignore-user-config" in argv
+
+
+def test_codex_imagegen_wrapper_captures_standard_generated_image_output(
+    tmp_path: Path,
+) -> None:
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    fake_codex = write_fake_codex(tmp_path)
+    run_root = tmp_path / "run-codex-home"
+    request_path = run_root / "request.json"
+    run_root.mkdir(parents=True)
+    request_path.write_text(
+        json.dumps(
+            {
+                "protocol_version": "viral-dna-image-tool/v1",
+                "request_id": str(uuid4()),
+                "candidate_count": 1,
+                "output": {"width": 320, "height": 576},
+                "prompt": {"positive": "竖屏人物", "negative": "模糊"},
+                "inputs": [],
+            },
+            ensure_ascii=False,
+        ),
+        "utf-8",
+    )
+    output_root = run_root / "tool-output"
+    environment = {
+        **os.environ,
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "FAKE_CODEX_OUTPUT_MODE": "codex_home",
+    }
+    subprocess.run(
+        [
+            sys.executable,
+            str(wrapper),
+            "--codex-executable",
+            sys.executable,
+            "--codex-fixed-arg",
+            str(fake_codex),
+            "generate",
+            "--request",
+            str(request_path),
+            "--output",
+            str(output_root),
+        ],
+        capture_output=True,
+        check=True,
+        encoding="utf-8",
+        env=environment,
+        text=True,
+        timeout=30,
+    )
+
+    manifest = json.loads((output_root / "result.json").read_text("utf-8"))
+    candidate_path = output_root / manifest["candidates"][0]["path"]
+    assert candidate_path.name == "codex-candidate-001.png"
+    assert candidate_path.is_file()
+    assert (output_root / "codex-events.jsonl").is_file()
+    assert "output_hint" in (output_root / "codex-events.jsonl").read_text("utf-8")
+    assert (output_root / "codex-stdout.log").is_file()
+    assert (output_root / "codex-stderr.log").is_file()
+    assert manifest["usage"]["artifact_capture"] == "codex_event_or_generated_images"
+
+
+def test_gateway_recovers_existing_codex_image_without_new_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    workspace = WorkspaceManager()
+    project = _project()
+    shot = _shot(project.id)
+    workspace.initialize_production(project.record_id, project.id)
+    run_id = uuid4()
+    run_root = (
+        workspace.production_shot_root(project.record_id, project.id, shot.id)
+        / "images"
+        / str(run_id)
+    )
+    input_path = run_root / "input.json"
+    filesystem_path(input_path.parent).mkdir(parents=True, exist_ok=True)
+    filesystem_path(input_path).write_text(
+        json.dumps(
+            {
+                "output": {"width": 720, "height": 1280},
+                "references": [],
+            }
+        ),
+        "utf-8",
+    )
+    artifact = codex_home / "generated_images" / "session-1" / "result.png"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (720, 1280), (90, 120, 180)).save(artifact, "PNG")
+    now = datetime.now(UTC)
+    run = GenerationRun(
+        id=run_id,
+        project_id=project.id,
+        shot_plan_id=shot.id,
+        revision_id=shot.revision_id,
+        kind=GenerationKind.IMAGE,
+        provider="openai-codex-imagegen",
+        model="gpt-5.6-sol",
+        model_snapshot="gpt-5.6-sol",
+        prompt_version="shot-image-v3",
+        schema_version="viral-dna-image-generation/v2",
+        pricing_version="local-tool-cost-v1",
+        request_fingerprint="a" * 64,
+        input_snapshot_relative_path=workspace.relative(input_path),
+        execution_mode=ImageExecutionMode.LOCAL_TOOL,
+        adapter_id=codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+        adapter_version="1.1.0",
+        cost_source=GenerationCostSource.SUBSCRIPTION_QUOTA,
+        request_payload={"candidate_count": 1},
+        status=ProductionRunStatus.FAILED,
+        error_code="local_tool_failed",
+        error_message="Codex ImageGen 只输出 0 张图片，预期 1 张",
+        started_at=now - timedelta(seconds=2),
+        completed_at=now + timedelta(seconds=2),
+    )
+    gateway = ImageGenerationGateway(workspace)
+
+    assert gateway.recoverable_local_tool_artifacts(run) == (artifact.resolve(),)
+    recovered_run, candidates = asyncio.run(gateway.recover_local_tool_output(run))
+
+    assert recovered_run.status == ProductionRunStatus.COMPLETED
+    assert recovered_run.error_code is None
+    assert recovered_run.actual_cost_micros == 0
+    assert recovered_run.usage["recovery_quota_consumed"] is False
+    assert len(candidates) == 1
+    assert is_file(workspace.resolve(candidates[0].relative_path))
+    assert is_file(run_root / "tool-output" / "recovered-codex-candidate-001.png")
 
 
 def _project() -> ProductionProject:

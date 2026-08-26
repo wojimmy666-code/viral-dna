@@ -149,6 +149,31 @@
 .viral-hook-callout span { color: var(--text-secondary); font-size: var(--type-caption-size); font-weight: var(--type-weight-semibold); }
 .viral-hook-callout strong { display: block; margin-top: 0.2rem; color: var(--text-primary); font-size: var(--type-body-size); }
 .viral-hook-callout p { max-width: 75ch; margin: 0.25rem 0 0; color: var(--text-secondary); font-size: var(--type-label-size); line-height: var(--type-leading-copy); }
+.viral-hook-evidence {
+  display: grid;
+  gap: 0.375rem;
+  margin: 0.625rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.viral-hook-evidence li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 6.75rem minmax(0, 1fr);
+  gap: 0.625rem;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-leading-copy);
+}
+.viral-hook-evidence time {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.viral-hook-evidence span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .viral-dna-grid {
   display: grid;

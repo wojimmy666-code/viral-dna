@@ -80,10 +80,8 @@ class FaithfulStrategyBuilder(BaseConceptStrategyBuilder):
         role_label: str,
         base: str,
     ) -> str:
-        return self.compose_prompt(
-            context,
+        return self.compose_image_prompt(
             heading="忠实复刻静态画面：",
-            role_label=role_label,
             directive="保持原构图、主体相对位置、色彩和光线，只应用指定元素替换。",
             base=base,
         )

@@ -379,16 +379,17 @@ export function PlatformAdminConsole({
                   />
                 </label>
                 <label className="settings-field">
-                  <span>模型策略</span>
+                  <span>模型选择</span>
                   <select
                     disabled={loading || saving}
                     onChange={(event) => onChange({ imageLocalModelPolicy: event.target.value })}
                     value={draft.imageLocalModelPolicy || "latest_flagship"}
                   >
-                    <option value="latest_flagship">自动选择最高模型</option>
+                    <option value="latest_flagship">最新旗舰</option>
                     <option value="balanced">均衡模型</option>
-                    <option value="pinned">固定模型</option>
+                    <option value="pinned">固定指定模型</option>
                   </select>
+                  <small>由管理员人工选择并保存；运行时不会因生成速度自动切换模型。</small>
                 </label>
                 <label className="settings-field">
                   <span>固定模型</span>
@@ -397,6 +398,20 @@ export function PlatformAdminConsole({
                     onChange={(event) => onChange({ imageLocalModel: event.target.value })}
                     value={draft.imageLocalModel || ""}
                   />
+                </label>
+                <label className="settings-field">
+                  <span>推理等级</span>
+                  <select
+                    disabled={loading || saving}
+                    onChange={(event) => onChange({ imageLocalReasoningEffort: event.target.value })}
+                    value={draft.imageLocalReasoningEffort || "xhigh"}
+                  >
+                    <option value="low">低（更快）</option>
+                    <option value="medium">中</option>
+                    <option value="high">高</option>
+                    <option value="xhigh">最高（更稳）</option>
+                  </select>
+                  <small>由管理员人工选择；系统不会根据耗时自动调整等级。</small>
                 </label>
               </div>
             </div>

@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from PIL import Image
 
+from viral_dna_api.image_generation import ImageGenerationGateway
+from viral_dna_api.image_generation.gateway import _filesystem_path
 from viral_dna_api.models import (
     GenerationCostSource,
     GenerationKind,
     GenerationRun,
     ImageExecutionMode,
     ImageGenerationCreate,
+    ProductionChangeKind,
     ProductionProject,
+    ProductionRevision,
     ProductionRunStatus,
     ShotPlan,
     WorkflowItemStatus,
@@ -158,6 +164,109 @@ async def test_cancel_and_retry_preserve_request_and_lineage(
     assert stored is not None
     assert stored.request_payload["candidate_count"] == 2
     assert stored.request_payload["expected_revision_id"] == str(project.current_revision_id)
+
+
+@pytest.mark.asyncio
+async def test_recover_image_output_imports_existing_artifact_without_new_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path, monkeypatch)
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    repository = InMemoryStore()
+    project = _project()
+    shot = _shot(project)
+    workspace.initialize_production(project.record_id, project.id)
+    await repository.save_production_project(project)
+    await repository.save_shot_plan(shot)
+
+    run_id = uuid4()
+    run_root = (
+        workspace.production_shot_root(project.record_id, project.id, shot.id)
+        / "images"
+        / str(run_id)
+    )
+    input_path = run_root / "input.json"
+    _filesystem_path(input_path.parent).mkdir(parents=True, exist_ok=True)
+    _filesystem_path(input_path).write_text(
+        json.dumps({"output": {"width": 720, "height": 1280}, "references": []}),
+        "utf-8",
+    )
+    artifact = codex_home / "generated_images" / "session-1" / "result.png"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (720, 1280), (70, 110, 170)).save(artifact, "PNG")
+    now = datetime.now(UTC)
+    failed = GenerationRun(
+        id=run_id,
+        project_id=project.id,
+        shot_plan_id=shot.id,
+        visual_beat_id=shot.visual_beats[0].id,
+        revision_id=project.current_revision_id,
+        kind=GenerationKind.IMAGE,
+        provider="local_tool",
+        model="gpt-5.6-sol",
+        model_snapshot="gpt-5.6-sol@1.1.0",
+        prompt_version="shot-image-v3",
+        schema_version="viral-dna-image-generation/v2",
+        pricing_version="local-tool-cost-v1",
+        request_fingerprint="b" * 64,
+        input_snapshot_relative_path=workspace.relative(input_path),
+        execution_mode=ImageExecutionMode.LOCAL_TOOL,
+        adapter_id="codex_imagegen_v1",
+        adapter_version="1.1.0",
+        cost_source=GenerationCostSource.SUBSCRIPTION_QUOTA,
+        request_payload={"candidate_count": 1},
+        status=ProductionRunStatus.FAILED,
+        error_code="local_tool_failed",
+        error_message="图片已生成但没有导入",
+        started_at=now,
+        completed_at=now,
+    )
+    await repository.save_generation_run(failed)
+    service = ProductionService(
+        repository,
+        workspace,
+        image_gateway=ImageGenerationGateway(workspace, repository=repository),
+    )
+
+    async def prepare_revision(
+        next_project: ProductionProject,
+        change_kind: ProductionChangeKind,
+        change_summary: str,
+        *,
+        revision_id,
+        **_kwargs,
+    ):
+        revision = ProductionRevision(
+            id=revision_id,
+            project_id=next_project.id,
+            parent_revision_id=next_project.current_revision_id,
+            revision_number=2,
+            change_kind=change_kind,
+            change_summary=change_summary,
+            snapshot_relative_path=f"revisions/{revision_id}.json",
+        )
+        return (
+            next_project.model_copy(update={"current_revision_id": revision.id}),
+            revision,
+        )
+
+    monkeypatch.setattr(service, "_prepare_revision", prepare_revision)
+
+    before_revision = project.current_revision_id
+    recovered = await service.recover_image_generation_output(failed.id)
+
+    assert recovered.status == ProductionRunStatus.COMPLETED
+    assert recovered.actual_cost_micros == 0
+    assert len(recovered.candidates) == 1
+    assert recovered.usage["recovery_quota_consumed"] is False
+    updated_project = await repository.get_production_project(project.id)
+    updated_shot = await repository.get_shot_plan(shot.id)
+    assert updated_project is not None
+    assert updated_project.current_revision_id != before_revision
+    assert updated_shot is not None
+    assert updated_shot.visual_beats[0].image_status == WorkflowItemStatus.REVIEW_REQUIRED
 
 
 @pytest.mark.asyncio

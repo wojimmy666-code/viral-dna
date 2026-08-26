@@ -12,6 +12,7 @@ import {
   latestRunByKind,
   normalizeVideoDuration,
   preferredVideoResolution,
+  videoCandidatePlaybackUrl,
   videoDurationOptions,
   videoGenerationRunLabel,
   workflowStatusClass,
@@ -302,10 +303,9 @@ export function ShotVideoWorkspace({
     && plan?.video_status === "approved"
     && plan?.approved_video_candidate_id === displayedCandidate.id
   );
-  const displayedVideoUrl = (
-    enhancementPreview?.candidateId === displayedCandidate?.id
-      ? enhancementPreview.url
-      : displayedCandidate?.content_url
+  const displayedVideoUrl = videoCandidatePlaybackUrl(
+    displayedCandidate,
+    enhancementPreview,
   );
   const displayedCandidateCostLabel = generationRunCostLabel(displayedCandidateRun);
   const activeRun = videoRuns.find((run) => ACTIVE_RUN_STATUSES.has(run.status)) || null;

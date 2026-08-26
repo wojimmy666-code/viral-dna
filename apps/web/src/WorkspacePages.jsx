@@ -37,7 +37,6 @@ export function NewAnalysisPage({ children }) {
             <span className="breadcrumb-current">新建分析</span>
           </div>
           <h1>新建视频分析</h1>
-          <p>导入一个本地视频或公开链接，创建独立的拆解任务。</p>
         </div>
         <div className="intro-status">
           <ShieldCheck size={17} weight="fill" />

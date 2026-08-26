@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -17,6 +22,7 @@ LATEST_FLAGSHIP_MODEL = "gpt-5.6-sol"
 BALANCED_MODEL = "gpt-5.6-terra"
 CODEX_IMAGEGEN_ADAPTER_ID = "codex_imagegen_v1"
 CODEX_NETWORK_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_GENERATED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +31,140 @@ class CodexNetworkProbeResult:
     http_status: int | None
     latency_ms: int
     message: str
+
+
+def codex_generated_images_root() -> Path:
+    codex_home = Path(os.getenv("CODEX_HOME") or (Path.home() / ".codex"))
+    return (codex_home / "generated_images").resolve()
+
+
+def _event_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        strings: list[str] = []
+        for item in value.values():
+            strings.extend(_event_strings(item))
+        return strings
+    if isinstance(value, list):
+        strings = []
+        for item in value:
+            strings.extend(_event_strings(item))
+        return strings
+    return []
+
+
+def _paths_in_event_string(value: str) -> list[Path]:
+    candidates = [value.strip().strip("`\"'")]
+    candidates.extend(
+        match.group("path")
+        for match in re.finditer(
+            r"(?P<path>(?:file:///|[A-Za-z]:[\\/]|/)[^\"\r\n]*?\.(?:png|jpe?g|webp))",
+            value,
+            flags=re.IGNORECASE,
+        )
+    )
+    paths: list[Path] = []
+    for candidate in candidates:
+        normalized = candidate.strip().strip("`\"'")
+        if normalized.lower().startswith("file://"):
+            parsed = urlparse(normalized)
+            normalized = unquote(parsed.path)
+            if os.name == "nt" and re.match(r"^/[A-Za-z]:/", normalized):
+                normalized = normalized[1:]
+        path = Path(normalized)
+        if path.suffix.lower() in CODEX_GENERATED_IMAGE_EXTENSIONS:
+            paths.append(path)
+    return paths
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _event_artifact_paths(run_root: Path, generated_root: Path) -> list[Path]:
+    event_path = run_root / "tool-output" / "codex-events.jsonl"
+    stdout_path = run_root / "tool-output" / "codex-stdout.log"
+    sources = [event_path] if event_path.is_file() else []
+    if not sources and stdout_path.is_file():
+        sources.append(stdout_path)
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for source in sources:
+        try:
+            lines = source.read_text("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                event: Any = json.loads(line)
+            except json.JSONDecodeError:
+                event = line
+            for value in _event_strings(event):
+                for path in _paths_in_event_string(value):
+                    try:
+                        resolved = path.resolve()
+                    except OSError:
+                        continue
+                    key = os.path.normcase(str(resolved))
+                    if (
+                        key not in seen
+                        and resolved.is_file()
+                        and _is_within(resolved, generated_root)
+                    ):
+                        seen.add(key)
+                        paths.append(resolved)
+    return paths
+
+
+def find_recoverable_codex_artifacts(
+    run_root: Path,
+    *,
+    started_at: datetime | None,
+    completed_at: datetime | None,
+    expected_count: int,
+    generated_root: Path | None = None,
+) -> tuple[Path, ...]:
+    """Find an exact, unambiguous set of ImageGen files for one failed run."""
+
+    expected_count = max(1, min(4, int(expected_count or 1)))
+    generated_root = (generated_root or codex_generated_images_root()).resolve()
+    event_paths = _event_artifact_paths(run_root, generated_root)
+    if len(event_paths) >= expected_count:
+        return tuple(event_paths[:expected_count])
+    if not generated_root.is_dir() or started_at is None or completed_at is None:
+        return ()
+
+    window_start = started_at.timestamp() - 3
+    window_end = completed_at.timestamp() + 3
+    grouped: dict[str, list[Path]] = {}
+    try:
+        candidates = generated_root.rglob("*")
+        for path in candidates:
+            if not path.is_file() or path.suffix.lower() not in CODEX_GENERATED_IMAGE_EXTENSIONS:
+                continue
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                continue
+            if window_start <= modified_at <= window_end:
+                resolved = path.resolve()
+                grouped.setdefault(os.path.normcase(str(resolved.parent)), []).append(resolved)
+    except OSError:
+        return ()
+
+    exact_groups = [
+        sorted(paths, key=lambda path: path.stat().st_mtime)
+        for paths in grouped.values()
+        if len(paths) == expected_count
+    ]
+    if len(exact_groups) != 1:
+        return ()
+    return tuple(exact_groups[0])
 
 
 def local_tool_proxy_environment_url(

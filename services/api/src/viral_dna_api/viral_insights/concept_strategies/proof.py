@@ -75,10 +75,8 @@ class ProofStrategyBuilder(BaseConceptStrategyBuilder):
         role_label: str,
         base: str,
     ) -> str:
-        return self.compose_prompt(
-            context,
+        return self.compose_image_prompt(
             heading="证据说服静态画面：",
-            role_label=role_label,
             directive=(
                 f"围绕{context.primary_selling_point}选择可验证细节、特写或同条件对比；"
                 "画面只保留一个主要证据，标签不得遮挡主体。"

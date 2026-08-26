@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
 from viral_dna_api.chinese import to_simplified
 from viral_dna_api.models import AnalysisReport, Entity, PromptShot, Shot
+from viral_dna_api.prompt_engine.compiler import sanitize_still_image_prompt
 
 from ..contracts import (
     ViralConcept,
@@ -192,7 +193,7 @@ class BaseConceptStrategyBuilder(ABC):
         role_key = role.role if role else "retention"
         role_label = ROLE_LABELS.get(role_key, "留存推进")
         base_image = replace_entities(
-            source_prompt.prompt if source_prompt else shot.prompt,
+            sanitize_still_image_prompt(source_prompt.prompt if source_prompt else shot.prompt),
             context.report.entities,
             context.replacements,
         ) + context.replacement_clause + context.category_clause
@@ -241,6 +242,15 @@ class BaseConceptStrategyBuilder(ABC):
         locks = context.insight.dna.recommended_locks[:4]
         lock_text = "、".join(locks) if locks else "时长、动作、运镜"
         return f"{heading} 本镜头承担{role_label}；锁定{lock_text}。{directive} {base}"
+
+    def compose_image_prompt(
+        self,
+        *,
+        heading: str,
+        directive: str,
+        base: str,
+    ) -> str:
+        return f"{heading} {directive} {base}"
 
     @abstractmethod
     def build_decision(self, context: ConceptGenerationContext) -> StrategyDecision: ...

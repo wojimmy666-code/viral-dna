@@ -5,8 +5,10 @@ import test from "node:test";
 import {
   assetMentionLabel,
   assetMentionToken,
+  ensurePromptMentionTokens,
   isVisibleImageCandidate,
   normalizePromptMentionDraft,
+  reconcilePromptReferenceRemoval,
   removeMentionFromPrompt,
 } from "../src/shot-image-ui.js";
 import {
@@ -61,6 +63,87 @@ test("shows directory and asset name while keeping the reference id stable", () 
   );
 });
 
+test("restores missing @ tokens from saved asset bindings without duplicates", () => {
+  const asset = {
+    id: "asset-1",
+    folder_name: "托管角色",
+    name: "小喵酱",
+  };
+  const normalized = normalizePromptMentionDraft(
+    "双马尾女性站在画面中央。",
+    [],
+    [asset],
+    [{ reference_asset_id: asset.id, role: "identity", weight: 1 }],
+  );
+  assert.equal(
+    normalized.imagePrompt,
+    "@托管角色/小喵酱\n双马尾女性站在画面中央。",
+  );
+  assert.deepEqual(normalized.imagePromptMentions, [
+    { reference_asset_id: asset.id, label: "托管角色/小喵酱" },
+  ]);
+  assert.equal(
+    ensurePromptMentionTokens(
+      normalized.imagePrompt,
+      normalized.imagePromptMentions,
+      [asset],
+    ),
+    normalized.imagePrompt,
+  );
+  assert.equal(
+    normalizePromptMentionDraft(
+      normalized.imagePrompt,
+      normalized.imagePromptMentions,
+      [asset],
+      [{ reference_asset_id: asset.id, role: "identity", weight: 1 }],
+    ).changed,
+    false,
+  );
+});
+
+test("deleting an @ token removes its mention and matching binding together", () => {
+  const asset = { id: "asset-1", folder_name: "人物", name: "面部" };
+  const unrelatedBinding = {
+    reference_asset_id: "asset-without-mention",
+    role: "scene",
+    weight: 1,
+  };
+  const reconciled = reconcilePromptReferenceRemoval(
+    "中景镜头，人物站在栏杆前",
+    [{ reference_asset_id: asset.id, label: "人物/面部" }],
+    [
+      { reference_asset_id: asset.id, role: "identity", weight: 1 },
+      unrelatedBinding,
+    ],
+    [asset],
+  );
+  assert.deepEqual(reconciled.imagePromptMentions, []);
+  assert.deepEqual(reconciled.referenceBindings, [unrelatedBinding]);
+});
+
+test("routes image prompt references and bindings through one visual-beat save", () => {
+  assert.match(
+    productionWorkflowSource,
+    /visualBeatChanges\.reference_bindings = remainingShotChanges\.reference_bindings/,
+  );
+  assert.match(
+    productionWorkflowSource,
+    /\/visual-beats\/\$\{activeBeat\.id\}[\s\S]*\.\.\.visualBeatChanges/,
+  );
+  assert.match(shotImageSource, /reconcilePromptReferenceRemoval\(/);
+});
+
+test("passes the selected visual beat into the image workspace", () => {
+  assert.match(
+    productionWorkflowSource,
+    /<ShotImageWorkspace[\s\S]*selectedVisualBeatId=\{selectedVisualBeatId\}/,
+  );
+  assert.match(
+    shotImageSource,
+    /visualBeats\.find\(\(item\) => item\.id === selectedVisualBeatId\)/,
+  );
+});
+
 test("keeps legacy history visible but hides user-deleted image candidates", () => {
   assert.equal(isVisibleImageCandidate({ status: "archived" }), true);
   assert.equal(isVisibleImageCandidate({
@@ -78,6 +161,13 @@ test("image workspace exposes zoom and reversible deletion without lock controls
   assert.match(productionWorkflowSource, /actionLabel:\s*"撤销"/);
   assert.match(productionWorkflowSource, /archiveImageCandidate/);
   assert.match(productionWorkflowSource, /restoreImageCandidate/);
+});
+
+test("recovers already generated Codex images without submitting another generation", () => {
+  assert.match(shotImageSource, /图片待恢复/);
+  assert.match(shotImageSource, /onRecoverRun\?\.\(latestRun\.id\)/);
+  assert.match(productionWorkflowSource, /\/generation-runs\/\$\{runId\}\/recover-output/);
+  assert.match(productionWorkflowSource, /本次未重新调用 ImageGen/);
 });
 
 test("progressively reveals optional image negative constraints", () => {

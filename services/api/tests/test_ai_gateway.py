@@ -299,9 +299,11 @@ def test_shot_facts_normalize_clip_relative_motion_and_transition_conflicts() ->
     assert normalized.outgoing_transition.start_seconds == pytest.approx(8.9)
     assert normalized.outgoing_transition.end_seconds == pytest.approx(9.6)
     assert normalized.outgoing_transition.description != "无出场转场"
-    assert "【时间轴】" in normalized.replication_prompt
-    assert "【出场转场】" in normalized.replication_prompt
-    assert normalized.replication_prompt.count("检测到出场转场窗口") == 1
+    assert "【主体与服装】" in normalized.replication_prompt
+    assert "【场景】" in normalized.replication_prompt
+    assert "【时间轴】" not in normalized.replication_prompt
+    assert "【出场转场】" not in normalized.replication_prompt
+    assert "检测到出场转场窗口" not in normalized.replication_prompt
     assert "硬切" not in normalized.replication_prompt
     assert "画面切换为" not in normalized.replication_prompt
 

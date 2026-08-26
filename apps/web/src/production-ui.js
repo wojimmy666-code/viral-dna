@@ -162,6 +162,17 @@ export function workflowStatusClass(value) {
   return "neutral";
 }
 
+export function videoCandidatePlaybackUrl(candidate, enhancementPreview) {
+  if (!candidate) return "";
+  if (
+    enhancementPreview?.candidateId === candidate.id
+    && enhancementPreview.url
+  ) {
+    return enhancementPreview.url;
+  }
+  return candidate.content_url || "";
+}
+
 export function duplicateVisualBeatSourceIds(beats = []) {
   const firstByFingerprint = new Map();
   const duplicates = new Set();
@@ -494,9 +505,19 @@ export function isImageEngineConfigured(settings, executionMode) {
   return false;
 }
 
+export function isRecoverableImageGenerationRun(run) {
+  return Boolean(
+    run?.recovery_available
+    && Number(run?.recovery_candidate_count || 0) > 0,
+  );
+}
+
 export function generationFailureGuidance(run) {
   const code = String(run?.error_code || "");
   const message = String(run?.error_message || "");
+  if (isRecoverableImageGenerationRun(run)) {
+    return "图片已经生成，只是尚未导入当前任务。点击“恢复图片”即可继续，不会再次消耗生成额度。";
+  }
   if (code === "codex_windows_sandbox_setup_failed") {
     return (
       "Codex Windows 沙箱未能启动。请到“模型与设置 → Windows 沙箱”执行无费用预检；"

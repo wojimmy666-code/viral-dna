@@ -31,6 +31,7 @@ import {
   imageQualityLabel,
   isAiImageGenerationRun,
   isImageEngineConfigured,
+  isRecoverableImageGenerationRun,
   productionPreviewLayout,
   resolveImageExecutionMode,
   workflowStatusClass,
@@ -49,6 +50,7 @@ import {
   isVisibleImageCandidate,
   mentionToken,
   normalizePromptMentionDraft,
+  reconcilePromptReferenceRemoval,
   removeMentionFromPrompt,
 } from "./shot-image-ui.js";
 
@@ -351,6 +353,7 @@ export function ShotImageWorkspace({
   onSave,
   onGenerate,
   onCancelRun,
+  onRecoverRun,
   onSelectKeyframe,
   onApproveSource,
   onCreateShot,
@@ -590,7 +593,10 @@ export function ShotImageWorkspace({
   const latestRunBusy = ["queued", "running", "cancellation_requested"].includes(
     latestRun?.status,
   );
-  const latestRunTone = ["completed", "cached"].includes(latestRun?.status)
+  const latestRunRecoverable = isRecoverableImageGenerationRun(latestRun);
+  const latestRunTone = latestRunRecoverable
+    ? "recoverable"
+    : ["completed", "cached"].includes(latestRun?.status)
     ? "completed"
     : ["failed", "blocked"].includes(latestRun?.status)
       ? "failed"
@@ -705,6 +711,7 @@ export function ShotImageWorkspace({
         state.imagePrompt,
         state.imagePromptMentions,
         assets,
+        state.referenceBindings,
       );
       return normalized.changed
         ? {
@@ -714,7 +721,15 @@ export function ShotImageWorkspace({
           }
         : state;
     });
-  }, [activeVisualBeat?.id, assets, plan?.id, setDraft]);
+  }, [
+    activeVisualBeat?.id,
+    assets,
+    draft.imagePrompt,
+    draft.imagePromptMentions,
+    draft.referenceBindings,
+    plan?.id,
+    setDraft,
+  ]);
 
   useEffect(() => {
     if (identityPolicy.enabled) {
@@ -744,7 +759,7 @@ export function ShotImageWorkspace({
       const nextRole = defaultRole === "identity" && currentIdentity
         ? "layout"
         : defaultRole;
-      return {
+      const nextState = {
         ...state,
         referenceBindings: exists
           ? state.referenceBindings.filter(
@@ -762,10 +777,27 @@ export function ShotImageWorkspace({
           ? state.imagePromptMentions.filter(
             (item) => item.reference_asset_id !== asset.id,
           )
-          : state.imagePromptMentions,
+          : mention
+            ? state.imagePromptMentions
+            : [
+              ...state.imagePromptMentions,
+              { reference_asset_id: asset.id, label: assetMentionLabel(asset) },
+            ],
         imagePrompt: exists
           ? removeMentionFromPrompt(state.imagePrompt, mention || {}, asset)
           : state.imagePrompt,
+      };
+      if (exists) return nextState;
+      const normalized = normalizePromptMentionDraft(
+        nextState.imagePrompt,
+        nextState.imagePromptMentions,
+        assets,
+        nextState.referenceBindings,
+      );
+      return {
+        ...nextState,
+        imagePrompt: normalized.imagePrompt,
+        imagePromptMentions: normalized.imagePromptMentions,
       };
     });
   }
@@ -940,17 +972,20 @@ export function ShotImageWorkspace({
     const cursor = event.target.selectionStart ?? value.length;
     const prefix = value.slice(0, cursor);
     const match = prefix.match(/@([^@\n,，。；;]*)$/);
-    setDraft((state) => ({
-      ...state,
-      imagePrompt: value,
-      imagePromptMentions: state.imagePromptMentions.filter(
-        (item) => {
-          const asset = assetsById.get(item.reference_asset_id);
-          return value.includes(mentionToken(item, asset))
-            || value.includes(mentionToken(item));
-        },
-      ),
-    }));
+    setDraft((state) => {
+      const references = reconcilePromptReferenceRemoval(
+        value,
+        state.imagePromptMentions,
+        state.referenceBindings,
+        assets,
+      );
+      return {
+        ...state,
+        imagePrompt: value,
+        imagePromptMentions: references.imagePromptMentions,
+        referenceBindings: references.referenceBindings,
+      };
+    });
     setMentionMenu(match ? { start: cursor - match[1].length - 1, end: cursor, query: match[1] } : null);
   }
 
@@ -974,7 +1009,7 @@ export function ShotImageWorkspace({
         (item) => item.role === "identity" && item.reference_asset_id !== asset.id,
       );
       const defaultRole = DEFAULT_ROLE_BY_TYPE[asset.type] || "layout";
-      return {
+      const nextState = {
         ...state,
         imagePrompt: nextPrompt,
         imagePromptMentions: hasMention
@@ -995,6 +1030,17 @@ export function ShotImageWorkspace({
               weight: 1,
             },
           ],
+      };
+      const normalized = normalizePromptMentionDraft(
+        nextState.imagePrompt,
+        nextState.imagePromptMentions,
+        assets,
+        nextState.referenceBindings,
+      );
+      return {
+        ...nextState,
+        imagePrompt: normalized.imagePrompt,
+        imagePromptMentions: normalized.imagePromptMentions,
       };
     });
     setMentionMenu(null);
@@ -1049,6 +1095,8 @@ export function ShotImageWorkspace({
         <span className="shot-generation-context-icon">
           {latestRunBusy
             ? <CircleNotch className="spin" size={18} />
+            : latestRunTone === "recoverable"
+              ? <ArrowCounterClockwise size={18} weight="bold" />
             : latestRunTone === "failed"
               ? <WarningCircle size={18} weight="fill" />
               : latestRunTone === "completed"
@@ -1058,7 +1106,7 @@ export function ShotImageWorkspace({
         <div>
           <strong>
             {latestRun
-              ? `${generationRunStatusLabel(latestRun.status)} · ${latestRun.model}`
+              ? `${latestRunRecoverable ? "图片待恢复" : generationRunStatusLabel(latestRun.status)} · ${latestRun.model}`
               : `${modeLabel} · ${configuredEngine}`}
           </strong>
           <small>
@@ -1068,6 +1116,9 @@ export function ShotImageWorkspace({
           </small>
           {ignoredSimulation && (
             <em>历史模拟占位候选已忽略，不会作为 AI 图片或通过工作流确认。</em>
+          )}
+          {latestRunRecoverable && (
+            <em>已找到 {latestRun.recovery_candidate_count} 张本次任务生成的图片，恢复不会再次消耗额度。</em>
           )}
           {latestRunTone === "failed" && (
             <em>{latestRun.error_message || "生成未完成，请检查模型设置后重试。"}</em>
@@ -1267,60 +1318,6 @@ export function ShotImageWorkspace({
                       );
                     })}
                   </div>
-                  <div className="visual-beat-fields">
-                    <label>
-                      <span>画面名称</span>
-                      <input
-                        defaultValue={activeVisualBeat.title}
-                        disabled={busy}
-                        key={activeVisualBeat.id}
-                        onBlur={(event) => {
-                          const title = event.target.value.trim();
-                          if (title && title !== activeVisualBeat.title) {
-                            onUpdateVisualBeat(activeVisualBeat.id, { title });
-                          }
-                        }}
-                      />
-                    </label>
-                    <label>
-                      <span>到下一画面</span>
-                      <select
-                        disabled={busy || activeVisualBeat.index === visualBeats.length}
-                        onChange={(event) => onUpdateVisualBeat(activeVisualBeat.id, {
-                          transition_to_next_type: event.target.value,
-                        })}
-                        value={activeVisualBeat.transition_to_next_type}
-                      >
-                        <option value="model_generated">模型连续转场</option>
-                        <option value="match_action">动作匹配</option>
-                        <option value="dissolve">叠化</option>
-                        <option value="cut">直接切换</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>转场秒数</span>
-                      <input
-                        defaultValue={activeVisualBeat.transition_to_next_duration_seconds}
-                        disabled={busy || activeVisualBeat.index === visualBeats.length}
-                        key={`${activeVisualBeat.id}-transition-duration`}
-                        max="5"
-                        min="0"
-                        onBlur={(event) => {
-                          const duration = Number(event.target.value);
-                          if (
-                            Number.isFinite(duration)
-                            && duration !== activeVisualBeat.transition_to_next_duration_seconds
-                          ) {
-                            onUpdateVisualBeat(activeVisualBeat.id, {
-                              transition_to_next_duration_seconds: duration,
-                            });
-                          }
-                        }}
-                        step="0.1"
-                        type="number"
-                      />
-                    </label>
-                  </div>
                 </section>
               )}
               {plan.image_status === "stale" && (
@@ -1514,6 +1511,23 @@ export function ShotImageWorkspace({
                 </div>
               )}
 
+              {latestRunRecoverable && !displayedCandidate && (
+                <div className="shot-candidate-empty recoverable">
+                  <strong>图片待恢复 · {latestRun.recovery_candidate_count} 张</strong>
+                  <p>ImageGen 已完成生成，但图片尚未导入当前分镜。</p>
+                  <small>{generationFailureGuidance(latestRun)}</small>
+                  <button
+                    className="secondary-button"
+                    disabled={busy}
+                    onClick={() => onRecoverRun?.(latestRun.id)}
+                    type="button"
+                  >
+                    <ArrowCounterClockwise size={16} />
+                    恢复图片
+                  </button>
+                </div>
+              )}
+
               {generationInputManifest.length > 0 && (
                 <section className={`shot-input-manifest compact${identityPolicy.enabled ? " identity-locked" : ""}`}>
                   <header>
@@ -1675,6 +1689,9 @@ export function ShotImageWorkspace({
                           assetsById.get(mention.reference_asset_id),
                         ),
                         imagePromptMentions: state.imagePromptMentions.filter(
+                          (item) => item.reference_asset_id !== mention.reference_asset_id,
+                        ),
+                        referenceBindings: state.referenceBindings.filter(
                           (item) => item.reference_asset_id !== mention.reference_asset_id,
                         ),
                       }))}

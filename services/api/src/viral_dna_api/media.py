@@ -27,7 +27,7 @@ from .models import (
 from .workspace import workspace_manager
 
 PROCESSOR_VERSION = "ffmpeg-hybrid-candidates-v4-motion-clips"
-MAX_VIDEO_SECONDS = 5 * 60
+MAX_VIDEO_SECONDS = 2 * 60
 MAX_SHOTS = 120
 MIN_SHOT_SECONDS = 0.45
 SEGMENTATION_DETECTOR_VERSION = "ffmpeg-hybrid-candidates-v3"
@@ -424,7 +424,7 @@ class MediaProcessor:
         if duration > MAX_VIDEO_SECONDS:
             raise MediaProcessingError(
                 "media_duration_exceeded",
-                f"首版真实分析仅支持 {MAX_VIDEO_SECONDS // 60} 分钟以内的视频",
+                f"仅支持 {MAX_VIDEO_SECONDS // 60} 分钟以内的视频，请裁剪后重新导入",
             )
 
         rotation = _rotation(video_stream)

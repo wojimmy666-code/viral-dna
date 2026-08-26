@@ -2017,6 +2017,12 @@
   background: #fff7f8;
 }
 
+.shot-generation-context.recoverable {
+  border-color: #ead9a6;
+  color: var(--status-warning-text);
+  background: #fffbef;
+}
+
 .shot-generation-context-icon {
   width: 34px;
   height: 34px;
@@ -2040,6 +2046,11 @@
 .shot-generation-context.failed .shot-generation-context-icon {
   color: var(--status-danger-text);
   background: #fbe5e8;
+}
+
+.shot-generation-context.recoverable .shot-generation-context-icon {
+  color: var(--status-warning-text);
+  background: #f7ebc7;
 }
 
 .shot-generation-context > div {
@@ -2428,34 +2439,6 @@
 .visual-beat-actions button:disabled {
   opacity: 0.35;
   cursor: not-allowed;
-}
-
-.visual-beat-fields {
-  display: grid;
-  grid-template-columns: minmax(160px, 1.5fr) minmax(140px, 1fr) minmax(100px, 0.7fr);
-  gap: 8px;
-}
-
-.visual-beat-fields label {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-  color: var(--text-secondary);
-  font-size: var(--type-caption-size);
-  font-weight: var(--type-weight-semibold);
-}
-
-.visual-beat-fields input,
-.visual-beat-fields select {
-  width: 100%;
-  min-width: 0;
-  height: 32px;
-  padding: 0 9px;
-  border: 1px solid #dedbe8;
-  border-radius: 7px;
-  color: var(--text-primary);
-  background: #fff;
-  font: inherit;
 }
 
 .shot-compare-grid {
@@ -3190,6 +3173,33 @@
   color: var(--status-danger-text);
   font-size: var(--type-caption-size);
   line-height: 1.55;
+}
+
+.shot-candidate-empty.recoverable {
+  display: grid;
+  gap: 7px;
+  margin: 12px;
+  padding: 13px 14px;
+  border: 1px solid #ead9a6;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: #fffbef;
+  text-align: left;
+}
+
+.shot-candidate-empty.recoverable strong,
+.shot-candidate-empty.recoverable small {
+  color: var(--status-warning-text);
+}
+
+.shot-candidate-empty.recoverable p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.shot-candidate-empty.recoverable button {
+  width: max-content;
+  margin-top: 3px;
 }
 
 .shot-review-actions {
@@ -5017,10 +5027,6 @@
     flex-direction: column;
   }
 
-  .visual-beat-fields {
-    grid-template-columns: 1fr;
-  }
-
   .shot-video-review-actions {
     display: grid;
     grid-template-columns: 1fr;
@@ -5984,7 +5990,6 @@
 }
 
 .production-workspace :is(
-  .visual-beat-fields label,
   .shot-image-negative-constraints summary,
   .shot-reference-field legend
 ) {

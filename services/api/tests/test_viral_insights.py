@@ -9,18 +9,28 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from viral_dna_api.ai.catalog import load_model_catalog
+from viral_dna_api.ai.contracts import ModelRequest, ProviderResult
+from viral_dna_api.ai.router import ModelRouter
+from viral_dna_api.ai.viral_reasoning import ViralReasoningService, validate_viral_reasoning
 from viral_dna_api.category_profiles.contracts import (
     CategoryProfile,
     CategoryProfileSnapshot,
 )
 from viral_dna_api.models import (
+    AnalysisJob,
+    AnalysisProfile,
     AnalysisReport,
     Entity,
+    ModelTask,
+    ModelUsage,
     PromptPackage,
     PromptShot,
     Shot,
     VideoOverview,
     ViralFinding,
+    ViralReasoningImprovement,
+    ViralReasoningSynthesis,
 )
 from viral_dna_api.store import InMemoryStore
 from viral_dna_api.viral_insights.concept_strategies import (
@@ -192,8 +202,174 @@ def test_insight_preserves_evidence_and_separates_inference() -> None:
     assert "前景遮挡" in insight.headline
 
 
+def test_insight_does_not_invent_mechanisms_or_default_improvements() -> None:
+    report = sample_report().model_copy(update={"viral_findings": []})
+    insight = build_viral_insight(report)
+
+    assert insight.mechanisms == []
+    assert insight.improvements == []
+    assert insight.dna.invariants == []
+    assert "首尾信息闭环" not in insight.headline
+    assert "核心视觉信号前置" not in insight.strongest_hook
+
+
+def test_model_reasoning_drives_unique_summary_and_evidence_scoped_improvements() -> None:
+    report = sample_report()
+    synthesis = ViralReasoningSynthesis(
+        headline="浅绿色丝带遮满镜头后切入稻田，视觉材质承担场景转换",
+        content_value="用同一条浅绿色丝带连接室内整理动作与户外眺望画面。",
+        narrative_structure="整理丝带 → 丝带遮挡 → 稻田场景显现",
+        audience="可能吸引偏好清新氛围短片与服装造型内容的用户。",
+        strongest_hook="0.00–2.80 秒的丝带推近遮挡建立了后续场景变化预期。",
+        findings=report.viral_findings,
+        improvements=[
+            ViralReasoningImprovement(
+                title="缩短丝带尚未进入前景的整理段",
+                rationale="分镜 1 的动作信息集中在丝带靠近镜头之后。",
+                expected_gain="可能减少遮挡发生前的等待。",
+                priority="medium",
+                affected_shot_ids=["shot-001"],
+            )
+        ],
+        confidence=0.86,
+    )
+    insight = build_viral_insight(report.model_copy(update={"viral_reasoning": synthesis}))
+
+    assert insight.headline == synthesis.headline
+    assert insight.content_value == synthesis.content_value
+    assert insight.audience == synthesis.audience
+    assert insight.strongest_hook == synthesis.strongest_hook
+    assert insight.improvements[0].affected_shot_ids == ["shot-001"]
+    assert insight.generator_id == "model-evidence-validator-v2"
+
+
+def test_model_reasoning_validator_rejects_unbound_claims_and_generic_advice() -> None:
+    report = sample_report()
+    valid_finding = report.viral_findings[0]
+    outside_video = valid_finding.model_copy(
+        update={"id": "outside", "start_seconds": 20, "end_seconds": 21}
+    )
+    synthesis = ViralReasoningSynthesis(
+        headline="浅绿色丝带遮挡连接两个场景",
+        content_value="丝带承担场景连接。",
+        narrative_structure="整理丝带 → 遮挡 → 户外画面",
+        audience="可能吸引清新氛围内容受众。",
+        strongest_hook="丝带靠近镜头并完成遮挡。",
+        findings=[outside_video, valid_finding],
+        improvements=[
+            ViralReasoningImprovement(
+                title="强化结尾兑现与首尾呼应",
+                rationale="通用建议不应通过校验。",
+                expected_gain="可能改善表现。",
+                priority="high",
+                affected_shot_ids=["shot-002"],
+            ),
+            ViralReasoningImprovement(
+                title="压缩丝带进入前景前的等待",
+                rationale="建议绑定到真实分镜。",
+                expected_gain="可能减少等待。",
+                priority="medium",
+                affected_shot_ids=["shot-001", "missing-shot"],
+            ),
+        ],
+        confidence=0.85,
+    )
+
+    validated = validate_viral_reasoning(report, synthesis)
+
+    assert len(validated.findings) == 1
+    assert validated.findings[0].start_seconds == 0
+    assert [item.title for item in validated.improvements] == ["压缩丝带进入前景前的等待"]
+    assert validated.improvements[0].affected_shot_ids == ["shot-001"]
+
+
+class FakeReasoningProvider:
+    provider_id = "dashscope"
+
+    def __init__(self, synthesis: ViralReasoningSynthesis) -> None:
+        self.synthesis = synthesis
+        self.calls = 0
+
+    async def generate(self, request: ModelRequest, response_schema) -> ProviderResult:
+        self.calls += 1
+        assert request.task == ModelTask.VIRAL_REASONING
+        assert response_schema is ViralReasoningSynthesis
+        usage = ModelUsage(input_tokens=800, output_tokens=300, total_tokens=1100)
+        return ProviderResult(
+            data=self.synthesis,
+            usage=usage,
+            requested_model=request.target.model,
+            resolved_model=request.target.model,
+            provider_request_id="viral-reasoning-test",
+            latency_ms=42,
+            raw_content=self.synthesis.model_dump_json(),
+        )
+
+
+def test_reasoning_service_runs_the_model_and_reuses_validated_cache() -> None:
+    async def scenario() -> None:
+        report = sample_report()
+        plan = load_model_catalog().resolve(
+            AnalysisProfile.BALANCED,
+            allowed_providers={"dashscope"},
+        )
+        analysis = AnalysisJob(
+            id=report.analysis_id,
+            video_id=report.video_id,
+            analysis_mode="model",
+            simulated=False,
+            model_plan=plan,
+        )
+        synthesis = ViralReasoningSynthesis(
+            headline="浅绿色丝带遮挡连接室内与稻田场景",
+            content_value="同一条丝带连接两个空间。",
+            narrative_structure="整理丝带 → 遮挡 → 稻田显现",
+            audience="可能吸引偏好清新氛围短片的用户。",
+            strongest_hook="丝带推近并遮满画面，建立场景变化预期。",
+            findings=report.viral_findings,
+            improvements=[],
+            confidence=0.88,
+        )
+        provider = FakeReasoningProvider(synthesis)
+        store = InMemoryStore()
+        await store.save_analysis(analysis)
+        service = ViralReasoningService(
+            store,
+            router=ModelRouter({"dashscope": provider}),
+        )
+
+        first = await service.enrich(analysis, report)
+        second = await service.enrich(analysis, report)
+
+        assert first.viral_reasoning is not None
+        assert first.overview.summary == synthesis.content_value
+        assert second.viral_reasoning is not None
+        assert provider.calls == 1
+        runs = await store.list_model_runs(analysis.id)
+        assert [run.status for run in runs] == ["completed", "cached"]
+
+    asyncio.run(scenario())
+
+
+def test_replication_difficulty_uses_motion_complexity_not_only_shot_count() -> None:
+    report = sample_report()
+    baseline = build_viral_insight(report)
+    complex_shot = report.shots[0].model_copy(
+        update={"camera": "手持跟拍后环绕主体，并以甩镜结束"}
+    )
+    complex_report = report.model_copy(update={"shots": [complex_shot, report.shots[1]]})
+
+    assert baseline.replication_difficulty == "low"
+    assert build_viral_insight(complex_report).replication_difficulty == "medium"
+
+
 def test_concept_generation_creates_three_distinct_routes_and_replacements() -> None:
     report = sample_report()
+    report.prompt_package.shots[0].prompt = (
+        "【基础画面】\n主体：黑长直发女性与浅绿色丝带\n场景：室内木门前\n\n"
+        "【时间轴】\n0.00–2.80s\n主体动作：女子整理丝带\n镜头运动：快速推近\n\n"
+        "【出场转场】\n丝带遮满画面"
+    )
     insight = build_viral_insight(report)
     profile = sample_category_profile()
     request = ViralConceptGenerateRequest(category_profile_id=profile.id)
@@ -233,6 +409,9 @@ def test_concept_generation_creates_three_distinct_routes_and_replacements() -> 
     assert len({tuple(item.risks) for item in concepts.concepts}) == 3
     assert len({item.shots[0].image_prompt for item in concepts.concepts}) == 3
     assert len({item.shots[0].video_prompt for item in concepts.concepts}) == 3
+    assert all("时间轴" not in item.shots[0].image_prompt for item in concepts.concepts)
+    assert all("出场转场" not in item.shots[0].image_prompt for item in concepts.concepts)
+    assert all("主体动作" not in item.shots[0].image_prompt for item in concepts.concepts)
 
 
 def test_concept_diversity_guard_rejects_duplicated_strategy_content() -> None:

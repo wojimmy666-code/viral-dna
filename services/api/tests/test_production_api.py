@@ -2238,6 +2238,106 @@ def test_prompt_asset_mentions_are_stable_and_auto_bind_references(
         assert "严禁从图像1继承人物" in input_payload["prompt"]["positive"]
 
 
+def test_visual_beat_saves_prompt_mentions_and_bindings_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository = isolated_service(tmp_path, monkeypatch)
+    record, _, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "画面引用原子保存"},
+        ).json()
+        project_id = created["project"]["id"]
+        revision_id = created["project"]["current_revision_id"]
+        shot = client.get(f"/api/v1/productions/{project_id}/shots").json()[0]
+        shot_id = shot["plan"]["id"]
+        visual_beat_id = shot["plan"]["visual_beats"][0]["id"]
+
+        asset_response = client.post(
+            f"/api/v1/productions/{project_id}/references",
+            files={"file": ("person.png", image_bytes("PNG"), "image/png")},
+            data={
+                "expected_revision_id": revision_id,
+                "type": "person",
+                "name": "小喵酱",
+                "rights_confirmed": "true",
+            },
+        )
+        assert asset_response.status_code == 201, asset_response.text
+        asset = asset_response.json()
+        revision_count = len(
+            asyncio.run(repository.list_production_revisions(UUID(project_id)))
+        )
+
+        updated = client.patch(
+            f"/api/v1/production-shots/{shot_id}/visual-beats/{visual_beat_id}",
+            json={
+                "expected_revision_id": asset["current_revision_id"],
+                "image_prompt": "双马尾女性站在画面中央。",
+                "reference_bindings": [
+                    {
+                        "reference_asset_id": asset["id"],
+                        "role": "identity",
+                        "weight": 1,
+                    }
+                ],
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        body = updated.json()
+        expected_label = f"{asset.get('folder_name') or '未分类'}/小喵酱"
+        beat = next(
+            item
+            for item in body["plan"]["visual_beats"]
+            if item["id"] == visual_beat_id
+        )
+        assert beat["image_prompt"] == (
+            f"@{expected_label}\n双马尾女性站在画面中央。"
+        )
+        assert beat["image_prompt_mentions"] == [
+            {"reference_asset_id": asset["id"], "label": expected_label}
+        ]
+        assert len(body["reference_bindings"]) == 1
+        assert body["reference_bindings"][0]["reference_asset_id"] == asset["id"]
+        assert len(
+            asyncio.run(repository.list_production_revisions(UUID(project_id)))
+        ) == revision_count + 1
+
+        reopened = client.get(f"/api/v1/production-shots/{shot_id}")
+        assert reopened.status_code == 200, reopened.text
+        reopened_beat = next(
+            item
+            for item in reopened.json()["plan"]["visual_beats"]
+            if item["id"] == visual_beat_id
+        )
+        assert reopened_beat["image_prompt"] == beat["image_prompt"]
+        assert reopened_beat["image_prompt_mentions"] == beat["image_prompt_mentions"]
+
+        removed = client.patch(
+            f"/api/v1/production-shots/{shot_id}/visual-beats/{visual_beat_id}",
+            json={
+                "expected_revision_id": body["current_revision_id"],
+                "image_prompt": "双马尾女性站在画面中央。",
+                "image_prompt_mentions": [],
+                "reference_bindings": [],
+            },
+        )
+        assert removed.status_code == 200, removed.text
+        removed_body = removed.json()
+        removed_beat = next(
+            item
+            for item in removed_body["plan"]["visual_beats"]
+            if item["id"] == visual_beat_id
+        )
+        assert removed_beat["image_prompt"] == "双马尾女性站在画面中央。"
+        assert removed_beat["image_prompt_mentions"] == []
+        assert removed_body["reference_bindings"] == []
+
+
 def test_create_shot_from_source_video_range(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

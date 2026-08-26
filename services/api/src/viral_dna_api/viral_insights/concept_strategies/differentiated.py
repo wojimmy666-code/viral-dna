@@ -61,10 +61,8 @@ class DifferentiatedStrategyBuilder(BaseConceptStrategyBuilder):
         role_label: str,
         base: str,
     ) -> str:
-        return self.compose_prompt(
-            context,
+        return self.compose_image_prompt(
             heading="差异化同构静态画面：",
-            role_label=role_label,
             directive="保留信息功能，重写人物、场景、构图或视觉符号，避免复制原画面细节。",
             base=base,
         )

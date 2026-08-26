@@ -75,10 +75,8 @@ class EnhancedStrategyBuilder(BaseConceptStrategyBuilder):
         role_label: str,
         base: str,
     ) -> str:
-        return self.compose_prompt(
-            context,
+        return self.compose_image_prompt(
             heading="强化改进静态画面：",
-            role_label=role_label,
             directive="提高核心主体和结果信号的可见性，减少无效背景信息，强化视觉对比与记忆点。",
             base=base,
         )

@@ -256,7 +256,7 @@ class LinkCollector:
             media_path.unlink(missing_ok=True)
             raise LinkIngestionError(
                 "link_duration_exceeded",
-                f"当前只支持 {MAX_VIDEO_SECONDS // 60} 分钟以内的视频",
+                f"仅支持 {MAX_VIDEO_SECONDS // 60} 分钟以内的视频，请裁剪后重新导入",
             )
 
         result = LinkIngestionResult(
@@ -480,7 +480,7 @@ class LinkCollector:
         if "link_duration_exceeded" in details:
             return LinkIngestionError(
                 "link_duration_exceeded",
-                f"当前只支持 {MAX_VIDEO_SECONDS // 60} 分钟以内的视频",
+                f"仅支持 {MAX_VIDEO_SECONDS // 60} 分钟以内的视频，请裁剪后重新导入",
             )
         if "max-filesize" in details or "larger than" in details:
             return LinkIngestionError(

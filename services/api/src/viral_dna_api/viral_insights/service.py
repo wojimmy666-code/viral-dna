@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
+from viral_dna_api.ai.viral_reasoning import ViralReasoningService
 from viral_dna_api.category_profiles.service import (
     CategoryProfileService,
     CategoryProfileServiceError,
 )
-from viral_dna_api.models import AnalysisReport
+from viral_dna_api.models import AnalysisJob, AnalysisReport
 
 from .concept_strategies import (
     CONCEPT_GENERATOR_ID,
@@ -27,7 +28,11 @@ from .engine import build_concept_set, build_viral_insight, report_fingerprint
 
 
 class ViralInsightRepository(Protocol):
+    async def get_analysis(self, analysis_id: UUID) -> AnalysisJob | None: ...
+
     async def get_report_by_analysis(self, analysis_id: UUID) -> AnalysisReport | None: ...
+
+    async def save_report(self, report: AnalysisReport) -> AnalysisReport: ...
 
     async def save_viral_insight(self, report: ViralInsightReport) -> ViralInsightReport: ...
 
@@ -88,10 +93,12 @@ class ViralInsightService:
         repository: ViralInsightRepository,
         publisher: ViralConceptPublisher | None = None,
         category_profiles: CategoryProfileService | None = None,
+        reasoning: ViralReasoningService | None = None,
     ) -> None:
         self.repository = repository
         self.publisher = publisher
         self.category_profiles = category_profiles
+        self.reasoning = reasoning
 
     async def _source_report(self, analysis_id: UUID) -> AnalysisReport:
         report = await self.repository.get_report_by_analysis(analysis_id)
@@ -105,6 +112,12 @@ class ViralInsightService:
 
     async def get_insight(self, analysis_id: UUID) -> ViralInsightReport:
         source = await self._source_report(analysis_id)
+        if source.viral_reasoning is None and self.reasoning is not None:
+            analysis = await self.repository.get_analysis(analysis_id)
+            if analysis is not None and analysis.model_plan is not None:
+                enriched = await self.reasoning.enrich(analysis, source)
+                if enriched != source:
+                    source = await self.repository.save_report(enriched)
         current = await self.repository.get_viral_insight(analysis_id)
         fingerprint = report_fingerprint(source)
         if current is not None and current.input_fingerprint == fingerprint:

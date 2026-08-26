@@ -82,6 +82,11 @@ import {
 } from "./app-routing.js";
 import { inferVideoOrientation } from "./video-layout.js";
 import {
+  ANALYSIS_VIDEO_DURATION_ERROR,
+  readLocalVideoDuration,
+  validateAnalysisVideoDuration,
+} from "./analysis-import-ui.js";
+import {
   buildRecordListParams,
   normalizeRecordLifecycle,
   RECORD_LIFECYCLE_META,
@@ -597,6 +602,7 @@ export function App() {
   const [sourceMode, setSourceMode] = useState("link");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState(null);
+  const [fileDurationSeconds, setFileDurationSeconds] = useState(null);
   const [targetModel, setTargetModel] = useState(initialModelSettings.targetModel);
   const [analysisProfile, setAnalysisProfile] = useState(initialModelSettings.analysisProfile);
   const [maxCostCny, setMaxCostCny] = useState(initialModelSettings.maxCostCny);
@@ -1831,6 +1837,13 @@ export function App() {
       setError("请选择一个视频文件");
       return;
     }
+    if (
+      sourceMode === "file"
+      && !validateAnalysisVideoDuration(fileDurationSeconds).valid
+    ) {
+      setError(ANALYSIS_VIDEO_DURATION_ERROR);
+      return;
+    }
 
     setSubmitting(true);
     setReport(null);
@@ -1876,6 +1889,26 @@ export function App() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function selectAnalysisFile(nextFile) {
+    setError("");
+    setAnalysisErrorCode("");
+    setFile(null);
+    setFileDurationSeconds(null);
+    if (!nextFile) return;
+    try {
+      const durationSeconds = await readLocalVideoDuration(nextFile);
+      const validation = validateAnalysisVideoDuration(durationSeconds);
+      if (!validation.valid) {
+        setError(validation.message);
+        return;
+      }
+      setFileDurationSeconds(validation.durationSeconds);
+    } catch {
+      // The backend still performs authoritative FFprobe validation.
+    }
+    setFile(nextFile);
   }
 
   async function retryCurrentLinkAnalysis() {
@@ -2492,7 +2525,7 @@ export function App() {
                   setAnalysisErrorPlatform("");
                 }}
                 file={file}
-                setFile={setFile}
+                setFile={selectAnalysisFile}
                 targetModel={targetModel}
                 setTargetModel={setTargetModel}
                 analysisProfile={analysisProfile}
@@ -3813,7 +3846,7 @@ function ModelSettingsDialog({
                             <option value="balanced">均衡模型</option>
                             <option value="pinned">固定指定模型</option>
                           </select>
-                          <small>最新旗舰由版本化目录解析，当前为 {codexDiscovery.recommended_model}。</small>
+                          <small>模型由你手动选择，系统不会因生成速度自动切换；当前最新旗舰为 {codexDiscovery.recommended_model}。</small>
                         </label>
                         <label className="settings-field">
                           <span>推理强度</span>
@@ -3829,7 +3862,7 @@ function ModelSettingsDialog({
                             <option value="medium">中（medium）</option>
                             <option value="low">低（low）</option>
                           </select>
-                          <small>最高质量更慢，也可能消耗更多订阅配额。</small>
+                          <small>推理强度由你手动选择；降低等级通常更快，但可能降低复杂指令的遵循稳定性。</small>
                         </label>
                         <label className="settings-field settings-field-wide">
                           <span>实际模型</span>
@@ -4743,11 +4776,10 @@ const ImportPanel = forwardRef(function ImportPanel({
     <section className="import-card" id="new-analysis" ref={ref}>
       <div className="card-heading">
         <div>
-          <span className="eyebrow">新建任务</span>
           <h2>导入一个短视频</h2>
           <p>支持本地文件，以及来自{SUPPORTED_PLATFORM_NAMES}的公开视频链接。</p>
         </div>
-        <span className="supported-formats">MP4 · MOV · WebM · 最长 5 分钟</span>
+        <span className="supported-formats">MP4 · MOV · WebM · 最长 2 分钟</span>
       </div>
 
       <div className="source-tabs" role="tablist" aria-label="视频来源">
@@ -5364,15 +5396,6 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
             </div>
           </div>
         )}
-
-        <div className="section-block overview-media-summary">
-          <h3>原视频与内容结构</h3>
-          <div className="tag-row">
-            <span>{overview.content_type}</span>
-            <span>{overview.aspect_ratio}</span>
-            <span>{overview.visual_style.split("、")[0]}</span>
-          </div>
-        </div>
 
         {showNarrativeStructure && (
           <div className="structure-strip">

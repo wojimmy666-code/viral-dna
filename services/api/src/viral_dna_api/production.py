@@ -149,6 +149,7 @@ from .production_media import (
     map_timed_text,
     playback_alignment,
 )
+from .prompt_engine.compiler import sanitize_still_image_prompt
 from .quality.continuity_service import ContinuityService
 from .storage_errors import IncompatibleShotPlanSchemaError
 from .video_generation import (
@@ -590,6 +591,44 @@ def _visual_beat(plan: ShotPlan, visual_beat_id: UUID | None) -> ShotVisualBeat:
     raise _fail(404, "visual_beat_not_found", "指定的分镜画面不存在")
 
 
+def _reference_asset_mention_label(asset: ReferenceAsset) -> str:
+    directory = (asset.folder_name or "").strip() or "未分类"
+    return f"{directory}/{asset.name.strip()}"
+
+
+def _sync_image_prompt_reference_tokens(
+    prompt: str,
+    previous_mentions: list[PromptAssetMention],
+    next_mentions: list[PromptAssetMention],
+) -> str:
+    """Keep the editable @ tokens aligned with their stable asset ids."""
+
+    updated = str(prompt or "")
+    next_by_id = {item.reference_asset_id: item for item in next_mentions}
+    for previous in previous_mentions:
+        previous_token = f"@{previous.label}"
+        replacement = next_by_id.get(previous.reference_asset_id)
+        if replacement is None:
+            updated = updated.replace(previous_token, "")
+            continue
+        next_token = f"@{replacement.label}"
+        if previous_token != next_token and next_token not in updated:
+            updated = updated.replace(previous_token, next_token)
+
+    missing_tokens = [
+        f"@{mention.label}"
+        for mention in next_mentions
+        if f"@{mention.label}" not in updated
+    ]
+    if missing_tokens:
+        body = updated.lstrip()
+        updated = " ".join(missing_tokens) + (f"\n{body}" if body else "")
+    updated = re.sub(r"[ \t]{2,}", " ", updated)
+    updated = re.sub(r"[ \t]+\n", "\n", updated)
+    updated = re.sub(r"\n{3,}", "\n\n", updated)
+    return updated.lstrip()
+
+
 def _visual_beat_image_status(beats: list[ShotVisualBeat]) -> WorkflowItemStatus:
     targets = [item for item in beats if item.required] or list(beats)
     if targets and all(
@@ -669,12 +708,32 @@ def _shot_for_visual_beat(plan: ShotPlan, beat: ShotVisualBeat) -> ShotPlan:
             "source_keyframe_origin": (
                 "analysis" if beat.source_origin == "legacy" else beat.source_origin
             ),
-            "image_prompt": beat.image_prompt,
+            "image_prompt": sanitize_still_image_prompt(beat.image_prompt),
             "image_prompt_mentions": beat.image_prompt_mentions,
             "image_negative_constraints": beat.image_negative_constraints,
             "required": beat.required,
             "image_status": beat.image_status,
             "approved_image_candidate_id": beat.approved_image_candidate_id,
+        }
+    )
+
+
+def _still_image_prompt_view(plan: ShotPlan) -> ShotPlan:
+    """Expose legacy plans with image-only prompts without mutating stored revisions."""
+
+    beats = [
+        item.model_copy(
+            update={"image_prompt": sanitize_still_image_prompt(item.image_prompt)}
+        )
+        for item in plan.visual_beats
+    ]
+    primary_prompt = beats[0].image_prompt if beats else sanitize_still_image_prompt(
+        plan.image_prompt
+    )
+    return plan.model_copy(
+        update={
+            "image_prompt": primary_prompt,
+            "visual_beats": beats,
         }
     )
 
@@ -2456,7 +2515,7 @@ class ProductionService:
         previews = await self._shot_media_previews(project.id, plans)
         return [
             ShotPlanResponse(
-                plan=plan,
+                plan=_still_image_prompt_view(plan),
                 reference_bindings=await self.repository.list_reference_bindings(plan.id),
                 current_revision_id=project.current_revision_id,
                 image_preview=previews[plan.id][0],
@@ -2631,11 +2690,13 @@ class ProductionService:
                 finally:
                     filesystem_temporary.unlink(missing_ok=True)
                 duration = max(0.01, end - start)
-                prompt = _simplified_text(
-                    payload.image_prompt,
-                    field_name="图片提示词",
-                    allow_empty=True,
-                    max_length=8000,
+                prompt = sanitize_still_image_prompt(
+                    _simplified_text(
+                        payload.image_prompt,
+                        field_name="图片提示词",
+                        allow_empty=True,
+                        max_length=8000,
+                    )
                 )
                 new_plan = ShotPlan(
                     id=new_plan_id,
@@ -2677,11 +2738,13 @@ class ProductionService:
                     else start + 3
                 )
                 duration = max(0.01, end - start)
-                prompt = _simplified_text(
-                    payload.image_prompt,
-                    field_name="图片提示词",
-                    allow_empty=True,
-                    max_length=8000,
+                prompt = sanitize_still_image_prompt(
+                    _simplified_text(
+                        payload.image_prompt,
+                        field_name="图片提示词",
+                        allow_empty=True,
+                        max_length=8000,
+                    )
                 )
                 new_plan = ShotPlan(
                     id=new_plan_id,
@@ -2929,7 +2992,7 @@ class ProductionService:
                 }
             )
         return ShotPlanDetailResponse(
-            plan=plan,
+            plan=_still_image_prompt_view(plan),
             reference_bindings=await self.repository.list_reference_bindings(plan.id),
             current_revision_id=project.current_revision_id,
             generation_runs=[await self._run_response(run) for run in reversed(runs)],
@@ -3405,7 +3468,9 @@ class ProductionService:
                     next_beats = [
                         beat.model_copy(
                             update={
-                                "image_prompt": field.latest_value,
+                                "image_prompt": sanitize_still_image_prompt(
+                                    field.latest_value
+                                ),
                                 "updated_at": now,
                             }
                         )
@@ -3664,6 +3729,9 @@ class ProductionService:
         revision_id: UUID,
         summary: str,
         change_kind: ProductionChangeKind = ProductionChangeKind.SHOT_STRUCTURE_CHANGED,
+        reference_bindings: list[ReferenceBinding] | None = None,
+        all_reference_bindings: list[ReferenceBinding] | None = None,
+        remove_reference_binding_ids: list[UUID] | None = None,
     ) -> None:
         plans = await self.repository.list_shot_plans(project.id)
         next_plans = [updated_plan if item.id == updated_plan.id else item for item in plans]
@@ -3680,11 +3748,14 @@ class ProductionService:
             summary,
             revision_id=revision_id,
             shot_plans=next_plans,
+            reference_bindings=all_reference_bindings,
         )
         await self.repository.save_production_bundle(
             next_project,
             revision,
             shot_plans=[updated_plan],
+            reference_bindings=reference_bindings,
+            remove_reference_binding_ids=remove_reference_binding_ids,
         )
 
     async def create_visual_beat(
@@ -3766,11 +3837,13 @@ class ProductionService:
                 )
                 source_origin = "video_selection"
 
-            prompt = _simplified_text(
-                payload.image_prompt,
-                field_name="画面图片提示词",
-                allow_empty=True,
-                max_length=8000,
+            prompt = sanitize_still_image_prompt(
+                _simplified_text(
+                    payload.image_prompt,
+                    field_name="画面图片提示词",
+                    allow_empty=True,
+                    max_length=8000,
+                )
             )
             new_beat = ShotVisualBeat(
                 id=beat_id,
@@ -3826,8 +3899,16 @@ class ProductionService:
             project = await self._require_project(plan.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
             beat = _visual_beat(plan, visual_beat_id)
+            requested_fields = payload.model_fields_set - {
+                "expected_revision_id",
+                "confirm_stale",
+            }
             fields = payload.model_dump(
-                exclude={"expected_revision_id", "confirm_stale"},
+                exclude={
+                    "expected_revision_id",
+                    "confirm_stale",
+                    "reference_bindings",
+                },
                 exclude_unset=True,
             )
             text_fields = {
@@ -3843,9 +3924,16 @@ class ProductionService:
                         allow_empty=allow_empty,
                         max_length=limit,
                     )
+            if "image_prompt" in fields:
+                fields["image_prompt"] = sanitize_still_image_prompt(fields["image_prompt"])
             image_inputs_changed = bool(
-                {"image_prompt", "image_prompt_mentions", "image_negative_constraints"}
-                & fields.keys()
+                {
+                    "image_prompt",
+                    "image_prompt_mentions",
+                    "image_negative_constraints",
+                    "reference_bindings",
+                }
+                & requested_fields
             )
             structural_changed = bool(
                 {
@@ -3872,6 +3960,91 @@ class ProductionService:
                     409,
                     "downstream_stale_confirmation_required",
                     "修改画面会让当前分镜视频及下游结果过期，请确认后重试",
+                )
+
+            plans: list[ShotPlan] | None = None
+            all_bindings: list[ReferenceBinding] | None = None
+            next_bindings: list[ReferenceBinding] | None = None
+            removed_binding_ids: list[UUID] = []
+            if "image_prompt_mentions" in requested_fields:
+                fields["image_prompt_mentions"] = await self._validate_prompt_mentions(
+                    project,
+                    payload.image_prompt_mentions or [],
+                )
+
+            references_changed = bool(
+                {"image_prompt_mentions", "reference_bindings"} & requested_fields
+            )
+            if references_changed:
+                plans = await self.repository.list_shot_plans(project.id)
+                all_bindings = await self._all_bindings(plans)
+                current_bindings = [
+                    item for item in all_bindings if item.shot_plan_id == plan.id
+                ]
+                binding_inputs = (
+                    list(payload.reference_bindings or [])
+                    if "reference_bindings" in requested_fields
+                    else [
+                        ReferenceBindingInput(
+                            reference_asset_id=item.reference_asset_id,
+                            role=item.role,
+                            weight=item.weight,
+                            crop_hint=item.crop_hint,
+                            notes=item.notes,
+                        )
+                        for item in current_bindings
+                    ]
+                )
+
+                if "reference_bindings" in requested_fields:
+                    assets = {
+                        item.id: item
+                        for item in await self._list_reference_assets(project.id)
+                    }
+                    selected_ids: set[UUID] = set()
+                    binding_mentions: list[PromptAssetMention] = []
+                    for binding in binding_inputs:
+                        if binding.reference_asset_id in selected_ids:
+                            continue
+                        asset = assets.get(binding.reference_asset_id)
+                        if asset is None or asset.archived_at is not None:
+                            raise _fail(
+                                422,
+                                "reference_asset_not_found",
+                                "绑定的参考资产不存在或已归档",
+                            )
+                        selected_ids.add(asset.id)
+                        binding_mentions.append(
+                            PromptAssetMention(
+                                reference_asset_id=asset.id,
+                                label=_reference_asset_mention_label(asset),
+                            )
+                        )
+                    fields["image_prompt_mentions"] = await self._validate_prompt_mentions(
+                        project,
+                        binding_mentions,
+                    )
+                else:
+                    binding_inputs = await self._append_mention_bindings(
+                        project,
+                        binding_inputs,
+                        fields.get("image_prompt_mentions", beat.image_prompt_mentions),
+                    )
+
+                next_bindings = await self._build_bindings(project, plan, binding_inputs)
+                removed_binding_ids = [item.id for item in current_bindings]
+                all_bindings = [
+                    item for item in all_bindings if item.shot_plan_id != plan.id
+                ] + next_bindings
+
+            if {"image_prompt", "image_prompt_mentions", "reference_bindings"} & requested_fields:
+                next_mentions = fields.get("image_prompt_mentions", beat.image_prompt_mentions)
+                fields["image_prompt"] = sanitize_still_image_prompt(
+                    _sync_image_prompt_reference_tokens(
+                        str(fields.get("image_prompt", beat.image_prompt)),
+                        beat.image_prompt_mentions,
+                        next_mentions,
+                    )
                 )
             if image_inputs_changed:
                 next_prompt = str(fields.get("image_prompt", beat.image_prompt)).strip()
@@ -3903,6 +4076,9 @@ class ProductionService:
                 revision_id=revision_id,
                 summary=f"更新分镜 {plan.index} 的画面 {beat.index}",
                 change_kind=ProductionChangeKind.SHOT_PLAN_CHANGED,
+                reference_bindings=next_bindings,
+                all_reference_bindings=all_bindings,
+                remove_reference_binding_ids=removed_binding_ids,
             )
         return await self.get_shot(plan.id)
 
@@ -5733,6 +5909,106 @@ class ProductionService:
             )
             self._schedule_image_run(run.id)
         return await self._run_response(run)
+
+    async def recover_image_generation_output(
+        self,
+        run_id: UUID,
+    ) -> GenerationRunResponse:
+        source = await self._require_run(run_id)
+        if source.kind != GenerationKind.IMAGE:
+            raise _fail(
+                409,
+                "generation_output_recovery_kind_invalid",
+                "只有图片生成任务支持输出恢复",
+            )
+        existing_candidates = await self.repository.list_generation_candidates(source.id)
+        if (
+            source.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+            and existing_candidates
+        ):
+            return await self._run_response(source)
+        if source.status not in {ProductionRunStatus.FAILED, ProductionRunStatus.BLOCKED}:
+            raise _fail(
+                409,
+                "generation_output_recovery_unavailable",
+                "当前图片任务没有可恢复的输出",
+            )
+
+        plan = await self._require_shot(source.shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            source = await self._require_run(run_id)
+            plan = await self._require_shot(source.shot_plan_id)
+            self._ensure_shot_active(plan)
+            project = await self._require_project(plan.project_id)
+            beat = _visual_beat(plan, source.visual_beat_id)
+            try:
+                recovered_run, candidates = await self.image_gateway.recover_local_tool_output(
+                    source
+                )
+            except ImageGenerationGatewayError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            if not candidates:
+                raise _fail(
+                    409,
+                    "generation_output_recovery_unavailable",
+                    "没有找到可恢复的图片输出",
+                )
+
+            prior_candidate_updates: list[GenerationCandidate] = []
+            updated_plan = plan
+            if beat.image_status != WorkflowItemStatus.APPROVED:
+                prior_candidate_updates = await self._reset_selected_image_candidates(
+                    project,
+                    plan,
+                    visual_beat_id=beat.id,
+                )
+                revision_id = uuid4()
+                updated_beat = beat.model_copy(
+                    update={
+                        "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
+                        "approved_image_candidate_id": None,
+                        "updated_at": utc_now(),
+                    }
+                )
+                updated_plan = _sync_shot_visual_beats(
+                    plan,
+                    [
+                        updated_beat if item.id == beat.id else item
+                        for item in plan.visual_beats
+                    ],
+                    revision_id=revision_id,
+                )
+            else:
+                revision_id = uuid4()
+
+            plans = await self.repository.list_shot_plans(project.id)
+            next_plans = [updated_plan if item.id == plan.id else item for item in plans]
+            next_project = project.model_copy(
+                update={
+                    "status": ProductionProjectStatus.ACTIVE,
+                    "updated_at": utc_now(),
+                }
+            )
+            next_project, revision = await self._prepare_revision(
+                next_project,
+                ProductionChangeKind.SHOT_PLAN_CHANGED,
+                (
+                    f"恢复分镜 {plan.index} 画面 {beat.index} 的 "
+                    f"{len(candidates)} 个 Codex ImageGen 图片候选"
+                ),
+                revision_id=revision_id,
+                shot_plans=next_plans,
+            )
+            await self.repository.save_production_bundle(
+                next_project,
+                revision,
+                shot_plans=[updated_plan],
+                generation_runs=[recovered_run],
+                generation_candidates=[*prior_candidate_updates, *candidates],
+            )
+        await self._notify_generation_run(recovered_run)
+        return await self.get_generation_run(recovered_run.id)
 
     async def recover_generation_runs(self) -> dict[str, int]:
         recovered = 0
@@ -8495,9 +8771,12 @@ class ProductionService:
                 key=lambda item: (item.start_seconds, item.index),
             )
             visual_prompt_parts = (
-                [(item.title, item.image_prompt) for item in structured_beats]
+                [
+                    (item.title, sanitize_still_image_prompt(item.image_prompt))
+                    for item in structured_beats
+                ]
                 if structured_beats
-                else _split_visual_beat_prompts(image_prompt)
+                else _split_visual_beat_prompts(sanitize_still_image_prompt(image_prompt))
             )
             beat_count = len(visual_prompt_parts)
             if structured_beats:
@@ -9224,11 +9503,16 @@ class ProductionService:
                 value = getattr(payload, field_name)
                 if value is None:
                     raise _fail(422, "invalid_shot_plan", f"{label}不能为 null")
-                updates[field_name] = _simplified_text(
+                normalized_value = _simplified_text(
                     value,
                     field_name=label,
                     allow_empty=True,
                     max_length=max_length,
+                )
+                updates[field_name] = (
+                    sanitize_still_image_prompt(normalized_value)
+                    if field_name == "image_prompt"
+                    else normalized_value
                 )
         if "image_prompt_mentions" in fields:
             if payload.image_prompt_mentions is None:
@@ -9572,6 +9856,22 @@ class ProductionService:
 
     async def _run_response(self, run: GenerationRun) -> GenerationRunResponse:
         candidates = await self.repository.list_generation_candidates(run.id)
+        recovery_artifacts: tuple[Path, ...] = ()
+        recovery_probe = getattr(
+            self.image_gateway,
+            "recoverable_local_tool_artifacts",
+            None,
+        )
+        if (
+            recovery_probe is not None
+            and not candidates
+            and run.kind == GenerationKind.IMAGE
+            and run.status in {ProductionRunStatus.FAILED, ProductionRunStatus.BLOCKED}
+        ):
+            try:
+                recovery_artifacts = await asyncio.to_thread(recovery_probe, run)
+            except (OSError, RuntimeError, ValueError):
+                recovery_artifacts = ()
         provider_tasks = (
             await self.repository.list_video_provider_tasks(run.id)
             if run.kind == GenerationKind.VIDEO
@@ -9663,6 +9963,8 @@ class ProductionService:
             ),
             error_retryable=run.error_retryable or bool(failure and failure.retryable),
             error_action=run.error_action or (failure.suggested_action if failure else None),
+            recovery_available=bool(recovery_artifacts),
+            recovery_candidate_count=len(recovery_artifacts),
             created_at=run.created_at,
             started_at=run.started_at,
             updated_at=run.updated_at,

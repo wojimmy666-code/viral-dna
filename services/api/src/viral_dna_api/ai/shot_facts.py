@@ -34,7 +34,11 @@ from ..models import (
     ShotVisualFacts,
     Video,
 )
-from ..prompt_engine.compiler import compile_prompt_draft, draft_from_visual_facts
+from ..prompt_engine.compiler import (
+    compile_still_image_prompt,
+    draft_from_visual_facts,
+    sanitize_still_image_prompt,
+)
 from ..prompt_engine.language_policy import (
     LANGUAGE_POLICY_MESSAGE,
     find_shot_facts_language_issues,
@@ -313,6 +317,22 @@ def _normalize_visual_beats(
         content_end=content_end,
     )
     normalized: list[ShotVisualBeatFact] = []
+
+    def still_prompt(value: str) -> str:
+        cleaned = sanitize_still_image_prompt(value)
+        if cleaned:
+            return cleaned
+        fields = (
+            ("主体与服装", "、".join(facts.subjects)),
+            ("场景", facts.scene),
+            ("构图", facts.composition),
+            ("光线", facts.lighting),
+            ("色彩", facts.color),
+        )
+        return "\n".join(
+            f"【{label}】 {text.strip()}" for label, text in fields if text.strip()
+        )
+
     for beat in sorted(facts.visual_beats, key=lambda item: (item.start_seconds, item.index)):
         offset = content_start if uses_relative_timing else 0.0
         start = max(content_start, float(beat.start_seconds) + offset)
@@ -330,6 +350,7 @@ def _normalize_visual_beats(
                     "start_seconds": round(start, 3),
                     "end_seconds": round(end, 3),
                     "source_timestamp_seconds": round(source_timestamp, 3),
+                    "image_prompt": still_prompt(beat.image_prompt),
                 }
             )
         )
@@ -345,7 +366,7 @@ def _normalize_visual_beats(
                 start_seconds=round(content_start, 3),
                 end_seconds=round(content_end, 3),
                 source_timestamp_seconds=round(source_timestamp, 3),
-                image_prompt=facts.replication_prompt,
+                image_prompt=still_prompt(facts.replication_prompt),
             )
         ]
     return facts.model_copy(
@@ -482,7 +503,7 @@ def _normalize_motion_facts(
         }
     )
     draft = draft_from_visual_facts(normalized)
-    compiled = compile_prompt_draft(draft, "seedance")[:4000]
+    compiled = compile_still_image_prompt(draft)[:4000]
     return normalized.model_copy(update={"replication_prompt": compiled})
 
 

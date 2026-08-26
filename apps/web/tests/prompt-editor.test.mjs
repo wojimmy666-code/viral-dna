@@ -71,7 +71,7 @@ test("direction A uses independent collapsed rows and one continuous editor", as
 
   assert.match(editor, /<h2>提示词文档<\/h2>/);
   assert.match(editor, /key=\{`\$\{analysisId\}:\$\{shot\.shot_id\}`\}/);
-  assert.match(editor, /默认使用简体中文/);
+  assert.doesNotMatch(editor, /默认使用简体中文/);
   assert.match(shot, /const \[isOpen, setIsOpen\] = useState\(false\)/);
   assert.match(shot, /aria-expanded=\{isOpen\}/);
   assert.match(shot, /onClick=\{\(\) => setIsOpen\(\(current\) => !current\)\}/);

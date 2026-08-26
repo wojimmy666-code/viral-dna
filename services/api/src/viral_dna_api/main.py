@@ -23,6 +23,7 @@ from .account_preferences import (
 )
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
+from .ai.viral_reasoning import ViralReasoningService
 from .asset_library import AssetLibraryService
 from .asset_promotion import GeneratedAssetPromotionService
 from .asset_promotion.routes import create_generated_asset_promotion_router
@@ -315,7 +316,12 @@ account_context_service = create_account_context_service(workspace_manager)
 user_preferences_service = UserPreferencesService(account_context_service)
 category_profile_service = CategoryProfileService(account_context_service)
 platform_connection_service = create_platform_connection_service(account_context_service)
-pipeline = HybridAnalysisPipeline(store, credential_resolver=platform_connection_service)
+viral_reasoning_service = ViralReasoningService(store)
+pipeline = HybridAnalysisPipeline(
+    store,
+    credential_resolver=platform_connection_service,
+    viral_reasoning=viral_reasoning_service,
+)
 notification_service = create_notification_service(account_context_service)
 storage_manager = StorageManager(store, workspace_manager)
 media_staging_secret_store = MediaStagingSecretStore(
@@ -393,6 +399,7 @@ viral_insight_service = ViralInsightService(
     store,
     publisher=ProductionConceptPublisher(production_service),
     category_profiles=category_profile_service,
+    reasoning=viral_reasoning_service,
 )
 prompt_draft_service = PromptDraftService(store)
 timeline_service = TimelineService(
@@ -1724,6 +1731,19 @@ async def cancel_production_generation_run(run_id: UUID) -> GenerationRunRespons
 async def retry_production_generation_run(run_id: UUID) -> GenerationRunResponse:
     try:
         return await production_service.retry_generation_run(run_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/generation-runs/{{run_id}}/recover-output",
+    response_model=GenerationRunResponse,
+)
+async def recover_production_image_generation_output(
+    run_id: UUID,
+) -> GenerationRunResponse:
+    try:
+        return await production_service.recover_image_generation_output(run_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

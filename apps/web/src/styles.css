@@ -1746,19 +1746,6 @@ button:disabled {
   background: #fbfbfd;
 }
 
-.overview-media-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 14px;
-}
-
-.overview-media-summary .tag-row {
-  justify-content: flex-end;
-  margin-top: 0;
-}
-
 .score-card,
 .audience-card {
   padding: 15px;

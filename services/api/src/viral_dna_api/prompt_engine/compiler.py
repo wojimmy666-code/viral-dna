@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .base_compiler import clean_text
@@ -11,6 +12,14 @@ from .contracts import (
 )
 from .language_policy import normalize_natural_text, normalize_prompt_draft
 from .providers import compile_minimax_prompt, compile_seedance_prompt, compile_wan_prompt
+
+_STILL_PROMPT_STOP_SECTION = re.compile(
+    r"【(?:时序运镜|时间轴|出场转场|连续性引用|负面约束|约束|补充说明)】"
+)
+_STILL_PROMPT_DYNAMIC_LINE = re.compile(
+    r"^\s*(?:【?\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?s?】?|"
+    r"【?(?:主体动作|镜头运动|前景运动|焦点变化|转场指令|转场时间)】?)\s*[：:]?"
+)
 
 
 def _target_family(target_model: str) -> str:
@@ -30,6 +39,42 @@ def compile_prompt_draft(draft: PromptShotDraft, target_model: str) -> str:
     if family == "wan":
         return compile_wan_prompt(draft)
     return compile_seedance_prompt(draft)
+
+
+def sanitize_still_image_prompt(value: str | None) -> str:
+    """Remove temporal and transition instructions from an image-only prompt."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    stop = _STILL_PROMPT_STOP_SECTION.search(text)
+    if stop is not None:
+        text = text[: stop.start()]
+    kept: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line == "【基础画面】":
+            continue
+        if _STILL_PROMPT_DYNAMIC_LINE.match(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def compile_still_image_prompt(draft: PromptShotDraft) -> str:
+    """Compile only facts that describe one still frame."""
+
+    normalized = normalize_prompt_draft(draft)
+    fields = (
+        ("主体与服装", normalized.visual.subjects),
+        ("场景", normalized.visual.scene),
+        ("构图", normalized.visual.composition),
+        ("光线", normalized.visual.lighting),
+        ("色彩", normalized.visual.color),
+    )
+    return "\n".join(
+        f"【{label}】 {text}"
+        for label, value in fields
+        if (text := clean_text(value))
+    )
 
 
 def _phase_from_fact(phase: Any) -> PromptMotionPhaseDraft:

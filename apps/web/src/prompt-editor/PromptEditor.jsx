@@ -6,7 +6,6 @@ import {
   FileText,
   LockSimple,
   ShieldCheck,
-  Translate,
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -281,14 +280,6 @@ export function PromptEditor({
             )}
           </section>
         )}
-
-        <div className="prompt-document-guidance">
-          <Translate size={17} />
-          <p>
-            <strong>默认使用简体中文</strong>
-            <span>英文仅保留原文台词、字幕或画面标识；粘贴内容会自动移除外部样式。</span>
-          </p>
-        </div>
 
         <div className="prompt-document-shot-list">
           {(workingPackage.shots || []).map((shot, index) => (

@@ -7,6 +7,9 @@ import {
   videoOutputSummary,
 } from "../src/video-generation-controls/video-generation-ui.js";
 import {
+  videoCandidatePlaybackUrl,
+} from "../src/production-ui.js";
+import {
   videoDraftFromDetail,
   videoDraftParameters,
 } from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
@@ -168,6 +171,28 @@ test("keeps video candidates usable when the shot input has changed", () => {
   assert.match(productionWorkflowSource, /confirm_stale_input: usesOldInput/);
   assert.match(workflowStyles, /\.shot-video-input-version-notice\s*\{/);
   assert.match(workflowStyles, /\.shot-candidate-current-detail > em\.old-input\s*\{/);
+});
+
+test("keeps the segmented video stage renderable before a candidate exists", () => {
+  const candidate = { id: "video-1", content_url: "/original.mp4" };
+
+  assert.equal(videoCandidatePlaybackUrl(null, null), "");
+  assert.equal(videoCandidatePlaybackUrl(candidate, null), "/original.mp4");
+  assert.equal(
+    videoCandidatePlaybackUrl(candidate, {
+      candidateId: "video-1",
+      url: "/enhanced.mp4",
+    }),
+    "/enhanced.mp4",
+  );
+  assert.equal(
+    videoCandidatePlaybackUrl(candidate, {
+      candidateId: "video-2",
+      url: "/other.mp4",
+    }),
+    "/original.mp4",
+  );
+  assert.match(workspaceSource, /videoCandidatePlaybackUrl\(/);
 });
 
 test("adopts a video candidate in one step without a selected intermediate state", () => {
@@ -840,13 +865,14 @@ test("uses the same reference-route gate in model settings", () => {
   assert.match(appSource, /selectableVideoModelOptions\.map/);
 });
 
-test("keeps visual beats compact, ordered and independently editable", () => {
+test("keeps visual beats compact while the system manages names and transitions", () => {
   assert.match(imageWorkspaceSource, /className="visual-beat-rail"/);
   assert.match(imageWorkspaceSource, /onReorderVisualBeats/);
   assert.match(imageWorkspaceSource, /onCreateVisualBeat/);
   assert.match(imageWorkspaceSource, /onDeleteVisualBeat/);
-  assert.match(imageWorkspaceSource, /transition_to_next_type/);
-  assert.match(imageWorkspaceSource, /transition_to_next_duration_seconds/);
+  assert.doesNotMatch(imageWorkspaceSource, /transition_to_next_type/);
+  assert.doesNotMatch(imageWorkspaceSource, /transition_to_next_duration_seconds/);
+  assert.doesNotMatch(imageWorkspaceSource, /画面名称|到下一画面|转场秒数/);
 
   const railRule = cssRule(".visual-beat-rail");
   assert.match(railRule, /display:\s*flex/);

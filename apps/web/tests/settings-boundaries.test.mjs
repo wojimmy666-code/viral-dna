@@ -39,6 +39,15 @@ test("platform admin uses an independent page shell", () => {
   assert.doesNotMatch(app, /\{settingsOpen && \(/);
 });
 
+test("platform admin exposes manual Codex model and reasoning controls", () => {
+  assert.match(adminSettings, /<span>模型选择<\/span>/);
+  assert.match(adminSettings, /imageLocalModelPolicy/);
+  assert.match(adminSettings, /<span>推理等级<\/span>/);
+  assert.match(adminSettings, /imageLocalReasoningEffort/);
+  assert.match(adminSettings, /不会因生成速度自动切换模型/);
+  assert.match(adminSettings, /不会根据耗时自动调整等级/);
+});
+
 test("platform admin keeps desktop navigation and content in independent scroll regions", () => {
   assert.match(
     adminSettingsStyles,

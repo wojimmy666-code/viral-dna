@@ -20,6 +20,7 @@ import {
   imageQualityLabel,
   isAiImageGenerationRun,
   isImageEngineConfigured,
+  isRecoverableImageGenerationRun,
   isVideoGenerationRun,
   latestRunByKind,
   normalizeReferenceTags,
@@ -552,4 +553,15 @@ test("explains proxy-related local ImageGen failures with a retry path", () => {
     generationFailureGuidance({ error_code: "local_tool_timeout" }),
     /超时.*重试/,
   );
+});
+
+test("distinguishes recoverable ImageGen output from a true generation failure", () => {
+  const run = {
+    error_code: "local_tool_failed",
+    recovery_available: true,
+    recovery_candidate_count: 1,
+  };
+  assert.equal(isRecoverableImageGenerationRun(run), true);
+  assert.equal(isRecoverableImageGenerationRun({ ...run, recovery_candidate_count: 0 }), false);
+  assert.match(generationFailureGuidance(run), /恢复图片.*不会再次消耗生成额度/);
 });

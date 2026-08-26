@@ -78,10 +78,8 @@ class ScenarioStrategyBuilder(BaseConceptStrategyBuilder):
         role_label: str,
         base: str,
     ) -> str:
-        return self.compose_prompt(
-            context,
+        return self.compose_image_prompt(
             heading="场景叙事静态画面：",
-            role_label=role_label,
             directive=(
                 f"重构为{context.primary_scene}，人物行为必须来自真实需要；"
                 f"以环境和状态变化承载{context.primary_selling_point}，不复制原画面。"

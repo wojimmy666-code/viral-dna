@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import time
 from datetime import UTC, datetime
 from io import BytesIO
@@ -35,6 +36,8 @@ from ..runtime_config import get_config_value
 from ..workspace import WorkspaceError, WorkspaceManager
 from .catalog import ImageModelCatalogError, load_image_model_catalog
 from .codex_local import (
+    CODEX_IMAGEGEN_ADAPTER_ID,
+    find_recoverable_codex_artifacts,
     local_tool_proxy_delivery,
     local_tool_proxy_environment_url,
 )
@@ -43,7 +46,6 @@ from .contracts import (
     IMAGE_REQUEST_SCHEMA_VERSION,
     AdapterIdentity,
     AdapterRequest,
-    AdapterResult,
     GeneratedImage,
     ImageGenerationError,
     ImageGenerationRequest,
@@ -931,6 +933,184 @@ class ImageGenerationGateway:
             completed_at=completed_at,
         )
         return run, candidates
+
+    def recoverable_local_tool_artifacts(self, run: GenerationRun) -> tuple[Path, ...]:
+        if (
+            run.kind != GenerationKind.IMAGE
+            or run.execution_mode != ImageExecutionMode.LOCAL_TOOL
+            or run.adapter_id != CODEX_IMAGEGEN_ADAPTER_ID
+            or run.status not in {ProductionRunStatus.FAILED, ProductionRunStatus.BLOCKED}
+        ):
+            return ()
+        expected_count = int(run.request_payload.get("candidate_count") or 1)
+        try:
+            input_path = self.workspace.resolve(run.input_snapshot_relative_path)
+        except WorkspaceError:
+            return ()
+        return find_recoverable_codex_artifacts(
+            input_path.parent,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            expected_count=expected_count,
+        )
+
+    async def recover_local_tool_output(
+        self,
+        run: GenerationRun,
+    ) -> tuple[GenerationRun, list[GenerationCandidate]]:
+        artifacts = await asyncio.to_thread(self.recoverable_local_tool_artifacts, run)
+        if not artifacts:
+            raise ImageGenerationGatewayError(
+                409,
+                "generation_output_recovery_unavailable",
+                "没有找到可与本次任务唯一匹配的 Codex ImageGen 图片",
+            )
+        try:
+            input_path = self.workspace.resolve(run.input_snapshot_relative_path)
+            input_payload = json.loads(_filesystem_path(input_path).read_text("utf-8"))
+        except (WorkspaceError, OSError, json.JSONDecodeError) as exc:
+            raise ImageGenerationGatewayError(
+                409,
+                "generation_input_snapshot_invalid",
+                "本次任务的输入快照不可用，无法安全恢复图片",
+            ) from exc
+        if not isinstance(input_payload, dict):
+            raise ImageGenerationGatewayError(
+                409,
+                "generation_input_snapshot_invalid",
+                "本次任务的输入快照格式无效，无法安全恢复图片",
+            )
+
+        output = (
+            input_payload.get("output")
+            if isinstance(input_payload.get("output"), dict)
+            else {}
+        )
+        references = (
+            input_payload.get("references")
+            if isinstance(input_payload.get("references"), list)
+            else []
+        )
+        target_width = max(1, int(output.get("width") or 1024))
+        target_height = max(1, int(output.get("height") or 1024))
+        reference_roles = {
+            str(item.get("role"))
+            for item in references
+            if isinstance(item, dict) and item.get("role")
+        }
+        run_root = input_path.parent
+        tool_output_root = run_root / "tool-output"
+        _filesystem_path(tool_output_root).mkdir(parents=True, exist_ok=True)
+        recovered_images: list[GeneratedImage] = []
+        recovered_names: list[str] = []
+        for ordinal, artifact in enumerate(artifacts, start=1):
+            destination = tool_output_root / (
+                f"recovered-codex-candidate-{ordinal:03d}{artifact.suffix.lower()}"
+            )
+            try:
+                await asyncio.to_thread(
+                    shutil.copy2,
+                    _filesystem_path(artifact),
+                    _filesystem_path(destination),
+                )
+                payload = await asyncio.to_thread(_filesystem_path(destination).read_bytes)
+                with Image.open(BytesIO(payload)) as source:
+                    image_format = source.format or ""
+                    width, height = ImageOps.exif_transpose(source).size
+                    media_type = Image.MIME.get(image_format)
+            except (OSError, UnidentifiedImageError) as exc:
+                raise ImageGenerationGatewayError(
+                    409,
+                    "generation_output_recovery_invalid",
+                    "找到的 Codex 输出不是可用图片，未执行恢复",
+                ) from exc
+            if media_type not in {"image/jpeg", "image/png", "image/webp"}:
+                raise ImageGenerationGatewayError(
+                    409,
+                    "generation_output_recovery_invalid",
+                    "找到的 Codex 输出格式不受支持，未执行恢复",
+                )
+            recovered_names.append(destination.name)
+            recovered_images.append(
+                GeneratedImage(
+                    payload=payload,
+                    media_type=media_type,
+                    width=width,
+                    height=height,
+                    metadata={
+                        "recovered": True,
+                        "source": "codex_generated_images",
+                        "source_name": artifact.name,
+                    },
+                )
+            )
+
+        candidates = [
+            _save_candidate(
+                self.workspace,
+                run_root,
+                run.id,
+                index,
+                image,
+                request_fingerprint=run.request_fingerprint,
+                provider=run.provider,
+                model=run.model,
+                target_width=target_width,
+                target_height=target_height,
+                reference_roles=reference_roles,
+            )
+            for index, image in enumerate(recovered_images, start=1)
+        ]
+        usage = dict(run.usage)
+        usage.update(
+            {
+                "image_count": len(candidates),
+                "recovered_image_count": len(candidates),
+                "recovery_quota_consumed": False,
+            }
+        )
+        execution_summary = dict(run.execution_summary)
+        execution_summary["artifact_recovery"] = {
+            "source": "codex_generated_images",
+            "candidate_count": len(candidates),
+            "quota_consumed": False,
+        }
+        manifest_path = run_root / "manifest.json"
+        manifest = {
+            "schema_version": "viral-dna-image-generation-result/v1",
+            "status": "completed",
+            "request_id": str(run.id),
+            "recovered": True,
+            "recovery_quota_consumed": False,
+            "tool_output_files": recovered_names,
+            "candidate_ids": [str(item.id) for item in candidates],
+            "candidate_sha256": [item.sha256 for item in candidates],
+            "usage": usage,
+            "estimated_cost_micros": run.estimated_cost_micros,
+            "actual_cost_micros": run.actual_cost_micros,
+            "cost_source": run.cost_source.value,
+        }
+        _write_atomic(manifest_path, _canonical_json(manifest) + b"\n")
+        now = datetime.now(UTC)
+        recovered_run = run.model_copy(
+            update={
+                "execution_summary": execution_summary,
+                "usage": usage,
+                "output_manifest_relative_path": self.workspace.relative(manifest_path),
+                "status": ProductionRunStatus.COMPLETED,
+                "error_code": None,
+                "error_message": None,
+                "error_category": None,
+                "error_title": None,
+                "error_technical_message": None,
+                "error_retryable": False,
+                "error_action": None,
+                "updated_at": now,
+                "last_heartbeat_at": now,
+                "completed_at": now,
+            }
+        )
+        return recovered_run, candidates
 
     @staticmethod
     def _fingerprint(input_payload: dict[str, Any]) -> str:

@@ -52,6 +52,10 @@ test("report summary prioritizes decisions and moves technical metadata behind d
 
   assert.match(executive, /判断置信度/);
   assert.match(executive, /复刻难度/);
+  assert.match(executive, /viral-hook-evidence/);
+  assert.match(executive, /formatInsightTime/);
+  assert.match(executive, /大模型综合 · 证据校验/);
+  assert.doesNotMatch(executive, /核心视觉信号前置/);
   assert.doesNotMatch(executive, /<span>证据覆盖<\/span>/);
   assert.doesNotMatch(executive, /<span>机制数量<\/span>/);
   assert.match(executive, /开始复刻/);

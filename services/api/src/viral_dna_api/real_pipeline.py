@@ -7,6 +7,7 @@ from uuid import UUID
 
 from .ai.shot_facts import ShotFactsOutcome, ShotFactsService
 from .ai.shot_segmentation import SegmentationOutcome, ShotSegmentationService
+from .ai.viral_reasoning import ViralReasoningService
 from .evidence import EvidenceTimelineBuilder
 from .link_ingestion import (
     LinkCollector,
@@ -85,9 +86,11 @@ class HybridAnalysisPipeline:
         self,
         repository: AnalysisRepository,
         credential_resolver: LinkCredentialResolver | None = None,
+        viral_reasoning: ViralReasoningService | None = None,
     ) -> None:
         self.repository = repository
         self.credential_resolver = credential_resolver
+        self.viral_reasoning = viral_reasoning
         self.simulated = SimulatedAnalysisPipeline(repository)  # type: ignore[arg-type]
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -207,7 +210,6 @@ class HybridAnalysisPipeline:
                     91,
                     "正在将语音和画面文字对齐到镜头；VLM 未启用",
                 )
-            await progress(AnalysisStage.VALIDATING, 96, "正在校验证据、模型结果与成本账本")
             self._apply_metadata(video, evidence)
             report = build_media_evidence_report(
                 video,
@@ -217,6 +219,14 @@ class HybridAnalysisPipeline:
                 model_outcome=model_outcome,
                 segmentation_outcome=segmentation_outcome,
             )
+            if analysis.model_plan is not None and self.viral_reasoning is not None:
+                await progress(
+                    AnalysisStage.UNDERSTANDING,
+                    96,
+                    "正在综合逐镜头证据与内容机制",
+                )
+                report = await self.viral_reasoning.enrich(analysis, report)
+            await progress(AnalysisStage.VALIDATING, 98, "正在校验证据、模型结果与成本账本")
             if analysis.record_id is not None:
                 await thumbnail_service.promote_from_report(analysis.record_id, report)
             await self.repository.save_report(report)

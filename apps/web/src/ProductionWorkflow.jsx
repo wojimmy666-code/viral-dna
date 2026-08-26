@@ -2116,7 +2116,13 @@ export function ProductionHub({
     confirmStale = false,
   }) {
     let expectedRevisionId = detail.project.current_revision_id;
-    if (Object.keys(beatChanges).length > 0) {
+    const visualBeatChanges = { ...beatChanges };
+    const remainingShotChanges = { ...shotChanges };
+    if (Object.hasOwn(remainingShotChanges, "reference_bindings")) {
+      visualBeatChanges.reference_bindings = remainingShotChanges.reference_bindings;
+      delete remainingShotChanges.reference_bindings;
+    }
+    if (Object.keys(visualBeatChanges).length > 0) {
       const updated = await request(
         `/production-shots/${shotDetail.plan.id}/visual-beats/${activeBeat.id}`,
         {
@@ -2125,21 +2131,21 @@ export function ProductionHub({
           body: JSON.stringify({
             expected_revision_id: expectedRevisionId,
             confirm_stale: confirmStale,
-            ...beatChanges,
+            ...visualBeatChanges,
           }),
         },
       );
       expectedRevisionId = updated.current_revision_id;
     }
-    if (Object.keys(shotChanges).length > 0) {
+    if (Object.keys(remainingShotChanges).length > 0) {
       const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_revision_id: expectedRevisionId,
-          confirm_stale: confirmStale,
-          ...shotChanges,
-        }),
+          body: JSON.stringify({
+            expected_revision_id: expectedRevisionId,
+            confirm_stale: confirmStale,
+            ...remainingShotChanges,
+          }),
       });
       expectedRevisionId = updated.current_revision_id;
     }
@@ -2223,6 +2229,30 @@ export function ProductionHub({
         onProjectsChanged(),
       ]);
       onNotice(`已取消采用分镜 ${shotIndex} 的图片；相关后续结果已标记为需要更新`);
+    });
+  }
+
+  async function recoverShotGeneration(runId) {
+    if (!runId) return;
+    await executeAction(async () => {
+      const run = await request(`/generation-runs/${runId}/recover-output`, {
+        method: "POST",
+      });
+      setShotDetail((current) => upsertGenerationRun(current, run));
+      await Promise.all([
+        refreshProject(
+          detail.project.id,
+          shotDetail?.plan?.id,
+          selectedVisualBeatId,
+        ),
+        onProjectsChanged(),
+      ]);
+      await onNotificationsChanged?.();
+      onNotice({
+        type: "success",
+        title: "图片已恢复",
+        message: `已导入 ${run.recovery_candidate_count || run.candidates?.length || 1} 张既有图片，本次未重新调用 ImageGen。`,
+      });
     });
   }
 
@@ -3380,6 +3410,7 @@ export function ProductionHub({
                 onApprove={approveCandidate}
                 onApproveSource={approveSourceKeyframe}
                 onCancelRun={cancelShotGeneration}
+                onRecoverRun={recoverShotGeneration}
                 onCreateShot={createShot}
                 onCreateVisualBeat={createVisualBeat}
                 onDeleteVisualBeat={deleteVisualBeat}
@@ -3401,6 +3432,7 @@ export function ProductionHub({
                 request={request}
                 resolveUrl={resolveUrl}
                 selectedShotId={selectedShotId}
+                selectedVisualBeatId={selectedVisualBeatId}
                 setDraft={setShotDraft}
                 setGenerationCandidateCount={setGenerationCandidateCount}
                 setGenerationEngine={setGenerationEngine}

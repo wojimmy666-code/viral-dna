@@ -34,27 +34,108 @@ export function removeMentionFromPrompt(prompt, mention, asset = null) {
   return [canonicalToken, storedToken]
     .filter(Boolean)
     .reduce((value, token) => value.replaceAll(token, ""), String(prompt || ""))
-    .replace(/\s{2,}/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trimStart();
 }
 
-export function normalizePromptMentionDraft(prompt, mentions = [], assets = []) {
+export function ensurePromptMentionTokens(prompt, mentions = [], assets = []) {
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+  let nextPrompt = String(prompt || "");
+  const missingTokens = mentions
+    .map((mention) => mentionToken(
+      mention,
+      assetsById.get(mention.reference_asset_id),
+    ))
+    .filter((token, index, tokens) => (
+      token && !nextPrompt.includes(token) && tokens.indexOf(token) === index
+    ));
+  if (missingTokens.length > 0) {
+    nextPrompt = `${missingTokens.join(" ")}${nextPrompt.trim() ? `\n${nextPrompt.trimStart()}` : ""}`;
+  }
+  return nextPrompt;
+}
+
+export function reconcilePromptReferenceRemoval(
+  prompt,
+  mentions = [],
+  referenceBindings = [],
+  assets = [],
+) {
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+  const imagePromptMentions = mentions.filter((mention) => {
+    const asset = assetsById.get(mention.reference_asset_id);
+    return String(prompt || "").includes(mentionToken(mention, asset))
+      || String(prompt || "").includes(mentionToken(mention));
+  });
+  const retainedIds = new Set(
+    imagePromptMentions.map((mention) => mention.reference_asset_id),
+  );
+  const removedIds = new Set(
+    mentions
+      .filter((mention) => !retainedIds.has(mention.reference_asset_id))
+      .map((mention) => mention.reference_asset_id),
+  );
+  return {
+    imagePromptMentions,
+    referenceBindings: referenceBindings.filter(
+      (binding) => !removedIds.has(binding.reference_asset_id),
+    ),
+  };
+}
+
+export function normalizePromptMentionDraft(
+  prompt,
+  mentions = [],
+  assets = [],
+  referenceBindings = [],
+) {
   const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
   let nextPrompt = String(prompt || "");
   let changed = false;
-  const nextMentions = mentions.map((mention) => {
-    const asset = assetsById.get(mention.reference_asset_id);
-    if (!asset) return mention;
-    const canonicalLabel = assetMentionLabel(asset);
-    if (mention.label === canonicalLabel) return mention;
-    const storedToken = mentionToken(mention);
-    const canonicalToken = assetMentionToken(asset);
-    if (storedToken && nextPrompt.includes(storedToken) && !nextPrompt.includes(canonicalToken)) {
-      nextPrompt = nextPrompt.replace(storedToken, canonicalToken);
+  const seenIds = new Set();
+  const nextMentions = [];
+  mentions.forEach((mention) => {
+    if (seenIds.has(mention.reference_asset_id)) {
+      changed = true;
+      return;
     }
-    changed = true;
-    return { ...mention, label: canonicalLabel };
+    seenIds.add(mention.reference_asset_id);
+    const asset = assetsById.get(mention.reference_asset_id);
+    if (!asset) {
+      nextMentions.push(mention);
+      return;
+    }
+    const canonicalLabel = assetMentionLabel(asset);
+    if (mention.label !== canonicalLabel) {
+      const storedToken = mentionToken(mention);
+      const canonicalToken = assetMentionToken(asset);
+      if (
+        storedToken
+        && nextPrompt.includes(storedToken)
+        && !nextPrompt.includes(canonicalToken)
+      ) {
+        nextPrompt = nextPrompt.replaceAll(storedToken, canonicalToken);
+      }
+      changed = true;
+    }
+    nextMentions.push({ ...mention, label: canonicalLabel });
   });
+  referenceBindings.forEach((binding) => {
+    if (seenIds.has(binding.reference_asset_id)) return;
+    const asset = assetsById.get(binding.reference_asset_id);
+    if (!asset) return;
+    seenIds.add(binding.reference_asset_id);
+    nextMentions.push({
+      reference_asset_id: asset.id,
+      label: assetMentionLabel(asset),
+    });
+    changed = true;
+  });
+  const promptWithTokens = ensurePromptMentionTokens(nextPrompt, nextMentions, assets);
+  if (promptWithTokens !== nextPrompt) changed = true;
+  nextPrompt = promptWithTokens;
   return { changed, imagePrompt: nextPrompt, imagePromptMentions: nextMentions };
 }
 

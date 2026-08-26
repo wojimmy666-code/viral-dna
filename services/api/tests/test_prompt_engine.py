@@ -15,7 +15,12 @@ from viral_dna_api.models import (
     ShotTransitionFact,
     VideoOverview,
 )
-from viral_dna_api.prompt_engine.compiler import compile_prompt_draft, draft_from_shot
+from viral_dna_api.prompt_engine.compiler import (
+    compile_prompt_draft,
+    compile_still_image_prompt,
+    draft_from_shot,
+    sanitize_still_image_prompt,
+)
 from viral_dna_api.prompt_engine.contracts import (
     PromptDraftUpdateRequest,
     PromptShotDraftUpdate,
@@ -146,6 +151,43 @@ def test_compiler_emits_readable_sections_without_legacy_duplication() -> None:
     assert "无法确认" not in compiled
     assert "时序运镜" not in compiled
     assert "动作过程" not in compiled
+
+
+def test_image_prompt_contains_only_still_visual_facts() -> None:
+    draft = draft_from_shot(build_shot())
+    image_prompt = compile_still_image_prompt(draft)
+    video_prompt = compile_prompt_draft(draft, "Seedance 2.0")
+
+    assert "【主体与服装】" in image_prompt
+    assert "【场景】" in image_prompt
+    assert "【构图】" in image_prompt
+    assert "【光线】" in image_prompt
+    assert "【色彩】" in image_prompt
+    assert "时间轴" not in image_prompt
+    assert "主体动作" not in image_prompt
+    assert "镜头运动" not in image_prompt
+    assert "出场转场" not in image_prompt
+    assert "【时间轴】" in video_prompt
+    assert "【出场转场】" in video_prompt
+
+    legacy = """【基础画面】
+主体：长发女子
+场景：户外公园
+
+【时间轴】
+0.00–1.00s
+主体动作：女子向镜头伸手
+镜头运动：固定机位
+
+【出场转场】
+丝带遮满画面
+"""
+    cleaned = sanitize_still_image_prompt(legacy)
+    assert "主体：长发女子" in cleaned
+    assert "场景：户外公园" in cleaned
+    assert "时间轴" not in cleaned
+    assert "伸手" not in cleaned
+    assert "转场" not in cleaned
 
 
 def test_language_policy_requires_chinese_but_keeps_tagged_english_literals() -> None:

@@ -1333,6 +1333,27 @@ class ViralFinding(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class ViralReasoningImprovement(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    rationale: str = Field(min_length=1, max_length=1600)
+    expected_gain: str = Field(min_length=1, max_length=800)
+    priority: Literal["high", "medium", "low"] = "medium"
+    affected_shot_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class ViralReasoningSynthesis(BaseModel):
+    headline: str = Field(min_length=1, max_length=300)
+    content_value: str = Field(min_length=1, max_length=1200)
+    narrative_structure: str = Field(min_length=1, max_length=1200)
+    audience: str = Field(min_length=1, max_length=1200)
+    strongest_hook: str = Field(min_length=1, max_length=1000)
+    findings: list[ViralFinding] = Field(default_factory=list, max_length=6)
+    improvements: list[ViralReasoningImprovement] = Field(default_factory=list, max_length=6)
+    confidence: float = Field(ge=0, le=1)
+    insufficient_evidence: bool = False
+    insufficient_evidence_reason: str | None = Field(default=None, max_length=800)
+
+
 class PromptShot(BaseModel):
     shot_id: str
     duration_seconds: float
@@ -1711,6 +1732,7 @@ class AnalysisReport(BaseModel):
     shots: list[Shot]
     entities: list[Entity]
     viral_findings: list[ViralFinding]
+    viral_reasoning: ViralReasoningSynthesis | None = None
     prompt_package: PromptPackage
     media_evidence: MediaEvidence | None = None
     evidence_timeline: EvidenceTimeline | None = None
@@ -2691,6 +2713,10 @@ class ShotVisualBeatUpdate(BaseModel):
         default=None,
         max_length=20,
     )
+    reference_bindings: list[ReferenceBindingInput] | None = Field(
+        default=None,
+        max_length=20,
+    )
     image_negative_constraints: list[str] | None = Field(default=None, max_length=40)
     required: bool | None = None
     transition_to_next_type: (
@@ -2704,6 +2730,32 @@ class ShotVisualBeatUpdate(BaseModel):
     ) = None
     transition_to_next_duration_seconds: float | None = Field(default=None, ge=0, le=5)
     transition_to_next_prompt: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("image_prompt_mentions")
+    @classmethod
+    def require_unique_mentions(
+        cls,
+        values: list[PromptAssetMention] | None,
+    ) -> list[PromptAssetMention] | None:
+        if values is None:
+            return values
+        ids = [item.reference_asset_id for item in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("同一参考资产不能在提示词中重复关联")
+        return values
+
+    @field_validator("reference_bindings")
+    @classmethod
+    def require_unique_bindings(
+        cls,
+        values: list[ReferenceBindingInput] | None,
+    ) -> list[ReferenceBindingInput] | None:
+        if values is None:
+            return values
+        keys = [(item.reference_asset_id, item.role) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("同一参考资产和角色不能重复绑定")
+        return values
 
     @model_validator(mode="after")
     def require_visual_beat_change(self) -> ShotVisualBeatUpdate:
@@ -3167,6 +3219,8 @@ class GenerationRunResponse(BaseModel):
     error_technical_message: str | None = None
     error_retryable: bool = False
     error_action: str | None = None
+    recovery_available: bool = False
+    recovery_candidate_count: int = Field(default=0, ge=0)
     created_at: datetime
     started_at: datetime | None = None
     updated_at: datetime

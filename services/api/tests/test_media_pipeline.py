@@ -11,11 +11,15 @@ from fastapi.testclient import TestClient
 
 from viral_dna_api.link_ingestion import LinkIngestionResult
 from viral_dna_api.main import app
-from viral_dna_api.media import MediaProcessor
+from viral_dna_api.media import MAX_VIDEO_SECONDS, MediaProcessor
 from viral_dna_api.models import SourceType
 from viral_dna_api.records import resolve_record_name_from_video
 
 FFMPEG = shutil.which("ffmpeg")
+
+
+def test_analysis_duration_limit_is_two_minutes() -> None:
+    assert MAX_VIDEO_SECONDS == 120
 
 
 def test_platform_title_replaces_only_generated_record_placeholder() -> None:
