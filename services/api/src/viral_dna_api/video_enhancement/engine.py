@@ -16,7 +16,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .domain import VideoEnhancementJobStage
-from .process_runner import AsyncEnhancementProcessRunner
+from .process_runner import AsyncEnhancementProcessRunner, EnhancementProcessError
 
 ENGINE_ID = "realesrgan-ncnn-vulkan"
 ENGINE_VERSION = "0.2.0"
@@ -137,6 +137,15 @@ class VideoEnhancementCapability:
 
 
 @dataclass(frozen=True, slots=True)
+class VideoMediaInfo:
+    width: int
+    height: int
+    fps: float
+    duration_seconds: float
+    frame_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class VideoEnhancementProgress:
     stage: VideoEnhancementJobStage
     percent: int
@@ -204,32 +213,55 @@ class _FfmpegFrameParser:
 
 
 class _NcnnProgressParser:
-    pattern = re.compile(r"(?P<percent>\d{1,3}(?:\.\d+)?)%")
+    completed_pattern = re.compile(
+        r"\s->\s(?P<output>.+?)\s+done\s*$",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(self, callback: ProgressCallback, total_frames: int) -> None:
         self.callback = callback
         self.total_frames = max(1, total_frames)
-        self.last_percent = -1
+        self.completed_outputs: set[str] = set()
+        self.buffers: dict[str, str] = {}
+        self.lock = asyncio.Lock()
 
     async def feed(self, chunk: str) -> None:
-        matches = list(self.pattern.finditer(chunk))
-        if not matches:
-            return
-        raw_percent = max(0, min(100, round(float(matches[-1].group("percent")))))
-        if raw_percent <= self.last_percent:
-            return
-        self.last_percent = raw_percent
-        overall = 15 + round(raw_percent * 0.7)
-        processed = round(self.total_frames * raw_percent / 100)
-        await self.callback(
-            VideoEnhancementProgress(
-                stage=VideoEnhancementJobStage.UPSCALING,
-                percent=overall,
-                message=f"正在增强画面细节 · {raw_percent}%",
-                processed_frames=processed,
-                total_frames=self.total_frames,
+        await self._feed("combined", chunk)
+
+    async def feed_stdout(self, chunk: str) -> None:
+        await self._feed("stdout", chunk)
+
+    async def feed_stderr(self, chunk: str) -> None:
+        await self._feed("stderr", chunk)
+
+    async def _feed(self, channel: str, chunk: str) -> None:
+        async with self.lock:
+            buffered = self.buffers.get(channel, "") + chunk
+            lines = buffered.splitlines(keepends=True)
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                self.buffers[channel] = lines.pop()
+            else:
+                self.buffers[channel] = ""
+
+            previous_count = len(self.completed_outputs)
+            for line in lines:
+                match = self.completed_pattern.search(line.strip())
+                if match:
+                    self.completed_outputs.add(match.group("output").strip())
+            completed = min(self.total_frames, len(self.completed_outputs))
+            if completed <= previous_count:
+                return
+
+            overall = 16 + round(69 * completed / self.total_frames)
+            await self.callback(
+                VideoEnhancementProgress(
+                    stage=VideoEnhancementJobStage.UPSCALING,
+                    percent=overall,
+                    message=f"正在增强画面细节 · {completed}/{self.total_frames} 帧",
+                    processed_frames=completed,
+                    total_frames=self.total_frames,
+                )
             )
-        )
 
 
 class RealEsrganNcnnEngine:
@@ -267,6 +299,18 @@ class RealEsrganNcnnEngine:
             execution_device="自动选择 Vulkan 设备",
             license=LICENSE,
             installable=installable,
+        )
+
+    def probe_source(self, source_path: Path) -> VideoMediaInfo:
+        if self.ffprobe is None:
+            raise RuntimeError("未找到 FFprobe，无法读取原视频信息")
+        width, height, fps, duration, frame_count = _probe(self.ffprobe, source_path)
+        return VideoMediaInfo(
+            width=width,
+            height=height,
+            fps=fps,
+            duration_seconds=duration,
+            frame_count=frame_count,
         )
 
     @staticmethod
@@ -501,7 +545,7 @@ class RealEsrganNcnnEngine:
             )
         )
         ncnn_parser = _NcnnProgressParser(progress, total_frames)
-        await self.runner.run(
+        ncnn_result = await self.runner.run(
             [
                 str(self.executable),
                 "-i",
@@ -523,8 +567,8 @@ class RealEsrganNcnnEngine:
             cwd=self.executable.parent,
             timeout_seconds=timeout_seconds,
             cancellation=cancellation,
-            on_stdout=ncnn_parser.feed,
-            on_stderr=ncnn_parser.feed,
+            on_stdout=ncnn_parser.feed_stdout,
+            on_stderr=ncnn_parser.feed_stderr,
             on_started=lambda process_id: progress(
                 VideoEnhancementProgress(
                     stage=VideoEnhancementJobStage.UPSCALING,
@@ -540,9 +584,23 @@ class RealEsrganNcnnEngine:
             lambda: sum(1 for _ in output_frames.glob("frame_*.png"))
         )
         if output_count < max(1, math.floor(total_frames * 0.98)):
-            raise RuntimeError(
-                f"增强帧数量不完整：预期约 {total_frames} 帧，实际 {output_count} 帧"
+            engine_detail = (ncnn_result.stderr or ncnn_result.stdout).strip()
+            frame_detail = f"增强帧数量不完整：预期约 {total_frames} 帧，实际 {output_count} 帧"
+            raise EnhancementProcessError(
+                "Real-ESRGAN 未生成完整的增强帧",
+                returncode=ncnn_result.returncode,
+                output_tail=(f"{frame_detail}\n{engine_detail}" if engine_detail else frame_detail),
             )
+
+        await progress(
+            VideoEnhancementProgress(
+                stage=VideoEnhancementJobStage.UPSCALING,
+                percent=85,
+                message=f"画面细节增强完成 · {output_count}/{total_frames} 帧",
+                processed_frames=output_count,
+                total_frames=total_frames,
+            )
+        )
 
         encode_parser = _FfmpegFrameParser(
             progress,

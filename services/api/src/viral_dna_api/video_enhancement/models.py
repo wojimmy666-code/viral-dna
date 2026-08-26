@@ -62,8 +62,17 @@ class VideoEnhancementJobResponse(BaseModel):
     original_content_url: str
 
 
+class VideoEnhancementSourceResponse(BaseModel):
+    width: int = Field(gt=0, le=32768)
+    height: int = Field(gt=0, le=32768)
+    fps: float = Field(gt=0)
+    duration_seconds: float = Field(gt=0)
+    frame_count: int = Field(gt=0)
+
+
 class VideoEnhancementJobListResponse(BaseModel):
     items: list[VideoEnhancementJobResponse] = Field(default_factory=list)
+    source: VideoEnhancementSourceResponse | None = None
 
 
 class VideoEnhancementVersionSelectionResponse(BaseModel):

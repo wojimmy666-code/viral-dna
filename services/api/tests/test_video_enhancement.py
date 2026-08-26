@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -23,11 +23,13 @@ from viral_dna_api.video_enhancement.engine import (
     VideoEnhancementCapability,
     VideoEnhancementOutput,
     VideoEnhancementProgress,
+    VideoMediaInfo,
 )
 from viral_dna_api.video_enhancement.process_runner import EnhancementProcessCancelled
 from viral_dna_api.video_enhancement.service import (
     VideoEnhancementService,
     VideoEnhancementServiceError,
+    _estimate_remaining,
 )
 
 
@@ -133,6 +135,16 @@ class FakeSettings:
 
 
 class FakeEngine:
+    def __init__(self) -> None:
+        self.working_roots: list[Path] = []
+        self.source_info = VideoMediaInfo(
+            width=640,
+            height=360,
+            fps=30,
+            duration_seconds=2,
+            frame_count=60,
+        )
+
     def capability(self):
         return VideoEnhancementCapability(
             engine="realesrgan-ncnn-vulkan",
@@ -153,16 +165,22 @@ class FakeEngine:
         del source_width, source_height, target_width, target_height
         return 3
 
+    def probe_source(self, source_path):
+        assert source_path.name == "source.mp4"
+        return self.source_info
+
     async def generate(
         self,
         *,
         destination_path,
+        working_root,
         target_width,
         target_height,
         progress,
         **kwargs,
     ):
         del kwargs
+        self.working_roots.append(working_root)
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         destination_path.write_bytes(b"enhanced-video")
         await progress(
@@ -267,21 +285,48 @@ def test_video_enhancement_requires_the_current_approved_candidate(tmp_path: Pat
 
 def test_enhancement_is_a_durable_inactive_version_until_selected(tmp_path: Path) -> None:
     async def scenario() -> None:
-        service, repository, revision_id = make_service(tmp_path)
+        engine = FakeEngine()
+        service, repository, revision_id = make_service(tmp_path, engine=engine)
         submitted = await service.submit(
             repository.candidate.id,
             expected_revision_id=revision_id,
         )
         assert submitted.target_width == 1920
         assert submitted.target_height == 1080
+        assert (submitted.source_width, submitted.source_height) == (640, 360)
+        assert submitted.duration_seconds == 2
         completed = await wait_terminal(repository, submitted.id)
         assert completed.status == VideoEnhancementJobStatus.SUCCEEDED
         assert completed.active_for_final is False
         assert repository.candidate.relative_path == "source.mp4"
         assert completed.result_relative_path
+        assert engine.working_roots == [service.job_working_root(completed)]
+        assert "enhancements" not in engine.working_roots[0].parts
+        assert not str(engine.working_roots[0]).startswith("\\\\?\\")
         await service.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_upscaling_estimate_uses_completed_frame_throughput() -> None:
+    now = datetime.now(UTC)
+    job = SimpleNamespace(
+        started_at=now - timedelta(seconds=100),
+        updated_at=now - timedelta(seconds=5),
+        duration_seconds=5,
+        stage=VideoEnhancementJobStage.UPSCALING,
+        processed_frames=10,
+        total_frames=100,
+    )
+    event = VideoEnhancementProgress(
+        stage=VideoEnhancementJobStage.UPSCALING,
+        percent=23,
+        message="正在增强画面细节 · 10/100 帧",
+        processed_frames=10,
+        total_frames=100,
+    )
+
+    assert _estimate_remaining(job, event, 23, now) == 910
 
 
 def test_user_can_switch_between_enhanced_and_original_versions(tmp_path: Path) -> None:

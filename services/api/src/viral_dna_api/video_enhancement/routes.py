@@ -17,6 +17,7 @@ from .models import (
     VideoEnhancementJobResponse,
     VideoEnhancementSettingsResponse,
     VideoEnhancementSettingsUpdate,
+    VideoEnhancementSourceResponse,
     VideoEnhancementVersionSelectionResponse,
 )
 from .service import (
@@ -175,8 +176,21 @@ def create_video_enhancement_router(
     async def list_jobs(
         candidate_id: Annotated[UUID, Path()],
     ) -> VideoEnhancementJobListResponse:
+        source_response = None
+        try:
+            source = await service.source_info(candidate_id)
+            source_response = VideoEnhancementSourceResponse(
+                width=source.width,
+                height=source.height,
+                fps=source.fps,
+                duration_seconds=source.duration_seconds,
+                frame_count=source.frame_count,
+            )
+        except VideoEnhancementServiceError:
+            pass
         return VideoEnhancementJobListResponse(
-            items=[_job_response(item) for item in await service.list_for_candidate(candidate_id)]
+            items=[_job_response(item) for item in await service.list_for_candidate(candidate_id)],
+            source=source_response,
         )
 
     @router.get(

@@ -54,7 +54,10 @@ export function VideoEnhancementPanel({
     onNotificationsChanged,
     request,
   });
-  const original = originalMedia(candidate);
+  const originalMetadata = originalMedia(candidate);
+  const original = enhancement.source
+    ? { ...originalMetadata, ...enhancement.source }
+    : originalMetadata;
   const sourceShortEdge = Math.min(
     Number(original.width) || 0,
     Number(original.height) || 0,

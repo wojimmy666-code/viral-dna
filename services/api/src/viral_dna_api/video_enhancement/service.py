@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from .engine import (
     RealEsrganNcnnEngine,
     VideoEnhancementCapability,
     VideoEnhancementProgress,
+    VideoMediaInfo,
 )
 from .process_runner import (
     EnhancementProcessCancelled,
@@ -101,10 +103,44 @@ def _target_dimensions(aspect_ratio: str, target: VideoEnhancementTarget) -> tup
     return width, height
 
 
-def _estimate_remaining(job: VideoEnhancementJob, percent: int) -> int | None:
+def _estimate_remaining(
+    job: VideoEnhancementJob,
+    event: VideoEnhancementProgress,
+    percent: int,
+    now: datetime,
+) -> int | None:
     if job.started_at is None or percent <= 3:
         return None
-    elapsed = max(0.0, (utc_now() - job.started_at).total_seconds())
+
+    if event.stage == VideoEnhancementJobStage.UPSCALING:
+        processed = event.processed_frames
+        total = event.total_frames or job.total_frames
+        if processed is None or processed <= 0 or total is None:
+            return None
+        elapsed = max(0.0, (now - job.started_at).total_seconds())
+        remaining_frames = max(0, total - processed)
+        encode_reserve = max(10, round(job.duration_seconds * 2))
+        return max(0, round(elapsed / processed * remaining_frames) + encode_reserve)
+
+    if event.stage == VideoEnhancementJobStage.ENCODING:
+        processed = event.processed_frames
+        total = event.total_frames or job.total_frames
+        if (
+            processed is not None
+            and total is not None
+            and job.stage == VideoEnhancementJobStage.ENCODING
+            and job.processed_frames is not None
+            and processed > job.processed_frames
+        ):
+            elapsed = max(0.0, (now - job.updated_at).total_seconds())
+            rate = elapsed / (processed - job.processed_frames)
+            return max(0, round(rate * max(0, total - processed)))
+        return max(5, round(job.duration_seconds * 2))
+
+    if event.stage == VideoEnhancementJobStage.VALIDATING:
+        return 1
+
+    elapsed = max(0.0, (now - job.started_at).total_seconds())
     remaining = elapsed * (100 - percent) / max(1, percent)
     return max(0, round(remaining))
 
@@ -168,6 +204,7 @@ class VideoEnhancementService:
         self._installation_lock = asyncio.Lock()
         self._installations: dict[UUID, VideoEnhancementInstallation] = {}
         self._installation_tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._source_media_cache: dict[tuple[UUID, str], VideoMediaInfo] = {}
         self._shutdown_requested = False
 
     def capability(self) -> VideoEnhancementCapability:
@@ -178,6 +215,45 @@ class VideoEnhancementService:
 
     def _candidate_lock(self, candidate_id: UUID) -> asyncio.Lock:
         return self._candidate_locks.setdefault(candidate_id, asyncio.Lock())
+
+    async def _probe_original_media(
+        self,
+        candidate: GenerationCandidate,
+    ) -> tuple[dict[str, object], VideoMediaInfo]:
+        original = self._original_media(candidate)
+        source_sha256 = str(original.get("sha256") or candidate.sha256)
+        cache_key = (candidate.id, source_sha256)
+        cached = self._source_media_cache.get(cache_key)
+        if cached is not None:
+            return original, cached
+        try:
+            source_path, _ = await self.production.resolve_candidate_content(
+                candidate.id,
+                variant="original",
+            )
+            media = await asyncio.to_thread(
+                self.engine.probe_source,
+                _filesystem_path(source_path),
+            )
+        except Exception as exc:
+            raise VideoEnhancementServiceError(
+                422,
+                "video_probe_failed",
+                "无法读取原视频的真实尺寸、帧率或时长",
+            ) from exc
+        self._source_media_cache[cache_key] = media
+        return original, media
+
+    async def source_info(self, candidate_id: UUID) -> VideoMediaInfo:
+        candidate = await self.repository.get_generation_candidate(candidate_id)
+        if candidate is None:
+            raise VideoEnhancementServiceError(
+                404,
+                "generation_candidate_not_found",
+                "视频候选不存在",
+            )
+        _, media = await self._probe_original_media(candidate)
+        return media
 
     async def start_installation(self) -> VideoEnhancementInstallation:
         async with self._installation_lock:
@@ -323,27 +399,14 @@ class VideoEnhancementService:
                 project.output_aspect_ratio,
                 selected_target,
             )
-            original = self._original_media(candidate)
-            source_width = int(original.get("width") or candidate.width or 0)
-            source_height = int(original.get("height") or candidate.height or 0)
-            if source_width <= 0 or source_height <= 0:
-                raise VideoEnhancementServiceError(
-                    422,
-                    "video_dimensions_missing",
-                    "原视频缺少尺寸信息，无法创建清晰化任务",
-                )
+            original, source_media = await self._probe_original_media(candidate)
+            source_width = source_media.width
+            source_height = source_media.height
             if source_width >= target_width and source_height >= target_height:
                 raise VideoEnhancementServiceError(
                     409,
                     "video_target_not_larger",
                     "原视频已达到或超过所选目标分辨率",
-                )
-            duration = float(candidate.duration_seconds or 0)
-            if duration <= 0:
-                raise VideoEnhancementServiceError(
-                    422,
-                    "video_duration_missing",
-                    "原视频缺少时长信息，无法创建清晰化任务",
                 )
             job = VideoEnhancementJob(
                 account_id=account_id,
@@ -357,7 +420,7 @@ class VideoEnhancementService:
                 source_sha256=str(original.get("sha256") or candidate.sha256),
                 source_width=source_width,
                 source_height=source_height,
-                duration_seconds=duration,
+                duration_seconds=source_media.duration_seconds,
                 target=selected_target,
                 target_width=target_width,
                 target_height=target_height,
@@ -628,6 +691,13 @@ class VideoEnhancementService:
             / str(job.id)
         )
 
+    def job_working_root(self, job: VideoEnhancementJob) -> Path:
+        """Use a short native path for Real-ESRGAN's temporary frame files."""
+
+        return (
+            Path(tempfile.gettempdir()).resolve() / "ViralDNA" / "video-enhancement" / str(job.id)
+        )
+
     async def recover(self) -> None:
         jobs = await self.repository.list_video_enhancement_jobs()
         now = utc_now()
@@ -699,7 +769,9 @@ class VideoEnhancementService:
                                 "total_frames": event.total_frames or latest.total_frames,
                                 "estimated_seconds_remaining": _estimate_remaining(
                                     latest,
+                                    event,
                                     progress_percent,
+                                    now,
                                 ),
                                 "process_id": event.process_id or latest.process_id,
                                 "heartbeat_at": now,
@@ -714,18 +786,18 @@ class VideoEnhancementService:
                 )
                 root = self.job_root(claimed)
                 destination = root / "enhanced.mp4"
-                working = root / "work"
+                working = self.job_working_root(claimed)
                 output = await self.engine.generate(
                     source_path=_filesystem_path(source_path),
                     destination_path=_filesystem_path(destination),
-                    working_root=_filesystem_path(working),
+                    working_root=working,
                     target_width=claimed.target_width,
                     target_height=claimed.target_height,
                     timeout_seconds=21600,
                     cancellation=cancellation,
                     progress=report,
                 )
-                await asyncio.to_thread(shutil.rmtree, _filesystem_path(working), True)
+                await asyncio.to_thread(shutil.rmtree, working, True)
                 manifest_path = root / "manifest.json"
                 await asyncio.to_thread(
                     _write_json_atomic,
@@ -814,8 +886,8 @@ class VideoEnhancementService:
                         }
                     )
                     await self.repository.save_video_enhancement_job(failed)
-                work = self.job_root(failed) / "work"
-                await asyncio.to_thread(shutil.rmtree, _filesystem_path(work), True)
+                work = self.job_working_root(failed)
+                await asyncio.to_thread(shutil.rmtree, work, True)
                 await self._notify(failed)
             finally:
                 cancellation.set()

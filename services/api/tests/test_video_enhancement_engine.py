@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import zipfile
 from pathlib import Path
@@ -7,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from viral_dna_api.video_enhancement import engine as engine_module
-from viral_dna_api.video_enhancement.engine import RealEsrganNcnnEngine
+from viral_dna_api.video_enhancement.domain import VideoEnhancementJobStage
+from viral_dna_api.video_enhancement.engine import (
+    RealEsrganNcnnEngine,
+    _NcnnProgressParser,
+)
 
 
 def _write_package(path: Path, *, include_binary_model: bool = True) -> str:
@@ -87,3 +92,27 @@ def test_installer_keeps_the_existing_install_when_the_package_lacks_a_model(
         engine.install(lambda _percent, _message: None)
 
     assert marker.read_text("utf-8") == "keep until replacement is validated"
+
+
+def test_ncnn_progress_counts_completed_frames_across_split_output() -> None:
+    async def scenario() -> None:
+        updates = []
+
+        async def capture(event) -> None:
+            updates.append(event)
+
+        parser = _NcnnProgressParser(capture, total_frames=4)
+        await parser.feed_stderr("93.33%\ninput/frame_00000001.png -> output/frame_")
+        assert updates == []
+        await parser.feed_stderr("00000001.png done\n0.00%\n")
+        await parser.feed_stdout("input/frame_00000002.png -> output/frame_00000002.png done\n")
+        await parser.feed_stderr("input/frame_00000001.png -> output/frame_00000001.png done\n")
+
+        assert len(updates) == 2
+        assert updates[0].stage == VideoEnhancementJobStage.UPSCALING
+        assert updates[0].processed_frames == 1
+        assert updates[0].message == "正在增强画面细节 · 1/4 帧"
+        assert updates[-1].processed_frames == 2
+        assert updates[-1].percent == 50
+
+    asyncio.run(scenario())

@@ -69,6 +69,8 @@ test("switches the shared player between original and enhanced media", () => {
 });
 
 test("disables output sizes the adopted source has already reached", () => {
+  assert.match(hookSource, /setSource\(nextJobs\.source \|\| null\)/);
+  assert.match(panelSource, /enhancement\.source/);
   assert.match(panelSource, /sourceShortEdge/);
   assert.match(panelSource, /sourceShortEdge >= item\.shortEdge/);
   assert.match(panelSource, /disabled=\{Boolean\(runningJob\) \|\| reached\}/);

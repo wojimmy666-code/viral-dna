@@ -12,6 +12,7 @@ export function useVideoEnhancement({
 }) {
   const [settings, setSettings] = useState(null);
   const [jobs, setJobs] = useState([]);
+  const [source, setSource] = useState(null);
   const [installation, setInstallation] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -48,6 +49,7 @@ export function useVideoEnhancement({
       ]);
       setSettings(nextSettings);
       setJobs(nextJobs.items || []);
+      setSource(nextJobs.source || null);
     } catch (nextError) {
       setError(nextError.message || "读取视频清晰化状态失败");
     } finally {
@@ -59,6 +61,7 @@ export function useVideoEnhancement({
     clearTimers();
     setSettings(null);
     setJobs([]);
+    setSource(null);
     setInstallation(null);
     setError("");
     if (enabled && candidateId) load();
@@ -233,6 +236,7 @@ export function useVideoEnhancement({
     load,
     retry,
     settings,
+    source,
     start,
     useForFinal,
     useOriginal,
