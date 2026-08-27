@@ -146,15 +146,16 @@ export function VideoEnhancementPanel({
         <span className="video-enhancement-summary-icon"><MagicWand size={18} weight="duotone" /></span>
         <span>
           <strong id="video-enhancement-title">AI 清晰化</strong>
-          <small>
-            {runningJob
-              ? runningJob.progress_message
-              : activeResult
+          {runningJob && !open && <small>{runningJob.progress_message}</small>}
+          {!runningJob && (
+            <small>
+              {activeResult
                 ? `${activeResult.job.target === "4k" ? "4K" : "1080p"} 版本用于成片`
                 : "Real-ESRGAN 本地处理，不消耗视频生成额度"}
-          </small>
+            </small>
+          )}
         </span>
-        {runningJob && <em>{runningJob.progress_percent}%</em>}
+        {runningJob && !open && <em>{runningJob.progress_percent}%</em>}
         <CaretDown className="video-enhancement-caret" size={17} />
       </button>
 

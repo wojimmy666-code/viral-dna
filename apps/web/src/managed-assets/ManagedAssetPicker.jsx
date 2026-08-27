@@ -45,14 +45,15 @@ function assetBinding(asset) {
 
 export function ManagedAssetPicker({
   currentBinding,
+  initialQuery = "",
   onClose,
   onOpenModelSettings,
   onSelect,
   request,
 }) {
   const [kind, setKind] = useState(currentBinding?.kind || "virtual_person");
-  const [queryDraft, setQueryDraft] = useState("");
-  const [query, setQuery] = useState("");
+  const [queryDraft, setQueryDraft] = useState(initialQuery);
+  const [query, setQuery] = useState(initialQuery);
   const [groupId, setGroupId] = useState("");
   const [page, setPage] = useState(1);
   const [catalog, setCatalog] = useState(null);

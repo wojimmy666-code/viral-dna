@@ -9,6 +9,7 @@
     "dev:web": "npm --workspace apps/web run dev",
     "build:web": "npm --workspace apps/web run build",
     "check:design": "npm --workspace apps/web run check:design",
+    "test:launcher": "node --test scripts/managed-launcher.test.mjs",
     "test:web": "npm --workspace apps/web run test"
   }
 }

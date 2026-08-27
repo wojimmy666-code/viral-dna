@@ -46,6 +46,8 @@ test("keeps Real-ESRGAN work durable and explicitly selects the final version", 
   assert.match(panelSource, /成片改用原始版/);
   assert.match(panelSource, /原视频始终保留/);
   assert.match(panelSource, /可以离开此页面，任务将在后台继续/);
+  assert.match(panelSource, /runningJob && !open && <small>/);
+  assert.match(panelSource, /runningJob && !open && <em>/);
 });
 
 test("installs the optional engine inline without triggering an automatic download", () => {

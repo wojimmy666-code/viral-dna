@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,9 @@ from ..models import (
     VideoGenerationIntentIR,
     VideoIntentBaseline,
     VideoIntentConflict,
+    VideoIntentDimension,
+    VideoIntentDirective,
+    VideoIntentOperation,
     VideoIntentState,
     VideoIntentStatus,
     VideoPromptMention,
@@ -42,6 +46,24 @@ SYSTEM_PROMPT_PATH = (
     Path(__file__).resolve().parents[1] / "ai" / "prompts" / "video_generation_intent_v1.md"
 )
 PRIMARY_SEMANTIC_ATTEMPTS = 2
+CONTINUOUS_TRANSITION_INSTRUCTION = (
+    "人物动作、主体位置、画面构图与光影自然连续衔接，"
+    "前后画面由视频模型生成连续视觉转场。"
+)
+HARD_CUT_NEGATION_PATTERN = re.compile(
+    r"(?:不|不要|无需|避免|禁止|不得|不可|非|取消|去掉|拒绝|无)"
+    r"(?:再|使用|采用|做|进行|发生|保留|任何|固定|明显|直接|\s)*硬切"
+)
+DIRECT_CUT_REQUEST_MARKERS = (
+    "直接切换",
+    "直接切到",
+    "直接切成",
+    "去掉转场",
+    "取消转场",
+    "不要转场",
+    "无需转场",
+    "无转场",
+)
 
 
 class VideoIntentRepository(Protocol):
@@ -181,14 +203,19 @@ class ModelVideoIntentInterpreter:
                 except ModelProviderError as exc:
                     failures.append(f"{target.model}：{exc}")
                     break
-                issues = _intent_output_issues(
+                normalized_intent = _normalize_generated_transition_contract(
                     result.data,
+                    intent_text=intent_text,
+                    intent_context=context,
+                )
+                issues = _intent_output_issues(
+                    normalized_intent,
                     intent_text=intent_text,
                     intent_context=context,
                 )
                 if not issues:
                     return InterpretedIntent(
-                        intent=result.data,
+                        intent=normalized_intent,
                         requested_model=target.model,
                         resolved_model=result.resolved_model,
                         prompt_version=target.prompt_version,
@@ -199,7 +226,7 @@ class ModelVideoIntentInterpreter:
                 validation_issues.extend(issues)
                 attempt_label = "首次输出" if attempt_index == 0 else "纠错输出"
                 failures.append(f"{target.model} {attempt_label}：{'；'.join(issues)}")
-                repair_candidate = result.data
+                repair_candidate = normalized_intent
                 repair_issues = issues
         if validation_issues:
             issue_summary = "；".join(dict.fromkeys(validation_issues))
@@ -226,6 +253,132 @@ def _semantic_repair_instructions(
         f"上一次输出：\n{candidate_json}\n"
         "校验错误：\n- "
         + "\n- ".join(issues)
+    )
+
+
+def _contains_positive_hard_cut(text: str | None) -> bool:
+    without_negated_mentions = HARD_CUT_NEGATION_PATTERN.sub("", str(text or ""))
+    return "硬切" in without_negated_mentions
+
+
+def _user_requests_direct_cut(intent_text: str) -> bool:
+    compact = re.sub(r"\s+", "", intent_text)
+    return _contains_positive_hard_cut(compact) or any(
+        marker in compact for marker in DIRECT_CUT_REQUEST_MARKERS
+    )
+
+
+def _expects_generated_transition(
+    intent_context: dict[str, object] | None,
+) -> bool:
+    visual_beats = ((intent_context or {}).get("shot") or {}).get("visual_beats") or []
+    return any(
+        str(item.get("transition_to_next_type") or "") == "model_generated"
+        for item in visual_beats
+        if isinstance(item, dict)
+    )
+
+
+def _replace_hard_cut_result(text: str) -> str:
+    if not _contains_positive_hard_cut(text):
+        return text
+    return (
+        text.replace("直接硬切", "自然连续切换")
+        .replace("瞬间硬切", "自然连续切换")
+        .replace("固定硬切", "连续视觉转场")
+        .replace("硬切", "连续视觉转场")
+    )
+
+
+def _normalize_generated_transition_contract(
+    intent: VideoGenerationIntentIR,
+    *,
+    intent_text: str,
+    intent_context: dict[str, object] | None = None,
+) -> VideoGenerationIntentIR:
+    if (
+        not _expects_generated_transition(intent_context)
+        or _user_requests_direct_cut(intent_text)
+    ):
+        return intent
+
+    transition_directives = [
+        item
+        for item in intent.directives
+        if item.dimension == VideoIntentDimension.TRANSITION
+        and item.operation != VideoIntentOperation.UNSPECIFIED
+    ]
+    selects_direct_cut = any(
+        item.operation == VideoIntentOperation.REMOVE
+        or _contains_positive_hard_cut(item.target_name)
+        or _contains_positive_hard_cut(item.instruction)
+        for item in transition_directives
+    ) or any(
+        _contains_positive_hard_cut(text)
+        for text in (
+            intent.final_state_instruction,
+            intent.creative_instruction,
+            intent.transition_instruction,
+        )
+    )
+    if not selects_direct_cut:
+        return intent
+
+    normalized_directives: list[VideoIntentDirective] = []
+    has_transition_directive = False
+    for directive in intent.directives:
+        if directive.dimension != VideoIntentDimension.TRANSITION:
+            normalized_directives.append(directive)
+            continue
+        has_transition_directive = True
+        if (
+            directive.operation
+            in {VideoIntentOperation.REMOVE, VideoIntentOperation.UNSPECIFIED}
+            or _contains_positive_hard_cut(directive.target_name)
+            or _contains_positive_hard_cut(directive.instruction)
+        ):
+            normalized_directives.append(
+                directive.model_copy(
+                    update={
+                        "operation": VideoIntentOperation.REDESIGN,
+                        "target_name": "连续视觉转场",
+                        "target_reference_key": None,
+                        "preferred_source": "text",
+                        "instruction": CONTINUOUS_TRANSITION_INSTRUCTION,
+                    }
+                )
+            )
+        else:
+            normalized_directives.append(directive)
+    if not has_transition_directive:
+        normalized_directives.append(
+            VideoIntentDirective(
+                dimension=VideoIntentDimension.TRANSITION,
+                operation=VideoIntentOperation.REDESIGN,
+                target_name="连续视觉转场",
+                preferred_source="text",
+                instruction=CONTINUOUS_TRANSITION_INSTRUCTION,
+            )
+        )
+
+    transition_instruction = intent.transition_instruction
+    if (
+        not transition_instruction.strip()
+        or _contains_positive_hard_cut(transition_instruction)
+    ):
+        transition_instruction = CONTINUOUS_TRANSITION_INSTRUCTION
+    return intent.model_copy(
+        update={
+            "summary": _replace_hard_cut_result(intent.summary),
+            "directives": normalized_directives,
+            "final_state_instruction": _replace_hard_cut_result(
+                intent.final_state_instruction
+            ),
+            "creative_instruction": _replace_hard_cut_result(
+                intent.creative_instruction
+            ),
+            "transition_instruction": transition_instruction,
+        }
     )
 
 
@@ -261,20 +414,29 @@ def _intent_output_issues(
         issues.append("填写 transition_instruction 时必须同时输出 transition directive")
     if "转场" in intent_text and not transition_directives:
         issues.append("用户明确提到转场，必须输出 transition directive")
-    visual_beats = ((intent_context or {}).get("shot") or {}).get("visual_beats") or []
-    expects_generated_transition = any(
-        str(item.get("transition_to_next_type") or "") == "model_generated"
-        for item in visual_beats
-        if isinstance(item, dict)
-    )
     transition_directive_text = " ".join(
         text
         for item in transition_directives
         for text in (item.target_name, item.instruction)
         if text
     )
-    model_selected_hard_cut = "硬切" in f"{transition_text} {transition_directive_text}"
-    if expects_generated_transition and model_selected_hard_cut and "硬切" not in intent_text:
+    model_selected_hard_cut = any(
+        item.operation == VideoIntentOperation.REMOVE
+        for item in transition_directives
+    ) or any(
+        _contains_positive_hard_cut(text)
+        for text in (
+            intent.final_state_instruction,
+            intent.creative_instruction,
+            transition_text,
+            transition_directive_text,
+        )
+    )
+    if (
+        _expects_generated_transition(intent_context)
+        and model_selected_hard_cut
+        and not _user_requests_direct_cut(intent_text)
+    ):
         issues.append("当前分镜要求模型生成连续转场；用户未指定硬切时不得擅自改为硬切")
     return list(dict.fromkeys(issues))
 

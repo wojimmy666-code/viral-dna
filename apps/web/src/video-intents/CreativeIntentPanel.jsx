@@ -1,6 +1,5 @@
 import {
   ArrowCounterClockwise,
-  CheckCircle,
   CircleNotch,
   MagicWand,
   PencilSimple,
@@ -12,30 +11,6 @@ import { InlineMessage, StatusBadge } from "../ui/system/index.js";
 import { TextModelIndicator } from "../ui/text-model/TextModelIndicator.jsx";
 import { CreativeIntentMentionEditor } from "./CreativeIntentMentionEditor.jsx";
 import "./creative-intent.css";
-
-const DIMENSION_LABELS = Object.freeze({
-  identity: "人物身份",
-  wardrobe: "服装",
-  product: "产品",
-  scene: "场景",
-  prop: "道具",
-  motion: "动作",
-  camera: "镜头",
-  timing: "节奏",
-  composition: "构图",
-  transition: "转场",
-  dialogue: "对白",
-  audio: "声音",
-  lighting: "光线",
-  style: "风格",
-});
-
-const OPERATION_LABELS = Object.freeze({
-  preserve: "保留",
-  replace: "替换",
-  redesign: "重设计",
-  remove: "移除",
-});
 
 const ASSET_REQUIREMENT_CODES = new Set([
   "asset_ambiguous",
@@ -51,14 +26,6 @@ const ASSET_REQUIREMENT_CODES = new Set([
 
 export function intentRequirementsNeedAssets(requirements = []) {
   return requirements.some((item) => ASSET_REQUIREMENT_CODES.has(item?.code));
-}
-
-function directiveLabel(directive) {
-  const operation = OPERATION_LABELS[directive?.operation];
-  if (!operation) return "";
-  const dimension = DIMENSION_LABELS[directive?.dimension] || directive?.dimension;
-  const target = directive?.target_name ? `为 ${directive.target_name}` : "";
-  return `${operation}${dimension}${target}`;
 }
 
 function intentStatus(status, hasInterpretation, conflicts, errorCode) {
@@ -92,6 +59,7 @@ export function CreativeIntentPanel({
   onCompile,
   onOpenPrompt,
   onOpenReferences,
+  onRequestManagedAssetMention,
   onRestore,
   referenceFrames,
   resolveUrl,
@@ -100,9 +68,6 @@ export function CreativeIntentPanel({
 }) {
   const [mentionsValid, setMentionsValid] = useState(true);
   const interpretation = draft?.intent?.interpretation || null;
-  const directives = (interpretation?.directives || [])
-    .map(directiveLabel)
-    .filter(Boolean);
   const referenceCount = draft?.selectedReferences?.length || 0;
   const conflicts = draft?.intentConflicts || [];
   const status = intentStatus(
@@ -146,6 +111,7 @@ export function CreativeIntentPanel({
           managedAssetBinding={managedAssetBinding}
           mentions={draft?.intentMentions || []}
           onChange={onChange}
+          onRequestManagedAssetMention={onRequestManagedAssetMention}
           onValidityChange={setMentionsValid}
           referenceFrames={referenceFrames}
           resolveUrl={resolveUrl}
@@ -174,22 +140,13 @@ export function CreativeIntentPanel({
       )}
 
       {interpretation && (
-        <div className="creative-intent-result" aria-label="意图理解结果">
-          <div className="creative-intent-result-copy">
-            <CheckCircle aria-hidden="true" size={18} weight="fill" />
-            <div>
-              <strong>{interpretation.summary}</strong>
-              {directives.length > 0 && <p>{directives.join(" · ")}</p>}
-            </div>
-          </div>
-          <div className="creative-intent-result-actions">
-            <button className="text-button" onClick={onOpenReferences} type="button">
-              <Stack size={16} />查看引用（{referenceCount}）
-            </button>
-            <button className="text-button" onClick={onOpenPrompt} type="button">
-              <PencilSimple size={16} />编辑提示词
-            </button>
-          </div>
+        <div className="creative-intent-result-actions" aria-label="生成结果操作">
+          <button className="text-button" onClick={onOpenReferences} type="button">
+            <Stack size={16} />查看引用（{referenceCount}）
+          </button>
+          <button className="text-button" onClick={onOpenPrompt} type="button">
+            <PencilSimple size={16} />编辑提示词
+          </button>
         </div>
       )}
 
@@ -216,12 +173,6 @@ export function CreativeIntentPanel({
         </div>
       )}
 
-      {compileResult?.recommended_model_alias
-        && compileResult.recommended_model_alias !== draft?.modelAlias && (
-          <p className="creative-intent-model-note">
-            建议模型：{compileResult.recommended_model_alias}；当前选择保持不变。
-          </p>
-        )}
     </section>
   );
 }

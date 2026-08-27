@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   FilmStrip,
   ImageSquare,
   MagnifyingGlass,
@@ -65,6 +66,7 @@ export function CreativeIntentMentionEditor({
   managedAssetBinding,
   mentions,
   onChange,
+  onRequestManagedAssetMention,
   onValidityChange,
   referenceFrames,
   resolveUrl,
@@ -88,6 +90,21 @@ export function CreativeIntentMentionEditor({
     referenceFrames,
     videoReferenceBindings,
   }), [assets, depthAssets, managedAssetBinding, referenceFrames, videoReferenceBindings]);
+  const managedAssetDirectoryOption = useMemo(() => (
+    onRequestManagedAssetMention
+      ? {
+        id: "managed-asset-directory",
+        action: "browse_managed_assets",
+        reference_kind: "provider_managed_asset",
+        reference_id: "managed-asset-directory",
+        label: "从托管资产目录选择",
+        role: "actor_identity",
+        category: "Provider 托管角色",
+        description: "选择后绑定当前分镜并自动插入 @ 引用",
+        search_text: "托管角色 托管资产 演员 人物 身份",
+      }
+      : null
+  ), [onRequestManagedAssetMention]);
   const optionKeys = useMemo(
     () => new Set(options.map(videoReferenceKey)),
     [options],
@@ -134,7 +151,7 @@ export function CreativeIntentMentionEditor({
       Math.max(0, mentionMenu.start - 36),
       mentionMenu.start,
     );
-    return options
+    const references = options
       .filter((item) => (
         !mentionedKeys.has(videoReferenceKey(item))
         && (!query || `${item.label} ${item.search_text}`
@@ -147,8 +164,11 @@ export function CreativeIntentMentionEditor({
         || left.index - right.index
       ))
       .map(({ item }) => item)
-      .slice(0, 30);
-  }, [mentionMenu, mentionedKeys, options, value]);
+      .slice(0, managedAssetDirectoryOption ? 29 : 30);
+    return managedAssetDirectoryOption
+      ? [...references, managedAssetDirectoryOption]
+      : references;
+  }, [managedAssetDirectoryOption, mentionMenu, mentionedKeys, options, value]);
 
   useEffect(() => setActiveOptionIndex(0), [mentionMenu?.query]);
 
@@ -300,7 +320,7 @@ export function CreativeIntentMentionEditor({
         role: option.role,
         order: (mentions || []).length + 1,
       },
-    ], options);
+    ], [...options, option]);
     onChange?.({
       intentText: insertion.value,
       intentMentions,
@@ -313,6 +333,22 @@ export function CreativeIntentMentionEditor({
       promptRef.current?.setSelectionRange(insertion.cursor, insertion.cursor);
       setSelectionActive(false);
     });
+  }
+
+  function selectOption(option) {
+    if (option?.action === "browse_managed_assets") {
+      const range = mentionMenu ? { ...mentionMenu } : null;
+      const query = String(mentionMenu?.query || "")
+        .replace(/^(?:托管角色|托管资产|演员|人物)(?:[/：:\s]+)?/u, "")
+        .trim();
+      setMentionMenu(null);
+      onRequestManagedAssetMention?.({
+        query,
+        insert: (managedAssetOption) => insertMention(managedAssetOption, range),
+      });
+      return;
+    }
+    insertMention(option);
   }
 
   function handleKeyDown(event) {
@@ -353,7 +389,7 @@ export function CreativeIntentMentionEditor({
       ));
     } else if (event.key === "Enter") {
       event.preventDefault();
-      insertMention(filteredOptions[activeOptionIndex] || filteredOptions[0]);
+      selectOption(filteredOptions[activeOptionIndex] || filteredOptions[0]);
     }
   }
 
@@ -372,10 +408,10 @@ export function CreativeIntentMentionEditor({
         ) : filteredOptions.map((option, index) => (
           <button
             aria-selected={activeOptionIndex === index}
-            className={activeOptionIndex === index ? "active" : ""}
+            className={`${activeOptionIndex === index ? "active" : ""}${option.action ? " managed-directory-action" : ""}`.trim()}
             id={`${menuId}-option-${index}`}
-            key={videoReferenceKey(option)}
-            onClick={() => insertMention(option)}
+            key={option.action ? `action:${option.action}` : videoReferenceKey(option)}
+            onClick={() => selectOption(option)}
             onMouseEnter={() => setActiveOptionIndex(index)}
             onMouseDown={(event) => event.preventDefault()}
             role="option"
@@ -385,9 +421,10 @@ export function CreativeIntentMentionEditor({
               <ReferenceThumbnail option={option} resolveUrl={resolveUrl} />
             </span>
             <span>
-              <strong>@{option.label}</strong>
+              <strong>{option.action ? option.label : `@${option.label}`}</strong>
               <small>{option.category} · {option.description}</small>
             </span>
+            {option.action && <ArrowRight aria-hidden="true" size={17} />}
           </button>
         ))}
       </div>

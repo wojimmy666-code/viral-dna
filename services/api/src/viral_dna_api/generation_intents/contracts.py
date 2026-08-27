@@ -11,7 +11,7 @@ class VideoIntentCompileRequest(BaseModel):
     expected_draft_version: int = Field(ge=1)
     intent_text: str = Field(min_length=1, max_length=4000)
     intent_mentions: list[VideoPromptMention] = Field(default_factory=list, max_length=40)
-    merge_strategy: Literal["preserve_manual", "replace_all"] = "preserve_manual"
+    merge_strategy: Literal["preserve_manual", "replace_all"] = "replace_all"
 
     @model_validator(mode="after")
     def validate_mentions(self) -> VideoIntentCompileRequest:

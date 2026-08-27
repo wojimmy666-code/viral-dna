@@ -26,6 +26,7 @@ const appSource = readFileSync(
 test("browses provider managed people without a manual asset id field", () => {
   assert.match(pickerSource, /\/managed-assets\/providers\/volc_ark\/catalog/);
   assert.doesNotMatch(pickerSource, /name="asset_id"/);
+  assert.match(pickerSource, /initialQuery/);
 });
 
 test("binds one provider actor identity to the active shot revision", () => {
@@ -35,6 +36,8 @@ test("binds one provider actor identity to the active shot revision", () => {
   assert.match(workflowSource, /managed_asset_bindings: binding \? \[binding\] : \[\]/);
   assert.match(workflowSource, /onManagedAssetChange=\{updateManagedAssetBinding\}/);
   assert.match(workspaceSource, /managed_asset_bindings/);
+  assert.match(workspaceSource, /onRequestManagedAssetMention=\{openManagedAssetPicker\}/);
+  assert.match(workflowSource, /savedBinding = binding/);
 });
 
 test("configures the managed asset directory with separate access credentials", () => {

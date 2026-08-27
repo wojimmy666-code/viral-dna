@@ -2501,7 +2501,7 @@ export function ProductionHub({
     ) {
       return false;
     }
-    let succeeded = false;
+    let savedBinding = false;
     await executeAction(async () => {
       const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
         method: "PATCH",
@@ -2525,9 +2525,13 @@ export function ProductionHub({
           ? `已将 ${binding.name} 绑定为分镜 ${shotDetail.plan.index} 的演员身份`
           : `已解除分镜 ${shotDetail.plan.index} 的演员身份绑定`,
       );
-      succeeded = true;
+      savedBinding = binding
+        ? (updated.plan.managed_asset_bindings || []).find(
+          (item) => item.role === "actor_identity",
+        ) || false
+        : true;
     });
-    return succeeded;
+    return savedBinding;
   }
 
   async function createDepthControl(job) {

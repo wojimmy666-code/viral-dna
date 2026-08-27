@@ -420,7 +420,7 @@ export function VideoCandidateLibrary({
         <div>
           <strong>视频候选</strong>
           <small>
-            可用 {activeCandidates.length} 个 · {candidateGroups.length} 个批次
+            可用 {activeCandidates.length} 个
             {!managing && "，点击缩略图切换预览"}
           </small>
         </div>

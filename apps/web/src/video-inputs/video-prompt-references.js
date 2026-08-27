@@ -386,6 +386,21 @@ export function requiredSourceForVideoMention(mention = {}) {
   return VIDEO_REFERENCE_SOURCE_BY_KIND[mention.reference_kind] || "";
 }
 
+export function buildManagedAssetReferenceOption(managedAssetBinding = null) {
+  if (!managedAssetBinding?.id) return null;
+  return {
+    id: managedAssetBinding.id,
+    reference_kind: "provider_managed_asset",
+    reference_id: managedAssetBinding.id,
+    label: `托管角色/${managedAssetBinding.name}`,
+    role: "actor_identity",
+    category: "Provider 托管角色",
+    description: `${managedAssetBinding.provider} · ${managedAssetBinding.project_name}`,
+    preview_url: managedAssetPreviewPath(managedAssetBinding),
+    search_text: `${managedAssetBinding.name} ${managedAssetBinding.group_name || ""} 托管角色`,
+  };
+}
+
 export function buildVideoReferenceOptions({
   assets = [],
   depthAssets = [],
@@ -434,19 +449,8 @@ export function buildVideoReferenceOptions({
         },
       });
     });
-  if (managedAssetBinding) {
-    options.push({
-      id: managedAssetBinding.id,
-      reference_kind: "provider_managed_asset",
-      reference_id: managedAssetBinding.id,
-      label: `托管角色/${managedAssetBinding.name}`,
-      role: "actor_identity",
-      category: "Provider 托管角色",
-      description: `${managedAssetBinding.provider} · ${managedAssetBinding.project_name}`,
-      preview_url: managedAssetPreviewPath(managedAssetBinding),
-      search_text: `${managedAssetBinding.name} ${managedAssetBinding.group_name || ""} 托管角色`,
-    });
-  }
+  const managedAssetOption = buildManagedAssetReferenceOption(managedAssetBinding);
+  if (managedAssetOption) options.push(managedAssetOption);
   depthAssets
     .filter((asset) => (
       asset.enabled

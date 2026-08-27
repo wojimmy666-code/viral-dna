@@ -15,6 +15,7 @@ import {
 } from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
 import {
   buildVideoPromptHighlightSegments,
+  buildManagedAssetReferenceOption,
   buildVideoReferenceSystemConstraints,
   buildVideoReferenceOptions,
   compileVideoPromptWithReferences,
@@ -761,6 +762,14 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.equal(videoMentionToken(asset), "@资产/小喵酱/面部");
   assert.equal(requiredSourceForVideoMention(asset), "project_assets");
   const managed = options.find((item) => item.reference_kind === "provider_managed_asset");
+  assert.deepEqual(buildManagedAssetReferenceOption(null), null);
+  assert.equal(buildManagedAssetReferenceOption({
+    id: "08c760fc-f454-41b0-b074-aa3895537a88",
+    asset_id: "managed-person-1",
+    name: "演员A",
+    provider: "volc_ark",
+    project_name: "default",
+  }).reference_id, managed.reference_id);
   assert.deepEqual(selectedVideoReferenceOptions(options, [asset]), [asset]);
   assert.equal(
     managed.preview_url,
@@ -895,6 +904,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(workspaceSource, /<CreativeIntentPanel/);
   assert.match(workspaceSource, /compile-intent/);
   assert.match(workspaceSource, /intent_mentions:\s*videoDraft\.intentMentions/);
+  assert.match(workspaceSource, /merge_strategy:\s*"replace_all"/);
   assert.match(workspaceSource, /restore-intent-baseline/);
   assert.match(workspaceSource, /className="shot-video-config-disclosure"/);
   assert.match(workspaceSource, /open=\{referenceSettingsOpen\}/);
@@ -921,9 +931,16 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(creativeIntentPanelSource, /video_intent_model_validation_failed/);
   assert.match(creativeIntentPanelSource, /提示词校验失败/);
   assert.match(creativeIntentPanelSource, /需要确认意图/);
+  assert.doesNotMatch(creativeIntentPanelSource, /建议模型|creative-intent-model-note/);
   assert.match(workspaceSource, /intentRequirementsNeedAssets/);
   assert.match(workspaceSource, /仍有创作意图需要人工确认/);
   assert.match(creativeIntentMentionEditorSource, /buildVideoReferenceOptions/);
+  assert.match(creativeIntentMentionEditorSource, /从托管资产目录选择/);
+  assert.match(creativeIntentMentionEditorSource, /onRequestManagedAssetMention/);
+  assert.match(workspaceSource, /buildManagedAssetReferenceOption\(savedBinding\)/);
+  assert.match(workspaceSource, /pendingManagedAssetMentionRef/);
+  assert.doesNotMatch(creativeIntentPanelSource, /interpretation\.summary/);
+  assert.doesNotMatch(creativeIntentPanelSource, /creative-intent-result-copy/);
   assert.match(creativeIntentMentionEditorSource, /deleteVideoMentionAtSelection/);
   assert.match(creativeIntentMentionEditorSource, /event\.nativeEvent\?\.isComposing/);
   assert.match(creativeIntentMentionEditorSource, /createPortal\(menu, document\.body\)/);
@@ -957,6 +974,8 @@ test("keeps video candidates from every generation batch selectable", () => {
   assert.match(workspaceSource, /<VideoCandidateLibrary/);
   assert.match(candidateLibrarySource, /className="shot-candidate-library shot-video-candidate-library"/);
   assert.match(candidateLibrarySource, /历史 \{historicalCount\} 个/);
+  assert.match(candidateLibrarySource, /可用 \{activeCandidates\.length\} 个/);
+  assert.doesNotMatch(candidateLibrarySource, /个批次/);
   assert.match(workspaceSource, /改用此视频/);
   assert.match(workspaceSource, /displayedCandidateRun\?\.model_display_name/);
   assert.doesNotMatch(

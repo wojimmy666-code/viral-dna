@@ -8,6 +8,11 @@ import pytest
 from pydantic import ValidationError
 
 import viral_dna_api.generation_intents.service as intent_service_module
+from viral_dna_api.control_assets.domain import (
+    DepthControlAsset,
+    DepthControlStatus,
+    DepthControlValidationStatus,
+)
 from viral_dna_api.generation_intents.compiler import compile_intent_prompt
 from viral_dna_api.generation_intents.contracts import VideoIntentCompileRequest
 from viral_dna_api.generation_intents.service import (
@@ -18,15 +23,19 @@ from viral_dna_api.generation_intents.service import (
 )
 from viral_dna_api.models import (
     AnalysisProfile,
+    ManagedAssetKind,
+    ManagedAssetMediaType,
     ModelPlanSnapshot,
     ModelRouteSnapshot,
     ModelTargetSnapshot,
     ModelTask,
+    ProviderManagedAssetBinding,
     ReferenceAsset,
     ReferenceAssetType,
     ShotPlan,
     ShotVideoGenerationDraft,
     ShotVisualBeat,
+    VideoGenerationInputSource,
     VideoGenerationIntentIR,
     VideoGenerationReference,
     VideoIntentDimension,
@@ -37,6 +46,7 @@ from viral_dna_api.models import (
     VideoPromptMention,
     VideoPromptReferenceKind,
     VideoPromptReferenceRole,
+    VideoReferenceOrigin,
 )
 from viral_dna_api.video_generation.drafts import current_default_input_plan
 
@@ -299,12 +309,172 @@ def test_intent_compilation_resolves_assets_and_preserves_model_generated_transi
     asyncio.run(scenario())
 
 
+def test_successful_regeneration_replaces_old_intent_identity_references() -> None:
+    async def scenario() -> None:
+        shot = make_shot()
+        managed = ProviderManagedAssetBinding(
+            provider="volc_ark",
+            asset_id="managed-person-1",
+            kind=ManagedAssetKind.VIRTUAL_PERSON,
+            name="小喵酱",
+            media_type=ManagedAssetMediaType.IMAGE,
+            project_name="default",
+        )
+        depth = DepthControlAsset(
+            status=DepthControlStatus.READY,
+            source_video_id=uuid4(),
+            source_relative_path="source/video.mp4",
+            source_start_seconds=0,
+            source_end_seconds=4,
+            relative_path="depth/control.mp4",
+            thumbnail_relative_path="depth/control.webp",
+            manifest_relative_path="depth/control.json",
+            sha256="d" * 64,
+            width=1080,
+            height=1920,
+            fps=30,
+            duration_seconds=4,
+            frame_count=120,
+            validation_status=DepthControlValidationStatus.PASSED,
+        )
+        shot = shot.model_copy(
+            update={
+                "managed_asset_bindings": [managed],
+                "depth_control_assets": [depth],
+            }
+        )
+        old_identity = make_asset(shot.project_id, "旧人物面部").model_copy(
+            update={"type": ReferenceAssetType.PERSON}
+        )
+        old_reference = VideoGenerationReference(
+            reference_kind=VideoPromptReferenceKind.PROJECT_ASSET,
+            reference_id=old_identity.id,
+            label="资产/小喵酱/面部",
+            role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+            order=3,
+            origin=VideoReferenceOrigin.INTENT_EXPLICIT,
+        )
+        default_plan = current_default_input_plan(shot)
+        draft = ShotVideoGenerationDraft(
+            project_id=shot.project_id,
+            shot_plan_id=shot.id,
+            model_alias="minimax_h3",
+            resolution="720P",
+            duration_seconds=4,
+            input_plan=default_plan.model_copy(
+                update={
+                    "sources": [
+                        *default_plan.sources,
+                        VideoGenerationInputSource.PROJECT_ASSETS,
+                    ],
+                    "references": [*default_plan.references, old_reference],
+                }
+            ),
+            video_prompt="@资产/小喵酱/面部\n\n上一版人物提示词",
+            video_prompt_mentions=[
+                VideoPromptMention(**old_reference.model_dump(mode="python"))
+            ],
+            prompt_manually_modified=True,
+        )
+        managed_mention = VideoPromptMention(
+            reference_kind=VideoPromptReferenceKind.PROVIDER_MANAGED_ASSET,
+            reference_id=managed.id,
+            label="托管角色/小喵酱",
+            role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+            order=1,
+        )
+        depth_mention = VideoPromptMention(
+            reference_kind=VideoPromptReferenceKind.DEPTH_CONTROL,
+            reference_id=depth.id,
+            label="深度视频/分镜动作1",
+            role=VideoPromptReferenceRole.DEPTH,
+            order=2,
+        )
+        intent = VideoGenerationIntentIR(
+            summary="指定托管人物身份并采用深度动作",
+            directives=[
+                VideoIntentDirective(
+                    dimension=VideoIntentDimension.IDENTITY,
+                    operation=VideoIntentOperation.REPLACE,
+                    target_name="小喵酱",
+                    target_reference_key=f"provider_managed_asset:{managed.id}",
+                    preferred_source="managed_asset",
+                    visual_beat_indexes=[1, 2],
+                ),
+                VideoIntentDirective(
+                    dimension=VideoIntentDimension.MOTION,
+                    operation=VideoIntentOperation.PRESERVE,
+                    target_reference_key=f"depth_control:{depth.id}",
+                    preferred_source="depth_control",
+                    visual_beat_indexes=[1, 2],
+                ),
+            ],
+            final_state_instruction="同一名双马尾年轻女性完成跳跃和抬手展示。",
+            creative_instruction="人物动作自然连续，固定机位保持不变。",
+        )
+        repository = FakeRepository(shot, draft)
+        service = VideoIntentCompilationService(
+            repository,
+            FakeDraftService(draft),
+            FakeAssets([old_identity]),
+            FakeSettings(),
+            interpreter=FakeInterpreter(intent),
+        )
+
+        result = await service.compile(
+            shot.id,
+            VideoIntentCompileRequest(
+                expected_draft_version=1,
+                intent_text=(
+                    "将人物五官换成 @托管角色/小喵酱，"
+                    "动作使用 @深度视频/分镜动作1"
+                ),
+                intent_mentions=[managed_mention, depth_mention],
+                merge_strategy="replace_all",
+            ),
+            actor_account_id=None,
+        )
+
+        reference_kinds = [
+            item.reference_kind for item in result.draft.input_plan.references
+        ]
+        assert reference_kinds == [
+            VideoPromptReferenceKind.APPROVED_IMAGE,
+            VideoPromptReferenceKind.APPROVED_IMAGE,
+            VideoPromptReferenceKind.PROVIDER_MANAGED_ASSET,
+            VideoPromptReferenceKind.DEPTH_CONTROL,
+        ]
+        assert all(
+            item.reference_id != old_identity.id
+            for item in result.draft.input_plan.references
+        )
+        assert "@托管角色/小喵酱" in result.draft.video_prompt
+        assert "@深度视频/分镜动作1" in result.draft.video_prompt
+        assert "@资产/小喵酱/面部" not in result.draft.video_prompt
+        assert "上一版人物提示词" not in result.draft.video_prompt
+        assert result.draft.prompt_manually_modified is False
+        assert [item.reference_id for item in result.draft.video_prompt_mentions] == [
+            item.reference_id for item in result.draft.input_plan.references
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_compile_request_rejects_unbound_at_reference() -> None:
     with pytest.raises(ValidationError, match="尚未选择完成"):
         VideoIntentCompileRequest(
             expected_draft_version=1,
             intent_text="将人物换成 @",
         )
+
+
+def test_compile_request_defaults_to_replacing_generated_prompt() -> None:
+    payload = VideoIntentCompileRequest(
+        expected_draft_version=1,
+        intent_text="重新生成当前资产引用与视频提示词",
+    )
+
+    assert payload.merge_strategy == "replace_all"
 
 
 def test_model_interpreter_retries_preferred_model_with_validation_feedback(
@@ -389,7 +559,7 @@ def test_model_interpreter_retries_preferred_model_with_validation_feedback(
     assert interpreted.intent == valid
 
 
-def test_model_interpreter_uses_valid_fallback_after_preferred_model_repair_fails(
+def test_model_interpreter_normalizes_unrequested_hard_cut_without_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hard_cut = VideoGenerationIntentIR(
@@ -403,12 +573,6 @@ def test_model_interpreter_uses_valid_fallback_after_preferred_model_repair_fail
         ],
         final_state_instruction="一名年轻女性先穿白色睡衣跳跃，随后穿浅绿色水手服站立展示。",
         transition_instruction="人物落地时直接硬切为水手服画面。",
-    )
-    continuous = hard_cut.model_copy(
-        update={
-            "summary": "替换人物并连续变装",
-            "transition_instruction": "人物落地动作自然承接为抬手展示，服装在遮挡瞬间连续变换。",
-        }
     )
     targets = [
         ModelTargetSnapshot(
@@ -433,10 +597,7 @@ def test_model_interpreter_uses_valid_fallback_after_preferred_model_repair_fail
         routes=[ModelRouteSnapshot(task=ModelTask.VIDEO_INTENT, targets=targets)],
     )
     monkeypatch.setattr(intent_service_module, "load_model_plan", lambda _profile: plan)
-    provider = SequenceIntentProvider({
-        targets[0].model: hard_cut,
-        targets[1].model: continuous,
-    })
+    provider = SequenceIntentProvider({target.model: hard_cut for target in targets})
 
     interpreted = asyncio.run(
         ModelVideoIntentInterpreter(router=SequenceIntentRouter(provider)).interpret(
@@ -452,9 +613,63 @@ def test_model_interpreter_uses_valid_fallback_after_preferred_model_repair_fail
         )
     )
 
-    assert provider.calls == [targets[0].model, targets[0].model, targets[1].model]
-    assert interpreted.resolved_model == targets[1].model
-    assert interpreted.intent.transition_instruction == continuous.transition_instruction
+    assert provider.calls == [targets[0].model]
+    assert interpreted.resolved_model == targets[0].model
+    assert "连续视觉转场" in interpreted.intent.transition_instruction
+    assert "硬切" not in interpreted.intent.transition_instruction
+    assert interpreted.intent.directives[0].operation == VideoIntentOperation.REDESIGN
+
+
+def test_model_interpreter_preserves_user_requested_hard_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hard_cut = VideoGenerationIntentIR(
+        summary="人物落地时硬切变装",
+        directives=[
+            VideoIntentDirective(
+                dimension=VideoIntentDimension.TRANSITION,
+                operation=VideoIntentOperation.REDESIGN,
+                target_name="硬切",
+                preferred_source="text",
+                instruction="人物落地时直接硬切为水手服画面。",
+            )
+        ],
+        final_state_instruction="人物落地后身穿浅绿色水手服站立展示。",
+        transition_instruction="人物落地时直接硬切为水手服画面。",
+    )
+    target = ModelTargetSnapshot(
+        alias="qwen37",
+        provider="dashscope",
+        model="qwen3.7-plus-2026-05-26",
+        prompt_version="video-generation-intent-v1",
+        schema_version="video-generation-intent-v1",
+    )
+    plan = ModelPlanSnapshot(
+        profile=AnalysisProfile.BALANCED,
+        catalog_version="test",
+        pricing_version="test",
+        routes=[ModelRouteSnapshot(task=ModelTask.VIDEO_INTENT, targets=[target])],
+    )
+    monkeypatch.setattr(intent_service_module, "load_model_plan", lambda _profile: plan)
+    provider = SequenceIntentProvider({target.model: hard_cut})
+
+    interpreted = asyncio.run(
+        ModelVideoIntentInterpreter(router=SequenceIntentRouter(provider)).interpret(
+            intent_text="人物落地时直接硬切为下一套服装",
+            context={
+                "shot": {
+                    "visual_beats": [
+                        {"index": 1, "transition_to_next_type": "model_generated"},
+                        {"index": 2, "transition_to_next_type": "cut"},
+                    ]
+                }
+            },
+        )
+    )
+
+    assert provider.calls == [target.model]
+    assert interpreted.intent.transition_instruction == hard_cut.transition_instruction
+    assert interpreted.intent.directives == hard_cut.directives
 
 
 def test_model_interpreter_rejects_every_invalid_model_result(
@@ -524,7 +739,7 @@ def test_model_interpreter_rejects_every_invalid_model_result(
     assert failure.value.code == "video_intent_model_validation_failed"
     assert "提示词校验失败" in str(failure.value)
     assert "final_state_instruction 不得包含 @引用" in str(failure.value)
-    assert "用户未指定硬切时不得擅自改为硬切" in str(failure.value)
+    assert "用户未指定硬切时不得擅自改为硬切" not in str(failure.value)
     assert "模型输出已降级清理" not in str(failure.value)
 
 
@@ -813,6 +1028,7 @@ def test_intent_regeneration_preserves_manually_edited_prompt_and_updates_baseli
             VideoIntentCompileRequest(
                 expected_draft_version=1,
                 intent_text="场景改为明亮摄影棚",
+                merge_strategy="preserve_manual",
             ),
             actor_account_id=None,
         )

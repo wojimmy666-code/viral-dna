@@ -35,6 +35,7 @@ import {
 } from "./video-intents/CreativeIntentPanel.jsx";
 import {
   approvedVisualBeatFramesFromDetail,
+  buildManagedAssetReferenceOption,
   reconcileVideoDraftReferences,
   requiredSourceForVideoMention,
   videoMentionToken,
@@ -185,6 +186,8 @@ export function ShotVideoWorkspace({
   const [enhancementPreview, setEnhancementPreview] = useState(null);
   const [durationAdjustmentMessage, setDurationAdjustmentMessage] = useState("");
   const [managedAssetPickerOpen, setManagedAssetPickerOpen] = useState(false);
+  const [managedAssetPickerQuery, setManagedAssetPickerQuery] = useState("");
+  const pendingManagedAssetMentionRef = useRef(null);
   const [depthEngineCapabilities, setDepthEngineCapabilities] = useState([]);
   const [depthEngineLoadBusy, setDepthEngineLoadBusy] = useState(false);
   const [depthEngineLoadError, setDepthEngineLoadError] = useState("");
@@ -671,6 +674,18 @@ export function ShotVideoWorkspace({
     setDurationAdjustmentMessage("");
   }
 
+  function openManagedAssetPicker({ insert = null, query = "" } = {}) {
+    pendingManagedAssetMentionRef.current = insert;
+    setManagedAssetPickerQuery(query);
+    setManagedAssetPickerOpen(true);
+  }
+
+  function closeManagedAssetPicker() {
+    pendingManagedAssetMentionRef.current = null;
+    setManagedAssetPickerQuery("");
+    setManagedAssetPickerOpen(false);
+  }
+
   function changeCreativeIntent({
     addedReference = null,
     intentMentions = [],
@@ -711,7 +726,7 @@ export function ShotVideoWorkspace({
             expected_draft_version: record.draft_version,
             intent_text: intentText,
             intent_mentions: videoDraft.intentMentions || [],
-            merge_strategy: "preserve_manual",
+            merge_strategy: "replace_all",
           }),
         },
       );
@@ -901,6 +916,7 @@ export function ShotVideoWorkspace({
               onCompile={compileCreativeIntent}
               onOpenPrompt={() => setPromptSettingsOpen(true)}
               onOpenReferences={() => setReferenceSettingsOpen(true)}
+              onRequestManagedAssetMention={openManagedAssetPicker}
               onRestore={restoreIntentBaseline}
               referenceFrames={referenceFrames}
               resolveUrl={resolveUrl}
@@ -937,7 +953,7 @@ export function ShotVideoWorkspace({
                     }));
                     setDepthSettingsOpen(true);
                   }}
-                  onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
+                  onOpenManagedAssets={() => openManagedAssetPicker()}
                   onRestoreAutomaticReferences={() => setVideoDraft((current) => (
                     reconcileVideoDraftReferences(current, {
                       restoreAutomaticReferences: true,
@@ -1125,11 +1141,12 @@ export function ShotVideoWorkspace({
       {managedAssetPickerOpen && (
         <ManagedAssetPicker
           currentBinding={managedAssetBinding}
-          onClose={() => setManagedAssetPickerOpen(false)}
+          initialQuery={managedAssetPickerQuery}
+          onClose={closeManagedAssetPicker}
           onOpenModelSettings={onOpenModelSettings}
           onSelect={async (binding) => {
-            const saved = await onManagedAssetChange?.(binding);
-            if (saved !== false) {
+            const savedBinding = await onManagedAssetChange?.(binding);
+            if (savedBinding !== false) {
               setVideoDraft((current) => ({
                 ...current,
                 inputSources: Array.from(new Set([
@@ -1137,7 +1154,10 @@ export function ShotVideoWorkspace({
                   "provider_managed_assets",
                 ])),
               }));
-              setManagedAssetPickerOpen(false);
+              const insertMention = pendingManagedAssetMentionRef.current;
+              const option = buildManagedAssetReferenceOption(savedBinding);
+              if (insertMention && option) insertMention(option);
+              closeManagedAssetPicker();
             }
           }}
           request={request}
