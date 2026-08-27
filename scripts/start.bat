@@ -214,7 +214,11 @@ exit /b %errorlevel%
 :startup_timeout
 echo.
 echo [ViralDNA] ERROR: Services did not become ready within 30 seconds.
-echo [ViralDNA] Check the API and Web windows for details.
+if defined PROJECT_LAUNCHER_MANAGED (
+  echo [ViralDNA] Check this launch run's API and Web logs for details.
+) else (
+  echo [ViralDNA] Check the API and Web windows for details.
+)
 if not defined PROJECT_LAUNCHER_MANAGED pause
 exit /b 1
 
