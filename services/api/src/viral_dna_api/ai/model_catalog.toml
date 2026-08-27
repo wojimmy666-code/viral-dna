@@ -1,4 +1,4 @@
-catalog_version = "phase2-model-catalog-2026-08-16-r8"
+catalog_version = "phase2-model-catalog-2026-08-27-r9"
 pricing_version = "cn-list-price-2026-08-02"
 
 [prompts]
@@ -7,6 +7,7 @@ shot_facts = "shot-facts-v3"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-reasoning-v1"
 prompt_generation = "seedance-prompt-v1"
+video_intent = "video-generation-intent-v1"
 image_quality_qa = "image-semantic-quality-v1"
 
 [schemas]
@@ -15,6 +16,7 @@ shot_facts = "shot-visual-motion-facts-v2"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-findings-v1"
 prompt_generation = "prompt-ir-v1"
+video_intent = "video-generation-intent-v1"
 image_quality_qa = "image-semantic-quality-v1"
 
 [models.qwen37]
@@ -41,6 +43,7 @@ shot_facts = ["qwen37"]
 entity_resolution = ["qwen37"]
 viral_reasoning = ["qwen37"]
 prompt_generation = ["qwen37"]
+video_intent = ["qwen37"]
 image_quality_qa = ["qwen37"]
 
 [routes.balanced]
@@ -49,6 +52,7 @@ shot_facts = ["qwen37"]
 entity_resolution = ["qwen37"]
 viral_reasoning = ["qwen37"]
 prompt_generation = ["qwen36flash", "qwen37"]
+video_intent = ["qwen36flash", "qwen37"]
 image_quality_qa = ["qwen36flash", "qwen37"]
 
 [routes.economy]
@@ -57,4 +61,5 @@ shot_facts = ["qwen36flash", "qwen37"]
 entity_resolution = ["qwen36flash", "qwen37"]
 viral_reasoning = ["qwen36flash", "qwen37"]
 prompt_generation = ["qwen36flash", "qwen37"]
+video_intent = ["qwen36flash", "qwen37"]
 image_quality_qa = ["qwen36flash", "qwen37"]

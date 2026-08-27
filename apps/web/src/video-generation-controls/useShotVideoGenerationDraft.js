@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { normalizeVideoDuration } from "../production-ui.js";
 import {
+  approvedVisualBeatFramesFromDetail,
   normalizeVideoGenerationReferences,
-  normalizeVideoPromptMentions,
   requiredSourceForVideoMention,
   stripLegacyVideoReferencePolicies,
+  synchronizeAutomaticVideoPrompt,
+  synchronizeAutomaticVideoReferences,
+  videoReferenceStableKey,
 } from "../video-inputs/video-prompt-references.js";
 
 export const EMPTY_VIDEO_DRAFT = Object.freeze({
@@ -17,6 +20,18 @@ export const EMPTY_VIDEO_DRAFT = Object.freeze({
   modelAlias: "",
   resolution: "720P",
   inputSources: [],
+  referenceSyncMode: "auto",
+  autoReferenceExclusions: [],
+  referenceOrderOverride: [],
+  draftVersion: 0,
+  intentText: "",
+  intentMentions: [],
+  intent: null,
+  autoBaseline: null,
+  intentConflicts: [],
+  promptManuallyModified: false,
+  lockedReferenceKeys: [],
+  removedIntentReferenceKeys: [],
 });
 
 function normalizedCandidateCount(value) {
@@ -30,6 +45,15 @@ function normalizedDuration(value, fallback = 3) {
     : fallback;
 }
 
+function negativeConstraintLines(value) {
+  return Array.from(new Set(
+    String(value || "")
+      .split(/\r?\n/u)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ));
+}
+
 export function videoDraftParameters(draft) {
   return {
     model_alias: String(draft?.modelAlias || "").trim(),
@@ -41,6 +65,29 @@ export function videoDraftParameters(draft) {
       sources: Array.from(new Set(draft?.inputSources || [])),
       references: normalizeVideoGenerationReferences(draft?.selectedReferences || []),
     },
+    video_prompt: String(draft?.videoPrompt || ""),
+    video_prompt_mentions: normalizeVideoGenerationReferences(
+      draft?.videoPromptMentions || [],
+    ),
+    video_negative_constraints: negativeConstraintLines(draft?.negativeConstraints),
+    intent_text: String(draft?.intentText || ""),
+    intent_mentions: normalizeVideoGenerationReferences(
+      draft?.intentMentions || [],
+    ),
+    locked_reference_keys: Array.from(new Set(
+      (draft?.lockedReferenceKeys || []).map(String),
+    )),
+    removed_intent_reference_keys: Array.from(new Set(
+      (draft?.removedIntentReferenceKeys || []).map(String),
+    )),
+    prompt_manually_modified: Boolean(draft?.promptManuallyModified),
+    reference_sync_mode: draft?.referenceSyncMode || "auto",
+    auto_reference_exclusions: Array.from(new Set(
+      (draft?.autoReferenceExclusions || []).map(String),
+    )),
+    reference_order_override: Array.from(new Set(
+      (draft?.referenceOrderOverride || []).map(String),
+    )),
   };
 }
 
@@ -56,6 +103,18 @@ function localVideoDraftParameters(draft) {
     candidateCount: draft.candidateCount,
     inputSources: [...(draft.inputSources || [])],
     selectedReferences: (draft.selectedReferences || []).map((item) => ({ ...item })),
+    referenceSyncMode: draft.referenceSyncMode || "auto",
+    autoReferenceExclusions: [...(draft.autoReferenceExclusions || [])],
+    referenceOrderOverride: [...(draft.referenceOrderOverride || [])],
+    draftVersion: Number(draft.draftVersion || 0),
+    intentText: draft.intentText || "",
+    intentMentions: (draft.intentMentions || []).map((item) => ({ ...item })),
+    intent: draft.intent || null,
+    autoBaseline: draft.autoBaseline || null,
+    intentConflicts: [...(draft.intentConflicts || [])],
+    promptManuallyModified: Boolean(draft.promptManuallyModified),
+    lockedReferenceKeys: [...(draft.lockedReferenceKeys || [])],
+    removedIntentReferenceKeys: [...(draft.removedIntentReferenceKeys || [])],
   };
 }
 
@@ -76,23 +135,61 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
   const durationSeconds = selectedModel
     ? normalizeVideoDuration(rawDuration, selectedModel)
     : normalizedDuration(rawDuration);
-  const videoPrompt = stripLegacyVideoReferencePolicies(detail?.plan?.video_prompt || "");
-  const legacyMentions = detail?.plan?.video_prompt_mentions || [];
-  const selectedReferences = normalizeVideoGenerationReferences(
-    persistedDraft?.input_plan?.references?.length
-      ? persistedDraft.input_plan.references
-      : legacyMentions,
+  const persistedV2 = persistedDraft?.schema_version === "viral-dna-shot-video-draft/v2";
+  const videoPrompt = stripLegacyVideoReferencePolicies(
+    persistedV2 ? persistedDraft?.video_prompt : detail?.plan?.video_prompt || "",
   );
+  const legacyMentions = persistedV2
+    ? persistedDraft?.video_prompt_mentions || []
+    : detail?.plan?.video_prompt_mentions || [];
+  const persistedReferences = persistedDraft?.input_plan?.references;
+  const shouldRespectEmptyPersistedReferences = (
+    persistedV2
+    || ["user", "intent_generated"].includes(persistedDraft?.origin)
+  );
+  const baseReferences = (
+    Array.isArray(persistedReferences)
+    && (persistedReferences.length > 0 || shouldRespectEmptyPersistedReferences)
+  ) ? persistedReferences : legacyMentions;
+  const referenceFrames = approvedVisualBeatFramesFromDetail(detail);
+  const currentVisualBeatIds = new Set(
+    referenceFrames.map(({ beat }) => String(beat.id)),
+  );
+  const autoReferenceExclusions = (
+    persistedDraft?.auto_reference_exclusions || []
+  ).map(String).filter((id) => currentVisualBeatIds.size === 0 || currentVisualBeatIds.has(id));
+  const referenceOrderOverride = (
+    persistedDraft?.reference_order_override || []
+  ).map(String);
+  const selectedReferences = synchronizeAutomaticVideoReferences({
+    selectedReferences: baseReferences,
+    referenceFrames,
+    excludedVisualBeatIds: autoReferenceExclusions,
+    orderOverride: referenceOrderOverride,
+  });
+  const selectedStableKeys = new Set(selectedReferences.map(videoReferenceStableKey));
+  const effectiveReferenceOrderOverride = referenceOrderOverride.filter(
+    (key) => selectedStableKeys.has(key),
+  );
+  const synchronizedPrompt = synchronizeAutomaticVideoPrompt({
+    prompt: videoPrompt,
+    mentions: legacyMentions,
+    selectedReferences,
+  });
   const inferredSources = selectedReferences
     .map(requiredSourceForVideoMention)
     .filter(Boolean);
   return {
     ...EMPTY_VIDEO_DRAFT,
-    videoPrompt,
-    videoPromptMentions: normalizeVideoPromptMentions(videoPrompt, legacyMentions),
+    videoPrompt: synchronizedPrompt.videoPrompt,
+    videoPromptMentions: synchronizedPrompt.videoPromptMentions,
     selectedReferences,
     negativeConstraints: (
-      detail?.plan?.video_negative_constraints || []
+      (
+        persistedV2
+          ? persistedDraft?.video_negative_constraints
+          : detail?.plan?.video_negative_constraints
+      ) || []
     ).join("\n"),
     durationSeconds: String(durationSeconds),
     candidateCount: normalizedCandidateCount(
@@ -108,6 +205,22 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
       ...(persistedDraft?.input_plan?.sources || []),
       ...inferredSources,
     ])),
+    referenceSyncMode: persistedDraft?.reference_sync_mode || "auto",
+    autoReferenceExclusions,
+    referenceOrderOverride: effectiveReferenceOrderOverride,
+    draftVersion: Number(persistedDraft?.draft_version || 0),
+    intentText: persistedDraft?.intent?.text || "",
+    intentMentions: normalizeVideoGenerationReferences(
+      persistedDraft?.intent?.mentions || [],
+    ),
+    intent: persistedDraft?.intent || null,
+    autoBaseline: persistedDraft?.auto_baseline || null,
+    intentConflicts: persistedDraft?.intent_conflicts || [],
+    promptManuallyModified: Boolean(persistedDraft?.prompt_manually_modified),
+    lockedReferenceKeys: (persistedDraft?.locked_reference_keys || []).map(String),
+    removedIntentReferenceKeys: (
+      persistedDraft?.removed_intent_reference_keys || []
+    ).map(String),
   };
 }
 
@@ -215,7 +328,16 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
 
   const setVideoDraft = useCallback((updater) => {
     const current = currentDraftRef.current;
-    const next = typeof updater === "function" ? updater(current) : updater;
+    const proposed = typeof updater === "function" ? updater(current) : updater;
+    const promptChanged = (
+      proposed.videoPrompt !== current.videoPrompt
+      || JSON.stringify(proposed.videoPromptMentions || [])
+        !== JSON.stringify(current.videoPromptMentions || [])
+      || proposed.negativeConstraints !== current.negativeConstraints
+    );
+    const next = promptChanged
+      ? { ...proposed, promptManuallyModified: true }
+      : proposed;
     const shotPlanId = activeShotIdRef.current;
     applyLocalDraft(next, shotPlanId);
     if (!shotPlanId) return;
@@ -311,6 +433,19 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
     return persistPending(shotPlanId);
   }, [persistPending]);
 
+  const applyPersistedVideoDraft = useCallback(({
+    shotPlanId,
+    detail,
+    settings,
+    persistedDraft,
+  }) => {
+    pendingRef.current.delete(shotPlanId);
+    localDraftsRef.current.delete(shotPlanId);
+    promptDirtyRef.current.delete(shotPlanId);
+    recordsRef.current.set(shotPlanId, persistedDraft);
+    return hydrateVideoDraft({ shotPlanId, detail, settings, persistedDraft });
+  }, [hydrateVideoDraft]);
+
   const resetVideoDraft = useCallback(() => {
     const activeShotId = activeShotIdRef.current;
     if (activeShotId && pendingRef.current.has(activeShotId)) {
@@ -330,6 +465,7 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
   }, []);
 
   return {
+    applyPersistedVideoDraft,
     flushVideoDraft,
     hydrateVideoDraft,
     resetVideoDraft,

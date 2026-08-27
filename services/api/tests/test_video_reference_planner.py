@@ -188,6 +188,23 @@ def test_bailian_ordered_multi_image_route_keeps_ordered_frames() -> None:
     assert plan.managed_asset_references == ()
 
 
+def test_reference_planner_blocks_capacity_overflow_without_dropping_frames() -> None:
+    capability = load_video_model_catalog().option(
+        "bailian_wan_2_7_r2v"
+    ).capability.model_copy(update={"maximum_reference_images": 1})
+
+    with pytest.raises(VideoReferencePolicyError) as captured:
+        resolve_video_reference_plan(
+            capability=capability,
+            shot=_shot(),
+            reference_frames=(_frame(1), _frame(2)),
+            managed_asset_references=(),
+        )
+
+    assert captured.value.code == "provider_reference_limit"
+    assert "不会自动丢弃参考" in str(captured.value)
+
+
 def test_non_managed_route_never_submits_unrelated_provider_actor() -> None:
     frame = _frame(1)
     plan = resolve_video_reference_plan(

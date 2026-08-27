@@ -158,6 +158,30 @@ export function VideoPromptReferenceEditor({
     setSelectionActive(event.currentTarget.selectionStart !== event.currentTarget.selectionEnd);
   }
 
+  function referenceStateAfterPromptChange(nextValue) {
+    const nextMentions = normalizeVideoPromptMentions(
+      nextValue,
+      videoPromptMentions,
+      options,
+    );
+    const nextMentionKeys = new Set(nextMentions.map(videoReferenceKey));
+    const removedMentionKeys = new Set(
+      (videoPromptMentions || [])
+        .filter((mention) => !nextMentionKeys.has(videoReferenceKey(mention)))
+        .map(videoReferenceKey),
+    );
+    const removedReferences = (selectedReferences || []).filter(
+      (reference) => removedMentionKeys.has(videoReferenceKey(reference)),
+    );
+    return {
+      videoPromptMentions: nextMentions,
+      selectedReferences: (selectedReferences || []).filter(
+        (reference) => !removedMentionKeys.has(videoReferenceKey(reference)),
+      ),
+      removedReferences,
+    };
+  }
+
   function updatePrompt(event) {
     const nextValue = event.target.value;
     const cursor = event.target.selectionStart ?? nextValue.length;
@@ -167,14 +191,7 @@ export function VideoPromptReferenceEditor({
       const label = String(mention.label || "").replace(/^@+/, "");
       return matchedFragment === label || matchedFragment.startsWith(`${label} `);
     });
-    onChange({
-      videoPrompt: nextValue,
-      videoPromptMentions: normalizeVideoPromptMentions(
-        nextValue,
-        videoPromptMentions,
-        options,
-      ),
-    });
+    onChange({ videoPrompt: nextValue, ...referenceStateAfterPromptChange(nextValue) });
     setMentionMenu(match && !followsCompletedMention ? {
       start: cursor - match[1].length - 1,
       end: cursor,
@@ -193,11 +210,7 @@ export function VideoPromptReferenceEditor({
         event.preventDefault();
         onChange({
           videoPrompt: deletion.value,
-          videoPromptMentions: normalizeVideoPromptMentions(
-            deletion.value,
-            videoPromptMentions,
-            options,
-          ),
+          ...referenceStateAfterPromptChange(deletion.value),
         });
         setMentionMenu(null);
         requestAnimationFrame(() => {
@@ -268,7 +281,6 @@ export function VideoPromptReferenceEditor({
 
   return (
     <div className="video-prompt-reference-field">
-      <label htmlFor={editorId}>视频提示词</label>
       {quickOptions.length > 0 && (
         <div className="video-prompt-quick-references" aria-label="视频提示词快捷引用">
           <span>快捷引用</span>
@@ -320,6 +332,7 @@ export function VideoPromptReferenceEditor({
           {String(value || "").endsWith("\n") && "\n "}
         </div>
         <textarea
+          aria-label="视频提示词"
           aria-activedescendant={mentionMenu && filteredOptions.length
             ? `${menuId}-option-${activeOptionIndex}`
             : undefined}

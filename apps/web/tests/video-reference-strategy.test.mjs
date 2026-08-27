@@ -44,7 +44,8 @@ test("keeps managed actor validation in final video generation only", () => {
   assert.match(workspaceSource, /当前模型不接收原始真人身份素材，请先绑定 Provider 托管演员/);
   assert.doesNotMatch(workspaceSource, /\/video-references\/shots\/\$\{plan\.id\}\/strategy/);
   assert.match(workspaceSource, /if \(!plan\?\.id \|\| !usesDepthControl\)/);
-  assert.match(panelSource, /disabled=\{busy \|\| generationRunning\}/);
+  assert.match(panelSource, /engine\?\.available \? \(\s*!generationRunning && \(/);
+  assert.doesNotMatch(panelSource, /disabled=\{busy \|\| generationRunning\}/);
 });
 
 test("persists depth assets through dedicated create toggle and delete endpoints", () => {

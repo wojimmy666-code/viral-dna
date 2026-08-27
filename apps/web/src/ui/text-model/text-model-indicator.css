@@ -1,0 +1,7 @@
+.text-model-indicator {
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--type-leading-ui);
+  white-space: nowrap;
+}

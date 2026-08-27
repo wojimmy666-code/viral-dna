@@ -87,7 +87,8 @@ if "%API_RUNNING%"=="1" if "%WEB_RUNNING%"=="1" goto :ready
 if "%API_RUNNING%"=="0" (
   echo [ViralDNA] Starting API...
   if defined PROJECT_LAUNCHER_MANAGED (
-    start "ViralDNA API" /D "%PROJECT_ROOT%" "%ComSpec%" /d /s /c ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
+    if defined PROJECT_LAUNCHER_EVENT_FILE >>"%PROJECT_LAUNCHER_EVENT_FILE%" echo {"type":"stage","stage":"api","label":"启动 API","message":"正在启动 8000 端口服务"}
+    start "ViralDNA API" /b /D "%PROJECT_ROOT%" "%ComSpec%" /d /s /c ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
   ) else (
     start "ViralDNA API" /D "%PROJECT_ROOT%" "%ComSpec%" /k ""%PYTHON_EXE%" -m uvicorn viral_dna_api.main:app --app-dir services/api/src --host 127.0.0.1 --port 8000"
   )
@@ -96,13 +97,15 @@ if "%API_RUNNING%"=="0" (
 if "%WEB_RUNNING%"=="0" (
   echo [ViralDNA] Starting Web...
   if defined PROJECT_LAUNCHER_MANAGED (
-    start "ViralDNA Web" /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /d /s /c "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
+    if defined PROJECT_LAUNCHER_EVENT_FILE >>"%PROJECT_LAUNCHER_EVENT_FILE%" echo {"type":"stage","stage":"web","label":"启动 Web","message":"正在启动 4174 端口服务"}
+    start "ViralDNA Web" /b /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /d /s /c "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
   ) else (
     start "ViralDNA Web" /D "%PROJECT_ROOT%\apps\web" "%ComSpec%" /k "npm run dev -- --host 127.0.0.1 --port 4174 --strictPort"
   )
 )
 
 echo [ViralDNA] Waiting for both services...
+if defined PROJECT_LAUNCHER_EVENT_FILE >>"%PROJECT_LAUNCHER_EVENT_FILE%" echo {"type":"stage","stage":"services","label":"等待双服务","message":"正在检查 API 和 Web 就绪状态"}
 set /a WAIT_COUNT=0
 
 :wait_for_services
@@ -120,6 +123,7 @@ goto :wait_for_services
 
 :ready
 echo [ViralDNA] Ready: %WEB_URL%
+if defined PROJECT_LAUNCHER_EVENT_FILE >>"%PROJECT_LAUNCHER_EVENT_FILE%" echo {"type":"stage","stage":"ready","label":"服务已就绪","message":"API 与 Web 均已响应"}
 if /I not "%~1"=="--no-browser" start "" "%WEB_URL%"
 exit /b 0
 

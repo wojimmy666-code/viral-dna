@@ -12,6 +12,14 @@ from ..models import (
     ShotVideoGenerationDraftUpdate,
     VideoGenerationInputPlan,
     VideoGenerationInputSource,
+    VideoGenerationReference,
+    VideoIntentState,
+    VideoIntentStatus,
+    VideoPromptReferenceKind,
+    VideoPromptReferenceRole,
+    VideoReferenceOrigin,
+    VideoReferenceScope,
+    VideoReferenceScopeKind,
 )
 from .settings import VideoGenerationSettingsService
 
@@ -114,13 +122,45 @@ class ShotVideoGenerationDraftService:
                 "视频生成设置已在其他操作中更新，请保留当前选择并重试",
             )
         now = _now()
+        intent = current.intent
+        intent_text = (
+            payload.intent_text if payload.intent_text is not None else current.intent.text
+        )
+        intent_mentions = (
+            payload.intent_mentions
+            if payload.intent_mentions is not None
+            else current.intent.mentions
+        )
+        if intent_text != current.intent.text or intent_mentions != current.intent.mentions:
+            intent = current.intent.model_copy(
+                update={
+                    "text": intent_text,
+                    "mentions": intent_mentions,
+                    "status": (
+                        VideoIntentStatus.STALE
+                        if current.intent.interpretation is not None
+                        else VideoIntentStatus.EMPTY
+                    ),
+                }
+            )
         updated = current.model_copy(
             update={
+                "schema_version": "viral-dna-shot-video-draft/v2",
                 "model_alias": payload.model_alias,
                 "resolution": payload.resolution.upper(),
                 "duration_seconds": round(payload.duration_seconds, 3),
                 "candidate_count": payload.candidate_count,
                 "input_plan": payload.input_plan,
+                "video_prompt": payload.video_prompt,
+                "video_prompt_mentions": payload.video_prompt_mentions,
+                "video_negative_constraints": payload.video_negative_constraints,
+                "intent": intent,
+                "locked_reference_keys": payload.locked_reference_keys,
+                "removed_intent_reference_keys": payload.removed_intent_reference_keys,
+                "prompt_manually_modified": payload.prompt_manually_modified,
+                "reference_sync_mode": payload.reference_sync_mode,
+                "auto_reference_exclusions": payload.auto_reference_exclusions,
+                "reference_order_override": payload.reference_order_override,
                 "draft_version": current.draft_version + 1,
                 "origin": "user",
                 "updated_by_account_id": actor_account_id,
@@ -142,11 +182,7 @@ class ShotVideoGenerationDraftService:
     async def _initial_draft(self, plan: ShotPlan) -> ShotVideoGenerationDraft:
         runs = await self.repository.list_generation_runs(plan.project_id, plan.id)
         latest_run = next(
-            (
-                run
-                for run in reversed(runs)
-                if run.kind == GenerationKind.VIDEO and run.model_alias
-            ),
+            (run for run in reversed(runs) if run.kind == GenerationKind.VIDEO and run.model_alias),
             None,
         )
         settings = self.settings.get()
@@ -157,17 +193,17 @@ class ShotVideoGenerationDraftService:
                 project_id=plan.project_id,
                 shot_plan_id=plan.id,
                 model_alias=latest_run.model_alias or settings.default_model_alias,
-                resolution=str(
-                    request.get("resolution") or settings.default_resolution
-                ).upper(),
+                resolution=str(request.get("resolution") or settings.default_resolution).upper(),
                 duration_seconds=_bounded_duration(
                     request.get("duration_seconds"),
                     plan.duration_seconds,
                 ),
-                candidate_count=_bounded_candidate_count(
-                    request.get("candidate_count")
-                ),
+                candidate_count=_bounded_candidate_count(request.get("candidate_count")),
                 input_plan=request.get("input_plan") or legacy_video_input_plan(),
+                video_prompt=plan.video_prompt,
+                video_prompt_mentions=plan.video_prompt_mentions,
+                video_negative_constraints=plan.video_negative_constraints,
+                intent=VideoIntentState(),
                 origin="latest_run",
                 created_at=now,
                 updated_at=now,
@@ -182,20 +218,50 @@ class ShotVideoGenerationDraftService:
                 3.0,
             ),
             candidate_count=1,
-            input_plan=current_default_input_plan(),
+            input_plan=current_default_input_plan(plan),
+            video_prompt=plan.video_prompt,
+            video_prompt_mentions=plan.video_prompt_mentions,
+            video_negative_constraints=plan.video_negative_constraints,
+            intent=VideoIntentState(),
             origin="global_default",
             created_at=now,
             updated_at=now,
         )
 
 
-def current_default_input_plan() -> VideoGenerationInputPlan:
-    """New drafts start as prompt-only; optional media is an explicit user choice."""
-    return VideoGenerationInputPlan()
+def current_default_input_plan(plan: ShotPlan | None = None) -> VideoGenerationInputPlan:
+    """Use every approved required visual beat as the default ordered video input."""
+    if plan is None:
+        return VideoGenerationInputPlan()
+    beats = sorted(plan.visual_beats, key=lambda item: item.index)
+    required = [item for item in beats if item.required]
+    targets = required or beats
+    approved_targets = [beat for beat in targets if beat.approved_image_candidate_id is not None]
+    references = [
+        VideoGenerationReference(
+            reference_kind=VideoPromptReferenceKind.APPROVED_IMAGE,
+            reference_id=beat.approved_image_candidate_id,
+            label=f"分镜图/图{beat.index}",
+            role=VideoPromptReferenceRole.COMPOSITION,
+            order=order,
+            visual_beat_id=beat.id,
+            automatic=True,
+            origin=VideoReferenceOrigin.VISUAL_BEAT_AUTO,
+            scope=VideoReferenceScope(
+                kind=VideoReferenceScopeKind.VISUAL_BEATS,
+                visual_beat_ids=[beat.id],
+                start_ratio=beat.start_ratio,
+                end_ratio=beat.end_ratio,
+            ),
+        )
+        for order, beat in enumerate(approved_targets, start=1)
+    ]
+    return VideoGenerationInputPlan(
+        sources=([VideoGenerationInputSource.APPROVED_IMAGES] if approved_targets else []),
+        references=references,
+    )
 
 
 def legacy_video_input_plan() -> VideoGenerationInputPlan:
     """Old runs were created from approved shot images unless stated otherwise."""
-    return VideoGenerationInputPlan(
-        sources=[VideoGenerationInputSource.APPROVED_IMAGES]
-    )
+    return VideoGenerationInputPlan(sources=[VideoGenerationInputSource.APPROVED_IMAGES])

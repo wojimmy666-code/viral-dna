@@ -4,18 +4,68 @@
 
 .generation-reference-rail {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
   border: 1px solid var(--border-default);
   border-radius: 12px;
   background: #fbfbfd;
 }
 
+.generation-reference-summary,
+.generation-reference-content {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.generation-reference-summary {
+  justify-content: space-between;
+}
+
+.generation-reference-summary > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.generation-reference-summary strong {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+}
+
+.generation-reference-summary small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-leading-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generation-reference-summary > button {
+  min-height: 28px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
+  cursor: pointer;
+}
+
 .generation-reference-add {
-  min-width: 92px;
-  min-height: 48px;
+  min-width: 78px;
+  min-height: 54px;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -126,6 +176,11 @@
   color: var(--text-on-accent);
   background: rgba(27, 24, 34, .76);
   font-size: var(--type-caption-size);
+}
+
+.generation-reference-media > .generation-reference-auto-badge {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .generation-reference-item > small {
@@ -480,8 +535,13 @@
 }
 
 @media (max-width: 620px) {
-  .generation-reference-rail {
+  .generation-reference-content {
     align-items: flex-start;
+  }
+
+  .generation-reference-summary > div {
+    display: grid;
+    gap: 1px;
   }
 
   .generation-reference-add {

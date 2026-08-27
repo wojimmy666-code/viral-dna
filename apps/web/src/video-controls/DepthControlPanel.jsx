@@ -108,13 +108,6 @@ export function DepthControlPanel({
         <span><CheckCircle size={16} />无需人物或场景资产</span>
       </div>
 
-      <DepthGenerationStatus
-        error={generationError}
-        job={generationJob}
-        onCancel={onCancelGeneration}
-        onRetry={onRetryGeneration}
-      />
-
       <div className="depth-control-body">
         <div className="depth-control-media-grid">
           <article>
@@ -160,9 +153,11 @@ export function DepthControlPanel({
               <button className="secondary-button compact" disabled={busy} onClick={() => onToggle?.(activeDepth.id, false)} type="button">停用</button>
             )}
             {engine?.available ? (
-              <button className="secondary-button compact" disabled={busy || generationRunning} onClick={() => onCreate?.()} type="button">
-                <ArrowClockwise size={17} />{generationRunning ? "正在生成" : activeDepth ? "重新生成" : "生成深度视频"}
-              </button>
+              !generationRunning && (
+                <button className="secondary-button compact" disabled={busy} onClick={() => onCreate?.()} type="button">
+                  <ArrowClockwise size={17} />{activeDepth ? "重新生成" : "生成深度视频"}
+                </button>
+              )
             ) : (
               <button
                 className="secondary-button compact"
@@ -178,6 +173,13 @@ export function DepthControlPanel({
             )}
           </div>
         </div>
+
+        <DepthGenerationStatus
+          error={generationError}
+          job={generationJob}
+          onCancel={onCancelGeneration}
+          onRetry={onRetryGeneration}
+        />
 
         {(installationRunning || installationError) && (
           <div className={`depth-engine-installation${installationError ? " failed" : ""}`} role="status">

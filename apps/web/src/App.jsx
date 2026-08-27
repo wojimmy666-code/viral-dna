@@ -60,6 +60,12 @@ import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
 import {
+  DEFAULT_TEXT_MODEL_ALIAS,
+  TEXT_MODEL_PURPOSES,
+  effectiveTextModelLabel,
+  normalizeTextModelOverrides,
+} from "./settings/text-model-settings.js";
+import {
   PromptEditor,
   promptPackageToPlainText,
   promptTextFilename,
@@ -940,6 +946,11 @@ export function App() {
       image_model_alias: nextSettings.image_model_alias || null,
       video_model_alias: nextSettings.video_model_alias || null,
       video_resolution: nextSettings.video_resolution || null,
+      text_model_alias: nextSettings.text_model_alias || DEFAULT_TEXT_MODEL_ALIAS,
+      text_model_fallback_enabled: nextSettings.text_model_fallback_enabled !== false,
+      text_model_task_overrides: normalizeTextModelOverrides(
+        nextSettings.text_model_task_overrides,
+      ),
     };
     const saved = await apiRequest("/me/settings/preferences", {
       method: "PUT",
@@ -2640,6 +2651,10 @@ export function App() {
                       onPublished={openPublishedConcept}
                       onNotice={showNotice}
                       onManageCategories={() => navigate(pathForNav("categories"))}
+                      textModelLabel={effectiveTextModelLabel(
+                        userPreferences,
+                        TEXT_MODEL_PURPOSES.replicationPlan,
+                      )}
                     />
                   )}
                   {activeReportTab === "prompts" && (
@@ -2691,6 +2706,14 @@ export function App() {
                       width: video.width || report.media_evidence?.metadata?.width,
                     }}
                     sourceTitle={video.title}
+                    shotImageTextModelLabel={effectiveTextModelLabel(
+                      userPreferences,
+                      TEXT_MODEL_PURPOSES.shotImagePrompt,
+                    )}
+                    videoTextModelLabel={effectiveTextModelLabel(
+                      userPreferences,
+                      TEXT_MODEL_PURPOSES.videoPrompt,
+                    )}
                   />
                   )}
                 </section>

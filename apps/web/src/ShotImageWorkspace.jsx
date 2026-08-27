@@ -41,6 +41,7 @@ import { MediaLightbox } from "./MediaLightbox.jsx";
 import { AddToAssetsButton } from "./generated-assets/AddToAssetsButton.jsx";
 import { ImageGenerationCommandBar } from "./image-generation-controls/ImageGenerationCommandBar.jsx";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
+import { TextModelIndicator } from "./ui/text-model/TextModelIndicator.jsx";
 import {
   assetDirectoryLabel,
   assetMentionLabel,
@@ -372,6 +373,7 @@ export function ShotImageWorkspace({
   onAdvance,
   onNotice,
   request,
+  textModelLabel = "Qwen3.7 Plus",
 }) {
   const [keyframePickerOpen, setKeyframePickerOpen] = useState(false);
   const [shotCreateOpen, setShotCreateOpen] = useState(false);
@@ -1642,7 +1644,10 @@ export function ShotImageWorkspace({
               </button>
             </div>
             <label className="production-field">
-              <span>图片提示词</span>
+              <span className="shot-prompt-field-title">
+                <span>图片提示词</span>
+                <TextModelIndicator label={textModelLabel} />
+              </span>
               <div className="shot-prompt-editor">
                 <textarea
                   className="prompt-editor-textarea"

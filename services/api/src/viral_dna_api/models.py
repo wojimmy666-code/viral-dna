@@ -113,7 +113,14 @@ class ModelTask(StrEnum):
     ENTITY_RESOLUTION = "entity_resolution"
     VIRAL_REASONING = "viral_reasoning"
     PROMPT_GENERATION = "prompt_generation"
+    VIDEO_INTENT = "video_intent"
     IMAGE_QUALITY_QA = "image_quality_qa"
+
+
+class TextGenerationPurpose(StrEnum):
+    REPLICATION_PLAN = "replication_plan"
+    SHOT_IMAGE_PROMPT = "shot_image_prompt"
+    VIDEO_PROMPT = "video_prompt"
 
 
 class ModelRunStatus(StrEnum):
@@ -281,6 +288,44 @@ class VideoPromptReferenceRole(StrEnum):
     MOTION = "motion"
     CAMERA = "camera"
     DEPTH = "depth"
+    TRANSITION = "transition"
+    STYLE = "style"
+
+
+class VideoReferenceOrigin(StrEnum):
+    MANUAL = "manual"
+    VISUAL_BEAT_AUTO = "visual_beat_auto"
+    INTENT_GENERATED = "intent_generated"
+    INTENT_EXPLICIT = "intent_explicit"
+
+
+class VideoReferenceScopeKind(StrEnum):
+    WHOLE_SHOT = "whole_shot"
+    VISUAL_BEATS = "visual_beats"
+    TRANSITION_WINDOW = "transition_window"
+
+
+class VideoReferenceScope(BaseModel):
+    kind: VideoReferenceScopeKind = VideoReferenceScopeKind.WHOLE_SHOT
+    visual_beat_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    start_ratio: float | None = Field(default=None, ge=0, le=1)
+    end_ratio: float | None = Field(default=None, ge=0, le=1)
+
+    @field_validator("visual_beat_ids")
+    @classmethod
+    def require_unique_visual_beat_ids(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("视频参考生效画面不能重复")
+        return values
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> VideoReferenceScope:
+        if self.kind == VideoReferenceScopeKind.VISUAL_BEATS and not self.visual_beat_ids:
+            raise ValueError("按画面生效的视频参考必须指定画面")
+        if self.start_ratio is not None and self.end_ratio is not None:
+            if self.end_ratio <= self.start_ratio:
+                raise ValueError("视频参考结束位置必须晚于开始位置")
+        return self
 
 
 class VideoGenerationReference(BaseModel):
@@ -291,6 +336,11 @@ class VideoGenerationReference(BaseModel):
     label: str = Field(min_length=1, max_length=260)
     role: VideoPromptReferenceRole
     order: int = Field(default=1, ge=1, le=100)
+    visual_beat_id: UUID | None = None
+    automatic: bool = False
+    scope: VideoReferenceScope = Field(default_factory=VideoReferenceScope)
+    origin: VideoReferenceOrigin = VideoReferenceOrigin.MANUAL
+    locked: bool = False
 
     @field_validator("label")
     @classmethod
@@ -302,9 +352,7 @@ class VideoGenerationReference(BaseModel):
 
 
 class VideoGenerationInputPlan(BaseModel):
-    schema_version: Literal["viral-dna-video-input-plan/v1"] = (
-        "viral-dna-video-input-plan/v1"
-    )
+    schema_version: Literal["viral-dna-video-input-plan/v1"] = "viral-dna-video-input-plan/v1"
     sources: list[VideoGenerationInputSource] = Field(default_factory=list, max_length=5)
     references: list[VideoGenerationReference] = Field(default_factory=list, max_length=100)
 
@@ -582,9 +630,7 @@ class VideoGenerationCapability(BaseModel):
     managed_assets: ProviderManagedAssetCapability = Field(
         default_factory=ProviderManagedAssetCapability
     )
-    person_references: PersonReferenceCapability = Field(
-        default_factory=PersonReferenceCapability
-    )
+    person_references: PersonReferenceCapability = Field(default_factory=PersonReferenceCapability)
     reference_route: VideoReferenceRouteCapability = Field(
         default_factory=VideoReferenceRouteCapability
     )
@@ -666,6 +712,7 @@ class VideoProviderCredentialUpdate(BaseModel):
         if managed_fields_set and self.provider != "volc_ark":
             raise ValueError("只有火山方舟 Provider 支持托管资产目录配置")
         return self
+
 
 class VideoGenerationSettingsUpdate(BaseModel):
     enabled: bool = True
@@ -3059,10 +3106,141 @@ class VideoGenerationCreate(BaseModel):
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
 
 
-class ShotVideoGenerationDraft(BaseModel):
-    schema_version: Literal["viral-dna-shot-video-draft/v1"] = (
-        "viral-dna-shot-video-draft/v1"
+class VideoIntentDimension(StrEnum):
+    IDENTITY = "identity"
+    WARDROBE = "wardrobe"
+    PRODUCT = "product"
+    SCENE = "scene"
+    PROP = "prop"
+    MOTION = "motion"
+    CAMERA = "camera"
+    TIMING = "timing"
+    COMPOSITION = "composition"
+    TRANSITION = "transition"
+    DIALOGUE = "dialogue"
+    AUDIO = "audio"
+    LIGHTING = "lighting"
+    STYLE = "style"
+
+
+class VideoIntentOperation(StrEnum):
+    PRESERVE = "preserve"
+    REPLACE = "replace"
+    REDESIGN = "redesign"
+    REMOVE = "remove"
+    UNSPECIFIED = "unspecified"
+
+
+class VideoIntentFidelity(StrEnum):
+    STRICT = "strict"
+    GUIDED = "guided"
+    FREE = "free"
+
+
+class VideoIntentDirective(BaseModel):
+    dimension: VideoIntentDimension
+    operation: VideoIntentOperation
+    fidelity: VideoIntentFidelity = VideoIntentFidelity.GUIDED
+    target_name: str | None = Field(default=None, max_length=240)
+    target_reference_key: str | None = Field(default=None, max_length=200)
+    preferred_source: Literal[
+        "none",
+        "project_asset",
+        "managed_asset",
+        "approved_image",
+        "depth_control",
+        "source_video",
+        "source_transition",
+        "text",
+    ] = "none"
+    visual_beat_indexes: list[int] = Field(default_factory=list, max_length=20)
+    instruction: str = Field(default="", max_length=1200)
+
+    @field_validator("visual_beat_indexes")
+    @classmethod
+    def require_unique_beat_indexes(cls, values: list[int]) -> list[int]:
+        if any(value < 1 or value > 20 for value in values):
+            raise ValueError("创作意图画面序号必须位于 1～20")
+        if len(values) != len(set(values)):
+            raise ValueError("创作意图画面序号不能重复")
+        return values
+
+
+class VideoGenerationIntentIR(BaseModel):
+    schema_version: Literal["viral-dna-video-intent/v1"] = "viral-dna-video-intent/v1"
+    summary: str = Field(min_length=1, max_length=800)
+    directives: list[VideoIntentDirective] = Field(default_factory=list, max_length=60)
+    final_state_instruction: str = Field(
+        default="",
+        max_length=4000,
+        description=(
+            "供视频模型执行的替换完成后最终画面描述；使用肯定式现状语言，"
+            "不得描述替换、删除或修改过程"
+        ),
     )
+    creative_instruction: str = Field(default="", max_length=4000)
+    transition_instruction: str = Field(default="", max_length=2000)
+    dialogue_text: str = Field(default="", max_length=2000)
+    negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    confidence: float = Field(default=1, ge=0, le=1)
+    ambiguities: list[str] = Field(default_factory=list, max_length=20)
+
+
+class VideoIntentStatus(StrEnum):
+    EMPTY = "empty"
+    READY = "ready"
+    NEEDS_INPUT = "needs_input"
+    FAILED = "failed"
+    STALE = "stale"
+
+
+class VideoIntentState(BaseModel):
+    text: str = Field(default="", max_length=4000)
+    mentions: list[VideoPromptMention] = Field(default_factory=list, max_length=40)
+    revision: int = Field(default=0, ge=0)
+    status: VideoIntentStatus = VideoIntentStatus.EMPTY
+    interpretation: VideoGenerationIntentIR | None = None
+    requested_model: str | None = Field(default=None, max_length=160)
+    resolved_model: str | None = Field(default=None, max_length=160)
+    prompt_version: str | None = Field(default=None, max_length=80)
+    schema_version: str | None = Field(default=None, max_length=80)
+    provider_request_id: str | None = Field(default=None, max_length=200)
+    latency_ms: int = Field(default=0, ge=0)
+    generated_at: datetime | None = None
+
+    @field_validator("mentions")
+    @classmethod
+    def require_unique_mentions(
+        cls,
+        values: list[VideoPromptMention],
+    ) -> list[VideoPromptMention]:
+        keys = [(item.reference_kind, item.reference_id) for item in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("创作意图不能重复引用同一资产")
+        return values
+
+
+class VideoIntentBaseline(BaseModel):
+    video_prompt: str = Field(default="", max_length=8000)
+    video_prompt_mentions: list[VideoPromptMention] = Field(
+        default_factory=list,
+        max_length=40,
+    )
+    video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
+
+
+class VideoIntentConflict(BaseModel):
+    code: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1, max_length=500)
+    reference_key: str | None = Field(default=None, max_length=200)
+
+
+class ShotVideoGenerationDraft(BaseModel):
+    schema_version: Literal[
+        "viral-dna-shot-video-draft/v1",
+        "viral-dna-shot-video-draft/v2",
+    ] = "viral-dna-shot-video-draft/v2"
     project_id: UUID
     shot_plan_id: UUID
     model_alias: str = Field(
@@ -3074,11 +3252,52 @@ class ShotVideoGenerationDraft(BaseModel):
     duration_seconds: float = Field(ge=0.1, le=60)
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
+    video_prompt: str = Field(default="", max_length=8000)
+    video_prompt_mentions: list[VideoPromptMention] = Field(
+        default_factory=list,
+        max_length=40,
+    )
+    video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    intent: VideoIntentState = Field(default_factory=VideoIntentState)
+    auto_baseline: VideoIntentBaseline | None = None
+    intent_conflicts: list[VideoIntentConflict] = Field(default_factory=list, max_length=40)
+    locked_reference_keys: list[str] = Field(default_factory=list, max_length=100)
+    removed_intent_reference_keys: list[str] = Field(default_factory=list, max_length=100)
+    prompt_manually_modified: bool = False
+    reference_sync_mode: Literal["auto"] = "auto"
+    auto_reference_exclusions: list[UUID] = Field(default_factory=list, max_length=20)
+    reference_order_override: list[str] = Field(default_factory=list, max_length=100)
     draft_version: int = Field(default=1, ge=1)
-    origin: Literal["global_default", "latest_run", "user"] = "global_default"
+    origin: Literal[
+        "global_default",
+        "latest_run",
+        "user",
+        "intent_generated",
+    ] = "global_default"
     updated_by_account_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("auto_reference_exclusions")
+    @classmethod
+    def require_unique_auto_reference_exclusions(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("自动分镜图排除项不能重复")
+        return values
+
+    @field_validator(
+        "reference_order_override",
+        "locked_reference_keys",
+        "removed_intent_reference_keys",
+    )
+    @classmethod
+    def require_unique_reference_order_override(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 160 for value in normalized):
+            raise ValueError("生成参考顺序键格式无效")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("生成参考顺序键不能重复")
+        return normalized
 
 
 class ShotVideoGenerationDraftUpdate(BaseModel):
@@ -3092,6 +3311,41 @@ class ShotVideoGenerationDraftUpdate(BaseModel):
     duration_seconds: float = Field(ge=0.1, le=60)
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
+    video_prompt: str = Field(default="", max_length=8000)
+    video_prompt_mentions: list[VideoPromptMention] = Field(
+        default_factory=list,
+        max_length=40,
+    )
+    video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    intent_text: str | None = Field(default=None, max_length=4000)
+    intent_mentions: list[VideoPromptMention] | None = Field(default=None, max_length=40)
+    locked_reference_keys: list[str] = Field(default_factory=list, max_length=100)
+    removed_intent_reference_keys: list[str] = Field(default_factory=list, max_length=100)
+    prompt_manually_modified: bool = False
+    reference_sync_mode: Literal["auto"] = "auto"
+    auto_reference_exclusions: list[UUID] = Field(default_factory=list, max_length=20)
+    reference_order_override: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("auto_reference_exclusions")
+    @classmethod
+    def require_unique_auto_reference_exclusions(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("自动分镜图排除项不能重复")
+        return values
+
+    @field_validator(
+        "reference_order_override",
+        "locked_reference_keys",
+        "removed_intent_reference_keys",
+    )
+    @classmethod
+    def require_unique_reference_order_override(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 160 for value in normalized):
+            raise ValueError("生成参考顺序键格式无效")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("生成参考顺序键不能重复")
+        return normalized
 
 
 class ShotKeyframeSelectRequest(BaseModel):

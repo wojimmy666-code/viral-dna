@@ -22,6 +22,9 @@ const SOURCE_KIND = Object.freeze({
 
 export function referenceAlias(item = {}, index = 0) {
   const ordinal = index + 1;
+  if (item.reference_kind === "approved_image" && item.beat_index) {
+    return `图${item.beat_index}`;
+  }
   if (item.reference_kind === "provider_managed_asset") return `角色${ordinal}`;
   if (item.reference_kind === "reference_video") return `视频${ordinal}`;
   if (item.reference_kind === "depth_control") return `深度${ordinal}`;

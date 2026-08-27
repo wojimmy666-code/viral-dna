@@ -12,9 +12,11 @@ from viral_dna_api.models import (
     GenerationKind,
     ShotPlan,
     ShotVideoGenerationDraftUpdate,
+    ShotVisualBeat,
     VideoGenerationInputPlan,
     VideoGenerationInputSource,
     VideoGenerationReference,
+    VideoPromptMention,
     VideoPromptReferenceKind,
     VideoPromptReferenceRole,
 )
@@ -63,6 +65,15 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
 
         actor_id = uuid4()
         reference_id = uuid4()
+        excluded_visual_beat_id = uuid4()
+        order_key = f"approved_image:visual_beat:{excluded_visual_beat_id}"
+        intent_mention = VideoPromptMention(
+            reference_kind=VideoPromptReferenceKind.PROJECT_ASSET,
+            reference_id=reference_id,
+            label="资产/人物/小喵酱",
+            role=VideoPromptReferenceRole.ACTOR_IDENTITY,
+            order=1,
+        )
         updated = await service.update(
             shot.id,
             ShotVideoGenerationDraftUpdate(
@@ -82,12 +93,20 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
                         )
                     ],
                 ),
+                auto_reference_exclusions=[excluded_visual_beat_id],
+                reference_order_override=[order_key],
+                intent_text="将人物换成 @资产/人物/小喵酱",
+                intent_mentions=[intent_mention],
             ),
             actor_account_id=actor_id,
         )
         assert updated.model_alias == "seedance_2_0_fast"
         assert updated.input_plan.sources == [VideoGenerationInputSource.PROJECT_ASSETS]
         assert updated.input_plan.references[0].reference_id == reference_id
+        assert updated.auto_reference_exclusions == [excluded_visual_beat_id]
+        assert updated.reference_order_override == [order_key]
+        assert updated.intent.text == "将人物换成 @资产/人物/小喵酱"
+        assert updated.intent.mentions == [intent_mention]
         assert updated.updated_by_account_id == actor_id
         assert updated.draft_version == 2
 
@@ -97,6 +116,9 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
         assert restored.resolution == "1080P"
         assert restored.input_plan.sources == [VideoGenerationInputSource.PROJECT_ASSETS]
         assert restored.input_plan.references[0].reference_id == reference_id
+        assert restored.auto_reference_exclusions == [excluded_visual_beat_id]
+        assert restored.reference_order_override == [order_key]
+        assert restored.intent.mentions == [intent_mention]
 
         with pytest.raises(ShotVideoGenerationDraftError) as conflict:
             await service.update(
@@ -112,6 +134,51 @@ def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates()
             )
         assert conflict.value.status_code == 409
         assert conflict.value.code == "video_draft_conflict"
+
+    asyncio.run(scenario())
+
+
+def test_video_generation_draft_starts_with_all_approved_visual_beats() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        service = ShotVideoGenerationDraftService(store, FakeVideoSettings())
+        first_candidate_id = uuid4()
+        second_candidate_id = uuid4()
+        beats = [
+            ShotVisualBeat(
+                index=1,
+                title="起始画面",
+                start_ratio=0,
+                end_ratio=0.5,
+                approved_image_candidate_id=first_candidate_id,
+            ),
+            ShotVisualBeat(
+                index=2,
+                title="结束画面",
+                start_ratio=0.5,
+                end_ratio=1,
+                approved_image_candidate_id=second_candidate_id,
+            ),
+        ]
+        shot = make_shot().model_copy(update={"visual_beats": beats})
+        await store.save_shot_plan(shot)
+
+        draft = await service.get(shot.id)
+
+        assert draft.input_plan.sources == [VideoGenerationInputSource.APPROVED_IMAGES]
+        assert [item.reference_id for item in draft.input_plan.references] == [
+            first_candidate_id,
+            second_candidate_id,
+        ]
+        assert [item.visual_beat_id for item in draft.input_plan.references] == [
+            beats[0].id,
+            beats[1].id,
+        ]
+        assert all(item.automatic for item in draft.input_plan.references)
+        assert [item.label for item in draft.input_plan.references] == [
+            "分镜图/图1",
+            "分镜图/图2",
+        ]
 
     asyncio.run(scenario())
 

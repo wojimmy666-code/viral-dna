@@ -2,10 +2,6 @@
   min-width: 0;
 }
 
-.video-prompt-reference-field > label {
-  display: block;
-}
-
 .video-prompt-quick-references {
   width: 100%;
   display: grid;
@@ -173,7 +169,7 @@
   border: 1px solid #dcd8ed;
   border-radius: 10px;
   background: #fff;
-  box-shadow: 0 12px 32px rgba(43, 38, 66, 0.16);
+  box-shadow: 0 4px 8px rgba(43, 38, 66, 0.16);
 }
 
 .video-prompt-mention-menu > header {

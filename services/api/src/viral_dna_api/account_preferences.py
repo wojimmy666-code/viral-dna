@@ -11,6 +11,9 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .ai.catalog import load_model_catalog
+from .ai.text_model_routing import DEFAULT_TEXT_MODEL_ALIAS
+from .models import ModelOption, TextGenerationPurpose
 from .workspace_catalog import AccountContextService, default_account_catalog_path
 
 
@@ -24,6 +27,16 @@ class UserPreferences(BaseModel):
     image_candidate_count: int = Field(default=1, ge=1, le=4)
     video_model_alias: str | None = Field(default=None, max_length=160)
     video_resolution: str | None = Field(default=None, max_length=32)
+    text_model_alias: str = Field(
+        default=DEFAULT_TEXT_MODEL_ALIAS,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+    )
+    text_model_fallback_enabled: bool = True
+    text_model_task_overrides: dict[TextGenerationPurpose, str] = Field(
+        default_factory=dict
+    )
 
     @field_validator("image_model_alias", "video_model_alias", "video_resolution")
     @classmethod
@@ -31,11 +44,59 @@ class UserPreferences(BaseModel):
         normalized = " ".join((value or "").split()).strip()
         return normalized or None
 
+    @field_validator("text_model_alias")
+    @classmethod
+    def normalize_text_model_alias(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("text_model_task_overrides")
+    @classmethod
+    def normalize_text_model_task_overrides(
+        cls,
+        value: dict[TextGenerationPurpose, str],
+    ) -> dict[TextGenerationPurpose, str]:
+        normalized: dict[TextGenerationPurpose, str] = {}
+        for purpose, alias in value.items():
+            clean_alias = alias.strip()
+            if not clean_alias:
+                continue
+            if len(clean_alias) > 80:
+                raise ValueError("文案模型别名不能超过 80 个字符")
+            normalized[purpose] = clean_alias
+        return normalized
+
+
+class TextModelTaskOption(BaseModel):
+    id: TextGenerationPurpose
+    label: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=300)
+
+
+TEXT_MODEL_TASK_OPTIONS = (
+    TextModelTaskOption(
+        id=TextGenerationPurpose.REPLICATION_PLAN,
+        label="分析结论与复刻方案",
+        description="控制分析推理结论及其生成的三套复刻方案。",
+    ),
+    TextModelTaskOption(
+        id=TextGenerationPurpose.SHOT_IMAGE_PROMPT,
+        label="分镜说明与图片提示词",
+        description="分镜事实、画面说明和图片提示词由同一次视觉理解生成。",
+    ),
+    TextModelTaskOption(
+        id=TextGenerationPurpose.VIDEO_PROMPT,
+        label="创作意图与视频提示词",
+        description="理解创作意图，并编译带资产引用的最终视频提示词。",
+    ),
+)
+
 
 class UserPreferencesResponse(BaseModel):
     account_id: UUID
     revision: int = Field(ge=1)
     settings: UserPreferences
+    text_models: list[ModelOption] = Field(default_factory=list)
+    text_model_tasks: list[TextModelTaskOption] = Field(default_factory=list)
 
 
 class UserPreferencesUpdate(BaseModel):
@@ -52,6 +113,10 @@ class UserPreferencesState(BaseModel):
 
 
 class UserPreferencesConflict(RuntimeError):
+    pass
+
+
+class UserPreferencesValidationError(RuntimeError):
     pass
 
 
@@ -138,11 +203,35 @@ class UserPreferencesService:
 
     async def get(self) -> UserPreferencesResponse:
         account = await self.account_context.current_account()
-        return await self.repository.get(account.id)
+        return self._decorate(await self.repository.get(account.id))
 
     async def update(self, payload: UserPreferencesUpdate) -> UserPreferencesResponse:
+        self._validate_text_models(payload.settings)
         account = await self.account_context.current_account()
-        return await self.repository.update(account.id, payload)
+        return self._decorate(await self.repository.update(account.id, payload))
+
+    @staticmethod
+    def _validate_text_models(settings: UserPreferences) -> None:
+        catalog = load_model_catalog()
+        known_aliases = {option.alias for option in catalog.model_options()}
+        requested_aliases = {
+            settings.text_model_alias,
+            *settings.text_model_task_overrides.values(),
+        }
+        unknown_aliases = sorted(requested_aliases - known_aliases)
+        if unknown_aliases:
+            raise UserPreferencesValidationError(
+                f"文案模型不存在：{'、'.join(unknown_aliases)}"
+            )
+
+    @staticmethod
+    def _decorate(response: UserPreferencesResponse) -> UserPreferencesResponse:
+        return response.model_copy(
+            update={
+                "text_models": load_model_catalog().model_options(),
+                "text_model_tasks": list(TEXT_MODEL_TASK_OPTIONS),
+            }
+        )
 
 
 def create_user_preferences_router(service: UserPreferencesService) -> APIRouter:
@@ -160,5 +249,7 @@ def create_user_preferences_router(service: UserPreferencesService) -> APIRouter
             return await service.update(payload)
         except UserPreferencesConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except UserPreferencesValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return router

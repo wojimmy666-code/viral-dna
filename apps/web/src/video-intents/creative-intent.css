@@ -1,0 +1,273 @@
+.creative-intent-panel {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.creative-intent-heading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.creative-intent-heading h4,
+.creative-intent-heading p,
+.creative-intent-result p,
+.creative-intent-model-note {
+  margin: 0;
+}
+
+.shot-video-config-disclosure {
+  min-width: 0;
+  border-block: 1px solid var(--border-default);
+}
+
+.shot-video-config-disclosure + .shot-video-config-disclosure {
+  border-top: 0;
+}
+
+.shot-video-config-disclosure > summary {
+  min-height: var(--control-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-1);
+  color: var(--text-primary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.shot-video-config-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.shot-video-config-disclosure > summary > span {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.shot-video-config-disclosure > summary strong {
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+  line-height: var(--type-leading-ui);
+}
+
+.shot-video-config-disclosure > summary small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-regular);
+  line-height: var(--type-leading-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shot-video-config-disclosure > summary > svg {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  transition: transform 180ms ease-out;
+}
+
+.shot-video-config-disclosure[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.shot-video-config-disclosure > summary:hover,
+.shot-video-config-disclosure > summary:focus-visible {
+  color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.shot-video-config-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.shot-video-config-disclosure-body {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-2) 0 var(--space-4);
+}
+
+.creative-intent-heading h4 {
+  color: var(--text-primary);
+  font-size: var(--type-heading-size);
+  font-weight: var(--type-weight-semibold);
+  line-height: var(--type-leading-tight);
+}
+
+.creative-intent-heading p {
+  max-width: 72ch;
+  margin-top: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-leading-copy);
+}
+
+.creative-intent-heading .text-model-indicator {
+  display: block;
+  margin-top: var(--space-1);
+}
+
+.creative-intent-command {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.creative-intent-command textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.creative-intent-reference-field {
+  min-width: 0;
+}
+
+.creative-intent-invalid-mentions {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+  color: var(--status-danger-text);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-leading-copy);
+}
+
+.creative-intent-invalid-mentions svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.creative-intent-mention-menu {
+  position: fixed;
+}
+
+.video-prompt-highlight mark.invalid {
+  color: var(--status-danger-text);
+  background: var(--status-danger-bg);
+}
+
+.creative-intent-generate {
+  min-width: 190px;
+  white-space: nowrap;
+}
+
+.creative-intent-result {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0 0;
+  border-top: 1px solid var(--border-default);
+}
+
+.creative-intent-result-copy {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--status-success-text);
+}
+
+.creative-intent-result-copy > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.creative-intent-result-copy div {
+  min-width: 0;
+}
+
+.creative-intent-result-copy strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+  line-height: var(--type-leading-copy);
+}
+
+.creative-intent-result-copy p,
+.creative-intent-model-note,
+.creative-intent-restore {
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-leading-copy);
+}
+
+.creative-intent-result-copy p {
+  margin-top: var(--space-1);
+}
+
+.creative-intent-result-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.creative-intent-result-actions .text-button,
+.creative-intent-restore .text-button {
+  min-height: 36px;
+}
+
+.creative-intent-restore {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.creative-intent-model-note {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-default);
+}
+
+@media (max-width: 900px) {
+  .creative-intent-command {
+    grid-template-columns: 1fr;
+  }
+
+  .creative-intent-generate {
+    width: 100%;
+  }
+
+  .creative-intent-result {
+    display: grid;
+  }
+
+  .creative-intent-result-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 520px) {
+  .creative-intent-heading,
+  .creative-intent-restore {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shot-video-config-disclosure > summary > span {
+    display: grid;
+    gap: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shot-video-config-disclosure > summary > svg {
+    transition: none;
+  }
+}

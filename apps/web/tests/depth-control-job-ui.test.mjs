@@ -50,6 +50,18 @@ test("depth generation status exposes progress cancel retry and diagnostics", ()
   assert.match(statusSource, /aria-live="polite"/);
 });
 
+test("depth generation progress replaces the running button below the video controls", () => {
+  const mediaIndex = panelSource.indexOf('className="depth-control-media-grid"');
+  const toolbarIndex = panelSource.indexOf('className="depth-control-toolbar"');
+  const statusIndex = panelSource.indexOf("<DepthGenerationStatus");
+
+  assert.ok(mediaIndex >= 0);
+  assert.ok(toolbarIndex > mediaIndex);
+  assert.ok(statusIndex > toolbarIndex);
+  assert.match(panelSource, /engine\?\.available \? \(\s*!generationRunning && \(/);
+  assert.doesNotMatch(panelSource, /正在生成/);
+});
+
 test("depth settings expose automatic CPU and GPU modes with a device probe", () => {
   assert.match(settingsSource, /auto: \{/);
   assert.match(settingsSource, /cpu: \{/);

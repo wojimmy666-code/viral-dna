@@ -76,9 +76,7 @@ def filesystem_path(path: Path) -> Path:
 def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
     reference_id = uuid4()
     prompt_only = VideoGenerationInputPlan()
-    approved_frame = VideoGenerationInputPlan(
-        sources=[VideoGenerationInputSource.APPROVED_IMAGES]
-    )
+    approved_frame = VideoGenerationInputPlan(sources=[VideoGenerationInputSource.APPROVED_IMAGES])
     composed = VideoGenerationInputPlan(
         sources=[
             VideoGenerationInputSource.PROJECT_ASSETS,
@@ -93,9 +91,7 @@ def test_video_input_plan_is_composable_and_never_contains_audio() -> None:
             )
         ],
     )
-    video_only = VideoGenerationInputPlan(
-        sources=[VideoGenerationInputSource.DEPTH_CONTROL]
-    )
+    video_only = VideoGenerationInputPlan(sources=[VideoGenerationInputSource.DEPTH_CONTROL])
 
     assert prompt_only.input_mode == VideoGenerationInputMode.TEXT_TO_VIDEO
     assert approved_frame.input_mode == VideoGenerationInputMode.IMAGE_TO_VIDEO
@@ -208,7 +204,7 @@ def test_selected_depth_and_managed_references_compile_separated_responsibilitie
     assert "镜头关系以深度视频为准" in compiled
     assert compiled.count("是画面中唯一的人物身份来源") == 1
     assert compiled.count("是唯一的动作、姿态、运动节奏") == 1
-    assert "动作与运镜要求：【目标画面】 人物抬手调整口罩。" in compiled
+    assert "用户视频提示词：【目标画面】 人物抬手调整口罩。" in compiled
 
 
 def test_video_gateway_creates_persistent_simulated_candidates(
@@ -322,9 +318,10 @@ def test_video_gateway_creates_persistent_simulated_candidates(
         )
         assert input_payload["reference_images"][1]["sha256"] == "b" * 64
         assert input_payload["output"]["native_audio"] is False
-        assert input_payload["prompt"]["positive"].startswith("动作与运镜要求")
+        assert input_payload["prompt"]["positive"].startswith("用户视频提示词")
         assert "使用下列有序安全参考画面" in input_payload["prompt"]["positive"]
-        assert "图1到图2" in input_payload["prompt"]["positive"]
+        assert "图1到图2由视频模型结合前后画面和用户转场意图" in input_payload["prompt"]["positive"]
+        assert "不得默认改成硬切" in input_payload["prompt"]["positive"]
 
     asyncio.run(scenario())
 

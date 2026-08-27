@@ -1305,6 +1305,8 @@ export function ProductionHub({
   analysisId,
   sourceTitle,
   sourceMedia = {},
+  shotImageTextModelLabel = "Qwen3.7 Plus",
+  videoTextModelLabel = "Qwen3.7 Plus",
   projects,
   loading,
   error,
@@ -1346,6 +1348,7 @@ export function ProductionHub({
   const [shotDetail, setShotDetail] = useState(null);
   const [shotDraft, setShotDraft] = useState({ ...EMPTY_SHOT_DRAFT });
   const {
+    applyPersistedVideoDraft,
     flushVideoDraft,
     hydrateVideoDraft,
     resetVideoDraft,
@@ -3443,6 +3446,7 @@ export function ProductionHub({
                 sourceVideoUrl={resolveUrl(
                   "/api/v1/productions/" + detail.project.id + "/source-video",
                 )}
+                textModelLabel={shotImageTextModelLabel}
               />
             )}
             {activeSection === "shot_videos" && (
@@ -3475,6 +3479,8 @@ export function ProductionHub({
                 onRestoreCandidates={restoreVideoCandidates}
                 onRevokeApproval={revokeVideoApproval}
                 onSelectShot={selectShot}
+                applyPersistedVideoDraft={applyPersistedVideoDraft}
+                flushVideoDraft={flushVideoDraft}
                 project={detail.project}
                 request={request}
                 resolveUrl={resolveUrl}
@@ -3490,6 +3496,7 @@ export function ProductionHub({
                 videoGenerationSettings={videoGenerationSettings}
                 videoGenerationSettingsError={videoGenerationSettingsError}
                 videoGenerationSettingsStatus={videoGenerationSettingsStatus}
+                textModelLabel={videoTextModelLabel}
               />
             )}
             {activeSection === "editing" && (

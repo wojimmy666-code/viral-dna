@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
+  CaretDown,
   Check,
   Cloud,
   Desktop,
@@ -14,6 +15,13 @@ import {
   SettingsShell,
 } from "../ui/settings/SettingsPrimitives.jsx";
 import { VideoEnhancementSettings } from "../video-enhancement/VideoEnhancementSettings.jsx";
+import { TextModelIndicator } from "../ui/text-model/TextModelIndicator.jsx";
+import {
+  DEFAULT_TEXT_MODEL_ALIAS,
+  effectiveTextModelLabel,
+  normalizeTextModelOverrides,
+  textModelOptionLabel,
+} from "./text-model-settings.js";
 import "./settings-center.css";
 
 const SECTIONS = [
@@ -31,6 +39,11 @@ function normalizedSettings(settings) {
     image_candidate_count: Number(settings?.image_candidate_count || 1),
     video_model_alias: settings?.video_model_alias || "",
     video_resolution: settings?.video_resolution || "",
+    text_model_alias: settings?.text_model_alias || DEFAULT_TEXT_MODEL_ALIAS,
+    text_model_fallback_enabled: settings?.text_model_fallback_enabled !== false,
+    text_model_task_overrides: normalizeTextModelOverrides(
+      settings?.text_model_task_overrides,
+    ),
   };
 }
 
@@ -72,6 +85,17 @@ export function UserSettingsPage({
     () => modelOptions(videoSettings?.models),
     [videoSettings?.models],
   );
+  const textModels = useMemo(
+    () => modelOptions(preferences?.text_models),
+    [preferences?.text_models],
+  );
+  const textModelTasks = preferences?.text_model_tasks || [];
+  const textModelLabel = effectiveTextModelLabel(
+    { ...preferences, settings: draft },
+  );
+  const textModelOverrideCount = Object.keys(
+    normalizeTextModelOverrides(draft.text_model_task_overrides),
+  ).length;
 
   useEffect(() => {
     setDraft(normalizedSettings(preferences?.settings));
@@ -80,6 +104,15 @@ export function UserSettingsPage({
   function change(update) {
     setDraft((current) => ({ ...current, ...update }));
     setError("");
+  }
+
+  function changeTextModelOverride(taskId, alias) {
+    change({
+      text_model_task_overrides: normalizeTextModelOverrides({
+        ...draft.text_model_task_overrides,
+        [taskId]: alias,
+      }),
+    });
   }
 
   async function save() {
@@ -203,6 +236,79 @@ export function UserSettingsPage({
                 <Check size={18} weight="bold" />
                 <span>API Key、Provider 地址和计费规则由平台管理员统一维护，本页面不会读取或保存凭据。</span>
               </div>
+              <section className="text-model-settings-section" aria-labelledby="text-model-settings-title">
+                <header className="text-model-settings-heading">
+                  <div>
+                    <h3 id="text-model-settings-title">文案与提示词模型</h3>
+                    <p>用于复刻方案、分镜说明、图片提示词和视频提示词。</p>
+                  </div>
+                  <TextModelIndicator label={textModelLabel} />
+                </header>
+                <div className="text-model-default-row">
+                  <label className="settings-field">
+                    <span>默认文案模型</span>
+                    <select
+                      disabled={loading || saving}
+                      onChange={(event) => change({ text_model_alias: event.target.value })}
+                      value={draft.text_model_alias}
+                    >
+                      {textModels.map((model) => (
+                        <option key={model.alias} value={model.alias}>
+                          {textModelOptionLabel(model)}
+                        </option>
+                      ))}
+                    </select>
+                    <small>不影响图片生成模型和视频生成模型。</small>
+                  </label>
+                  <label className="text-model-fallback-field">
+                    <input
+                      checked={draft.text_model_fallback_enabled}
+                      disabled={loading || saving}
+                      onChange={(event) => change({
+                        text_model_fallback_enabled: event.target.checked,
+                      })}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>失败时自动回退</strong>
+                      <small>首选模型不可用或输出无效时，尝试任务默认备选模型。</small>
+                    </span>
+                  </label>
+                </div>
+                <details className="text-model-task-overrides">
+                  <summary>
+                    <span>按任务分别设置</span>
+                    <small>{textModelOverrideCount} 项已覆盖</small>
+                    <CaretDown aria-hidden="true" size={17} />
+                  </summary>
+                  <div className="text-model-task-list">
+                    {textModelTasks.map((task) => (
+                      <label className="text-model-task-row" key={task.id}>
+                        <span>
+                          <strong>{task.label}</strong>
+                          <small>{task.description}</small>
+                        </span>
+                        <select
+                          aria-label={`${task.label}文案模型`}
+                          disabled={loading || saving}
+                          onChange={(event) => changeTextModelOverride(
+                            task.id,
+                            event.target.value,
+                          )}
+                          value={draft.text_model_task_overrides[task.id] || ""}
+                        >
+                          <option value="">跟随默认（{textModelLabel}）</option>
+                          {textModels.map((model) => (
+                            <option key={model.alias} value={model.alias}>
+                              {textModelOptionLabel(model)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </details>
+              </section>
               <div className="settings-form-grid">
                 <label className="settings-field">
                   <span>默认图片模型</span>

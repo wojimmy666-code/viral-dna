@@ -11,10 +11,19 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { CategoryProfilePicker } from "../category-profiles/index.js";
+import { TextModelIndicator } from "../ui/text-model/TextModelIndicator.jsx";
 import { ConceptComparison } from "./ConceptComparison.jsx";
 import { useViralInsight } from "./viral-report-ui.js";
 
-export function ReplicationWorkspace({ analysisId, recordId, request, onPublished, onNotice, onManageCategories }) {
+export function ReplicationWorkspace({
+  analysisId,
+  recordId,
+  request,
+  onPublished,
+  onNotice,
+  onManageCategories,
+  textModelLabel = "Qwen3.7 Plus",
+}) {
   const { insight, loading, error, reload } = useViralInsight({ analysisId, request });
   const [replacementValues, setReplacementValues] = useState({});
   const [conceptSet, setConceptSet] = useState(null);
@@ -140,7 +149,7 @@ export function ReplicationWorkspace({ analysisId, recordId, request, onPublishe
       </div>
 
       <section className="replication-generate-bar">
-        <div><strong>{selectedCategoryId ? (selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案") : "尚未选择品类档案"}</strong><span>{selectedCategoryId ? "一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00" : "必须手动选择本次品类；历史方案不会自动回填。"}</span></div>
+        <div><strong>{selectedCategoryId ? (selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案") : "尚未选择品类档案"}</strong><span>{selectedCategoryId ? "一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00" : "必须手动选择本次品类；历史方案不会自动回填。"}</span><TextModelIndicator label={textModelLabel} /></div>
         <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading || !selectedCategoryId}>
           {conceptLoading ? <CircleNotch className="spin" size={19} /> : <MagicWand size={19} weight="fill" />}
           {hasSelectedCategoryConcepts ? "重新生成三套方案" : "生成三套方案"}

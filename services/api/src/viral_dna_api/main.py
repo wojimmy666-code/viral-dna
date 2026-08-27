@@ -23,6 +23,7 @@ from .account_preferences import (
 )
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
+from .ai.text_model_routing import preferred_text_model_aliases
 from .ai.viral_reasoning import ViralReasoningService
 from .asset_library import AssetLibraryService
 from .asset_promotion import GeneratedAssetPromotionService
@@ -39,6 +40,11 @@ from .control_assets.routes import (
 from .control_assets.service import DepthControlService
 from .control_assets.settings import DepthGenerationSettingsService
 from .exports import ExportService
+from .generation_intents.routes import create_video_intent_router
+from .generation_intents.service import (
+    ModelVideoIntentInterpreter,
+    VideoIntentCompilationService,
+)
 from .identity import (
     PlatformAdmin,
     create_identity_router,
@@ -370,6 +376,13 @@ generated_asset_promotion_service = GeneratedAssetPromotionService(
 project_asset_service = ProjectAssetService(
     store, workspace_manager, storage_manager, account_context_service
 )
+video_intent_compilation_service = VideoIntentCompilationService(
+    store,
+    video_generation_draft_service,
+    project_asset_service,
+    video_generation_settings_service,
+    interpreter=ModelVideoIntentInterpreter(preferences=user_preferences_service),
+)
 continuity_service = ContinuityService(store)
 production_service = ProductionService(
     store,
@@ -425,6 +438,13 @@ app.include_router(create_managed_asset_router(managed_asset_service), prefix=AP
 app.include_router(
     create_video_generation_draft_router(
         video_generation_draft_service,
+        account_context_service,
+    ),
+    prefix=API_PREFIX,
+)
+app.include_router(
+    create_video_intent_router(
+        video_intent_compilation_service,
         account_context_service,
     ),
     prefix=API_PREFIX,
@@ -2448,7 +2468,18 @@ async def create_analysis(video_id: UUID, payload: AnalysisCreate) -> AnalysisJo
             if "analysis_profile" in payload.model_fields_set
             else default_analysis_profile()
         )
-        model_plan = None if analyzer_mode == "simulated" else load_model_plan(analysis_profile)
+        if analyzer_mode == "simulated":
+            model_plan = None
+        else:
+            user_preferences = (await user_preferences_service.get()).settings
+            model_plan = load_model_plan(
+                analysis_profile,
+                preferred_aliases=preferred_text_model_aliases(
+                    user_preferences.text_model_alias,
+                    user_preferences.text_model_task_overrides,
+                ),
+                fallback_enabled=user_preferences.text_model_fallback_enabled,
+            )
     except ModelCatalogError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     mode = (

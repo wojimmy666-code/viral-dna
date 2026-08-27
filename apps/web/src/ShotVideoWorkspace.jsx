@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
+  CaretDown,
   CheckCircle,
   DownloadSimple,
   FilmStrip,
@@ -29,10 +30,15 @@ import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceE
 import { VideoPromptReferencePolicy } from "./video-inputs/VideoPromptReferencePolicy.jsx";
 import { VideoEnhancementPanel } from "./video-enhancement/VideoEnhancementPanel.jsx";
 import {
-  removeVideoMentionFromPrompt,
+  CreativeIntentPanel,
+  intentRequirementsNeedAssets,
+} from "./video-intents/CreativeIntentPanel.jsx";
+import {
+  approvedVisualBeatFramesFromDetail,
+  reconcileVideoDraftReferences,
   requiredSourceForVideoMention,
   videoMentionToken,
-  videoReferenceKey,
+  videoReferenceStableKey,
 } from "./video-inputs/video-prompt-references.js";
 import "./managed-assets/managed-assets.css";
 import "./video-controls/depth-control.css";
@@ -55,27 +61,6 @@ function isUserDeletedVideoCandidate(candidate) {
       || candidate.quality_report?.archive_reason === "user_deleted"
     )
   );
-}
-
-function approvedVisualBeatFrames(detail) {
-  const beats = [...(detail?.plan?.visual_beats || [])]
-    .sort((left, right) => left.index - right.index);
-  const requiredBeats = beats.filter((item) => item.required);
-  const targets = requiredBeats.length > 0 ? requiredBeats : beats;
-  const firstBeatId = beats[0]?.id;
-  const imageRuns = (detail?.generation_runs || []).filter((run) => run.kind === "image");
-  return targets.map((beat) => {
-    const runs = imageRuns.filter((run) => (
-      run.visual_beat_id === beat.id
-      || (!run.visual_beat_id && beat.id === firstBeatId)
-    ));
-    const candidate = beat.approved_image_candidate_id
-      ? runs
-        .flatMap((run) => run.candidates || [])
-        .find((item) => item.id === beat.approved_image_candidate_id) || null
-      : null;
-    return { beat, candidate };
-  });
 }
 
 function supportsReferenceRoute(model) {
@@ -154,10 +139,12 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
 }
 
 export function ShotVideoWorkspace({
+  applyPersistedVideoDraft,
   advanced,
   assets = [],
   busy,
   error,
+  flushVideoDraft,
   gate,
   initialCandidateId = "",
   onAdvance,
@@ -192,6 +179,7 @@ export function ShotVideoWorkspace({
   videoGenerationSettingsError = "",
   videoGenerationSettingsStatus = "ready",
   onReloadVideoGenerationSettings,
+  textModelLabel = "Qwen3.7 Plus",
 }) {
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [enhancementPreview, setEnhancementPreview] = useState(null);
@@ -204,6 +192,12 @@ export function ShotVideoWorkspace({
   const [depthEngineInstallError, setDepthEngineInstallError] = useState("");
   const depthEnginePollTimer = useRef(null);
   const [depthSettingsOpen, setDepthSettingsOpen] = useState(false);
+  const [intentBusy, setIntentBusy] = useState(false);
+  const [intentCompileResult, setIntentCompileResult] = useState(null);
+  const [intentError, setIntentError] = useState("");
+  const [intentErrorCode, setIntentErrorCode] = useState("");
+  const [referenceSettingsOpen, setReferenceSettingsOpen] = useState(false);
+  const [promptSettingsOpen, setPromptSettingsOpen] = useState(false);
   const plan = shotDetail?.plan;
   const depthGeneration = useDepthControlJob({
     expectedRevisionId: project?.current_revision_id,
@@ -282,7 +276,7 @@ export function ShotVideoWorkspace({
     [candidateGroups],
   );
   const referenceFrames = useMemo(
-    () => approvedVisualBeatFrames(shotDetail),
+    () => approvedVisualBeatFramesFromDetail(shotDetail),
     [shotDetail],
   );
   const approvedReferenceCount = referenceFrames.filter((item) => item.candidate).length;
@@ -349,6 +343,18 @@ export function ShotVideoWorkspace({
   const usesDepthControl = selectedInputSources.has("depth_control");
   const selectedVideoReferences = videoDraft.selectedReferences || [];
   const explicitVideoMentions = videoDraft.videoPromptMentions || [];
+  const capacityReferenceKinds = new Set([
+    "approved_image",
+    "project_asset",
+    "provider_managed_asset",
+    "depth_control",
+  ]);
+  const selectedCapacityReferenceCount = selectedVideoReferences.filter(
+    (reference) => capacityReferenceKinds.has(reference.reference_kind),
+  ).length;
+  const maximumReferenceCount = Number(
+    selectedModel?.capabilities?.maximum_reference_images || 0,
+  );
   const explicitProjectAssetMentions = selectedVideoReferences.filter(
     (mention) => mention.reference_kind === "project_asset",
   );
@@ -367,6 +373,15 @@ export function ShotVideoWorkspace({
       window.clearTimeout(depthEnginePollTimer.current);
     }
   }, []);
+
+  useEffect(() => {
+    setIntentCompileResult(null);
+    setIntentError("");
+    setIntentErrorCode("");
+    setReferenceSettingsOpen(false);
+    setPromptSettingsOpen(false);
+    setDepthSettingsOpen(false);
+  }, [plan?.id]);
 
   async function pollDepthEngineInstallation(installationId) {
     try {
@@ -557,6 +572,9 @@ export function ShotVideoWorkspace({
       ? "没有已开放的视频生成模型"
     : !selectedModel
       ? "请选择视频生成模型"
+      : maximumReferenceCount > 0
+        && selectedCapacityReferenceCount > maximumReferenceCount
+        ? `当前模型最多支持 ${maximumReferenceCount} 项生成参考，本次已选择 ${selectedCapacityReferenceCount} 项；不会自动丢弃参考，请切换模型或手动减少`
       : mentionBlockedReason
         ? mentionBlockedReason
       : selectedInputSources.size === 0 && !selectedModel.capabilities?.text_to_video
@@ -653,6 +671,120 @@ export function ShotVideoWorkspace({
     setDurationAdjustmentMessage("");
   }
 
+  function changeCreativeIntent({
+    addedReference = null,
+    intentMentions = [],
+    intentText = "",
+  }) {
+    setIntentCompileResult(null);
+    setIntentError("");
+    setIntentErrorCode("");
+    setVideoDraft((current) => ({
+      ...current,
+      intentText,
+      intentMentions,
+      removedIntentReferenceKeys: addedReference
+        ? (current.removedIntentReferenceKeys || []).filter(
+          (key) => key !== videoReferenceStableKey(addedReference),
+        )
+        : current.removedIntentReferenceKeys,
+    }));
+  }
+
+  async function compileCreativeIntent() {
+    const intentText = String(videoDraft.intentText || "").trim();
+    if (!intentText || !plan?.id || intentBusy) return;
+    setIntentBusy(true);
+    setIntentError("");
+    setIntentErrorCode("");
+    try {
+      let record = await flushVideoDraft?.(plan.id);
+      if (!record?.draft_version) {
+        record = await request(`/production-shots/${plan.id}/video-generation-draft`);
+      }
+      const result = await request(
+        `/production-shots/${plan.id}/video-generation-draft/compile-intent`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_draft_version: record.draft_version,
+            intent_text: intentText,
+            intent_mentions: videoDraft.intentMentions || [],
+            merge_strategy: "preserve_manual",
+          }),
+        },
+      );
+      applyPersistedVideoDraft?.({
+        shotPlanId: plan.id,
+        detail: shotDetail,
+        settings: videoGenerationSettings,
+        persistedDraft: result.draft,
+      });
+      setIntentCompileResult(result);
+      const unresolvedRequirements = result.unresolved_requirements || [];
+      const needsAssets = intentRequirementsNeedAssets(unresolvedRequirements);
+      if (needsAssets) {
+        setReferenceSettingsOpen(true);
+      }
+      onNotice?.({
+        type: unresolvedRequirements.length ? "warning" : "success",
+        title: "创作意图已生成",
+        message: unresolvedRequirements.length
+          ? needsAssets
+            ? "已生成可用部分；仍有资产需要人工选择。"
+            : "已生成可用部分；仍有创作意图需要人工确认。"
+          : "资产引用和视频提示词已更新，仍可继续人工修改。",
+      });
+    } catch (compileError) {
+      setIntentErrorCode(compileError?.code || "");
+      setIntentError(compileError?.message || "暂时无法理解创作意图");
+    } finally {
+      setIntentBusy(false);
+    }
+  }
+
+  async function restoreIntentBaseline() {
+    if (!plan?.id || intentBusy) return;
+    setIntentBusy(true);
+    setIntentError("");
+    setIntentErrorCode("");
+    try {
+      let record = await flushVideoDraft?.(plan.id);
+      if (!record?.draft_version) {
+        record = await request(`/production-shots/${plan.id}/video-generation-draft`);
+      }
+      const restored = await request(
+        `/production-shots/${plan.id}/video-generation-draft/restore-intent-baseline`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_draft_version: record.draft_version,
+            parts: ["prompt", "negative_constraints"],
+          }),
+        },
+      );
+      applyPersistedVideoDraft?.({
+        shotPlanId: plan.id,
+        detail: shotDetail,
+        settings: videoGenerationSettings,
+        persistedDraft: restored,
+      });
+      setPromptSettingsOpen(true);
+      onNotice?.({
+        type: "success",
+        title: "已恢复自动提示词",
+        message: "引用选择保持不变，提示词与负面约束已恢复为最近自动版本。",
+      });
+    } catch (restoreError) {
+      setIntentErrorCode(restoreError?.code || "");
+      setIntentError(restoreError?.message || "暂时无法恢复自动提示词");
+    } finally {
+      setIntentBusy(false);
+    }
+  }
+
   return (
     <section className="shot-video-workspace">
       <header className="shot-video-stage-header">
@@ -709,75 +841,37 @@ export function ShotVideoWorkspace({
             </span>
           </header>
 
-          <div className="shot-video-preview-stack">
-            {usesApprovedImages && <article className="shot-video-preview-card shot-video-reference-card">
-              <header>
-                <span>有序参考画面</span>
-                <small>{approvedReferenceCount}/{referenceFrames.length} 已确认 · 按图号提交</small>
-              </header>
-              <div className="shot-video-storyboard" aria-label="有序多图参考故事板">
-                {referenceFrames.length > 0 ? referenceFrames.map(({ beat, candidate }, index) => (
-                  <div className="shot-video-storyboard-step" key={beat.id}>
-                    <figure className={candidate ? "ready" : "missing"}>
-                      <div className="shot-video-storyboard-image">
-                        {candidate ? (
-                          <img
-                            alt={`图${beat.index} ${beat.title}`}
-                            src={resolveUrl(candidate.thumbnail_url || candidate.content_url)}
-                          />
-                        ) : (
-                          <span><WarningCircle size={22} />待确认</span>
-                        )}
-                        <b>图{beat.index}</b>
-                      </div>
-                    </figure>
-                    {index < referenceFrames.length - 1 && (
-                      <span className="shot-video-storyboard-transition">
-                        <ArrowRight size={15} />
-                        <small>{beat.transition_to_next_type === "cut" ? "切换" : "连续转场"}</small>
-                      </span>
-                    )}
-                  </div>
-                )) : (
-                  <div className="shot-video-media-placeholder">
-                    <WarningCircle size={26} /><span>请先在分镜图片阶段创建画面</span>
-                  </div>
-                )}
-              </div>
-            </article>}
-
-            <article className="shot-video-preview-card">
-              <header>
-                <span>视频候选</span>
-                <small>{videoGenerationRunLabel(displayedCandidateRun || latestRun)}</small>
-              </header>
-              <div className="shot-video-media-frame shot-video-candidate-frame">
-                {displayedCandidate ? (
-                  <>
-                    <video
-                      controls
-                      key={`${displayedCandidate.id}:${enhancementPreview?.key || "active"}`}
-                      playsInline
-                      poster={resolveUrl(displayedCandidate.thumbnail_url)}
-                      preload="metadata"
-                      src={resolveUrl(displayedVideoUrl)}
-                    />
-                    <a
-                      aria-label={`下载视频 ${displayedCandidate.sequence || displayedCandidate.ordinal}`}
-                      className="shot-video-download-button"
-                      download={`shot-${plan.index}-video-${displayedCandidate.sequence || displayedCandidate.ordinal}.mp4`}
-                      href={resolveUrl(displayedVideoUrl)}
-                      title="下载视频候选"
-                    >
-                      <DownloadSimple size={16} />
-                    </a>
-                  </>
-                ) : (
-                  <div className="shot-video-media-placeholder"><PlayCircle size={30} /><span>生成后可在这里播放候选</span></div>
-                )}
-              </div>
-            </article>
-          </div>
+          <article className="shot-video-preview-card">
+            <header>
+              <span>视频候选</span>
+              <small>{videoGenerationRunLabel(displayedCandidateRun || latestRun)}</small>
+            </header>
+            <div className="shot-video-media-frame shot-video-candidate-frame">
+              {displayedCandidate ? (
+                <>
+                  <video
+                    controls
+                    key={`${displayedCandidate.id}:${enhancementPreview?.key || "active"}`}
+                    playsInline
+                    poster={resolveUrl(displayedCandidate.thumbnail_url)}
+                    preload="metadata"
+                    src={resolveUrl(displayedVideoUrl)}
+                  />
+                  <a
+                    aria-label={`下载视频 ${displayedCandidate.sequence || displayedCandidate.ordinal}`}
+                    className="shot-video-download-button"
+                    download={`shot-${plan.index}-video-${displayedCandidate.sequence || displayedCandidate.ordinal}.mp4`}
+                    href={resolveUrl(displayedVideoUrl)}
+                    title="下载视频候选"
+                  >
+                    <DownloadSimple size={16} />
+                  </a>
+                </>
+              ) : (
+                <div className="shot-video-media-placeholder"><PlayCircle size={30} /><span>生成后可在这里播放候选</span></div>
+              )}
+            </div>
+          </article>
 
           <VideoCandidateLibrary
             archivedCandidateGroups={archivedCandidateGroups}
@@ -794,118 +888,148 @@ export function ShotVideoWorkspace({
           />
 
           <div className="shot-video-prompt-panel">
-            <GenerationReferenceComposer
+            <CreativeIntentPanel
               assets={assets}
+              busy={busy || intentBusy}
+              compileResult={intentCompileResult}
               depthAssets={plan?.depth_control_assets || []}
+              draft={videoDraft}
+              error={intentError}
+              errorCode={intentErrorCode}
               managedAssetBinding={managedAssetBinding}
-              model={selectedModel}
-              onChange={({ selectedReferences, inputSources, removedReference }) => setVideoDraft((current) => ({
-                ...current,
-                selectedReferences,
-                inputSources,
-                videoPrompt: removedReference
-                  ? removeVideoMentionFromPrompt(current.videoPrompt, removedReference)
-                  : current.videoPrompt,
-                videoPromptMentions: removedReference
-                  ? (current.videoPromptMentions || []).filter(
-                      (mention) => videoReferenceKey(mention) !== videoReferenceKey(removedReference),
-                    )
-                  : current.videoPromptMentions,
-              }))}
-              onCreateDepth={() => {
-                setVideoDraft((current) => ({
-                  ...current,
-                  inputSources: Array.from(new Set([
-                    ...(current.inputSources || []),
-                    "depth_control",
-                  ])),
-                }));
-                setDepthSettingsOpen(true);
-              }}
-              onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
+              onChange={changeCreativeIntent}
+              onCompile={compileCreativeIntent}
+              onOpenPrompt={() => setPromptSettingsOpen(true)}
+              onOpenReferences={() => setReferenceSettingsOpen(true)}
+              onRestore={restoreIntentBaseline}
               referenceFrames={referenceFrames}
               resolveUrl={resolveUrl}
-              selectedReferences={videoDraft.selectedReferences || []}
-              selectedSources={videoDraft.inputSources || []}
-              shotPlanId={plan.id}
+              textModelLabel={textModelLabel}
               videoReferenceBindings={plan?.video_reference_bindings || []}
             />
-            {usesDepthControl && (
-              <details
-                className="shot-video-depth-input-details"
-                onToggle={(event) => setDepthSettingsOpen(event.currentTarget.open)}
-                open={depthSettingsOpen}
-              >
-                <summary><span>深度视频</span><small>仅使用原始分镜生成，可预览、重建或停用</small></summary>
-                <DepthControlPanel
-                  busy={busy || depthEngineLoadBusy}
-                  engineCapabilities={depthEngineCapabilities}
-                  engineError={depthEngineLoadError}
-                  generationError={depthGeneration.error}
-                  generationJob={depthGeneration.job}
-                  installation={depthEngineInstallation}
-                  installationError={depthEngineInstallError}
-                  onCancelGeneration={depthGeneration.cancel}
-                  onCreate={depthGeneration.start}
-                  onDelete={onDeleteDepthControl}
-                  onInstall={installDepthEngine}
-                  onRetryGeneration={depthGeneration.retry}
-                  onToggle={onToggleDepthControl}
-                  onNotice={onNotice}
-                  plan={plan}
-                  request={request}
+
+            <details
+              className="shot-video-config-disclosure"
+              onToggle={(event) => setReferenceSettingsOpen(event.currentTarget.open)}
+              open={referenceSettingsOpen}
+            >
+              <summary>
+                <span><strong>资产引用与控制</strong><small>{selectedVideoReferences.length} 项 · 可人工调整</small></span>
+                <CaretDown aria-hidden="true" size={17} />
+              </summary>
+              <div className="shot-video-config-disclosure-body">
+                <GenerationReferenceComposer
+                  assets={assets}
+                  autoReferenceExclusions={videoDraft.autoReferenceExclusions || []}
+                  depthAssets={plan?.depth_control_assets || []}
+                  managedAssetBinding={managedAssetBinding}
+                  model={selectedModel}
+                  onChange={(change) => setVideoDraft((current) => (
+                    reconcileVideoDraftReferences(current, change, referenceFrames)
+                  ))}
+                  onCreateDepth={() => {
+                    setVideoDraft((current) => ({
+                      ...current,
+                      inputSources: Array.from(new Set([
+                        ...(current.inputSources || []),
+                        "depth_control",
+                      ])),
+                    }));
+                    setDepthSettingsOpen(true);
+                  }}
+                  onOpenManagedAssets={() => setManagedAssetPickerOpen(true)}
+                  onRestoreAutomaticReferences={() => setVideoDraft((current) => (
+                    reconcileVideoDraftReferences(current, {
+                      restoreAutomaticReferences: true,
+                    }, referenceFrames)
+                  ))}
+                  referenceFrames={referenceFrames}
                   resolveUrl={resolveUrl}
-                  sourceVideoUrl={sourceVideoUrl}
+                  selectedReferences={videoDraft.selectedReferences || []}
+                  selectedSources={videoDraft.inputSources || []}
+                  shotPlanId={plan.id}
+                  videoReferenceBindings={plan?.video_reference_bindings || []}
                 />
-              </details>
-            )}
-            <VideoPromptReferenceEditor
-              assets={assets}
-              depthAssets={plan?.depth_control_assets || []}
-              managedAssetBinding={managedAssetBinding}
-              onChange={({
-                videoPrompt,
-                videoPromptMentions,
-                requiredInputSource,
-                selectedReferences,
-              }) => setVideoDraft((current) => ({
-                ...current,
-                videoPrompt,
-                videoPromptMentions,
-                selectedReferences: selectedReferences || current.selectedReferences,
-                inputSources: requiredInputSource
-                  ? Array.from(new Set([
-                      ...(current.inputSources || []),
-                      requiredInputSource,
-                    ]))
-                  : current.inputSources,
-              }))}
-              referenceFrames={referenceFrames}
-              resolveUrl={resolveUrl}
-              selectedReferences={videoDraft.selectedReferences || []}
-              value={videoDraft.videoPrompt}
-              videoPromptMentions={videoDraft.videoPromptMentions || []}
-              videoReferenceBindings={plan?.video_reference_bindings || []}
-            />
-            <VideoPromptReferencePolicy
-              onNotice={onNotice}
-              prompt={videoDraft.videoPrompt}
-              references={videoDraft.selectedReferences || []}
-            />
-            <details className="shot-video-negative-constraints">
-              <summary>视频负面约束（可选）</summary>
-              <textarea
-                aria-label="视频负面约束"
-                className="prompt-editor-textarea"
-                maxLength={3000}
-                onChange={(event) => setVideoDraft((current) => ({
-                  ...current,
-                  negativeConstraints: event.target.value,
-                }))}
-                placeholder="每行一项，例如：人物身份漂移"
-                rows={3}
-                value={videoDraft.negativeConstraints}
-              />
+                {usesDepthControl && (
+                  <details
+                    className="shot-video-depth-input-details"
+                    onToggle={(event) => setDepthSettingsOpen(event.currentTarget.open)}
+                    open={depthSettingsOpen}
+                  >
+                    <summary><span>深度视频</span><small>仅使用原始分镜生成，可预览、重建或停用</small></summary>
+                    <DepthControlPanel
+                      busy={busy || depthEngineLoadBusy}
+                      engineCapabilities={depthEngineCapabilities}
+                      engineError={depthEngineLoadError}
+                      generationError={depthGeneration.error}
+                      generationJob={depthGeneration.job}
+                      installation={depthEngineInstallation}
+                      installationError={depthEngineInstallError}
+                      onCancelGeneration={depthGeneration.cancel}
+                      onCreate={depthGeneration.start}
+                      onDelete={onDeleteDepthControl}
+                      onInstall={installDepthEngine}
+                      onRetryGeneration={depthGeneration.retry}
+                      onToggle={onToggleDepthControl}
+                      onNotice={onNotice}
+                      plan={plan}
+                      request={request}
+                      resolveUrl={resolveUrl}
+                      sourceVideoUrl={sourceVideoUrl}
+                    />
+                  </details>
+                )}
+              </div>
+            </details>
+
+            <details
+              className="shot-video-config-disclosure"
+              onToggle={(event) => setPromptSettingsOpen(event.currentTarget.open)}
+              open={promptSettingsOpen}
+            >
+              <summary>
+                <span>
+                  <strong>视频提示词</strong>
+                  <small>{videoDraft.promptManuallyModified ? "含人工修改" : `${videoDraft.videoPrompt.length} 字`}</small>
+                </span>
+                <CaretDown aria-hidden="true" size={17} />
+              </summary>
+              <div className="shot-video-config-disclosure-body">
+                <VideoPromptReferenceEditor
+                  assets={assets}
+                  depthAssets={plan?.depth_control_assets || []}
+                  managedAssetBinding={managedAssetBinding}
+                  onChange={(change) => setVideoDraft((current) => (
+                    reconcileVideoDraftReferences(current, change, referenceFrames)
+                  ))}
+                  referenceFrames={referenceFrames}
+                  resolveUrl={resolveUrl}
+                  selectedReferences={videoDraft.selectedReferences || []}
+                  value={videoDraft.videoPrompt}
+                  videoPromptMentions={videoDraft.videoPromptMentions || []}
+                  videoReferenceBindings={plan?.video_reference_bindings || []}
+                />
+                <VideoPromptReferencePolicy
+                  onNotice={onNotice}
+                  prompt={videoDraft.videoPrompt}
+                  references={videoDraft.selectedReferences || []}
+                />
+                <details className="shot-video-negative-constraints">
+                  <summary>视频负面约束（可选）</summary>
+                  <textarea
+                    aria-label="视频负面约束"
+                    className="prompt-editor-textarea"
+                    maxLength={3000}
+                    onChange={(event) => setVideoDraft((current) => ({
+                      ...current,
+                      negativeConstraints: event.target.value,
+                    }))}
+                    placeholder="每行一项，例如：人物身份漂移"
+                    rows={3}
+                    value={videoDraft.negativeConstraints}
+                  />
+                </details>
+              </div>
             </details>
             <ShotVideoGenerationControls
               activeRun={activeRun}

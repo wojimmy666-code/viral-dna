@@ -22,10 +22,12 @@ import {
   ensureVideoGenerationReference,
   insertVideoMentionIntoPrompt,
   normalizeVideoPromptMentions,
+  reconcileVideoDraftReferences,
   selectedVideoReferenceOptions,
   removeVideoMentionFromPrompt,
   requiredSourceForVideoMention,
   stripLegacyVideoReferencePolicies,
+  synchronizeAutomaticVideoPrompt,
   videoMentionToken,
   videoReferenceConflictPriority,
 } from "../src/video-inputs/video-prompt-references.js";
@@ -51,6 +53,14 @@ const generationDraftSource = readFileSync(
 );
 const videoPromptReferenceEditorSource = readFileSync(
   new URL("../src/video-inputs/VideoPromptReferenceEditor.jsx", import.meta.url),
+  "utf8",
+);
+const creativeIntentPanelSource = readFileSync(
+  new URL("../src/video-intents/CreativeIntentPanel.jsx", import.meta.url),
+  "utf8",
+);
+const creativeIntentMentionEditorSource = readFileSync(
+  new URL("../src/video-intents/CreativeIntentMentionEditor.jsx", import.meta.url),
   "utf8",
 );
 const videoPromptReferencePolicySource = readFileSync(
@@ -348,6 +358,17 @@ test("persists each shot video model instead of reapplying the global default", 
       sources: [],
       references: [],
     },
+    video_prompt: "测试提示词",
+    video_prompt_mentions: [],
+    video_negative_constraints: ["不要抖动"],
+    intent_text: "",
+    intent_mentions: [],
+    locked_reference_keys: [],
+    removed_intent_reference_keys: [],
+    prompt_manually_modified: false,
+    reference_sync_mode: "auto",
+    auto_reference_exclusions: [],
+    reference_order_override: [],
   });
 
   assert.match(productionWorkflowSource, /useShotVideoGenerationDraft/);
@@ -370,20 +391,79 @@ test("persists each shot video model instead of reapplying the global default", 
   );
 });
 
-test("keeps selected generation references separate from prompt mentions", () => {
+test("persists creative-intent mentions as stable asset ids", () => {
+  const mention = {
+    reference_kind: "project_asset",
+    reference_id: "9a0cadbc-22c0-43cf-bfb4-ae37c50ee09d",
+    label: "资产/服装/白色睡衣",
+    role: "wardrobe",
+    order: 1,
+  };
+  const restored = videoDraftFromDetail({
+    plan: { duration_seconds: 3, video_prompt: "" },
+  }, {
+    default_model_alias: "minimax_h3",
+    default_resolution: "720P",
+    models: [{ alias: "minimax_h3" }],
+  }, {
+    schema_version: "viral-dna-shot-video-draft/v2",
+    model_alias: "minimax_h3",
+    resolution: "720P",
+    duration_seconds: 3,
+    candidate_count: 1,
+    video_prompt: "",
+    video_prompt_mentions: [],
+    video_negative_constraints: [],
+    input_plan: { sources: [], references: [] },
+    intent: {
+      text: "服装换成 @资产/服装/白色睡衣",
+      mentions: [mention],
+    },
+  });
+
+  assert.equal(restored.intentText, "服装换成 @资产/服装/白色睡衣");
+  assert.deepEqual(restored.intentMentions, [mention]);
+  assert.deepEqual(videoDraftParameters(restored).intent_mentions, [mention]);
+});
+
+test("automatically binds approved visual beats to prompt mentions", () => {
+  const visualBeatId = "46bc61aa-e6f1-4a9d-bf84-81f85be1e6f9";
   const reference = {
     reference_kind: "approved_image",
     reference_id: "5e098a85-7bd7-4b35-97bc-17397a3f1f48",
-    label: "分镜图/图1-动作",
+    label: "分镜图/图1",
     role: "composition",
     order: 1,
+    visual_beat_id: visualBeatId,
+    automatic: true,
+    scope: {
+      kind: "visual_beats",
+      visual_beat_ids: [visualBeatId],
+      start_ratio: 0,
+      end_ratio: 1,
+    },
+    origin: "visual_beat_auto",
   };
   const detail = {
     plan: {
       duration_seconds: 3,
       video_prompt: "保持构图和动作。",
-      video_prompt_mentions: [reference],
+      video_prompt_mentions: [],
+      visual_beats: [{
+        id: visualBeatId,
+        index: 1,
+        title: "动作",
+        required: true,
+        start_ratio: 0,
+        end_ratio: 1,
+        approved_image_candidate_id: reference.reference_id,
+      }],
     },
+    generation_runs: [{
+      kind: "image",
+      visual_beat_id: visualBeatId,
+      candidates: [{ id: reference.reference_id }],
+    }],
   };
   const settings = {
     default_model_alias: "bailian_wan_2_7_r2v",
@@ -395,23 +475,159 @@ test("keeps selected generation references separate from prompt mentions", () =>
   });
 
   assert.deepEqual(restored.selectedReferences, [reference]);
-  assert.deepEqual(restored.videoPromptMentions, []);
+  assert.equal(restored.videoPrompt, "@分镜图/图1\n\n保持构图和动作。");
+  assert.deepEqual(restored.videoPromptMentions, [reference]);
   assert.deepEqual(videoDraftParameters(restored).input_plan.references, [reference]);
+  assert.deepEqual(restored.inputSources, ["approved_images"]);
+});
 
-  const mentioned = videoDraftFromDetail({
-    plan: {
-      ...detail.plan,
-      video_prompt: "保持 @分镜图/图1-动作 的构图和动作。",
+test("keeps automatic frame references at their semantic positions", () => {
+  const references = [
+    {
+      reference_kind: "approved_image",
+      reference_id: "5e098a85-7bd7-4b35-97bc-17397a3f1f48",
+      label: "分镜图/图1",
+      role: "composition",
+      order: 1,
+      automatic: true,
     },
-  }, settings, { input_plan: { sources: ["approved_images"], references: [reference] } });
-  assert.deepEqual(mentioned.videoPromptMentions, [reference]);
+    {
+      reference_kind: "approved_image",
+      reference_id: "03ae3d8d-de44-455d-9931-b495474964b7",
+      label: "分镜图/图2",
+      role: "composition",
+      order: 2,
+      automatic: true,
+    },
+    {
+      reference_kind: "project_asset",
+      reference_id: "02f03a76-8603-48d3-b51e-df1b7ade3200",
+      label: "资产/小喵酱/面部",
+      role: "actor_identity",
+      order: 3,
+    },
+  ];
+  const prompt = [
+    "@分镜图/图1 @分镜图/图2 @资产/小喵酱/面部",
+    "",
+    "【分段画面】",
+    "画面以 @分镜图/图1 为准。",
+    "@分镜图/图1 到 @分镜图/图2 由视频模型生成连续转场。",
+  ].join("\n");
+
+  const synchronized = synchronizeAutomaticVideoPrompt({
+    prompt,
+    mentions: references,
+    selectedReferences: references,
+  });
+
+  assert.equal(synchronized.videoPrompt, prompt);
+  assert.match(synchronized.videoPrompt, /画面以 @分镜图\/图1 为准/);
+  assert.match(synchronized.videoPrompt, /@分镜图\/图1 到 @分镜图\/图2/);
+  assert.equal(synchronized.videoPromptMentions.length, 3);
+});
+
+test("remembers removed automatic references by stable visual beat id", () => {
+  const frame = (beatId, index, candidateId) => ({
+    beat: {
+      id: beatId,
+      index,
+      title: `画面${index}`,
+      start_ratio: (index - 1) / 2,
+      end_ratio: index / 2,
+    },
+    candidate: { id: candidateId },
+  });
+  const frames = [
+    frame("fe9af5cf-8293-4a37-a38c-c0fc827906de", 1, "9ea90c3c-f451-4b83-a5dc-a0709d2a90e5"),
+    frame("af462b21-9c5d-4668-b43f-4265b52c1ca1", 2, "03ae3d8d-de44-455d-9931-b495474964b7"),
+  ];
+  const automatic = reconcileVideoDraftReferences({
+    videoPrompt: "人物连续完成动作。",
+    videoPromptMentions: [],
+    selectedReferences: [],
+    inputSources: [],
+    autoReferenceExclusions: [],
+    referenceOrderOverride: [],
+  }, {}, frames);
+  assert.equal(automatic.selectedReferences.length, 2);
+  assert.equal(automatic.videoPrompt, "@分镜图/图1 @分镜图/图2\n\n人物连续完成动作。");
+
+  const reversedReferences = [...automatic.selectedReferences].reverse();
+  const reordered = reconcileVideoDraftReferences(automatic, {
+    selectedReferences: reversedReferences,
+    referenceOrderOverride: reversedReferences.map(
+      (item) => `approved_image:visual_beat:${item.visual_beat_id}`,
+    ),
+  }, frames);
+  assert.deepEqual(
+    reordered.selectedReferences.map((item) => item.label),
+    ["分镜图/图2", "分镜图/图1"],
+  );
+  assert.equal(reordered.videoPrompt, "@分镜图/图2 @分镜图/图1\n\n人物连续完成动作。");
+
+  const removed = reordered.selectedReferences[1];
+  const excluded = reconcileVideoDraftReferences(reordered, {
+    selectedReferences: reordered.selectedReferences.slice(0, 1),
+    removedReference: removed,
+  }, frames);
+  assert.deepEqual(excluded.autoReferenceExclusions, [frames[0].beat.id]);
+  assert.equal(excluded.videoPrompt, "@分镜图/图2\n\n人物连续完成动作。");
+
+  const changedFrames = [
+    frame(frames[0].beat.id, 1, "b894f4dd-99af-4f45-af99-a4b94cda4b89"),
+    frames[1],
+  ];
+  const stillExcluded = reconcileVideoDraftReferences(excluded, {}, changedFrames);
+  assert.equal(stillExcluded.selectedReferences.length, 1);
+  const restored = reconcileVideoDraftReferences(stillExcluded, {
+    restoreAutomaticReferences: true,
+  }, changedFrames);
+  assert.deepEqual(restored.autoReferenceExclusions, []);
+  assert.equal(restored.selectedReferences[0].reference_id, changedFrames[0].candidate.id);
+  assert.equal(restored.videoPrompt, "@分镜图/图1 @分镜图/图2\n\n人物连续完成动作。");
+});
+
+test("remembers removed intent references and clears the exclusion after a manual re-add", () => {
+  const intentReference = {
+    reference_kind: "project_asset",
+    reference_id: "02f03a76-8603-48d3-b51e-df1b7ade3200",
+    label: "资产/服装/白色睡衣",
+    role: "appearance",
+    order: 1,
+    origin: "intent_explicit",
+  };
+  const removed = reconcileVideoDraftReferences({
+    videoPrompt: "@资产/服装/白色睡衣\n替换服装。",
+    videoPromptMentions: [intentReference],
+    selectedReferences: [intentReference],
+    inputSources: ["project_assets"],
+    removedIntentReferenceKeys: [],
+  }, {
+    selectedReferences: [],
+    removedReference: intentReference,
+  });
+
+  assert.deepEqual(removed.removedIntentReferenceKeys, [
+    `project_asset:${intentReference.reference_id}`,
+  ]);
+
+  const manuallyReadded = reconcileVideoDraftReferences(removed, {
+    selectedReferences: [{ ...intentReference, origin: "manual" }],
+    addedReference: { ...intentReference, origin: "manual" },
+  });
+  assert.deepEqual(manuallyReadded.removedIntentReferenceKeys, []);
 });
 
 test("composes optional video inputs without exposing audio as a generation input", () => {
   assert.match(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(generationReferenceComposerSource, /ReferencePickerPopover/);
   assert.match(generationReferenceComposerSource, /selectedReferenceItems/);
-  assert.match(generationReferenceComposerSource, /未添加媒体参考，将按文生视频生成/);
+  assert.match(generationReferenceComposerSource, /已自动加入.*张分镜图/);
+  assert.match(generationReferenceComposerSource, /恢复默认/);
+  assert.match(generationReferenceComposerSource, /尚无生成参考/);
+  assert.match(workspaceSource, /maximum_reference_images/);
+  assert.match(workspaceSource, /不会自动丢弃参考/);
   assert.match(referencePickerSource, /选择托管人物/);
   assert.match(referencePickerSource, /创建或管理深度视频/);
   assert.match(referencePickerSource, /preferredWidth=\{480\}/);
@@ -651,8 +867,8 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
     managedReference,
   ]);
   assert.equal(systemConstraints.length, 2);
-  assert.match(systemConstraints[0].text, /严格逐帧遵循深度视频/);
-  assert.match(systemConstraints[0].text, /不得重新设计、简化、增加、删除、交换或提前任何动作/);
+  assert.match(systemConstraints[0].text, /保留强度以创作意图中的明确要求为准/);
+  assert.match(systemConstraints[0].text, /未要求逐帧复刻时允许模型自然调整/);
   assert.match(systemConstraints[1].text, /唯一的人物身份来源/);
   assert.match(systemConstraints[1].text, /不得继承深度视频或其他参考画面中的人物身份/);
   assert.match(
@@ -676,7 +892,14 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(workspaceSource, /<VideoPromptReferenceEditor/);
   assert.match(workspaceSource, /<VideoPromptReferencePolicy/);
   assert.match(workspaceSource, /<GenerationReferenceComposer/);
-  assert.match(workspaceSource, /requiredInputSource/);
+  assert.match(workspaceSource, /<CreativeIntentPanel/);
+  assert.match(workspaceSource, /compile-intent/);
+  assert.match(workspaceSource, /intent_mentions:\s*videoDraft\.intentMentions/);
+  assert.match(workspaceSource, /restore-intent-baseline/);
+  assert.match(workspaceSource, /className="shot-video-config-disclosure"/);
+  assert.match(workspaceSource, /open=\{referenceSettingsOpen\}/);
+  assert.match(workspaceSource, /open=\{promptSettingsOpen\}/);
+  assert.match(workspaceSource, /reconcileVideoDraftReferences/);
   assert.match(workspaceSource, /videoPromptMentions/);
   assert.match(workspaceSource, /selectedReferences/);
   assert.match(videoPromptReferenceEditorSource, /className="video-prompt-highlight"/);
@@ -687,9 +910,25 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(videoPromptReferenceEditorSource, /new ResizeObserver/);
   assert.match(videoPromptReferenceEditorSource, /textarea\.clientWidth \+ horizontalBorder/);
   assert.match(videoPromptReferenceEditorSource, /视频提示词快捷引用/);
+  assert.match(videoPromptReferenceEditorSource, /aria-label="视频提示词"/);
+  assert.doesNotMatch(videoPromptReferenceEditorSource, /<label[^>]*>视频提示词<\/label>/);
   assert.match(videoPromptReferenceEditorSource, /加入生成参考并插入提示词/);
   assert.match(videoPromptReferenceEditorSource, /deleteVideoMentionAtSelection/);
+  assert.match(videoPromptReferenceEditorSource, /removedReferences/);
   assert.match(videoPromptReferenceEditorSource, /event\.nativeEvent\?\.isComposing/);
+  assert.match(creativeIntentPanelSource, /<CreativeIntentMentionEditor/);
+  assert.match(creativeIntentPanelSource, /输入 @ 可精确指定资产/);
+  assert.match(creativeIntentPanelSource, /video_intent_model_validation_failed/);
+  assert.match(creativeIntentPanelSource, /提示词校验失败/);
+  assert.match(creativeIntentPanelSource, /需要确认意图/);
+  assert.match(workspaceSource, /intentRequirementsNeedAssets/);
+  assert.match(workspaceSource, /仍有创作意图需要人工确认/);
+  assert.match(creativeIntentMentionEditorSource, /buildVideoReferenceOptions/);
+  assert.match(creativeIntentMentionEditorSource, /deleteVideoMentionAtSelection/);
+  assert.match(creativeIntentMentionEditorSource, /event\.nativeEvent\?\.isComposing/);
+  assert.match(creativeIntentMentionEditorSource, /createPortal\(menu, document\.body\)/);
+  assert.match(creativeIntentMentionEditorSource, /explicit|失效|invalidMentions/);
+  assert.match(generationDraftSource, /intent_mentions/);
   assert.match(videoPromptReferencePolicySource, /复制可编辑提示词/);
   assert.match(videoPromptReferencePolicySource, /复制模型输入/);
   assert.match(
@@ -817,34 +1056,15 @@ test("shows clip quality warnings inside the independent editor inspector", () =
   assert.match(videoEditorStyles, /\.timeline-quality-summary/);
 });
 
-test("submits approved visual beats as an explicit ordered storyboard", () => {
-  assert.match(workspaceSource, /function approvedVisualBeatFrames/);
-  assert.match(workspaceSource, /className="shot-video-preview-stack"/);
-  assert.match(workspaceSource, /className="shot-video-storyboard"/);
-  assert.match(workspaceSource, /图\{beat\.index\}/);
-  assert.match(workspaceSource, /\{approvedReferenceCount\}\/\{referenceFrames\.length\}/);
+test("submits approved visual beats without a duplicate storyboard preview", () => {
+  assert.match(workspaceSource, /approvedVisualBeatFramesFromDetail/);
+  assert.match(workspaceSource, /referenceFrames=\{referenceFrames\}/);
+  assert.match(workspaceSource, /请先确认全部必需画面（\$\{approvedReferenceCount\}\/\$\{referenceFrames\.length\}）/);
   assert.match(workspaceSource, /!allReferencesApproved/);
   assert.doesNotMatch(workspaceSource, /function approvedImageCandidate/);
   assert.doesNotMatch(workspaceSource, /className="shot-video-preview-grid"/);
-
-  const previewStackRule = cssRule(".shot-video-preview-stack");
-  const storyboardRule = cssRule(".shot-video-storyboard");
-  const figureRule = cssRule(".shot-video-storyboard figure");
-  const imageRule = cssRule(".shot-video-storyboard-image");
-  const transitionRule = cssRule(".shot-video-storyboard-transition");
-
-  assert.match(previewStackRule, /grid-template-columns:\s*minmax\(0, 1fr\)/);
-  assert.match(previewStackRule, /align-items:\s*start/);
-  assert.match(previewStackRule, /gap:\s*16px/);
-  assert.match(storyboardRule, /display:\s*flex/);
-  assert.match(storyboardRule, /height:\s*auto/);
-  assert.match(storyboardRule, /align-items:\s*flex-start/);
-  assert.match(storyboardRule, /overflow-x:\s*auto/);
-  assert.match(storyboardRule, /scroll-snap-type:\s*x proximity/);
-  assert.match(figureRule, /width:\s*clamp\(108px, 11vw, 144px\)/);
-  assert.match(imageRule, /height:\s*clamp\(128px, 14vw, 168px\)/);
-  assert.match(transitionRule, /width:\s*32px/);
-  assert.doesNotMatch(workflowStyles, /height:\s*min\(58vh, 360px\)/);
+  assert.doesNotMatch(workspaceSource, /有序参考画面|有序多图参考故事板|shot-video-storyboard/);
+  assert.doesNotMatch(workflowStyles, /\.shot-video-preview-stack|\.shot-video-storyboard/);
 });
 
 test("offers only models that declare an enabled reference route", () => {

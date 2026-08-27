@@ -151,6 +151,16 @@ def _positive_prompt(
     input_plan: VideoGenerationInputPlan | None = None,
 ) -> str:
     editable_prompt = shot.video_prompt.strip()
+    strict_depth_requested = any(
+        marker in editable_prompt
+        for marker in (
+            "严格逐帧",
+            "逐帧遵循",
+            "严格遵循其动作顺序",
+            "精确复刻动作",
+            "不得重新设计、简化、增加、删除、交换或提前任何动作",
+        )
+    )
     legacy_policy_patterns = (
         (
             r"@托管角色/[^@\n]+?\s+是画面中唯一的人物身份来源。\s*"
@@ -169,7 +179,7 @@ def _positive_prompt(
     for pattern in legacy_policy_patterns:
         editable_prompt = re.sub(pattern, "", editable_prompt)
     editable_prompt = re.sub(r"\n{3,}", "\n\n", editable_prompt).strip()
-    lines = [f"动作与运镜要求：{editable_prompt}"]
+    lines = [f"用户视频提示词：{editable_prompt}"]
     if shot.video_prompt_mentions:
         role_labels = {
             "actor_identity": "人物身份",
@@ -180,6 +190,8 @@ def _positive_prompt(
             "motion": "人物动作",
             "camera": "运镜",
             "depth": "动作与空间深度",
+            "transition": "转场",
+            "style": "视觉风格",
         }
         lines.append("提示词中的 @引用 与本次上传素材一一对应，必须按各自用途使用：")
         for mention in sorted(shot.video_prompt_mentions, key=lambda item: item.order):
@@ -197,22 +209,28 @@ def _positive_prompt(
         (input_plan.references if input_plan else ()),
         key=lambda item: item.order,
     )
-    has_depth_control = any(
-        item.reference_kind.value == "depth_control" for item in references
-    )
+    has_depth_control = any(item.reference_kind.value == "depth_control" for item in references)
     has_managed_identity = any(
         item.reference_kind.value == "provider_managed_asset" for item in references
     )
     for reference in references:
         token = f"@{reference.label}"
         if reference.reference_kind.value == "depth_control":
-            lines.append(
-                f"{token} 是唯一的动作、姿态、运动节奏、空间位置、镜头关系和遮挡转场来源。"
-                "严格逐帧遵循深度视频中的身体姿态、手臂轨迹、动作顺序、速度、停顿、"
-                "主体位置、景别变化和镜头运动。"
-                "不得重新设计、简化、增加、删除、交换或提前任何动作。"
-                "该引用不提供人物身份、面部或外观特征。"
-            )
+            if strict_depth_requested:
+                lines.append(
+                    f"{token} 是唯一的动作、姿态、运动节奏、空间位置、"
+                    "镜头关系和遮挡转场来源。严格逐帧遵循深度视频中的身体姿态、"
+                    "手臂轨迹、动作顺序、速度、停顿、主体位置、景别变化和镜头运动。"
+                    "不得重新设计、简化、增加、删除、交换或提前任何动作。"
+                    "该引用不提供人物身份、服装、颜色或纹理。"
+                )
+            else:
+                lines.append(
+                    f"{token} 只提供动作、姿态、节奏、空间位置和镜头关系，"
+                    "不提供人物身份、服装、颜色或纹理。"
+                    "保留强度以用户视频提示词中的明确要求为准；"
+                    "未要求逐帧复刻时，允许为目标人物和新场景进行自然调整。"
+                )
         elif reference.reference_kind.value == "provider_managed_asset":
             lines.append(
                 f"{token} 是画面中唯一的人物身份来源。"
@@ -221,10 +239,12 @@ def _positive_prompt(
                 "该引用不改变动作、时序、主体位置或镜头运动。"
             )
     if has_depth_control and has_managed_identity:
-        lines.append(
-            "发生冲突时按职责分离处理：人物身份以托管角色为准；"
+        depth_priority = (
             "动作、姿态、节奏、空间位置和镜头关系以深度视频为准。"
+            if strict_depth_requested
+            else "动作、姿态、节奏、空间位置和镜头关系按用户提示词要求参考深度视频。"
         )
+        lines.append(f"发生冲突时按职责分离处理：人物身份以托管角色为准；{depth_priority}")
     if reference_frames:
         lines.extend(
             [
@@ -239,16 +259,23 @@ def _positive_prompt(
         )
         if frame.ordinal < len(reference_frames):
             transition = frame.transition_to_next_prompt.strip()
-            lines.append(
-                f"图{frame.ordinal}到图{frame.ordinal + 1}采用 "
-                f"{frame.transition_to_next_type} 转场，约 "
-                f"{frame.transition_to_next_duration_seconds:g} 秒"
-                f"{f'；{transition}' if transition else '。'}"
-            )
+            if frame.transition_to_next_type == "model_generated":
+                lines.append(
+                    f"图{frame.ordinal}到图{frame.ordinal + 1}由视频模型结合前后画面"
+                    "和用户转场意图生成连续转场，不得默认改成硬切"
+                    f"{f'；{transition}' if transition else '。'}"
+                )
+            else:
+                lines.append(
+                    f"图{frame.ordinal}到图{frame.ordinal + 1}采用 "
+                    f"{frame.transition_to_next_type} 转场，约 "
+                    f"{frame.transition_to_next_duration_seconds:g} 秒"
+                    f"{f'；{transition}' if transition else '。'}"
+                )
     lines.append("不添加配音、字幕、片头、片尾、额外文字或水印。")
     locked = "、".join(item.value for item in shot.locks)
     if locked:
-        lines.append(f"必须保持的约束：{locked}。")
+        lines.append(f"原方案锁定项：{locked}；若与本次明确创作意图冲突，以本次创作意图为准。")
     text = "\n".join(lines)
     return (to_simplified(text) or text).strip()
 
@@ -586,8 +613,7 @@ class VideoGenerationGateway:
             raise VideoGenerationGatewayError(
                 409,
                 "video_reference_route_disabled",
-                capability.reference_route.availability_note
-                or "当前模型的参考素材路由尚未开放",
+                capability.reference_route.availability_note or "当前模型的参考素材路由尚未开放",
             )
         source_ordered_frames = tuple(sorted(reference_frames, key=lambda item: item.ordinal))
         if [item.ordinal for item in source_ordered_frames] != list(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
@@ -73,16 +74,27 @@ class ModelCatalog:
         *,
         allowed_providers: set[str] | None = None,
         preferred_alias: str | None = None,
+        preferred_aliases: Mapping[ModelTask | str, str] | None = None,
+        fallback_enabled: bool = True,
     ) -> ModelPlanSnapshot:
         raw_profile = self.routes.get(profile.value)
         if not isinstance(raw_profile, dict):
             raise ModelCatalogError(f"模型目录未配置分析档位：{profile.value}")
-        if preferred_alias:
-            preferred = self.models.get(preferred_alias)
+        normalized_preferred_aliases = {
+            ModelTask(task): alias
+            for task, alias in (preferred_aliases or {}).items()
+            if alias
+        }
+        aliases_to_validate = {
+            *(normalized_preferred_aliases.values()),
+            *([preferred_alias] if preferred_alias else []),
+        }
+        for alias in aliases_to_validate:
+            preferred = self.models.get(alias)
             if preferred is None:
-                raise ModelCatalogError(f"模型目录没有 GUI 选择的模型：{preferred_alias}")
+                raise ModelCatalogError(f"模型目录没有 GUI 选择的模型：{alias}")
             if allowed_providers and preferred.provider not in allowed_providers:
-                raise ModelCatalogError(f"模型 {preferred_alias} 不属于已启用的 Provider")
+                raise ModelCatalogError(f"模型 {alias} 不属于已启用的 Provider")
 
         routes: list[ModelRouteSnapshot] = []
         for task in ModelTask:
@@ -90,10 +102,16 @@ class ModelCatalog:
             if not isinstance(raw_aliases, list):
                 raise ModelCatalogError(f"任务路由必须是模型别名列表：{task.value}")
             aliases = [str(alias) for alias in raw_aliases]
-            if preferred_alias:
+            task_preferred_alias = normalized_preferred_aliases.get(
+                task,
+                preferred_alias,
+            )
+            if task in normalized_preferred_aliases and not fallback_enabled:
+                aliases = [task_preferred_alias]
+            elif task_preferred_alias:
                 aliases = [
-                    preferred_alias,
-                    *(alias for alias in aliases if alias != preferred_alias),
+                    task_preferred_alias,
+                    *(alias for alias in aliases if alias != task_preferred_alias),
                 ]
 
             targets: list[ModelTargetSnapshot] = []
@@ -189,7 +207,12 @@ def configured_model_alias() -> str | None:
     return None if raw.lower() in {"", "auto"} else raw
 
 
-def load_model_plan(profile: AnalysisProfile) -> ModelPlanSnapshot | None:
+def load_model_plan(
+    profile: AnalysisProfile,
+    *,
+    preferred_aliases: Mapping[ModelTask | str, str] | None = None,
+    fallback_enabled: bool = True,
+) -> ModelPlanSnapshot | None:
     providers = configured_model_providers()
     if not providers:
         return None
@@ -197,4 +220,6 @@ def load_model_plan(profile: AnalysisProfile) -> ModelPlanSnapshot | None:
         profile,
         allowed_providers=providers,
         preferred_alias=configured_model_alias(),
+        preferred_aliases=preferred_aliases,
+        fallback_enabled=fallback_enabled,
     )

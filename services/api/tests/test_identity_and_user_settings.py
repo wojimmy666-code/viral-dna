@@ -54,6 +54,16 @@ def test_user_preferences_are_account_scoped_and_do_not_accept_api_keys(
     with TestClient(build_app(tmp_path / "settings.json")) as client:
         initial = client.get("/api/v1/me/settings/preferences")
         assert initial.status_code == 200
+        assert initial.json()["settings"]["text_model_alias"] == "qwen37"
+        assert {item["alias"] for item in initial.json()["text_models"]} == {
+            "qwen37",
+            "qwen36flash",
+        }
+        assert {item["id"] for item in initial.json()["text_model_tasks"]} == {
+            "replication_plan",
+            "shot_image_prompt",
+            "video_prompt",
+        }
         revision = initial.json()["revision"]
 
         updated = client.put(
@@ -68,6 +78,9 @@ def test_user_preferences_are_account_scoped_and_do_not_accept_api_keys(
                     "image_candidate_count": 2,
                     "video_model_alias": "minimax_h3",
                     "video_resolution": "1080P",
+                    "text_model_alias": "qwen36flash",
+                    "text_model_fallback_enabled": False,
+                    "text_model_task_overrides": {"video_prompt": "qwen37"},
                 },
             },
         )
@@ -84,7 +97,30 @@ def test_user_preferences_are_account_scoped_and_do_not_accept_api_keys(
 
     assert updated.status_code == 200
     assert updated.json()["settings"]["video_resolution"] == "1080P"
+    assert updated.json()["settings"]["text_model_alias"] == "qwen36flash"
+    assert updated.json()["settings"]["text_model_fallback_enabled"] is False
+    assert updated.json()["settings"]["text_model_task_overrides"] == {
+        "video_prompt": "qwen37"
+    }
     assert rejected.status_code == 422
+
+
+def test_user_preferences_reject_unknown_text_model_alias(tmp_path: Path) -> None:
+    with TestClient(build_app(tmp_path / "settings.json")) as client:
+        initial = client.get("/api/v1/me/settings/preferences").json()
+        response = client.put(
+            "/api/v1/me/settings/preferences",
+            json={
+                "revision": initial["revision"],
+                "settings": {
+                    **initial["settings"],
+                    "text_model_alias": "missing-model",
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "文案模型不存在：missing-model"
 
 
 def test_user_preferences_use_revision_conflict_protection(tmp_path: Path) -> None:

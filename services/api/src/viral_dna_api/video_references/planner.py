@@ -243,17 +243,15 @@ def resolve_video_reference_plan(
     reserved_inputs = len(selected_managed) + len(enabled_depth)
     image_limit = max(0, maximum_inputs - reserved_inputs)
     if len(selected) > image_limit:
-        overflow = selected[image_limit:]
-        selected = selected[:image_limit]
-        excluded.extend(
-            _exclude(
-                frame,
-                reason_code="provider_reference_limit",
-                reason="超过当前模型的参考素材上限，已保留优先级更高的身份与外观资产",
-            )
-            for frame in overflow
+        requested_inputs = len(selected) + reserved_inputs
+        raise VideoReferencePolicyError(
+            "provider_reference_limit",
+            (
+                f"当前模型最多支持 {maximum_inputs} 项生成参考，"
+                f"本次需要 {requested_inputs} 项；系统不会自动丢弃参考，"
+                "请切换模型或手动减少参考"
+            ),
         )
-        warnings.append(f"已按模型输入上限排除 {len(overflow)} 张低优先级参考图")
 
     selected_frames = _renumber(selected)
     manifest_seed: dict[str, object] = {

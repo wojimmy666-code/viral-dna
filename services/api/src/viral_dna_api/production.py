@@ -5216,6 +5216,26 @@ class ProductionService:
                     "video_generation_reference_source_disabled",
                     f"生成参考 @{reference.label} 尚未启用对应输入来源",
                 )
+        capacity_reference_kinds = {
+            VideoPromptReferenceKind.APPROVED_IMAGE,
+            VideoPromptReferenceKind.PROJECT_ASSET,
+            VideoPromptReferenceKind.PROVIDER_MANAGED_ASSET,
+            VideoPromptReferenceKind.DEPTH_CONTROL,
+        }
+        selected_reference_count = sum(
+            reference.reference_kind in capacity_reference_kinds
+            for reference in payload.input_plan.references
+        )
+        if selected_reference_count > capability.maximum_reference_images:
+            raise _fail(
+                422,
+                "video_reference_limit",
+                (
+                    f"当前模型最多支持 {capability.maximum_reference_images} 项生成参考，"
+                    f"本次已选择 {selected_reference_count} 项；系统不会自动丢弃参考，"
+                    "请切换模型或手动减少参考"
+                ),
+            )
         for mention in plan.video_prompt_mentions:
             if f"@{mention.label}" not in plan.video_prompt:
                 raise _fail(
