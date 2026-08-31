@@ -111,7 +111,16 @@ class FakeInterpreter:
 
     async def interpret(self, *, intent_text, context):
         assert intent_text
-        assert context["shot"]["visual_beats"]
+        shot_context = context["shot"]
+        assert shot_context["original_video_prompt"]
+        assert "source_facts" not in shot_context
+        assert shot_context["visual_beats"]
+        assert all(
+            "image_prompt" not in item
+            and "title" not in item
+            and "transition_to_next_prompt" not in item
+            for item in shot_context["visual_beats"]
+        )
         return InterpretedIntent(
             intent=self.intent,
             requested_model="qwen3.6-flash-2026-04-16",
@@ -131,6 +140,7 @@ class UnexpectedInterpreter:
 class ValidationFailingInterpreter:
     async def interpret(self, *, intent_text, context):
         assert intent_text
+        assert context["shot"]["original_video_prompt"]
         assert context["shot"]["visual_beats"]
         raise VideoIntentCompilationError(
             502,
@@ -204,6 +214,10 @@ def make_shot() -> ShotPlan:
         start_seconds=0,
         end_seconds=4,
         duration_seconds=4,
+        video_prompt=(
+            "原始视频提示词：同一名双马尾女性先穿白色印花睡衣原地跳跃，"
+            "随后自然变为浅绿色水手服并抬起右手展示；固定机位，动作连续。"
+        ),
         visual_beats=[first, second],
     )
 
@@ -894,7 +908,7 @@ def test_depth_replacement_is_compiled_as_a_resolved_motion_state() -> None:
     assert intent.summary not in prompt
 
 
-def test_compiler_keeps_concrete_frame_details_and_inline_reference_roles() -> None:
+def test_compiler_keeps_ordered_visual_references_without_copying_image_prompts() -> None:
     shot = make_shot()
     references = [
         *[
@@ -975,10 +989,13 @@ def test_compiler_keeps_concrete_frame_details_and_inline_reference_roles() -> N
     )
 
     assert "生成一段 9:16、时长 6.00 秒的竖屏视频" in prompt
-    assert "【0.00–3.00 秒｜起始画面】" in prompt
-    assert "白色印花长袖睡衣套装" in prompt
-    assert "【3.00–6.00 秒｜结束画面】" in prompt
-    assert "浅绿色水手服与百褶裙" in prompt
+    assert "【0.00–3.00 秒｜图1】" in prompt
+    assert "【3.00–6.00 秒｜图2】" in prompt
+    assert "起始画面" not in prompt
+    assert "结束画面" not in prompt
+    assert "粉色挂饰和系蓝色蝴蝶结的白色兔子玩偶" not in prompt
+    assert "白色过膝袜和黑色乐福鞋" not in prompt
+    assert "最终可见内容以【最终画面】和【动作与镜头】为准" in prompt
     assert "画面以  为准" not in prompt
     assert "@分镜图/图1 到 @分镜图/图2" in prompt
     assert "人物跳跃落地的动作节点触发自然变装" in prompt
@@ -987,6 +1004,60 @@ def test_compiler_keeps_concrete_frame_details_and_inline_reference_roles() -> N
     assert "@资产/小喵酱/面部" in prompt
     assert "@深度视频/分镜动作1" in prompt
     assert len(mentions) == 4
+
+
+def test_compiler_does_not_reintroduce_text_from_the_image_prompt() -> None:
+    beat = ShotVisualBeat(
+        index=1,
+        title="滤芯推进与文字显现",
+        start_ratio=0,
+        end_ratio=1,
+        image_prompt=(
+            "主体：黑色矩形滤芯、白色边框、中文文字“比亚迪 宋”。"
+            "构图：文字居中叠加于主体表面。色彩：文字为纯白。"
+        ),
+        approved_image_candidate_id=uuid4(),
+    )
+    shot = ShotPlan(
+        project_id=uuid4(),
+        revision_id=uuid4(),
+        source_shot_id="shot-text-removal",
+        index=1,
+        start_seconds=0,
+        end_seconds=3,
+        duration_seconds=3,
+        video_prompt=(
+            "黑色矩形滤芯从远处向镜头推进并轻微自转，"
+            "滤芯表面逐渐显现白色文字“大师兄”。"
+        ),
+        visual_beats=[beat],
+    )
+    reference = current_default_input_plan(shot).references[0]
+    intent = VideoGenerationIntentIR(
+        summary="去掉原视频中的文字",
+        directives=[
+            VideoIntentDirective(
+                dimension=VideoIntentDimension.PROP,
+                operation=VideoIntentOperation.REMOVE,
+                target_name="中文文字“大师兄”",
+                visual_beat_indexes=[1],
+            )
+        ],
+        final_state_instruction=(
+            "黑色矩形滤芯从远处向镜头推进并轻微自转，画面中无任何文字叠加。"
+        ),
+        creative_instruction="固定机位，推进和自转节奏自然连续。",
+    )
+
+    prompt, _, _ = compile_intent_prompt(intent, [reference], shot)
+
+    assert "画面中无任何文字叠加" in prompt
+    assert "图1阶段画面中不出现中文文字“大师兄”" in prompt
+    assert "【0.00–3.00 秒｜图1】" in prompt
+    assert "滤芯推进与文字显现" not in prompt
+    assert "比亚迪 宋" not in prompt
+    assert "文字居中叠加" not in prompt
+    assert "文字为纯白" not in prompt
 
 
 def test_intent_regeneration_preserves_manually_edited_prompt_and_updates_baseline() -> None:

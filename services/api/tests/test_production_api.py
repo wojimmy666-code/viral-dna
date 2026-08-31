@@ -895,10 +895,7 @@ def test_leading_visual_beat_from_previous_shot_is_removed_once(
             target.model_copy(
                 update={
                     "image_prompt": contaminated.image_prompt,
-                    "video_prompt": (
-                        f"第一部分：{contaminated.image_prompt}"
-                        f"第二部分：{valid.image_prompt}"
-                    ),
+                    "video_prompt": "人物走入户外观景台，镜头平稳跟随并保持动作连续。",
                     "visual_beats": [contaminated, valid],
                 }
             )
@@ -919,7 +916,7 @@ def test_leading_visual_beat_from_previous_shot_is_removed_once(
         assert repaired.visual_beats[0].start_ratio == 0
         assert repaired.visual_beats[0].end_ratio == 1
         assert repaired.image_prompt == valid.image_prompt
-        assert "上一分镜" not in repaired.video_prompt
+        assert repaired.video_prompt == "人物走入户外观景台，镜头平稳跟随并保持动作连续。"
         assert repaired.approved_video_candidate_id is None
 
         await service.list_shots(detail.project.id)

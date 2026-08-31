@@ -207,6 +207,57 @@ def test_selected_depth_and_managed_references_compile_separated_responsibilitie
     assert "用户视频提示词：【目标画面】 人物抬手调整口罩。" in compiled
 
 
+def test_approved_image_metadata_never_adds_image_prompt_semantics() -> None:
+    shot = ShotPlan(
+        project_id=uuid4(),
+        revision_id=uuid4(),
+        source_shot_id="shot-image-metadata-isolation",
+        index=1,
+        start_seconds=0,
+        end_seconds=3,
+        duration_seconds=3,
+        video_prompt="黑色滤芯平滑推进，画面中无任何文字。",
+    )
+    frames = (
+        OrderedReferenceFrame(
+            visual_beat_id=uuid4(),
+            ordinal=1,
+            title="滤芯推进与文字显现",
+            candidate_id=uuid4(),
+            path=Path("approved-1.jpg"),
+            relative_path="approved-1.jpg",
+            sha256="a" * 64,
+            start_ratio=0,
+            end_ratio=0.5,
+            transition_to_next_type="model_generated",
+            transition_to_next_duration_seconds=0.5,
+            transition_to_next_prompt="文字逐渐显现为“大师兄”",
+        ),
+        OrderedReferenceFrame(
+            visual_beat_id=uuid4(),
+            ordinal=2,
+            title="文字完整出现",
+            candidate_id=uuid4(),
+            path=Path("approved-2.jpg"),
+            relative_path="approved-2.jpg",
+            sha256="b" * 64,
+            start_ratio=0.5,
+            end_ratio=1,
+            transition_to_next_type="cut",
+            transition_to_next_duration_seconds=0,
+        ),
+    )
+
+    compiled = _positive_prompt(shot, frames)
+
+    assert "用户视频提示词：黑色滤芯平滑推进，画面中无任何文字。" in compiled
+    assert "图1（分镜图/图1）" in compiled
+    assert "图2（分镜图/图2）" in compiled
+    assert "滤芯推进与文字显现" not in compiled
+    assert "文字完整出现" not in compiled
+    assert "文字逐渐显现为“大师兄”" not in compiled
+
+
 def test_video_gateway_creates_persistent_simulated_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

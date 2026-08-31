@@ -5464,16 +5464,12 @@ class ProductionService:
                 reference.reference_id
                 for reference in payload.input_plan.references
                 if reference.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
-            } or {
-                mention.reference_asset_id
-                for beat in plan.visual_beats
-                for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
             }
             if not asset_ids:
                 raise _fail(
                     409,
                     "video_project_asset_required",
-                    "当前分镜尚未在提示词中关联项目图片资产",
+                    "当前视频生成设置尚未选择项目图片资产",
                 )
         if VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS in sources:
             if not capability.managed_assets.supported:
@@ -6533,7 +6529,7 @@ class ProductionService:
                             title=(
                                 approved_mentions[beat.approved_image_candidate_id].label
                                 if beat.approved_image_candidate_id in approved_mentions
-                                else beat.title
+                                else f"分镜图/图{beat.index}"
                             ),
                             candidate_id=candidate.id,
                             path=candidate_path,
@@ -6545,7 +6541,7 @@ class ProductionService:
                             transition_to_next_duration_seconds=(
                                 beat.transition_to_next_duration_seconds
                             ),
-                            transition_to_next_prompt=beat.transition_to_next_prompt,
+                            transition_to_next_prompt="",
                             role="composition",
                             source_kind="approved_frame",
                         )
@@ -6568,17 +6564,10 @@ class ProductionService:
                     for item in payload.input_plan.references
                     if item.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
                 ]
-                if video_asset_mentions:
-                    mention_sources = [
-                        (target_beats[0], mention.reference_id, mention.label)
-                        for mention in sorted(video_asset_mentions, key=lambda item: item.order)
-                    ]
-                else:
-                    mention_sources = [
-                        (beat, mention.reference_asset_id, mention.label)
-                        for beat in sorted(target_beats, key=lambda item: item.index)
-                        for mention in (beat.image_prompt_mentions or plan.image_prompt_mentions)
-                    ]
+                mention_sources = [
+                    (target_beats[0], mention.reference_id, mention.label)
+                    for mention in sorted(video_asset_mentions, key=lambda item: item.order)
+                ]
                 for beat, reference_asset_id, mention_label in mention_sources:
                     if reference_asset_id in seen_asset_ids:
                         continue
@@ -8913,12 +8902,8 @@ class ProductionService:
                     revision_id=revision_id,
                     invalidate_video=True,
                 )
-                primary = retained[0]
                 updated = updated.model_copy(
                     update={
-                        "video_prompt": (
-                            f"{primary.image_prompt}；持续 {plan.duration_seconds:.2f} 秒。"
-                        ),
                         "approved_video_candidate_id": None,
                         "updated_at": utc_now(),
                     }

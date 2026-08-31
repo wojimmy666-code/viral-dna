@@ -253,12 +253,21 @@ def _positive_prompt(
             ]
         )
     for frame in reference_frames:
+        frame_title = (
+            f"分镜图/图{frame.ordinal}"
+            if frame.source_kind == "approved_frame"
+            else frame.title
+        )
         lines.append(
-            f"图{frame.ordinal}（{frame.title}）位于视频进度 "
+            f"图{frame.ordinal}（{frame_title}）位于视频进度 "
             f"{frame.start_ratio:.0%}～{frame.end_ratio:.0%}。"
         )
         if frame.ordinal < len(reference_frames):
-            transition = frame.transition_to_next_prompt.strip()
+            transition = (
+                ""
+                if frame.source_kind == "approved_frame"
+                else frame.transition_to_next_prompt.strip()
+            )
             if frame.transition_to_next_type == "model_generated":
                 lines.append(
                     f"图{frame.ordinal}到图{frame.ordinal + 1}由视频模型结合前后画面"

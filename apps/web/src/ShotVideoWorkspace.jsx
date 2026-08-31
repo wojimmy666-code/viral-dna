@@ -376,14 +376,8 @@ export function ShotVideoWorkspace({
     (mention) => mention.reference_kind === "project_asset",
   );
   const projectAssetCount = useMemo(() => (
-    explicitProjectAssetMentions.length > 0
-      ? new Set(explicitProjectAssetMentions.map((mention) => mention.reference_id)).size
-      : new Set(
-          (plan?.visual_beats || []).flatMap((beat) => (
-            beat.image_prompt_mentions || plan?.image_prompt_mentions || []
-          )).map((mention) => mention.reference_asset_id),
-        ).size
-  ), [explicitProjectAssetMentions, plan?.image_prompt_mentions, plan?.visual_beats]);
+    new Set(explicitProjectAssetMentions.map((mention) => mention.reference_id)).size
+  ), [explicitProjectAssetMentions]);
 
   useEffect(() => () => {
     if (depthEnginePollTimer.current) {
@@ -583,6 +577,8 @@ export function ShotVideoWorkspace({
     ? "正在读取视频模型目录，请稍候"
     : modelCatalogFailed
       ? "视频模型目录读取失败，请重新加载"
+    : videoDraft.intent?.status === "stale"
+      ? "创作意图使用旧版或已修改的输入，请重新生成引用与提示词"
     : !videoGenerationSettings?.enabled
     ? "视频生成尚未启用"
     : compatibleVideoModels.length === 0
@@ -601,7 +597,7 @@ export function ShotVideoWorkspace({
       : usesProjectAssets && !selectedModel.capabilities?.image_to_video
         ? "当前模型不支持项目图片资产输入"
       : usesProjectAssets && projectAssetCount === 0
-        ? "当前提示词尚未关联项目图片资产"
+        ? "当前视频生成设置尚未选择项目图片资产"
       : usesManagedAssets && !managedAssetCompatible
         ? "当前模型不支持已绑定的 Provider 托管人物资产，请切换到 Seedance 2.0 系列"
       : usesManagedAssets && !managedAssetBinding

@@ -1,4 +1,4 @@
-catalog_version = "phase2-model-catalog-2026-08-27-r9"
+catalog_version = "phase2-model-catalog-2026-08-27-r10"
 pricing_version = "cn-list-price-2026-08-02"
 
 [prompts]
@@ -7,7 +7,7 @@ shot_facts = "shot-facts-v3"
 entity_resolution = "entity-resolution-v1"
 viral_reasoning = "viral-reasoning-v1"
 prompt_generation = "seedance-prompt-v1"
-video_intent = "video-generation-intent-v1"
+video_intent = "video-generation-intent-v2"
 image_quality_qa = "image-semantic-quality-v1"
 
 [schemas]

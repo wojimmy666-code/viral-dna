@@ -428,6 +428,13 @@ test("persists creative-intent mentions as stable asset ids", () => {
   assert.deepEqual(videoDraftParameters(restored).intent_mentions, [mention]);
 });
 
+test("blocks video generation until a stale creative intent is regenerated", () => {
+  assert.match(
+    workspaceSource,
+    /videoDraft\.intent\?\.status === "stale"[\s\S]*重新生成引用与提示词/,
+  );
+});
+
 test("automatically binds approved visual beats to prompt mentions", () => {
   const visualBeatId = "46bc61aa-e6f1-4a9d-bf84-81f85be1e6f9";
   const reference = {
@@ -624,6 +631,7 @@ test("remembers removed intent references and clears the exclusion after a manua
 test("composes optional video inputs without exposing audio as a generation input", () => {
   assert.match(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(generationReferenceComposerSource, /ReferencePickerPopover/);
+  assert.doesNotMatch(workspaceSource, /image_prompt_mentions/);
   assert.match(generationReferenceComposerSource, /selectedReferenceItems/);
   assert.doesNotMatch(generationReferenceComposerSource, /已自动加入.*张分镜图.*与画面轨道同步/);
   assert.match(generationReferenceComposerSource, /恢复默认/);

@@ -21,6 +21,7 @@ from ..models import (
     VideoReferenceScope,
     VideoReferenceScopeKind,
 )
+from ..prompt_versions import VIDEO_INTENT_PROMPT_VERSION
 from .settings import VideoGenerationSettingsService
 
 
@@ -76,6 +77,21 @@ def _bounded_candidate_count(value: object) -> int:
     return min(4, max(1, count))
 
 
+def _with_current_intent_version(
+    draft: ShotVideoGenerationDraft,
+) -> ShotVideoGenerationDraft:
+    intent = draft.intent
+    if (
+        intent.interpretation is None
+        or intent.prompt_version == VIDEO_INTENT_PROMPT_VERSION
+        or intent.status in {VideoIntentStatus.EMPTY, VideoIntentStatus.FAILED}
+    ):
+        return draft
+    return draft.model_copy(
+        update={"intent": intent.model_copy(update={"status": VideoIntentStatus.STALE})}
+    )
+
+
 class ShotVideoGenerationDraftService:
     """Persists non-revisioned video generation choices per production shot."""
 
@@ -93,7 +109,7 @@ class ShotVideoGenerationDraftService:
             raise _fail(404, "shot_not_found", "分镜不存在")
         existing = await self.repository.get_video_generation_draft(shot_plan_id)
         if existing is not None:
-            return existing
+            return _with_current_intent_version(existing)
 
         draft = await self._initial_draft(plan)
         created = await self.repository.compare_and_swap_video_generation_draft(
@@ -105,7 +121,7 @@ class ShotVideoGenerationDraftService:
         concurrent = await self.repository.get_video_generation_draft(shot_plan_id)
         if concurrent is None:
             raise _fail(500, "video_draft_create_failed", "无法初始化视频生成设置")
-        return concurrent
+        return _with_current_intent_version(concurrent)
 
     async def update(
         self,

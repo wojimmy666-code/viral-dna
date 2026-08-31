@@ -11,15 +11,20 @@ import pytest
 from viral_dna_api.models import (
     GenerationKind,
     ShotPlan,
+    ShotVideoGenerationDraft,
     ShotVideoGenerationDraftUpdate,
     ShotVisualBeat,
     VideoGenerationInputPlan,
     VideoGenerationInputSource,
+    VideoGenerationIntentIR,
     VideoGenerationReference,
+    VideoIntentState,
+    VideoIntentStatus,
     VideoPromptMention,
     VideoPromptReferenceKind,
     VideoPromptReferenceRole,
 )
+from viral_dna_api.prompt_versions import VIDEO_INTENT_PROMPT_VERSION
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.store import InMemoryStore
 from viral_dna_api.video_generation.drafts import (
@@ -179,6 +184,50 @@ def test_video_generation_draft_starts_with_all_approved_visual_beats() -> None:
             "分镜图/图1",
             "分镜图/图2",
         ]
+
+    asyncio.run(scenario())
+
+
+def test_video_generation_draft_marks_legacy_intent_prompt_versions_stale() -> None:
+    async def scenario() -> None:
+        store = InMemoryStore()
+        service = ShotVideoGenerationDraftService(store, FakeVideoSettings())
+        shot = make_shot()
+        await store.save_shot_plan(shot)
+        legacy = ShotVideoGenerationDraft(
+            project_id=shot.project_id,
+            shot_plan_id=shot.id,
+            model_alias="minimax_h3",
+            resolution="720P",
+            duration_seconds=4,
+            video_prompt="旧版自动生成的视频提示词",
+            intent=VideoIntentState(
+                text="去掉画面文字",
+                status=VideoIntentStatus.READY,
+                interpretation=VideoGenerationIntentIR(
+                    summary="去掉画面文字",
+                    final_state_instruction="画面中没有文字。",
+                ),
+                prompt_version="video-generation-intent-v1",
+            ),
+        )
+        store.shot_video_generation_drafts[shot.id] = legacy
+
+        restored = await service.get(shot.id)
+
+        assert restored.intent.status == VideoIntentStatus.STALE
+        assert restored.video_prompt == legacy.video_prompt
+        assert restored.draft_version == legacy.draft_version
+
+        current = legacy.model_copy(
+            update={
+                "intent": legacy.intent.model_copy(
+                    update={"prompt_version": VIDEO_INTENT_PROMPT_VERSION}
+                )
+            }
+        )
+        store.shot_video_generation_drafts[shot.id] = current
+        assert (await service.get(shot.id)).intent.status == VideoIntentStatus.READY
 
     asyncio.run(scenario())
 

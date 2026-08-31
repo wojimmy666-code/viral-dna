@@ -169,13 +169,6 @@ def _reference_tokens(references: Iterable[VideoGenerationReference]) -> set[str
     return {_token(reference) for reference in references}
 
 
-def _beat_visual_description(beat: ShotVisualBeat, *, max_length: int) -> str:
-    text = beat.image_prompt
-    for mention in beat.image_prompt_mentions:
-        text = text.replace(f"@{mention.label.strip().lstrip('@')}", "")
-    return _safe_positive_text(text, max_length=max_length)
-
-
 def _final_value(directive: VideoIntentDirective) -> str:
     if directive.target_name:
         return directive.target_name.strip().strip("。")
@@ -352,7 +345,6 @@ def _phase_lines(
     }
     identity_is_external = VideoPromptReferenceRole.ACTOR_IDENTITY in overridden_roles
     lines: list[str] = []
-    description_budget = max(260, min(1600, 3200 // max(len(approved), 1)))
     for reference in approved:
         beat = _beat_for_reference(reference, shot)
         start_ratio = reference.scope.start_ratio
@@ -364,17 +356,15 @@ def _phase_lines(
         aspects = [label for role, label in IMAGE_ASPECTS if role not in overridden_roles]
         if not aspects:
             aspects = ["构图与主体空间位置"]
-        title = beat.title if beat is not None else reference.label.rsplit("/", 1)[-1]
+        beat_index = beat.index if beat is not None else len(lines) + 1
         heading = (
             f"【{_format_seconds(start_ratio * duration_seconds)}–"
-            f"{_format_seconds(end_ratio * duration_seconds)} 秒｜{title}】"
+            f"{_format_seconds(end_ratio * duration_seconds)} 秒｜图{beat_index}】"
         )
         paragraphs = [
-            f"该阶段的{'、'.join(aspects)}以 {_token(reference)} 为准。"
+            f"该阶段的{'、'.join(aspects)}以 {_token(reference)} 为视觉参考；"
+            "最终可见内容以【最终画面】和【动作与镜头】为准。"
         ]
-        description = _beat_visual_description(beat, max_length=description_budget) if beat else ""
-        if description:
-            paragraphs.append(description)
         if identity_is_external:
             paragraphs.append("人物可识别身份只采用已绑定的人物身份资产，不继承分镜图中的人物身份。")
         lines.append(heading + "\n" + "\n".join(paragraphs))
@@ -494,9 +484,8 @@ def _transition_lines(
         if directive is not None and directive.operation == VideoIntentOperation.REMOVE:
             lines.append(f"- {window}，{pair}直接切换，不叠加过渡效果。")
             continue
-        evidence = current.transition_to_next_prompt.strip()
         if directive is not None and directive.operation == VideoIntentOperation.PRESERVE:
-            detail = instruction or evidence or "采用已分析的触发动作、遮挡关系、速度和视觉节奏"
+            detail = instruction or "采用原始视频提示词中的触发动作、遮挡关系、速度和视觉节奏"
             detail = detail.rstrip("。；;，, ")
             lines.append(
                 f"- {window}，{pair}呈现连续视觉转场：{detail}；"
@@ -512,7 +501,7 @@ def _transition_lines(
         elif current.transition_to_next_type == "cut":
             lines.append(f"- {window}，{pair}直接切换。")
         elif current.transition_to_next_type == "model_generated":
-            detail = instruction or evidence
+            detail = instruction
             suffix = (
                 f"：{detail.rstrip('。')}。"
                 if detail
@@ -525,9 +514,8 @@ def _transition_lines(
                 f"- {window}，{pair}由视频模型结合前后画面生成连续视觉转场{suffix}"
             )
         else:
-            detail = f"；{evidence}" if evidence else ""
             lines.append(
-                f"- {window}，{pair}呈现 {current.transition_to_next_type} 转场{detail}。"
+                f"- {window}，{pair}呈现 {current.transition_to_next_type} 转场。"
             )
     if not lines and instruction:
         lines.append(f"- {instruction}")

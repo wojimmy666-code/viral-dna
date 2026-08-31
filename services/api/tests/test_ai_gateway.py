@@ -176,10 +176,10 @@ def test_catalog_freezes_profile_routes(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("VIRAL_DNA_VLM_PROVIDER", "dashscope")
     plan = load_model_plan(AnalysisProfile.ECONOMY)
     assert plan is not None
-    assert plan.catalog_version == "phase2-model-catalog-2026-08-27-r9"
+    assert plan.catalog_version == "phase2-model-catalog-2026-08-27-r10"
     assert plan.targets_for(ModelTask.SHOT_FACTS)[0].prompt_version == "shot-facts-v3"
     assert plan.targets_for(ModelTask.VIDEO_INTENT)[0].prompt_version == (
-        "video-generation-intent-v1"
+        "video-generation-intent-v2"
     )
     assert PriceCatalog().catalog_version == plan.pricing_version
     targets = plan.targets_for(ModelTask.SHOT_FACTS)

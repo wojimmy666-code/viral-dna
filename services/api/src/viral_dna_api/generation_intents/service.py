@@ -43,7 +43,7 @@ from .contracts import (
 from .resolver import resolve_intent_references, validate_intent_mentions
 
 SYSTEM_PROMPT_PATH = (
-    Path(__file__).resolve().parents[1] / "ai" / "prompts" / "video_generation_intent_v1.md"
+    Path(__file__).resolve().parents[1] / "ai" / "prompts" / "video_generation_intent_v2.md"
 )
 PRIMARY_SEMANTIC_ATTEMPTS = 2
 CONTINUOUS_TRANSITION_INSTRUCTION = (
@@ -73,8 +73,6 @@ class VideoIntentRepository(Protocol):
         self,
         project_id: UUID,
     ) -> ProductionProject | None: ...
-
-    async def get_report_by_analysis(self, analysis_id: UUID): ...
 
     async def compare_and_swap_video_generation_draft(
         self,
@@ -171,7 +169,7 @@ class ModelVideoIntentInterpreter:
         schema = json.dumps(VideoGenerationIntentIR.model_json_schema(), ensure_ascii=False)
         base_user_prompt = (
             f"用户创作意图：\n{intent_text.strip()}\n\n"
-            "当前分镜、可用资产和已选输入：\n"
+            "原始视频提示词、分镜结构、可用资产和已选输入：\n"
             f"{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}\n\n"
             "请输出结构化创作意图，严格遵守以下 JSON Schema：\n"
             f"{schema}"
@@ -507,29 +505,6 @@ class VideoIntentCompilationService:
         draft: ShotVideoGenerationDraft,
         intent_mentions: list[VideoPromptMention],
     ) -> dict[str, object]:
-        report = await self.repository.get_report_by_analysis(project.base_analysis_id)
-        source = None
-        if report is not None:
-            source = next(
-                (item for item in report.shots if item.id == shot.source_shot_id),
-                None,
-            ) or next(
-                (item for item in report.shots if item.index == shot.index),
-                None,
-            )
-        source_facts = {}
-        if source is not None:
-            source_facts = {
-                "subjects": source.subjects,
-                "action": source.action,
-                "scene": source.scene,
-                "camera": source.camera,
-                "composition": source.composition,
-                "dialogue": source.dialogue,
-                "transition": source.transition,
-                "start_seconds": source.start_seconds,
-                "end_seconds": source.end_seconds,
-            }
         return {
             "output": {
                 "aspect_ratio": getattr(project, "output_aspect_ratio", ""),
@@ -540,17 +515,14 @@ class VideoIntentCompilationService:
                 "index": shot.index,
                 "duration_seconds": shot.duration_seconds,
                 "generation_duration_seconds": draft.duration_seconds,
-                "source_facts": source_facts,
+                "original_video_prompt": shot.video_prompt,
                 "visual_beats": [
                     {
                         "index": item.index,
-                        "title": item.title,
                         "start_ratio": item.start_ratio,
                         "end_ratio": item.end_ratio,
-                        "image_prompt": item.image_prompt[:1600],
                         "has_approved_image": item.approved_image_candidate_id is not None,
                         "transition_to_next_type": item.transition_to_next_type,
-                        "transition_to_next_prompt": item.transition_to_next_prompt,
                     }
                     for item in sorted(shot.visual_beats, key=lambda value: value.index)
                 ],
