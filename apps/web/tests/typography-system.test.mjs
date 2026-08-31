@@ -23,6 +23,10 @@ const videoWorkspace = readFileSync(
   path.join(sourceDirectory, "ShotVideoWorkspace.jsx"),
   "utf8",
 );
+const videoPromptEditor = readFileSync(
+  path.join(sourceDirectory, "video-inputs/VideoPromptReferenceEditor.jsx"),
+  "utf8",
+);
 const systemPrimitives = readFileSync(
   path.join(sourceDirectory, "ui/system/SystemPrimitives.jsx"),
   "utf8",
@@ -136,7 +140,8 @@ test("keeps every stylesheet on semantic typography and text-color tokens", () =
 
 test("uses the same global prompt editor role for image and video", () => {
   assert.match(imageWorkspace, /className="prompt-editor-textarea"/);
-  assert.match(videoWorkspace, /className="prompt-editor-textarea"/);
+  assert.match(videoWorkspace, /<VideoPromptReferenceEditor/);
+  assert.match(videoPromptEditor, /className="prompt-editor-textarea"/);
 
   const rule = cssRule(
     workflowStyles,

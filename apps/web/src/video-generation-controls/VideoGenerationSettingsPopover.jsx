@@ -160,7 +160,7 @@ export function VideoGenerationSettingsPopover({
       </div>
 
       <footer className="video-settings-footer">
-        <span>生成前自动保存提示词与负面约束</span>
+        <span>生成前自动保存提示词</span>
         <strong>
           {estimatedCostKnown ? `预计 ${estimatedCostLabel}` : "按实际用量结算"}
           {" · "}

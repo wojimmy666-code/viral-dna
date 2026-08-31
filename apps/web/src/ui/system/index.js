@@ -7,3 +7,4 @@ export {
   StatusBadge,
   SurfacePanel,
 } from "./SystemPrimitives.jsx";
+export { AutosaveStatus } from "./AutosaveStatus.jsx";

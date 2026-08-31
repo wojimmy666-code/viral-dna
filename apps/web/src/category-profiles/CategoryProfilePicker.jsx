@@ -57,13 +57,9 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
 
   return (
     <section className="category-profile-picker" aria-label="本次生成使用的品类档案">
-      <header>
-        <div>
-          <strong>本次使用的品类档案 <span>必选</span></strong>
-          <p>三套方案都会遵循同一份品牌、受众、卖点和禁用约束。</p>
-        </div>
+      <div className="category-profile-picker-actions">
         <button className="text-button compact" onClick={onManage} type="button">管理品类库</button>
-      </header>
+      </div>
       {loading ? (
         <div className="category-picker-state"><CircleNotch className="spin" size={19} />正在读取品类库…</div>
       ) : error ? (
@@ -85,7 +81,7 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
             <span className="category-picker-icon"><Tag size={18} /></span>
             <span>
               <strong>{selected?.display_name || "选择本次使用的品类档案"}</strong>
-              <small>{selected ? [selected.brand_name, selected.category_name].filter(Boolean).join(" · ") : "必选 · 选择后才可生成"}</small>
+              {selected && <small>{[selected.brand_name, selected.category_name].filter(Boolean).join(" · ")}</small>}
             </span>
             {selected && <em>{selected.brief}</em>}
             <CaretDown size={17} />

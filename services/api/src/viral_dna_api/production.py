@@ -109,6 +109,8 @@ from .models import (
     ShotLifecycleStatus,
     ShotLifecycleUpdate,
     ShotMediaPreview,
+    ShotOutputMode,
+    ShotOutputModeUpdateRequest,
     ShotPlan,
     ShotPlanBulkUpdate,
     ShotPlanCreate,
@@ -132,6 +134,7 @@ from .models import (
     VideoClipPreparationStatus,
     VideoClipPreparationUpdate,
     VideoGenerationCreate,
+    VideoGenerationInputMode,
     VideoGenerationInputSource,
     VideoPromptMention,
     VideoPromptReferenceKind,
@@ -1665,10 +1668,17 @@ class ProductionService:
             shot_count=len(active_shots),
             discarded_shot_count=len(shots) - len(active_shots),
             approved_image_count=sum(
-                item.image_status == WorkflowItemStatus.APPROVED for item in active_shots
+                (
+                    item.video_status == WorkflowItemStatus.APPROVED
+                    if item.output_mode == ShotOutputMode.SOURCE_VIDEO
+                    else item.image_status == WorkflowItemStatus.APPROVED
+                )
+                for item in active_shots
             ),
             stale_image_count=sum(
-                item.image_status == WorkflowItemStatus.STALE for item in active_shots
+                item.output_mode != ShotOutputMode.SOURCE_VIDEO
+                and item.image_status == WorkflowItemStatus.STALE
+                for item in active_shots
             ),
         )
 
@@ -1853,10 +1863,17 @@ class ProductionService:
             shot_count=len(active_cloned_shots),
             discarded_shot_count=len(cloned_shots) - len(active_cloned_shots),
             approved_image_count=sum(
-                item.image_status == WorkflowItemStatus.APPROVED for item in active_cloned_shots
+                (
+                    item.video_status == WorkflowItemStatus.APPROVED
+                    if item.output_mode == ShotOutputMode.SOURCE_VIDEO
+                    else item.image_status == WorkflowItemStatus.APPROVED
+                )
+                for item in active_cloned_shots
             ),
             stale_image_count=sum(
-                item.image_status == WorkflowItemStatus.STALE for item in active_cloned_shots
+                item.output_mode != ShotOutputMode.SOURCE_VIDEO
+                and item.image_status == WorkflowItemStatus.STALE
+                for item in active_cloned_shots
             ),
         )
 
@@ -2429,6 +2446,7 @@ class ProductionService:
         plan: ShotPlan,
         kind: GenerationKind,
         candidates: list[GenerationCandidate],
+        run_by_id: dict[UUID, GenerationRun],
     ) -> ShotMediaPreview | None:
         approved_id = (
             plan.approved_image_candidate_id
@@ -2475,6 +2493,11 @@ class ProductionService:
             kind=preview_kind,
             candidate_id=candidate.id,
             updated_at=candidate.created_at,
+            execution_mode=(
+                run_by_id[candidate.generation_run_id].execution_mode
+                if candidate.generation_run_id in run_by_id
+                else None
+            ),
         )
 
     async def _shot_media_previews(
@@ -2497,11 +2520,13 @@ class ProductionService:
                     plan,
                     GenerationKind.IMAGE,
                     candidates_by_shot[plan.id],
+                    run_by_id,
                 ),
                 self._shot_media_preview(
                     plan,
                     GenerationKind.VIDEO,
                     candidates_by_shot[plan.id],
+                    run_by_id,
                 ),
             )
             for plan in plans
@@ -5105,7 +5130,7 @@ class ProductionService:
                 [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
                 revision_id=revision_id,
                 invalidate_video=has_downstream_impact,
-            )
+            ).model_copy(update={"output_mode": ShotOutputMode.IMAGE_TO_VIDEO})
             current_preparation = await self.repository.get_video_clip_preparation(plan.id)
             updated_preparation = (
                 current_preparation.model_copy(
@@ -5163,6 +5188,163 @@ class ProductionService:
             candidate=self._candidate_response(candidate),
             approval_event=event,
         )
+
+    async def update_shot_output_mode(
+        self,
+        project_id: UUID,
+        payload: ShotOutputModeUpdateRequest,
+    ) -> list[ShotPlanResponse]:
+        """Persist the route each shot takes after the storyboard-image stage."""
+
+        initial_project = await self._require_project(project_id)
+        await self._ensure_project_shots(initial_project)
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            plans = await self.repository.list_shot_plans(project.id)
+            plan_by_id = {item.id: item for item in plans}
+            missing = [item for item in payload.shot_plan_ids if item not in plan_by_id]
+            if missing:
+                raise _fail(404, "shot_plan_not_found", "所选分镜不存在或不属于当前方案")
+
+            targets = [plan_by_id[item] for item in payload.shot_plan_ids]
+            for plan in targets:
+                self._ensure_shot_active(plan)
+            if payload.only_unresolved:
+                targets = [
+                    plan
+                    for plan in targets
+                    if plan.image_status in {
+                        WorkflowItemStatus.DRAFT,
+                        WorkflowItemStatus.READY,
+                    }
+                    and plan.video_status in {
+                        WorkflowItemStatus.DRAFT,
+                        WorkflowItemStatus.READY,
+                    }
+                    and plan.approved_image_candidate_id is None
+                    and plan.approved_video_candidate_id is None
+                ]
+            targets = [plan for plan in targets if plan.output_mode != payload.output_mode]
+
+            has_downstream_impact = any(
+                self._image_choice_has_downstream_impact(project, plan)
+                for plan in targets
+            )
+            if has_downstream_impact and not payload.confirm_downstream_stale:
+                raise _fail(
+                    409,
+                    "downstream_stale_confirmation_required",
+                    "修改分镜处理方式会使后续视频或剪辑结果过期，请确认影响后重试",
+                )
+
+            source_video_path: Path | None = None
+            source_video: Video | None = None
+            if payload.output_mode == ShotOutputMode.SOURCE_VIDEO and targets:
+                source_video = await self.repository.get_video(project.video_id)
+                if source_video is None:
+                    raise _fail(404, "source_video_not_found", "创作方案的原视频不存在")
+                source_video_path = self._resolve_video_file(source_video)
+
+            if targets:
+                revision_id = uuid4()
+                updated_plans: list[ShotPlan] = []
+                new_runs: list[GenerationRun] = []
+                candidate_updates: list[GenerationCandidate] = []
+                approval_events: list[ApprovalEvent] = []
+
+                for plan in targets:
+                    if payload.output_mode == ShotOutputMode.SOURCE_VIDEO:
+                        assert source_video is not None and source_video_path is not None
+                        run, candidate = await self._create_source_video_candidate(
+                            project,
+                            plan,
+                            revision_id,
+                            source_video,
+                            source_video_path,
+                        )
+                        candidate_updates.extend(
+                            await self._reset_selected_video_candidates(project, plan)
+                        )
+                        approval_events.append(
+                            ApprovalEvent(
+                                project_id=project.id,
+                                revision_id=revision_id,
+                                shot_plan_id=plan.id,
+                                candidate_id=candidate.id,
+                                target_kind=GenerationKind.VIDEO,
+                                decision=ApprovalDecision.APPROVED,
+                                reason="沿用原视频分镜片段，跳过图片和分段视频生成",
+                            )
+                        )
+                        updated_plan = plan.model_copy(
+                            update={
+                                "revision_id": revision_id,
+                                "output_mode": ShotOutputMode.SOURCE_VIDEO,
+                                "video_status": WorkflowItemStatus.APPROVED,
+                                "approved_video_candidate_id": candidate.id,
+                                "updated_at": utc_now(),
+                            }
+                        )
+                        new_runs.append(run)
+                        candidate_updates.append(candidate)
+                    else:
+                        candidate_updates.extend(
+                            await self._reset_selected_video_candidates(
+                                project,
+                                plan,
+                                execution_mode=ImageExecutionMode.SOURCE_VIDEO,
+                            )
+                        )
+                        updated_plan = plan.model_copy(
+                            update={
+                                "revision_id": revision_id,
+                                "output_mode": ShotOutputMode.IMAGE_TO_VIDEO,
+                                "updated_at": utc_now(),
+                            }
+                        )
+                        if await self._approved_video_uses_mode(
+                            plan,
+                            ImageExecutionMode.SOURCE_VIDEO,
+                        ):
+                            updated_plan = updated_plan.model_copy(
+                                update={
+                                    "video_status": WorkflowItemStatus.READY,
+                                    "approved_video_candidate_id": None,
+                                }
+                            )
+                    updated_plans.append(updated_plan)
+
+                updated_by_id = {item.id: item for item in updated_plans}
+                snapshot_plans = [updated_by_id.get(item.id, item) for item in plans]
+                next_project = project.model_copy(
+                    update={
+                        "status": ProductionProjectStatus.ACTIVE,
+                        "active_step": ProductionStep.SHOT_IMAGES,
+                        "updated_at": utc_now(),
+                    }
+                )
+                labels = {
+                    ShotOutputMode.SOURCE_VIDEO: "沿用原视频",
+                    ShotOutputMode.IMAGE_TO_VIDEO: "图片生成流程",
+                }
+                next_project, revision = await self._prepare_revision(
+                    next_project,
+                    ProductionChangeKind.SHOT_PLAN_CHANGED,
+                    f"将 {len(updated_plans)} 个分镜设为{labels[payload.output_mode]}",
+                    revision_id=revision_id,
+                    shot_plans=snapshot_plans,
+                )
+                await self.repository.save_production_bundle(
+                    next_project,
+                    revision,
+                    shot_plans=updated_plans,
+                    generation_runs=new_runs,
+                    generation_candidates=candidate_updates,
+                    approval_events=approval_events,
+                )
+        return await self.list_shots(project_id)
 
     async def create_image_run(
         self,
@@ -7337,6 +7519,10 @@ class ProductionService:
                     revision_id=revision_id,
                     invalidate_video=image_downstream_impact,
                 )
+                if payload.decision == ApprovalDecision.APPROVED:
+                    updated_plan = updated_plan.model_copy(
+                        update={"output_mode": ShotOutputMode.IMAGE_TO_VIDEO}
+                    )
             else:
                 if project.active_step not in {
                     ProductionStep.SHOT_VIDEOS,
@@ -7901,11 +8087,20 @@ class ProductionService:
             approved = [
                 item
                 for item in required
-                if await self._has_valid_approved_image_output(project, item)
+                if (
+                    await self._has_valid_approved_video_output(project, item)
+                    if item.output_mode == ShotOutputMode.SOURCE_VIDEO
+                    else await self._has_valid_approved_image_output(project, item)
+                )
             ]
-            stale = [item for item in required if item.image_status == WorkflowItemStatus.STALE]
+            stale = [
+                item
+                for item in required
+                if item.output_mode != ShotOutputMode.SOURCE_VIDEO
+                and item.image_status == WorkflowItemStatus.STALE
+            ]
             next_step = ProductionStep.SHOT_VIDEOS
-            pending_label = "必需分镜图片"
+            pending_label = "必需分镜输出"
         blockers: list[str] = []
         if not required:
             blockers.append("创作方案没有必需分镜")
@@ -10196,6 +10391,200 @@ class ProductionService:
                         candidate.model_copy(update={"status": GenerationCandidateStatus.READY})
                     )
         return updates
+
+    async def _reset_selected_video_candidates(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        *,
+        keep_candidate_id: UUID | None = None,
+        execution_mode: ImageExecutionMode | None = None,
+    ) -> list[GenerationCandidate]:
+        updates: list[GenerationCandidate] = []
+        for run in await self.repository.list_generation_runs(project.id, plan.id):
+            if run.kind != GenerationKind.VIDEO:
+                continue
+            if execution_mode is not None and run.execution_mode != execution_mode:
+                continue
+            for candidate in await self.repository.list_generation_candidates(run.id):
+                if (
+                    candidate.status == GenerationCandidateStatus.SELECTED
+                    and candidate.id != keep_candidate_id
+                ):
+                    updates.append(
+                        candidate.model_copy(update={"status": GenerationCandidateStatus.READY})
+                    )
+        return updates
+
+    async def _approved_video_uses_mode(
+        self,
+        plan: ShotPlan,
+        execution_mode: ImageExecutionMode,
+    ) -> bool:
+        if plan.approved_video_candidate_id is None:
+            return False
+        candidate = await self.repository.get_generation_candidate(
+            plan.approved_video_candidate_id
+        )
+        if candidate is None:
+            return False
+        run = await self.repository.get_generation_run(candidate.generation_run_id)
+        return bool(run is not None and run.execution_mode == execution_mode)
+
+    async def _create_source_video_candidate(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        revision_id: UUID,
+        source_video: Video,
+        source_path: Path,
+    ) -> tuple[GenerationRun, GenerationCandidate]:
+        started = datetime.now(UTC)
+        run_id = uuid4()
+        run_root = (
+            self.workspace.production_shot_root(
+                project.record_id,
+                project.id,
+                plan.id,
+            )
+            / "videos"
+            / str(run_id)
+        )
+        candidate_path = run_root / "source-video.mp4"
+        thumbnail_path = run_root / "source-video.webp"
+        metadata_path = run_root / "source-video.json"
+        input_path = run_root / "input.json"
+        manifest_path = run_root / "manifest.json"
+        input_payload = {
+            "schema_version": "viral-dna-source-video/v1",
+            "project_id": str(project.id),
+            "shot_plan_id": str(plan.id),
+            "revision_id": str(revision_id),
+            "source_video_id": str(source_video.id),
+            "source_sha256": source_video.sha256,
+            "start_seconds": round(plan.start_seconds, 3),
+            "end_seconds": round(plan.end_seconds, 3),
+            "duration_seconds": round(plan.end_seconds - plan.start_seconds, 3),
+            "execution": {
+                "mode": ImageExecutionMode.SOURCE_VIDEO.value,
+                "model_call": False,
+            },
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                input_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            await self.media_processor.extract_video_clip(
+                _filesystem_path(source_path),
+                _filesystem_path(candidate_path),
+                start_seconds=plan.start_seconds,
+                end_seconds=plan.end_seconds,
+            )
+            inspection = await self.video_inspector.inspect(
+                _filesystem_path(candidate_path),
+                _filesystem_path(thumbnail_path),
+                cover_timestamp_seconds=max(0.0, plan.duration_seconds / 2),
+                expected_width=project.output_width,
+                expected_height=project.output_height,
+                expected_duration_seconds=plan.duration_seconds,
+            )
+        except (MediaProcessingError, ProductionVideoInspectionError, OSError) as exc:
+            raise _fail(
+                422,
+                "source_video_clip_failed",
+                f"无法提取分镜 {plan.index} 的原视频片段：{exc}",
+            ) from exc
+
+        quality_report = {
+            **inspection.quality_report,
+            "source_video_passthrough": True,
+            "summary": "已沿用原视频分镜片段，未调用图片或视频生成模型。",
+        }
+        candidate = GenerationCandidate(
+            generation_run_id=run_id,
+            ordinal=1,
+            kind=GenerationKind.VIDEO,
+            relative_path=self.workspace.relative(candidate_path),
+            thumbnail_relative_path=self.workspace.relative(thumbnail_path),
+            width=inspection.metadata.width,
+            height=inspection.metadata.height,
+            duration_seconds=inspection.metadata.duration_seconds,
+            sha256=inspection.metadata.sha256,
+            metadata_relative_path=self.workspace.relative(metadata_path),
+            quality_report=quality_report,
+            status=GenerationCandidateStatus.SELECTED,
+        )
+        metadata = {
+            "schema_version": "viral-dna-generation-candidate/v1",
+            "source_video": True,
+            "candidate_id": str(candidate.id),
+            "request_fingerprint": fingerprint,
+            "sha256": candidate.sha256,
+            "width": candidate.width,
+            "height": candidate.height,
+            "duration_seconds": candidate.duration_seconds,
+            "quality_report": quality_report,
+        }
+        manifest = {
+            "schema_version": "viral-dna-video-generation-result/v1",
+            "status": "completed",
+            "request_id": str(run_id),
+            "source_video": True,
+            "candidate_ids": [str(candidate.id)],
+            "candidate_sha256": [candidate.sha256],
+            "estimated_cost_micros": 0,
+            "actual_cost_micros": 0,
+            "cost_source": GenerationCostSource.UNMETERED.value,
+        }
+        await asyncio.to_thread(self._write_json_atomic, input_path, input_payload)
+        await asyncio.to_thread(self._write_json_atomic, metadata_path, metadata)
+        await asyncio.to_thread(self._write_json_atomic, manifest_path, manifest)
+        completed_at = datetime.now(UTC)
+        run = GenerationRun(
+            id=run_id,
+            project_id=project.id,
+            shot_plan_id=plan.id,
+            revision_id=revision_id,
+            kind=GenerationKind.VIDEO,
+            input_mode=VideoGenerationInputMode.VIDEO_TO_VIDEO,
+            provider="source_video",
+            model="source-segment",
+            model_snapshot="source-video-v1",
+            model_alias="source_video",
+            model_display_name="沿用原视频",
+            prompt_version="source-video-v1",
+            schema_version="viral-dna-source-video/v1",
+            pricing_version="zero-cost-v1",
+            request_fingerprint=fingerprint,
+            input_snapshot_relative_path=self.workspace.relative(input_path),
+            execution_mode=ImageExecutionMode.SOURCE_VIDEO,
+            adapter_id="source-video",
+            adapter_version="batch4.3",
+            capability_snapshot={"source_video_passthrough": True},
+            execution_summary={
+                "model_call": False,
+                "start_seconds": round(plan.start_seconds, 3),
+                "end_seconds": round(plan.end_seconds, 3),
+            },
+            cost_source=GenerationCostSource.UNMETERED,
+            cost_estimate_known=True,
+            actual_cost_known=True,
+            usage={"model_calls": 0, "source_video_segments": 1},
+            output_manifest_relative_path=self.workspace.relative(manifest_path),
+            status=ProductionRunStatus.COMPLETED,
+            estimated_cost_micros=0,
+            actual_cost_micros=0,
+            latency_ms=max(0, round((completed_at - started).total_seconds() * 1000)),
+            started_at=started,
+            updated_at=completed_at,
+            completed_at=completed_at,
+        )
+        return run, candidate
 
     def _create_source_frame_candidate(
         self,

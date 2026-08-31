@@ -1,16 +1,5 @@
-export function isRecordDetailView(activeNav, report) {
-  return activeNav === "workspace" && Boolean(report);
-}
-
-export function shouldShowTopbarCreate(activeNav, report) {
-  return activeNav === "workspace" && !isRecordDetailView(activeNav, report);
-}
-
 export function buildRecordBreadcrumb(workspaceMode, projectName = "") {
-  const items = [
-    { id: "workspace", label: "工作台", current: false },
-    { id: "history", label: "分析记录", current: false },
-  ];
+  const items = [{ id: "history", label: "项目", current: false }];
   if (workspaceMode !== "production") {
     return [...items, { id: "analysis", label: "分析报告", current: true }];
   }

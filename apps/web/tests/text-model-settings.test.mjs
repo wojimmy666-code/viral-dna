@@ -64,7 +64,7 @@ test("settings expose one default, fallback control, and collapsed task override
   assert.doesNotMatch(source, /在设置中修改/);
 });
 
-test("all copy-generation workspaces show the same read-only model indicator", async () => {
+test("copy-generation model indicators stay off image and video prompt editors", async () => {
   const [app, replication, imageWorkspace, intentPanel] = await Promise.all([
     readFile(APP_URL, "utf8"),
     readFile(REPLICATION_URL, "utf8"),
@@ -76,7 +76,7 @@ test("all copy-generation workspaces show the same read-only model indicator", a
   assert.match(app, /TEXT_MODEL_PURPOSES\.shotImagePrompt/);
   assert.match(app, /TEXT_MODEL_PURPOSES\.videoPrompt/);
   assert.match(replication, /<TextModelIndicator label=\{textModelLabel\}/);
-  assert.match(imageWorkspace, /<TextModelIndicator label=\{textModelLabel\}/);
-  assert.match(intentPanel, /<TextModelIndicator label=\{textModelLabel\}/);
+  assert.doesNotMatch(imageWorkspace, /TextModelIndicator|文案模型：/);
+  assert.doesNotMatch(intentPanel, /TextModelIndicator|文案模型：/);
   assert.doesNotMatch(`${replication}${imageWorkspace}${intentPanel}`, /在设置中修改/);
 });

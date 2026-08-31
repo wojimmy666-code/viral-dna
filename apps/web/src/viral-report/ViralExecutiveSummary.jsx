@@ -9,8 +9,6 @@ import {
   Target,
 } from "@phosphor-icons/react";
 import {
-  confidenceLabel,
-  difficultyLabel,
   formatInsightTime,
   useViralInsight,
 } from "./viral-report-ui.js";
@@ -55,11 +53,6 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms, o
           </span>
           <h2>{insight.headline}</h2>
         </div>
-      </div>
-
-      <div className="viral-summary-metrics" aria-label="洞察摘要">
-        <div><span>判断置信度</span><strong>{confidenceLabel(insight.confidence)}</strong></div>
-        <div><span>复刻难度</span><strong>{difficultyLabel(insight.replication_difficulty)}</strong></div>
       </div>
 
       <div className="viral-hook-callout">

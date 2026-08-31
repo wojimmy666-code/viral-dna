@@ -54,7 +54,8 @@ test("uses a searchable required picker and a single-column mobile fallback", as
   const css = await readFile(CSS_URL, "utf8");
   assert.match(picker, /搜索品类、品牌或卖点/);
   assert.match(picker, /role="listbox"/);
-  assert.match(picker, /必选 · 选择后才可生成/);
+  assert.doesNotMatch(picker, /必选 · 选择后才可生成|三套方案都会遵循同一份品牌/);
+  assert.doesNotMatch(picker, /本次使用的品类档案 <span>必选<\/span>/);
   assert.match(picker, /if \(loading \|\| !value \|\| profiles\.some/);
   assert.match(picker, /onChange\(""\)/);
   assert.doesNotMatch(picker, /items\[0\]\?\.id/);

@@ -26,6 +26,10 @@ const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
   "utf8",
 );
+const productionWorkflowStyles = readFileSync(
+  new URL("../src/production-workflow.css", import.meta.url),
+  "utf8",
+);
 const imageCommandBarSource = readFileSync(
   new URL("../src/image-generation-controls/ImageGenerationCommandBar.jsx", import.meta.url),
   "utf8",
@@ -128,9 +132,20 @@ test("routes image prompt references and bindings through one visual-beat save",
   );
   assert.match(
     productionWorkflowSource,
-    /\/visual-beats\/\$\{activeBeat\.id\}[\s\S]*\.\.\.visualBeatChanges/,
+    /\/visual-beats\/\$\{pending\.visualBeatId\}[\s\S]*confirm_stale: true[\s\S]*\.\.\.visualBeatChanges/,
   );
   assert.match(shotImageSource, /reconcilePromptReferenceRemoval\(/);
+});
+
+test("auto-saves image prompt edits without a manual save action", () => {
+  assert.match(shotImageSource, /<AutosaveStatus/);
+  assert.match(shotImageSource, /onBlur=\{\(\) => Promise\.resolve\(onFlushDraft\?\.\(\)\)/);
+  assert.doesNotMatch(shotImageSource, /保存草稿不会自动生成|type="submit">[\s\S]{0,120}保存/);
+  assert.match(productionWorkflowSource, /const SHOT_IMAGE_AUTOSAVE_DELAY_MS = 700/);
+  assert.match(productionWorkflowSource, /function useShotImageDraftAutosave/);
+  assert.match(productionWorkflowSource, /setTargetSaveState\(target\.key, "dirty"\)/);
+  assert.match(productionWorkflowSource, /const persistedShotDetail = await flushShotDraft\(\)/);
+  assert.match(productionWorkflowSource, /onRetryDraftSave=\{retryShotDraftSave\}/);
 });
 
 test("passes the selected visual beat into the image workspace", () => {
@@ -163,6 +178,28 @@ test("image workspace exposes zoom and reversible deletion without lock controls
   assert.match(productionWorkflowSource, /restoreImageCandidate/);
 });
 
+test("image workspace omits the redundant engine banner and ready labels in the shot list", () => {
+  assert.doesNotMatch(shotImageSource, /shot-generation-context|shot-generation-mode/);
+  assert.doesNotMatch(productionWorkflowStyles, /\.shot-generation-context|\.shot-generation-mode/);
+  assert.doesNotMatch(shotImageSource, /className=\{"shot-status-badge/);
+  assert.match(shotImageSource, /const approvedImageLabel = shot\.image_status === "approved"/);
+  assert.match(
+    shotImageSource,
+    /const latestRunBusy = \["queued", "running", "cancellation_requested"\]\.includes\(/,
+  );
+});
+
+test("removes secondary candidate metadata and the visible generation manifest", () => {
+  assert.doesNotMatch(
+    shotImageSource,
+    /选择此图|最近批次|历史批次|基础质检通过|请人工核对|本次参考|生成时按编号顺序提交|待采用/,
+  );
+  assert.doesNotMatch(shotImageSource, /shot-input-manifest|shot-candidate-quality/);
+  assert.doesNotMatch(shotImageSource, /TextModelIndicator/);
+  assert.match(shotImageSource, /<span>\{displayedCandidateModelLabel\}<\/span>/);
+  assert.match(shotImageSource, /inputCount=\{generationInputManifest\.length\}/);
+});
+
 test("recovers already generated Codex images without submitting another generation", () => {
   assert.match(shotImageSource, /图片待恢复/);
   assert.match(shotImageSource, /onRecoverRun\?\.\(latestRun\.id\)/);
@@ -170,17 +207,36 @@ test("recovers already generated Codex images without submitting another generat
   assert.match(productionWorkflowSource, /本次未重新调用 ImageGen/);
 });
 
-test("progressively reveals optional image negative constraints", () => {
+test("removes image negative constraints from the image workspace", () => {
+  assert.doesNotMatch(shotImageSource, /shot-image-negative-constraints/);
+  assert.doesNotMatch(shotImageSource, /<summary>负面约束（可选）<\/summary>/);
+  assert.doesNotMatch(shotImageSource, /aria-label="图片负面约束"/);
+});
+
+test("uses one persistent per-shot retain checkbox for the two output routes", () => {
+  assert.match(shotImageSource, /className=\{`shot-navigation-keep \$\{pendingOutputMode \? "pending" : ""\}`\}/);
+  assert.match(shotImageSource, /<span>保留<\/span>/);
+  assert.match(shotImageSource, /event\.target\.checked \? "source_video" : "image_to_video"/);
+  assert.match(shotImageSource, /const \[pendingOutputModes, setPendingOutputModes\] = useState\(\{\}\)/);
+  assert.match(shotImageSource, /await onSetOutputMode\?\.\(\{/);
+  assert.match(shotImageSource, /loadedShotPlan\.id === selectedShotId/);
+  assert.match(shotImageSource, /selectedShotSummary\?\.output_mode/);
+  assert.match(shotImageSource, /data-output-mode=\{outputMode\}/);
+  assert.match(shotImageSource, /sourceVideoMode \? \(/);
+  assert.match(shotImageSource, /\{detailReady && plan && !sourceVideoMode && \(\s*<aside className="shot-inspector-panel">/);
+  assert.match(productionWorkflowSource, /\/shot-output-mode/);
+  assert.match(productionWorkflowSource, /onSetOutputMode=\{setShotOutputMode\}/);
+  assert.match(productionWorkflowSource, /setShots\(\(current\) => current\.map/);
+  assert.match(productionWorkflowSource, /setShotDetail\(\(current\) => \(/);
+  assert.doesNotMatch(shotImageSource, /批量设置未处理分镜|shot-output-mode-selector/);
   assert.match(
-    shotImageSource,
-    /<details[\s\S]*className="production-field shot-image-negative-constraints"/,
+    productionWorkflowStyles,
+    /\.shot-image-workspace\[data-output-mode="source_video"\] \.shot-workspace-grid\s*\{[\s\S]*?grid-template-columns:\s*clamp\(300px, 23%, 380px\) minmax\(0, 1fr\)/,
   );
-  assert.match(shotImageSource, /<summary>负面约束（可选）<\/summary>/);
-  assert.match(shotImageSource, /aria-label="图片负面约束"/);
-  assert.doesNotMatch(
-    shotImageSource,
-    /<details[\s\S]{0,240}className="production-field shot-image-negative-constraints"[^>]*\sopen(?:=|>)/,
-  );
+  assert.doesNotMatch(productionWorkflowStyles, /output-mode-source-video/);
+  assert.doesNotMatch(shotImageSource, /分析默认帧|原视频已就绪/);
+  assert.doesNotMatch(shotImageSource, /"尚未生成"/);
+  assert.doesNotMatch(shotImageSource, /visual-beat-copy/);
 });
 
 test("image generation uses a compact command bar with upward popovers", () => {

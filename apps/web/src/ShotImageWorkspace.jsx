@@ -9,9 +9,7 @@ import {
   CircleNotch,
   Copy,
   DotsSixVertical,
-  FloppyDisk,
   ImageSquare,
-  MagicWand,
   MagnifyingGlassPlus,
   Plus,
   Trash,
@@ -24,11 +22,8 @@ import {
   duplicateVisualBeatSourceIds,
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
-  imageGenerationModeLabel,
   imageGenerationInputManifest,
   imageIdentityPolicy,
-  imageGenerationRunLabel,
-  imageQualityLabel,
   isAiImageGenerationRun,
   isImageEngineConfigured,
   isRecoverableImageGenerationRun,
@@ -41,7 +36,7 @@ import { MediaLightbox } from "./MediaLightbox.jsx";
 import { AddToAssetsButton } from "./generated-assets/AddToAssetsButton.jsx";
 import { ImageGenerationCommandBar } from "./image-generation-controls/ImageGenerationCommandBar.jsx";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
-import { TextModelIndicator } from "./ui/text-model/TextModelIndicator.jsx";
+import { AutosaveStatus } from "./ui/system/index.js";
 import {
   assetDirectoryLabel,
   assetMentionLabel,
@@ -71,19 +66,6 @@ function seconds(value) {
 function formatCostMicros(value) {
   const yuan = Math.max(0, Number(value || 0)) / 1_000_000;
   return `¥${yuan.toFixed(yuan > 0 ? 2 : 0)}`;
-}
-
-function generationRunStatusLabel(status) {
-  return {
-    queued: "排队中",
-    running: "生成中",
-    cancellation_requested: "取消中",
-    cancelled: "已取消",
-    completed: "已完成",
-    cached: "缓存命中",
-    failed: "生成失败",
-    blocked: "已阻止",
-  }[status] || "未开始";
 }
 
 function formatCandidateBatchTime(value) {
@@ -351,7 +333,6 @@ export function ShotImageWorkspace({
   setGenerationModelAlias,
   sourceVideoUrl,
   onSelectShot,
-  onSave,
   onGenerate,
   onCancelRun,
   onRecoverRun,
@@ -361,19 +342,22 @@ export function ShotImageWorkspace({
   onCreateVisualBeat,
   onDeleteVisualBeat,
   onDiscardShot,
+  onFlushDraft,
   onArchiveCandidate,
   onSelectCandidate,
   onApprove,
   onRevokeApproval,
   onReorderShots,
   onReorderVisualBeats,
+  onRetryDraftSave,
   onRestoreShot,
+  onSetOutputMode,
   onSelectVisualBeat,
   onUpdateVisualBeat,
   onAdvance,
   onNotice,
   request,
-  textModelLabel = "Qwen3.7 Plus",
+  saveState = "saved",
 }) {
   const [keyframePickerOpen, setKeyframePickerOpen] = useState(false);
   const [shotCreateOpen, setShotCreateOpen] = useState(false);
@@ -384,8 +368,17 @@ export function ShotImageWorkspace({
   const [candidateHistoryExpanded, setCandidateHistoryExpanded] = useState(false);
   const [lightboxCandidateId, setLightboxCandidateId] = useState(null);
   const [mentionMenu, setMentionMenu] = useState(null);
+  const [pendingOutputModes, setPendingOutputModes] = useState({});
   const promptRef = useRef(null);
-  const shotPlan = shotDetail?.plan;
+  const loadedShotPlan = shotDetail?.plan;
+  const detailReady = Boolean(
+    loadedShotPlan
+    && loadedShotPlan.id === selectedShotId
+  );
+  const selectedShotSummary = shots.find(
+    (item) => item.plan.id === selectedShotId,
+  )?.plan || null;
+  const shotPlan = detailReady ? loadedShotPlan : null;
   const visualBeats = useMemo(
     () => [...(shotPlan?.visual_beats || [])].sort((left, right) => left.index - right.index),
     [shotPlan?.visual_beats],
@@ -428,7 +421,25 @@ export function ShotImageWorkspace({
     () => shots.filter((item) => item.plan.lifecycle_status === "discarded"),
     [shots],
   );
-  const generationRuns = shotDetail?.generation_runs || [];
+  const generationRuns = detailReady ? (shotDetail?.generation_runs || []) : [];
+  const outputMode = (
+    shotPlan?.output_mode
+    || selectedShotSummary?.output_mode
+    || "image_to_video"
+  );
+  const sourceVideoMode = outputMode === "source_video";
+  const sourceVideoRuns = generationRuns.filter(
+    (run) => run.kind === "video" && run.execution_mode === "source_video",
+  );
+  const sourceVideoCandidate = sourceVideoRuns
+    .flatMap((run) => run.candidates || [])
+    .find((candidate) => candidate.id === shotPlan?.approved_video_candidate_id)
+    || sourceVideoRuns[0]?.candidates?.[0]
+    || null;
+  const sourceVideoReady = Boolean(
+    sourceVideoCandidate
+    && shotPlan?.video_status === "approved"
+  );
   const assetsById = useMemo(
     () => new Map(assets.map((asset) => [asset.id, asset])),
     [assets],
@@ -557,27 +568,6 @@ export function ShotImageWorkspace({
     effectiveGenerationSettings,
     candidateCount,
   );
-  const modeLabel = imageGenerationModeLabel(effectiveGenerationSettings);
-  const selectedModel = (generationSettings?.models || []).find(
-    (item) => item.alias === effectiveGenerationSettings.remote_model_alias,
-  );
-  const configuredEngine = !generationSettings?.enabled
-    ? "尚未配置"
-    : executionMode === "local_tool"
-      ? generationSettings.local_tool_id || "已配置 CLI"
-      : selectedModel?.label || generationSettings.remote_model || "Qwen Image";
-  const usesSubscriptionQuota = (
-    generationSettings?.enabled
-    && executionMode === "local_tool"
-    && generationSettings.local_cost_source === "subscription_quota"
-  );
-  const configuredCostLabel = !generationSettings?.enabled
-    ? "配置后显示成本"
-    : usesSubscriptionQuota
-      ? "使用订阅配额，金额不计入项目成本"
-    : estimatedCostMicros == null
-      ? "成本未知，生成前确认"
-      : `预计 ${formatCostMicros(estimatedCostMicros)} / 次`;
   const commandCostLabel = (
     generationSettings?.enabled
     && executionMode === "remote_api"
@@ -585,26 +575,11 @@ export function ShotImageWorkspace({
   )
     ? `预计 ${formatCostMicros(estimatedCostMicros)}`
     : "";
-  const latestRunCostLabel = latestRun?.cost_source === "subscription_quota"
-    ? "使用订阅配额"
-    : latestRun?.cost_source === "unknown"
-      ? "成本未知"
-      : latestRun
-        ? `实际 ${formatCostMicros(latestRun.actual_cost_micros)}`
-        : "";
   const latestRunBusy = ["queued", "running", "cancellation_requested"].includes(
     latestRun?.status,
   );
   const latestRunRecoverable = isRecoverableImageGenerationRun(latestRun);
-  const latestRunTone = latestRunRecoverable
-    ? "recoverable"
-    : ["completed", "cached"].includes(latestRun?.status)
-    ? "completed"
-    : ["failed", "blocked"].includes(latestRun?.status)
-      ? "failed"
-      : latestRunBusy
-        ? "running"
-        : "idle";
+  const latestRunFailed = ["failed", "blocked"].includes(latestRun?.status);
   const displayedCandidate = (
     candidates.find((item) => item.id === displayedCandidateId)
     || candidates.find((item) => item.id === plan?.approved_image_candidate_id)
@@ -622,17 +597,6 @@ export function ShotImageWorkspace({
     || displayedCandidateRun?.model
     || "未记录模型"
   );
-  const displayedCandidateBatchTime = formatCandidateBatchTime(
-    displayedCandidateRun?.completed_at || displayedCandidateRun?.created_at,
-  );
-  const displayedCandidateQualityLabel = displayedCandidate
-    ? imageQualityLabel(displayedCandidate.quality_report)
-    : "尚无候选";
-  const displayedCandidateStateLabel = displayedCandidateIsApproved
-    ? "已采用"
-    : visualChoice === "candidate"
-      ? "待采用"
-      : "仅预览";
   const candidateReadyForApproval = displayedCandidate && (
     plan?.image_status === "approved"
       ? !displayedCandidateIsApproved
@@ -668,14 +632,6 @@ export function ShotImageWorkspace({
     : identityPolicy.enabled && !plan?.source_keyframe_url
       ? "人物身份替换需要先选择原视频关键帧"
       : "";
-  const ignoredSimulation = Boolean(
-    latestRun
-    && (
-      latestRun.provider === "simulated"
-      || latestRun.execution_mode === "simulated"
-    ),
-  );
-
   useEffect(() => {
     const preferred = (
       candidates.find((item) => item.id === plan?.approved_image_candidate_id)
@@ -835,21 +791,29 @@ export function ShotImageWorkspace({
     onReorderShots(next);
   }
 
+  async function changeShotOutputMode(shotId, outputMode) {
+    setPendingOutputModes((current) => ({
+      ...current,
+      [shotId]: outputMode,
+    }));
+    try {
+      await onSetOutputMode?.({
+        shotPlanIds: [shotId],
+        outputMode,
+      });
+    } finally {
+      setPendingOutputModes((current) => {
+        if (current[shotId] !== outputMode) return current;
+        const next = { ...current };
+        delete next[shotId];
+        return next;
+      });
+    }
+  }
+
   function chooseSource() {
     if (!plan?.source_keyframe_url) return;
     setVisualChoice("source");
-  }
-
-  function manifestRoleLabel(item) {
-    if (item.kind === "source_keyframe") return "构图、姿态、动作和机位";
-    if (item.identity_source) return "唯一人物身份来源";
-    return {
-      product: "产品外观与结构",
-      wardrobe: "服装款式与材质",
-      scene: "场景环境",
-      style: "视觉风格",
-      layout: "道具与布局",
-    }[item.role] || "参考资产";
   }
 
   function moveVisualBeat(visualBeatId, offset) {
@@ -906,11 +870,10 @@ export function ShotImageWorkspace({
             );
             const isPreviewing = candidate.id === displayedCandidate?.id;
             const isChosen = isPreviewing && visualChoice === "candidate";
-            const qualityLabel = imageQualityLabel(candidate.quality_report);
             const stateLabel = isApproved
               ? "已采用"
               : isChosen
-                ? "待采用"
+                ? "已选择"
                 : historical || candidate.status === "archived"
                   ? "历史"
                   : "候选";
@@ -927,7 +890,7 @@ export function ShotImageWorkspace({
                   ].filter(Boolean).join(" ")}
                   disabled={busy}
                   onClick={() => chooseCandidate(candidate)}
-                  title={`${modelLabel} · ${batchTime} · ${qualityLabel}`}
+                  title={`${modelLabel} · ${batchTime}`}
                   type="button"
                 >
                   <span className="shot-candidate-thumb">
@@ -1059,12 +1022,12 @@ export function ShotImageWorkspace({
     : [];
 
   return (
-    <section className="shot-image-workspace">
+    <section className="shot-image-workspace" data-output-mode={outputMode}>
       <header className="shot-workspace-header">
         <div>
           <h3>分镜图片工作台</h3>
           <p>
-            编辑静态画面指令，通过{modeLabel}生成候选，人工确认后再进入分段视频。
+            在左侧勾选“保留”可直接使用原视频片段；未勾选的分镜在这里选择原图或生成新图。
           </p>
         </div>
         <div className="shot-gate-summary">
@@ -1093,45 +1056,6 @@ export function ShotImageWorkspace({
         </div>
       )}
 
-      <div className={"shot-generation-context " + latestRunTone}>
-        <span className="shot-generation-context-icon">
-          {latestRunBusy
-            ? <CircleNotch className="spin" size={18} />
-            : latestRunTone === "recoverable"
-              ? <ArrowCounterClockwise size={18} weight="bold" />
-            : latestRunTone === "failed"
-              ? <WarningCircle size={18} weight="fill" />
-              : latestRunTone === "completed"
-                ? <CheckCircle size={18} weight="fill" />
-                : <MagicWand size={18} weight="fill" />}
-        </span>
-        <div>
-          <strong>
-            {latestRun
-              ? `${latestRunRecoverable ? "图片待恢复" : generationRunStatusLabel(latestRun.status)} · ${latestRun.model}`
-              : `${modeLabel} · ${configuredEngine}`}
-          </strong>
-          <small>
-           {latestRun
-              ? `${imageGenerationRunLabel(latestRun)} · ${latestRun.input_mode === "text_to_image" ? "纯文生图" : "图生图"} · ${latestRunCostLabel}${latestRun.latency_ms == null ? "" : " · " + latestRun.latency_ms + " ms"}`
-             : `默认生成 ${candidateCount} 张 · ${configuredCostLabel}`}
-          </small>
-          {ignoredSimulation && (
-            <em>历史模拟占位候选已忽略，不会作为 AI 图片或通过工作流确认。</em>
-          )}
-          {latestRunRecoverable && (
-            <em>已找到 {latestRun.recovery_candidate_count} 张本次任务生成的图片，恢复不会再次消耗额度。</em>
-          )}
-          {latestRunTone === "failed" && (
-            <em>{latestRun.error_message || "生成未完成，请检查模型设置后重试。"}</em>
-          )}
-          {latestRun?.status === "cancelled" && (
-            <em>任务已取消，可保留当前设置重试上次任务。</em>
-          )}
-        </div>
-        <span className="shot-generation-mode">{modeLabel}</span>
-      </div>
-
       <div className="shot-workspace-grid">
         <aside className="shot-navigation-panel">
           <div className="shot-panel-title">
@@ -1149,6 +1073,15 @@ export function ShotImageWorkspace({
             {activeShots.map((item, itemIndex) => {
               const shot = item.plan;
               const active = shot.id === selectedShotId;
+              const pendingOutputMode = pendingOutputModes[shot.id];
+              const keepSourceVideo = (
+                pendingOutputMode || shot.output_mode
+              ) === "source_video";
+              const approvedImageLabel = shot.image_status === "approved"
+                ? item.image_preview?.execution_mode === "source_frame"
+                  ? "原图"
+                  : "新图"
+                : "";
               return (
                 <div
                   className={`shot-navigation-item ${active ? "active" : ""} ${draggedShotId === shot.id ? "dragging" : ""}`}
@@ -1165,6 +1098,10 @@ export function ShotImageWorkspace({
                       index={shot.index}
                       resolveUrl={resolveUrl}
                       sources={[
+                        item.video_preview?.execution_mode === "source_video" && {
+                          kind: item.video_preview.kind,
+                          url: item.video_preview.thumbnail_url,
+                        },
                         item.image_preview && {
                           kind: item.image_preview.kind,
                           url: item.image_preview.thumbnail_url,
@@ -1174,12 +1111,36 @@ export function ShotImageWorkspace({
                     />
                     <span className="shot-navigation-copy">
                       <strong>分镜 {shot.index}</strong>
-                      <small>{seconds(shot.start_seconds)}s — {seconds(shot.end_seconds)}s</small>
-                    </span>
-                    <span className={"shot-status-badge " + workflowStatusClass(shot.image_status)}>
-                      {workflowStatusLabel(shot.image_status)}
+                      <small>
+                        {keepSourceVideo
+                          ? "原视频"
+                          : approvedImageLabel
+                            ? `图片 · ${approvedImageLabel}`
+                            : "图片"}
+                        {` · ${seconds(shot.start_seconds)}s — ${seconds(shot.end_seconds)}s`}
+                      </small>
                     </span>
                   </button>
+                  <label
+                    aria-busy={Boolean(pendingOutputMode)}
+                    className={`shot-navigation-keep ${pendingOutputMode ? "pending" : ""}`}
+                    draggable={false}
+                    onDragStart={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    title="保留该分镜的原视频片段"
+                  >
+                    <input
+                      aria-label={`保留分镜 ${shot.index} 的原视频片段`}
+                      checked={keepSourceVideo}
+                      disabled={busy || Boolean(pendingOutputMode)}
+                      onChange={(event) => changeShotOutputMode(
+                        shot.id,
+                        event.target.checked ? "source_video" : "image_to_video",
+                      )}
+                      type="checkbox"
+                    />
+                    <span>保留</span>
+                  </label>
                   <div className="shot-navigation-actions">
                     <button aria-label="上移分镜" disabled={busy || itemIndex === 0} onClick={() => moveShot(shot.id, -1)} title="上移" type="button"><ArrowUp size={13} /></button>
                     <button aria-label="下移分镜" disabled={busy || itemIndex === activeShots.length - 1} onClick={() => moveShot(shot.id, 1)} title="下移" type="button"><ArrowDown size={13} /></button>
@@ -1218,10 +1179,13 @@ export function ShotImageWorkspace({
         </aside>
 
         <main className="shot-canvas-panel">
-          {!plan ? (
-            <div className="shot-workspace-loading">
-              <CircleNotch className="spin" size={24} />
-              正在读取分镜
+          {!detailReady || !plan ? (
+            <div
+              aria-live="polite"
+              className={`shot-workspace-loading ${sourceVideoMode ? "source-video" : "image"}`}
+            >
+              <span aria-hidden="true" className="shot-workspace-loading-preview" />
+              <span>{sourceVideoMode ? "正在读取原视频分镜" : "正在读取分镜"}</span>
             </div>
           ) : (
             <>
@@ -1230,14 +1194,48 @@ export function ShotImageWorkspace({
                   <small>分镜 {plan.index}</small>
                   <strong>
                     {seconds(plan.start_seconds)}s — {seconds(plan.end_seconds)}s
-                    {activeVisualBeat ? ` · 画面 ${activeVisualBeat.index}` : ""}
+                    {!sourceVideoMode && activeVisualBeat ? ` · 画面 ${activeVisualBeat.index}` : ""}
                   </strong>
                 </div>
-                <span className={"workflow-pill " + workflowStatusClass(plan.image_status)}>
-                  {workflowStatusLabel(plan.image_status)}
-                </span>
+                {!sourceVideoMode && (
+                  <span className={"workflow-pill " + workflowStatusClass(plan.image_status)}>
+                    {workflowStatusLabel(plan.image_status)}
+                  </span>
+                )}
               </div>
-              {activeVisualBeat && (
+              {sourceVideoMode ? (
+                <article className="shot-source-video-passthrough">
+                  <header>
+                    <div>
+                      <strong>原视频分镜</strong>
+                      <small>{seconds(shotPlan.start_seconds)}s — {seconds(shotPlan.end_seconds)}s</small>
+                    </div>
+                    <span>
+                      {sourceVideoReady
+                        ? <CheckCircle size={15} weight="fill" />
+                        : <CircleNotch className="spin" size={15} />}
+                      {sourceVideoReady ? "已直接传入剪辑流程" : "正在准备原视频片段"}
+                    </span>
+                  </header>
+                  <div className="shot-source-video-frame">
+                    <video
+                      controls
+                      key={sourceVideoCandidate?.id || shotPlan.id}
+                      playsInline
+                      poster={resolveUrl(sourceVideoCandidate?.thumbnail_url || "")}
+                      preload="metadata"
+                      src={
+                        sourceVideoCandidate?.content_url
+                          ? resolveUrl(sourceVideoCandidate.content_url)
+                          : `${sourceVideoUrl}#t=${shotPlan.start_seconds},${shotPlan.end_seconds}`
+                      }
+                    />
+                  </div>
+                  <p>保留该分镜的原动作、原转场和画面，不调用图片或视频生成模型。</p>
+                </article>
+              ) : (
+                <>
+                  {activeVisualBeat && (
                 <section className="visual-beat-editor" aria-label="分镜内画面顺序">
                   <header>
                     <div>
@@ -1274,25 +1272,12 @@ export function ShotImageWorkspace({
                                 ? <img alt="" src={resolveUrl(previewUrl)} />
                                 : <ImageSquare size={22} />}
                             </span>
-                            <span className="visual-beat-copy">
-                              <strong>{beat.title}</strong>
-                              <small>
-                                {Math.round(beat.start_ratio * 100)}%–{Math.round(beat.end_ratio * 100)}%
-                                {Number.isFinite(Number(beat.source_timestamp_seconds))
-                                  ? ` · 源 ${Number(beat.source_timestamp_seconds).toFixed(2)}s`
-                                  : ""}
-                              </small>
-                            </span>
-                            {duplicateSource ? (
+                            {duplicateSource && (
                               <span
                                 className="visual-beat-source-warning"
                                 title="该画面与其他画面使用了相同源帧，请自动修复或从视频重选"
                               >
-                                <WarningCircle size={13} weight="fill" />源帧重复
-                              </span>
-                            ) : (
-                              <span className={"shot-status-badge " + workflowStatusClass(beat.image_status)}>
-                                {workflowStatusLabel(beat.image_status)}
+                                <WarningCircle size={15} weight="fill" />
                               </span>
                             )}
                           </button>
@@ -1342,20 +1327,10 @@ export function ShotImageWorkspace({
                   <figcaption>
                     <div>
                       <strong>当前关键帧</strong>
-                      <small>
-                        {plan.source_keyframe_origin === "video_selection" ? "视频选帧" : "分析默认帧"}
-                        {plan.source_keyframe_timestamp_seconds == null
-                          ? ""
-                          : " · " + seconds(plan.source_keyframe_timestamp_seconds) + "s"}
-                      </small>
                     </div>
-                    <span>
-                      {approvedIsSource
-                        ? "已采用"
-                        : visualChoice === "source"
-                          ? "已选择"
-                          : "选择此图"}
-                    </span>
+                    {(approvedIsSource || visualChoice === "source") && (
+                      <span>{approvedIsSource ? "已采用" : "已选择"}</span>
+                    )}
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
@@ -1391,19 +1366,10 @@ export function ShotImageWorkspace({
                   <figcaption>
                     <div>
                       <strong>AI 生成图</strong>
-                      <small>
-                        {displayedCandidate
-                          ? `${displayedCandidate.generationRun === latestCandidateGroup?.run ? "最近批次" : "历史批次"} · 候选 ${displayedCandidate.ordinal}`
-                          : "尚未生成"}
-                      </small>
                     </div>
-                    <span>
-                      {displayedCandidateIsApproved
-                        ? "已采用"
-                        : visualChoice === "candidate"
-                          ? "已选择"
-                          : "选择此图"}
-                    </span>
+                    {(displayedCandidateIsApproved || visualChoice === "candidate") && (
+                      <span>{displayedCandidateIsApproved ? "已采用" : "已选择"}</span>
+                    )}
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
@@ -1426,18 +1392,6 @@ export function ShotImageWorkspace({
                       </button>
                     )}
                   </div>
-                  {displayedCandidate && (
-                    <small
-                      className={
-                        displayedCandidate.quality_report?.status === "warning"
-                          ? "shot-candidate-quality warning"
-                          : "shot-candidate-quality"
-                      }
-                      title={displayedCandidate.quality_report?.summary || "该候选没有自动质检报告"}
-                    >
-                      {imageQualityLabel(displayedCandidate.quality_report)}
-                    </small>
-                  )}
                 </figure>
               </div>
 
@@ -1478,18 +1432,7 @@ export function ShotImageWorkspace({
                   {displayedCandidate && (
                     <div className="shot-candidate-current-detail">
                       <strong>当前预览</strong>
-                      <span>
-                        {displayedCandidateModelLabel} · {displayedCandidateBatchTime} · {displayedCandidateQualityLabel}
-                      </span>
-                      <em className={
-                        displayedCandidateIsApproved
-                          ? "approved"
-                          : visualChoice === "candidate"
-                            ? "selected"
-                            : ""
-                      }>
-                        {displayedCandidateStateLabel}
-                      </em>
+                      <span>{displayedCandidateModelLabel}</span>
                       <AddToAssetsButton
                         artifactKind="image_candidate"
                         assetType="other"
@@ -1505,7 +1448,7 @@ export function ShotImageWorkspace({
                 </section>
               )}
 
-              {latestRunTone === "failed" && !displayedCandidate && (
+              {latestRunFailed && !displayedCandidate && (
                 <div className="shot-candidate-empty failed">
                   <strong>本次生成失败{latestRun?.error_code ? ` · ${latestRun.error_code}` : ""}</strong>
                   <p>{latestRun?.error_message || "本机工具没有返回可用候选。"}</p>
@@ -1528,36 +1471,6 @@ export function ShotImageWorkspace({
                     恢复图片
                   </button>
                 </div>
-              )}
-
-              {generationInputManifest.length > 0 && (
-                <section className={`shot-input-manifest compact${identityPolicy.enabled ? " identity-locked" : ""}`}>
-                  <header>
-                    <div>
-                      <strong>本次参考 {generationInputManifest.length} 项</strong>
-                      <small>生成时按编号顺序提交</small>
-                    </div>
-                    {identityPolicy.enabled && <span>人物身份已锁定</span>}
-                  </header>
-                  <ol>
-                    {generationInputManifest.map((item) => (
-                      <li className={item.identity_source ? "identity" : ""} key={`${item.input_index}-${item.asset_id || "source"}`}>
-                        <span className="shot-input-manifest-thumb">
-                          <MediaPreview
-                            alt={`${item.label}输入缩略图`}
-                            emptyLabel="无预览"
-                            src={resolveUrl(item.thumbnail_url)}
-                          />
-                        </span>
-                        <span>
-                          <b>{item.input_index}</b>
-                          <strong>{item.label}</strong>
-                          <small>{manifestRoleLabel(item)}</small>
-                        </span>
-                      </li>
-                    ))}
-                  </ol>
-                </section>
               )}
 
               <ImageGenerationCommandBar
@@ -1589,7 +1502,7 @@ export function ShotImageWorkspace({
                 settings={effectiveGenerationSettings}
               />
 
-              <div className="shot-review-actions">
+                  <div className="shot-review-actions">
                 {plan.image_status === "approved" && (
                   <button
                     className="secondary-button compact"
@@ -1626,32 +1539,30 @@ export function ShotImageWorkspace({
                         : "改用此候选"
                       : "采用所选画面"}
                 </button>
-              </div>
+                  </div>
+                </>
+              )}
             </>
           )}
         </main>
 
-        <aside className="shot-inspector-panel">
-          <form onSubmit={onSave}>
+        {detailReady && plan && !sourceVideoMode && (
+          <aside className="shot-inspector-panel">
+          <div className="shot-inspector-form">
             <div className="shot-panel-title">
-              <div>
-                <strong>分镜配置</strong>
-                <small>保存草稿不会自动生成</small>
-              </div>
-              <button className="primary-button compact" disabled={busy || !plan} type="submit">
-                {busy ? <CircleNotch className="spin" size={15} /> : <FloppyDisk size={15} />}
-                保存
-              </button>
+              <strong>分镜配置</strong>
+              <AutosaveStatus
+                onRetry={() => Promise.resolve(onRetryDraftSave?.()).catch(() => undefined)}
+                state={saveState}
+              />
             </div>
             <label className="production-field">
-              <span className="shot-prompt-field-title">
-                <span>图片提示词</span>
-                <TextModelIndicator label={textModelLabel} />
-              </span>
+              <span>图片提示词</span>
               <div className="shot-prompt-editor">
                 <textarea
                   className="prompt-editor-textarea"
                   maxLength={8000}
+                  onBlur={() => Promise.resolve(onFlushDraft?.()).catch(() => undefined)}
                   onChange={updatePrompt}
                   placeholder="描述画面；输入 @ 可关联人物、产品或场景资产"
                   ref={promptRef}
@@ -1711,21 +1622,6 @@ export function ShotImageWorkspace({
                 </span>
               )}
             </label>
-            <details
-              className="production-field shot-image-negative-constraints"
-              key={activeVisualBeat?.id || plan?.id}
-            >
-              <summary>负面约束（可选）</summary>
-              <textarea
-                aria-label="图片负面约束"
-                className="prompt-editor-textarea"
-                maxLength={4000}
-                onChange={(event) => setDraft((state) => ({ ...state, negativeConstraints: event.target.value }))}
-                placeholder="每行一条"
-                rows={4}
-                value={draft.negativeConstraints}
-              />
-            </details>
             <fieldset className="shot-reference-field">
               <legend>参考资产绑定</legend>
               {assets.length === 0 ? (
@@ -1788,8 +1684,9 @@ export function ShotImageWorkspace({
                 <small>未确认时阻止进入分段视频</small>
               </span>
             </label>
-          </form>
-        </aside>
+          </div>
+          </aside>
+        )}
       </div>
       <MediaLightbox
         activeId={lightboxCandidateId}

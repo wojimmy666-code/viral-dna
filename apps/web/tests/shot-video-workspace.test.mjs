@@ -241,7 +241,8 @@ test("uses a compact generation command bar with upward anchored model and setti
   assert.match(generationControlsSource, /className=\"shot-video-model-trigger/);
   assert.match(generationControlsSource, /className="shot-video-output-summary"/);
   assert.doesNotMatch(generationControlsSource, /shot-video-capability-badge|>有序多图</);
-  assert.match(settingsPopoverSource, /生成前自动保存提示词与负面约束/);
+  assert.match(settingsPopoverSource, /生成前自动保存提示词/);
+  assert.doesNotMatch(settingsPopoverSource, /提示词与负面约束/);
   assert.match(commandRule, /--video-command-control:\s*48px/);
   assert.match(commandRule, /container-type:\s*inline-size/);
   assert.match(barRule, /grid-template-areas:\s*"model summary cost actions"/);
@@ -624,7 +625,7 @@ test("composes optional video inputs without exposing audio as a generation inpu
   assert.match(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(generationReferenceComposerSource, /ReferencePickerPopover/);
   assert.match(generationReferenceComposerSource, /selectedReferenceItems/);
-  assert.match(generationReferenceComposerSource, /已自动加入.*张分镜图/);
+  assert.doesNotMatch(generationReferenceComposerSource, /已自动加入.*张分镜图.*与画面轨道同步/);
   assert.match(generationReferenceComposerSource, /恢复默认/);
   assert.match(generationReferenceComposerSource, /尚无生成参考/);
   assert.match(workspaceSource, /maximum_reference_images/);
@@ -660,24 +661,20 @@ test("recovers the video model catalog and exposes an actionable retry state", (
 });
 
 test("uses one prompt editor role in image and video workspaces", () => {
-  assert.match(workspaceSource, /className="prompt-editor-textarea"/);
+  assert.match(videoPromptReferenceEditorSource, /className="prompt-editor-textarea"/);
   assert.match(imageWorkspaceSource, /className="prompt-editor-textarea"/);
   assert.match(workflowStyles, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-weight:\s*var\(--type-weight-regular\)/s);
 });
 
-test("distills repeated candidate metadata and progressively reveals negative constraints", () => {
-  assert.match(workspaceSource, /<details className="shot-video-negative-constraints">/);
-  assert.match(workspaceSource, /<summary>视频负面约束（可选）<\/summary>/);
-  assert.doesNotMatch(
-    workspaceSource,
-    /<details className="shot-video-negative-constraints"[^>]*\sopen(?:=|>)/,
-  );
-  assert.match(workspaceSource, /aria-label="视频负面约束"/);
-  assert.match(workflowStyles, /\.shot-video-negative-constraints summary\s*\{/);
+test("distills candidate metadata and removes video negative-constraint editing", () => {
+  assert.doesNotMatch(workspaceSource, /shot-video-negative-constraints|视频负面约束/);
+  assert.doesNotMatch(workflowStyles, /\.shot-video-negative-constraints/);
 
   assert.doesNotMatch(workspaceSource, /Math\.round\(beat\.start_ratio \* 100\)/);
   assert.doesNotMatch(candidateLibrarySource, /<span>\{group\.candidates\.length\} 个<\/span>/);
   assert.match(candidateLibrarySource, /<strong>当前预览<\/strong>/);
+  assert.match(candidateLibrarySource, /<span>\{generationRunCostLabel\(displayedRun\)\}<\/span>/);
+  assert.doesNotMatch(candidateLibrarySource, /candidateModelLabel\(displayedRun\)|formatCandidateBatchTime\(displayedRun|formatVideoDuration\(displayedCandidate/);
   assert.doesNotMatch(candidateLibrarySource, /当前预览 · 视频 #/);
   assert.doesNotMatch(imageWorkspaceSource, /<span>\{group\.candidates\.length\} 张<\/span>/);
   assert.match(imageWorkspaceSource, /<strong>当前预览<\/strong>/);
@@ -735,6 +732,12 @@ test("auto-saves changed prompts with the returned revision before generating", 
   assert.doesNotMatch(productionWorkflowSource, /async function saveVideoPrompt/);
   assert.match(productionWorkflowSource, /changes\.video_prompt_mentions/);
   assert.match(generationDraftSource, /videoPromptMentions/);
+  assert.match(generationDraftSource, /setSaveState\("dirty"\)/);
+  assert.match(workspaceSource, /<AutosaveStatus/);
+  assert.match(workspaceSource, /draftSaveState/);
+  assert.match(workspaceSource, /<small>\{videoDraft\.videoPrompt\.length\} 字<\/small>/);
+  assert.match(videoPromptReferenceEditorSource, /onBlur=\{onBlur\}/);
+  assert.doesNotMatch(workspaceSource, /含人工修改/);
 });
 
 test("binds readable prompt mentions to stable multimodal reference ids", () => {
@@ -927,7 +930,7 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(videoPromptReferenceEditorSource, /removedReferences/);
   assert.match(videoPromptReferenceEditorSource, /event\.nativeEvent\?\.isComposing/);
   assert.match(creativeIntentPanelSource, /<CreativeIntentMentionEditor/);
-  assert.match(creativeIntentPanelSource, /输入 @ 可精确指定资产/);
+  assert.doesNotMatch(creativeIntentPanelSource, /说明要保留|输入 @ 可精确指定资产|TextModelIndicator|尚未生成/);
   assert.match(creativeIntentPanelSource, /video_intent_model_validation_failed/);
   assert.match(creativeIntentPanelSource, /提示词校验失败/);
   assert.match(creativeIntentPanelSource, /需要确认意图/);
@@ -974,7 +977,7 @@ test("keeps video candidates from every generation batch selectable", () => {
   assert.match(workspaceSource, /<VideoCandidateLibrary/);
   assert.match(candidateLibrarySource, /className="shot-candidate-library shot-video-candidate-library"/);
   assert.match(candidateLibrarySource, /历史 \{historicalCount\} 个/);
-  assert.match(candidateLibrarySource, /可用 \{activeCandidates\.length\} 个/);
+  assert.doesNotMatch(candidateLibrarySource, /可用 \{activeCandidates\.length\} 个|点击缩略图切换预览/);
   assert.doesNotMatch(candidateLibrarySource, /个批次/);
   assert.match(workspaceSource, /改用此视频/);
   assert.match(workspaceSource, /displayedCandidateRun\?\.model_display_name/);
@@ -986,6 +989,9 @@ test("keeps video candidates from every generation batch selectable", () => {
     workspaceSource,
     /plan\.video_status === "approved" \|\| Boolean\(generationBlockedReason\)/,
   );
+  assert.match(workspaceSource, /plan\.video_status !== "ready"/);
+  assert.doesNotMatch(workspaceSource, /videoGenerationRunLabel|可人工调整/);
+  assert.match(workspaceSource, /<strong>资产引用与控制<\/strong><small>\{selectedVideoReferences\.length\} 项<\/small>/);
 
   const libraryRule = cssRule(".shot-video-candidate-library");
   const thumbRule = cssRule(".shot-video-candidate-library .shot-candidate-thumb");
@@ -1116,4 +1122,12 @@ test("keeps visual beats compact while the system manages names and transitions"
   const railRule = cssRule(".visual-beat-rail");
   assert.match(railRule, /display:\s*flex/);
   assert.match(railRule, /overflow-x:\s*auto/);
+});
+
+test("source-video shots bypass generation controls and remain reversible", () => {
+  assert.match(workspaceSource, /plan\?\.output_mode === "source_video"/);
+  assert.match(workspaceSource, /已沿用原视频/);
+  assert.match(workspaceSource, /改为重新生成/);
+  assert.match(workspaceSource, /!sourceVideoMode && <VideoCandidateLibrary/);
+  assert.match(workspaceSource, /outputMode: "image_to_video"/);
 });

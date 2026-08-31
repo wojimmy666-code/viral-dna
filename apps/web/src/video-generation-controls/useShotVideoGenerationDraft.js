@@ -287,11 +287,15 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
             saved = await save(record, pending);
           }
           recordsRef.current.set(shotPlanId, saved);
-          if (sameParameters(pendingRef.current.get(shotPlanId), pending)) {
+          const savedLatestPending = sameParameters(
+            pendingRef.current.get(shotPlanId),
+            pending,
+          );
+          if (savedLatestPending) {
             pendingRef.current.delete(shotPlanId);
           }
           lastNotifiedErrorRef.current = "";
-          setSaveState("saved");
+          setSaveState(savedLatestPending ? "saved" : "dirty");
           return saved;
         } catch (error) {
           setSaveState("error");
@@ -362,6 +366,7 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
     const nextParameters = videoDraftParameters(next);
     if (sameParameters(currentParameters, nextParameters)) return;
     pendingRef.current.set(shotPlanId, nextParameters);
+    setSaveState("dirty");
     scheduleSave(
       shotPlanId,
       currentParameters.model_alias !== nextParameters.model_alias,

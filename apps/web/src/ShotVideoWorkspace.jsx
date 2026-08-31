@@ -15,7 +15,6 @@ import {
   preferredVideoResolution,
   videoCandidatePlaybackUrl,
   videoDurationOptions,
-  videoGenerationRunLabel,
   workflowStatusClass,
   workflowStatusLabel,
 } from "./production-ui.js";
@@ -29,6 +28,7 @@ import { GenerationReferenceComposer } from "./video-inputs/reference-composer/G
 import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
 import { VideoPromptReferencePolicy } from "./video-inputs/VideoPromptReferencePolicy.jsx";
 import { VideoEnhancementPanel } from "./video-enhancement/VideoEnhancementPanel.jsx";
+import { AutosaveStatus } from "./ui/system/index.js";
 import {
   CreativeIntentPanel,
   intentRequirementsNeedAssets,
@@ -125,12 +125,18 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
                 ]}
               />
               <span className="shot-video-list-copy">
-                <strong>分镜 {plan.index} · {plan.video_prompt || "尚未填写视频提示词"}</strong>
+                <strong>
+                  分镜 {plan.index} · {plan.output_mode === "source_video"
+                    ? "沿用原视频"
+                    : plan.video_prompt || "尚未填写视频提示词"}
+                </strong>
                 <small>{plan.start_seconds.toFixed(1)}s–{plan.end_seconds.toFixed(1)}s · {plan.duration_seconds.toFixed(1)}s</small>
               </span>
-              <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
-                {videoWorkflowStatusLabel(plan.video_status)}
-              </span>
+              {plan.video_status !== "ready" && (
+                <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
+                  {videoWorkflowStatusLabel(plan.video_status)}
+                </span>
+              )}
             </button>
           );
         })}
@@ -144,6 +150,7 @@ export function ShotVideoWorkspace({
   advanced,
   assets = [],
   busy,
+  draftSaveState = "saved",
   error,
   flushVideoDraft,
   gate,
@@ -166,6 +173,7 @@ export function ShotVideoWorkspace({
   onRetryRun,
   onRestoreCandidates,
   onRevokeApproval,
+  onSetOutputMode,
   onSelectShot,
   project,
   request,
@@ -202,6 +210,7 @@ export function ShotVideoWorkspace({
   const [referenceSettingsOpen, setReferenceSettingsOpen] = useState(false);
   const [promptSettingsOpen, setPromptSettingsOpen] = useState(false);
   const plan = shotDetail?.plan;
+  const sourceVideoMode = plan?.output_mode === "source_video";
   const depthGeneration = useDepthControlJob({
     expectedRevisionId: project?.current_revision_id,
     onTerminal: async (job) => {
@@ -305,6 +314,11 @@ export function ShotVideoWorkspace({
     enhancementPreview,
   );
   const displayedCandidateCostLabel = generationRunCostLabel(displayedCandidateRun);
+  const displayedCandidateUsesSourceVideo = Boolean(
+    displayedCandidateRun?.execution_mode === "source_video"
+    || displayedCandidateRun?.provider === "source_video"
+    || displayedCandidateRun?.model === "source_video",
+  );
   const activeRun = videoRuns.find((run) => ACTIVE_RUN_STATUSES.has(run.status)) || null;
   const videoModels = videoGenerationSettings?.models || [];
   const compatibleVideoModels = useMemo(
@@ -801,7 +815,7 @@ export function ShotVideoWorkspace({
   }
 
   return (
-    <section className="shot-video-workspace">
+    <section className={`shot-video-workspace${sourceVideoMode ? " source-video-passthrough" : ""}`}>
       <header className="shot-video-stage-header">
         <div>
           <h3>分段视频工作台</h3>
@@ -827,7 +841,7 @@ export function ShotVideoWorkspace({
         <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>
       )}
 
-      {plan.video_status === "stale" && (
+      {!sourceVideoMode && plan.video_status === "stale" && (
         <div className="shot-video-input-version-notice" role="status">
           <WarningCircle size={18} />
           <div>
@@ -851,15 +865,36 @@ export function ShotVideoWorkspace({
               <span>分镜 {plan.index}</span>
               <strong>{plan.start_seconds.toFixed(1)}s–{plan.end_seconds.toFixed(1)}s</strong>
             </div>
-            <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
-              {videoWorkflowStatusLabel(plan.video_status)}
-            </span>
+            {plan.video_status !== "ready" && (
+              <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
+                {videoWorkflowStatusLabel(plan.video_status)}
+              </span>
+            )}
           </header>
+
+          {sourceVideoMode && (
+            <div className="shot-video-source-mode-banner" role="status">
+              <div>
+                <CheckCircle size={18} weight="fill" />
+                <span><strong>已沿用原视频</strong><small>该分镜跳过视频生成，直接进入剪辑。</small></span>
+              </div>
+              <button
+                className="secondary-button compact"
+                disabled={busy}
+                onClick={() => onSetOutputMode?.({
+                  shotPlanIds: [plan.id],
+                  outputMode: "image_to_video",
+                })}
+                type="button"
+              >
+                改为重新生成
+              </button>
+            </div>
+          )}
 
           <article className="shot-video-preview-card">
             <header>
-              <span>视频候选</span>
-              <small>{videoGenerationRunLabel(displayedCandidateRun || latestRun)}</small>
+              <span>{sourceVideoMode ? "原视频分镜" : "视频候选"}</span>
             </header>
             <div className="shot-video-media-frame shot-video-candidate-frame">
               {displayedCandidate ? (
@@ -888,7 +923,7 @@ export function ShotVideoWorkspace({
             </div>
           </article>
 
-          <VideoCandidateLibrary
+          {!sourceVideoMode && <VideoCandidateLibrary
             archivedCandidateGroups={archivedCandidateGroups}
             busy={busy}
             candidateGroups={candidateGroups}
@@ -900,9 +935,9 @@ export function ShotVideoWorkspace({
             plan={plan}
             request={request}
             resolveUrl={resolveUrl}
-          />
+          />}
 
-          <div className="shot-video-prompt-panel">
+          {!sourceVideoMode && <div className="shot-video-prompt-panel">
             <CreativeIntentPanel
               assets={assets}
               busy={busy || intentBusy}
@@ -930,7 +965,7 @@ export function ShotVideoWorkspace({
               open={referenceSettingsOpen}
             >
               <summary>
-                <span><strong>资产引用与控制</strong><small>{selectedVideoReferences.length} 项 · 可人工调整</small></span>
+                <span><strong>资产引用与控制</strong><small>{selectedVideoReferences.length} 项</small></span>
                 <CaretDown aria-hidden="true" size={17} />
               </summary>
               <div className="shot-video-config-disclosure-body">
@@ -1000,21 +1035,34 @@ export function ShotVideoWorkspace({
 
             <details
               className="shot-video-config-disclosure"
-              onToggle={(event) => setPromptSettingsOpen(event.currentTarget.open)}
+              onToggle={(event) => {
+                const open = event.currentTarget.open;
+                setPromptSettingsOpen(open);
+                if (!open) {
+                  Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined);
+                }
+              }}
               open={promptSettingsOpen}
             >
               <summary>
-                <span>
+                <span className="shot-video-config-title">
                   <strong>视频提示词</strong>
-                  <small>{videoDraft.promptManuallyModified ? "含人工修改" : `${videoDraft.videoPrompt.length} 字`}</small>
+                  <small>{videoDraft.videoPrompt.length} 字</small>
                 </span>
-                <CaretDown aria-hidden="true" size={17} />
+                <span className="shot-video-config-actions">
+                  <AutosaveStatus
+                    onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)}
+                    state={draftSaveState}
+                  />
+                  <CaretDown aria-hidden="true" size={17} />
+                </span>
               </summary>
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
                   assets={assets}
                   depthAssets={plan?.depth_control_assets || []}
                   managedAssetBinding={managedAssetBinding}
+                  onBlur={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)}
                   onChange={(change) => setVideoDraft((current) => (
                     reconcileVideoDraftReferences(current, change, referenceFrames)
                   ))}
@@ -1030,21 +1078,6 @@ export function ShotVideoWorkspace({
                   prompt={videoDraft.videoPrompt}
                   references={videoDraft.selectedReferences || []}
                 />
-                <details className="shot-video-negative-constraints">
-                  <summary>视频负面约束（可选）</summary>
-                  <textarea
-                    aria-label="视频负面约束"
-                    className="prompt-editor-textarea"
-                    maxLength={3000}
-                    onChange={(event) => setVideoDraft((current) => ({
-                      ...current,
-                      negativeConstraints: event.target.value,
-                    }))}
-                    placeholder="每行一项，例如：人物身份漂移"
-                    rows={3}
-                    value={videoDraft.negativeConstraints}
-                  />
-                </details>
               </div>
             </details>
             <ShotVideoGenerationControls
@@ -1087,13 +1120,14 @@ export function ShotVideoWorkspace({
               supportedResolutions={supportedResolutions}
               videoDraft={videoDraft}
             />
-          </div>
+          </div>}
 
-          {displayedCandidate && (
+          {!sourceVideoMode && displayedCandidate && (
             <footer className="shot-video-review-actions">
               <div>
                 <strong>
-                  视频 #{displayedCandidate.sequence || displayedCandidate.ordinal} · {displayedCandidateRun?.model_display_name || displayedCandidateRun?.model_alias || displayedCandidateRun?.model || "视频模型"}
+                  视频 #{displayedCandidate.sequence || displayedCandidate.ordinal}
+                  {!displayedCandidateUsesSourceVideo && ` · ${displayedCandidateRun?.model_display_name || displayedCandidateRun?.model_alias || displayedCandidateRun?.model || "视频模型"}`}
                 </strong>
                 <span>
                   {displayedCandidate.duration_seconds?.toFixed(1)} 秒 · {displayedCandidate.width} × {displayedCandidate.height} · {displayedCandidateCostLabel}
@@ -1118,7 +1152,7 @@ export function ShotVideoWorkspace({
             </footer>
           )}
 
-          {displayedCandidateApproved && (
+          {!sourceVideoMode && displayedCandidateApproved && (
             <VideoEnhancementPanel
               candidate={displayedCandidate}
               expectedRevisionId={project?.current_revision_id}

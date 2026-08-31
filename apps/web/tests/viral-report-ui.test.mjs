@@ -50,8 +50,7 @@ test("report summary prioritizes decisions and moves technical metadata behind d
   const executive = await readFile(EXECUTIVE_URL, "utf8");
   const helpers = await readFile(UI_HELPERS_URL, "utf8");
 
-  assert.match(executive, /判断置信度/);
-  assert.match(executive, /复刻难度/);
+  assert.doesNotMatch(executive, /判断置信度|复刻难度|viral-summary-metrics/);
   assert.match(executive, /viral-hook-evidence/);
   assert.match(executive, /formatInsightTime/);
   assert.match(executive, /大模型综合 · 证据校验/);
@@ -63,6 +62,8 @@ test("report summary prioritizes decisions and moves technical metadata behind d
   assert.doesNotMatch(helpers, /viral-insight\/refresh|refresh\s*=\s*false/);
   assert.match(app, /<details className="overview-technical-details">/);
   assert.match(app, /<p>\{report\.shots\.length\} 个镜头 · 分析完成<\/p>/);
+  assert.doesNotMatch(app, /内容置信度 \$\{Math\.round\(activeShot\.confidence/);
+  assert.doesNotMatch(app, /程序边界 · VLM 已降级|程序候选 \+ VLM 确认|查看边界候选证据|segmentation-evidence/);
 });
 
 test("long report content uses progressive disclosure", async () => {
@@ -75,11 +76,11 @@ test("long report content uses progressive disclosure", async () => {
 
   assert.match(mechanism, /<details className="viral-mechanism-row"/);
   assert.match(mechanism, /open=\{index === 0\}/);
-  assert.match(mechanism, /distinctScores\.size > 1/);
+  assert.doesNotMatch(mechanism, /distinctScores|showScores|mechanism\.score/);
+  assert.doesNotMatch(mechanism, /先看结论|流量作用来自内容结构推断|内容推断 ·|置信度 |跳到 \{/);
   assert.match(traffic, /<details className="viral-report-page shot-traffic-section">/);
   assert.match(traffic, /shot-traffic-preserve-details/);
-  assert.match(replication, /<details className="replication-dna-locks">/);
-  assert.match(replication, /\bCaretDown\b[\s\S]*from "@phosphor-icons\/react"/);
+  assert.doesNotMatch(replication, /replication-dna-locks|内容 DNA 已锁定/);
   assert.doesNotMatch(replication, /replication-empty/);
   assert.match(app, /<details className="shot-secondary-facts">/);
   assert.match(app, /<details className="prompt-box shot-prompt-disclosure">/);
@@ -178,13 +179,13 @@ test("replication concepts expose distinct change levels and stale-batch recover
   assert.match(concept, /保留 \{selected\.retained_dna\.length\} 项 DNA/);
   assert.doesNotMatch(concept, /本方案重点改进|本策略锁定|concept-strategy-goal|meta\.goal/);
   assert.match(concept, /重新生成后可创建/);
-  assert.match(concept, /历史方案基于/);
-  assert.match(concept, /不会自动成为本次品类选择/);
+  assert.doesNotMatch(concept, /历史方案基于|不会自动成为本次品类选择/);
   assert.match(replication, /conceptSet\?\.status === "stale"/);
   assert.match(replication, /现有三套方案需要更新/);
   assert.match(replication, /category_profile_id: selectedCategoryId/);
   assert.match(replication, /historical=\{!selectedCategoryId\}/);
-  assert.match(replication, /历史方案不会自动回填/);
+  assert.doesNotMatch(replication, /历史方案不会自动回填/);
+  assert.doesNotMatch(replication, /尚未选择品类档案/);
   assert.doesNotMatch(replication, /setSelectedCategoryId\(payload/);
   assert.match(replication, /\["faithful", "scenario", "proof"\]/);
   assert.match(replication, /仅生成创意与分镜，不会立即生成图片或视频/);
@@ -209,16 +210,16 @@ test("viral report layout has responsive fallbacks without a fixed side panel", 
   assert.match(source, /@media \(max-width: 760px\)[\s\S]*\.concept-summary-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 
-test("viral workspaces use the same dense report frame and a responsive preparation grid", async () => {
+test("viral workspaces use the same dense report frame without redundant DNA preparation UI", async () => {
   const mechanism = await readFile(MECHANISM_URL, "utf8");
   const replication = await readFile(REPLICATION_URL, "utf8");
   const source = await readFile(CSS_URL, "utf8");
   assert.match(mechanism, /viral-report-page viral-mechanism-workspace/);
   assert.match(replication, /viral-report-page replication-workspace/);
-  assert.match(replication, /replication-preparation-grid/);
+  assert.match(replication, /replacement-opportunities/);
+  assert.doesNotMatch(replication, /replication-preparation-grid|replication-dna-locks/);
   assert.match(source, /\.viral-report-page\s*\{[^}]*width:\s*100%[^}]*padding:\s*1\.25rem/s);
-  assert.match(source, /\.replication-preparation-grid\s*\{[^}]*grid-template-columns:/s);
-  assert.match(source, /@media \(max-width: 1080px\)[\s\S]*\.replication-preparation-grid\s*\{\s*grid-template-columns:\s*1fr/);
+  assert.doesNotMatch(source, /\.replication-preparation-grid|\.replication-dna-locks|\.dna-lock-list/);
 });
 
 test("overview, mechanisms, and replication share the report typography hierarchy", async () => {

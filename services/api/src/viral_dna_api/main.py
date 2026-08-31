@@ -136,6 +136,7 @@ from .models import (
     ShotImageApprovalRevokeRequest,
     ShotKeyframeSelectRequest,
     ShotLifecycleUpdate,
+    ShotOutputModeUpdateRequest,
     ShotPlanBulkUpdate,
     ShotPlanCreate,
     ShotPlanDetailResponse,
@@ -1167,6 +1168,20 @@ async def reorder_production_shots(
 ) -> list[ShotPlanResponse]:
     try:
         return await production_service.reorder_shots(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/shot-output-mode",
+    response_model=list[ShotPlanResponse],
+)
+async def update_production_shot_output_mode(
+    project_id: UUID,
+    payload: ShotOutputModeUpdateRequest,
+) -> list[ShotPlanResponse]:
+    try:
+        return await production_service.update_shot_output_mode(project_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

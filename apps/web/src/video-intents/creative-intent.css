@@ -14,8 +14,7 @@
   gap: var(--space-4);
 }
 
-.creative-intent-heading h4,
-.creative-intent-heading p {
+.creative-intent-heading h4 {
   margin: 0;
 }
 
@@ -44,10 +43,17 @@
   display: none;
 }
 
-.shot-video-config-disclosure > summary > span {
+.shot-video-config-disclosure > summary > .shot-video-config-title {
   min-width: 0;
   display: flex;
   align-items: baseline;
+  gap: var(--space-2);
+}
+
+.shot-video-config-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
 }
 
@@ -67,13 +73,13 @@
   white-space: nowrap;
 }
 
-.shot-video-config-disclosure > summary > svg {
+.shot-video-config-actions > svg {
   flex: 0 0 auto;
   color: var(--text-secondary);
   transition: transform 180ms ease-out;
 }
 
-.shot-video-config-disclosure[open] > summary > svg {
+.shot-video-config-disclosure[open] .shot-video-config-actions > svg {
   transform: rotate(180deg);
 }
 
@@ -100,19 +106,6 @@
   font-size: var(--type-heading-size);
   font-weight: var(--type-weight-semibold);
   line-height: var(--type-leading-tight);
-}
-
-.creative-intent-heading p {
-  max-width: 72ch;
-  margin-top: var(--space-1);
-  color: var(--text-secondary);
-  font-size: var(--type-caption-size);
-  line-height: var(--type-leading-copy);
-}
-
-.creative-intent-heading .text-model-indicator {
-  display: block;
-  margin-top: var(--space-1);
 }
 
 .creative-intent-command {
@@ -224,14 +217,14 @@
     flex-direction: column;
   }
 
-  .shot-video-config-disclosure > summary > span {
+  .shot-video-config-disclosure > summary > .shot-video-config-title {
     display: grid;
     gap: 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .shot-video-config-disclosure > summary > svg {
+  .shot-video-config-actions > svg {
     transition: none;
   }
 }

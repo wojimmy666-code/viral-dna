@@ -181,6 +181,23 @@ class ShotSourceKind(StrEnum):
     BLANK = "blank"
 
 
+class ShotOutputMode(StrEnum):
+    """How one shot should continue after the storyboard-image stage."""
+
+    SOURCE_VIDEO = "source_video"
+    IMAGE_TO_VIDEO = "image_to_video"
+
+
+def normalize_shot_output_mode(value: object) -> object:
+    """Collapse the former source/generated image routes into one image workflow."""
+
+    if value is None or (
+        isinstance(value, str) and value in {"source_images", "generated_images"}
+    ):
+        return ShotOutputMode.IMAGE_TO_VIDEO
+    return value
+
+
 class ProductionChangeKind(StrEnum):
     PROJECT_CREATED = "project_created"
     PROJECT_SETTINGS_CHANGED = "project_settings_changed"
@@ -244,6 +261,7 @@ class ImageExecutionMode(StrEnum):
     LOCAL_TOOL = "local_tool"
     SIMULATED = "simulated"
     SOURCE_FRAME = "source_frame"
+    SOURCE_VIDEO = "source_video"
 
 
 class ImageGenerationInputMode(StrEnum):
@@ -2079,6 +2097,7 @@ class ShotPlan(BaseModel):
     index: int = Field(ge=1)
     lifecycle_status: ShotLifecycleStatus = ShotLifecycleStatus.ACTIVE
     source_kind: ShotSourceKind = ShotSourceKind.ANALYSIS
+    output_mode: ShotOutputMode = ShotOutputMode.IMAGE_TO_VIDEO
     source_keyframe_url: str | None = Field(default=None, min_length=1, max_length=2048)
     source_keyframe_relative_path: str | None = Field(default=None, max_length=2048)
     source_keyframe_timestamp_seconds: float | None = Field(default=None, ge=0)
@@ -2098,6 +2117,11 @@ class ShotPlan(BaseModel):
         max_length=20,
     )
     image_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+
+    @field_validator("output_mode", mode="before")
+    @classmethod
+    def normalize_legacy_output_mode(cls, value: object) -> object:
+        return normalize_shot_output_mode(value)
     video_prompt: str = Field(default="", max_length=8000)
     video_prompt_mentions: list[VideoPromptMention] = Field(
         default_factory=list,
@@ -3036,6 +3060,7 @@ class ShotMediaPreview(BaseModel):
     ]
     candidate_id: UUID
     updated_at: datetime
+    execution_mode: ImageExecutionMode | None = None
 
 
 class ShotPlanResponse(BaseModel):
@@ -3360,6 +3385,26 @@ class ShotSourceFrameApprovalRequest(BaseModel):
     visual_beat_id: UUID | None = None
     reason: str | None = Field(default=None, max_length=1000)
     confirm_downstream_stale: bool = False
+
+
+class ShotOutputModeUpdateRequest(BaseModel):
+    expected_revision_id: UUID
+    shot_plan_ids: list[UUID] = Field(min_length=1, max_length=100)
+    output_mode: ShotOutputMode
+    only_unresolved: bool = False
+    confirm_downstream_stale: bool = False
+
+    @field_validator("output_mode", mode="before")
+    @classmethod
+    def normalize_legacy_output_mode(cls, value: object) -> object:
+        return normalize_shot_output_mode(value)
+
+    @field_validator("shot_plan_ids")
+    @classmethod
+    def require_unique_shot_plan_ids(cls, values: list[UUID]) -> list[UUID]:
+        if len(values) != len(set(values)):
+            raise ValueError("分镜处理方式不能包含重复项")
+        return values
 
 
 class ShotImageApprovalRevokeRequest(BaseModel):

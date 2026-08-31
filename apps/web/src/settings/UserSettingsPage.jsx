@@ -131,7 +131,7 @@ export function UserSettingsPage({
     <SettingsShell className="settings-center">
       <header className="settings-center-header">
         <button className="settings-back" onClick={onBack} type="button">
-          <ArrowLeft size={19} /> 返回工作台
+          <ArrowLeft size={19} /> 返回项目
         </button>
         <div>
           <p className="settings-eyebrow">用户账户</p>

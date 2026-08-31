@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -205,6 +205,288 @@ function shotDraftPatch(detail, visualBeatId, draft) {
     shotChanges.reference_bindings = draft.referenceBindings;
   }
   return { activeBeat, beatChanges, shotChanges };
+}
+
+const SHOT_IMAGE_AUTOSAVE_DELAY_MS = 700;
+
+function cloneShotDraft(draft) {
+  return {
+    ...draft,
+    imagePromptMentions: (draft.imagePromptMentions || []).map((item) => ({ ...item })),
+    locks: [...(draft.locks || [])],
+    referenceBindings: (draft.referenceBindings || []).map((item) => ({ ...item })),
+  };
+}
+
+function shotDraftFingerprint(draft) {
+  return JSON.stringify(cloneShotDraft(draft));
+}
+
+function shotDraftTargetKey(shotPlanId, visualBeatId) {
+  return `${shotPlanId}:${visualBeatId}`;
+}
+
+function shotDraftHasChanges(detail, visualBeatId, draft) {
+  const { beatChanges, shotChanges } = shotDraftPatch(detail, visualBeatId, draft);
+  return Object.keys(beatChanges).length > 0 || Object.keys(shotChanges).length > 0;
+}
+
+function useShotImageDraftAutosave({ request, onNotice, onPersisted }) {
+  const [shotDraft, setShotDraftState] = useState({ ...EMPTY_SHOT_DRAFT });
+  const [saveState, setSaveState] = useState("idle");
+  const activeTargetRef = useRef(null);
+  const currentDraftRef = useRef({ ...EMPTY_SHOT_DRAFT });
+  const recordsRef = useRef(new Map());
+  const localDraftsRef = useRef(new Map());
+  const pendingRef = useRef(new Map());
+  const inFlightRef = useRef(new Set());
+  const saveStatesRef = useRef(new Map());
+  const saveTimersRef = useRef(new Map());
+  const saveChainRef = useRef(Promise.resolve());
+  const lastNotifiedErrorRef = useRef("");
+  const onPersistedRef = useRef(onPersisted);
+
+  useEffect(() => {
+    onPersistedRef.current = onPersisted;
+  }, [onPersisted]);
+
+  const setTargetSaveState = useCallback((key, state) => {
+    saveStatesRef.current.set(key, state);
+    if (activeTargetRef.current?.key === key) setSaveState(state);
+  }, []);
+
+  const applyLocalDraft = useCallback((next, target = activeTargetRef.current) => {
+    currentDraftRef.current = next;
+    if (target?.key) localDraftsRef.current.set(target.key, next);
+    setShotDraftState(next);
+  }, []);
+
+  const persistAgainstRecord = useCallback(async (record, pending) => {
+    const { activeBeat, beatChanges, shotChanges } = shotDraftPatch(
+      record,
+      pending.visualBeatId,
+      pending.draft,
+    );
+    if (!record?.plan || !activeBeat) return record;
+    let persisted = record;
+    let expectedRevisionId = record.current_revision_id;
+    const visualBeatChanges = { ...beatChanges };
+    const remainingShotChanges = { ...shotChanges };
+    if (Object.hasOwn(remainingShotChanges, "reference_bindings")) {
+      visualBeatChanges.reference_bindings = remainingShotChanges.reference_bindings;
+      delete remainingShotChanges.reference_bindings;
+    }
+    if (Object.keys(visualBeatChanges).length > 0) {
+      persisted = await request(
+        `/production-shots/${pending.shotPlanId}/visual-beats/${pending.visualBeatId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: expectedRevisionId,
+            confirm_stale: true,
+            ...visualBeatChanges,
+          }),
+        },
+      );
+      expectedRevisionId = persisted.current_revision_id;
+    }
+    if (Object.keys(remainingShotChanges).length > 0) {
+      persisted = await request(`/production-shots/${pending.shotPlanId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: expectedRevisionId,
+          confirm_stale: true,
+          ...remainingShotChanges,
+        }),
+      });
+    }
+    return persisted;
+  }, [request]);
+
+  const persistPending = useCallback((key) => {
+    const operation = saveChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        let pending = pendingRef.current.get(key);
+        if (!pending) return recordsRef.current.get(key.split(":", 1)[0]) || null;
+        let record = recordsRef.current.get(pending.shotPlanId);
+        if (!record) {
+          record = await request(`/production-shots/${pending.shotPlanId}`);
+          recordsRef.current.set(pending.shotPlanId, record);
+          pending = pendingRef.current.get(key);
+          if (!pending) return record;
+        }
+        if (!shotDraftHasChanges(record, pending.visualBeatId, pending.draft)) {
+          pendingRef.current.delete(key);
+          const serverDraft = shotDraftFromDetail(record, pending.visualBeatId);
+          localDraftsRef.current.set(key, serverDraft);
+          if (activeTargetRef.current?.key === key) applyLocalDraft(serverDraft);
+          setTargetSaveState(key, "saved");
+          return record;
+        }
+        setTargetSaveState(key, "saving");
+        inFlightRef.current.add(key);
+        try {
+          let saved;
+          try {
+            saved = await persistAgainstRecord(record, pending);
+          } catch (error) {
+            if (error?.status !== 409) throw error;
+            record = await request(`/production-shots/${pending.shotPlanId}`);
+            recordsRef.current.set(pending.shotPlanId, record);
+            pending = pendingRef.current.get(key);
+            if (!pending) return record;
+            saved = await persistAgainstRecord(record, pending);
+          }
+          recordsRef.current.set(pending.shotPlanId, saved);
+          onPersistedRef.current?.({
+            detail: saved,
+            shotPlanId: pending.shotPlanId,
+            visualBeatId: pending.visualBeatId,
+          });
+          const latestPending = pendingRef.current.get(key);
+          if (latestPending?.fingerprint === pending.fingerprint) {
+            pendingRef.current.delete(key);
+            const serverDraft = shotDraftFromDetail(saved, pending.visualBeatId);
+            localDraftsRef.current.set(key, serverDraft);
+            if (activeTargetRef.current?.key === key) applyLocalDraft(serverDraft);
+            setTargetSaveState(key, "saved");
+          } else {
+            setTargetSaveState(key, "dirty");
+          }
+          lastNotifiedErrorRef.current = "";
+          return saved;
+        } catch (error) {
+          setTargetSaveState(key, "error");
+          const message = error?.message || "图片提示词暂时无法保存";
+          if (lastNotifiedErrorRef.current !== message) {
+            lastNotifiedErrorRef.current = message;
+            onNotice?.({
+              type: "error",
+              title: "图片提示词未保存",
+              message: `${message}；当前修改已在本页保留，请点击“保存失败”重试。`,
+            });
+          }
+          throw error;
+        } finally {
+          inFlightRef.current.delete(key);
+        }
+      });
+    saveChainRef.current = operation.catch(() => undefined);
+    return operation;
+  }, [applyLocalDraft, onNotice, persistAgainstRecord, request, setTargetSaveState]);
+
+  const scheduleSave = useCallback((key, immediate = false) => {
+    const currentTimer = saveTimersRef.current.get(key);
+    if (currentTimer) window.clearTimeout(currentTimer);
+    saveTimersRef.current.delete(key);
+    if (immediate) return persistPending(key);
+    const timer = window.setTimeout(() => {
+      saveTimersRef.current.delete(key);
+      persistPending(key).catch(() => undefined);
+    }, SHOT_IMAGE_AUTOSAVE_DELAY_MS);
+    saveTimersRef.current.set(key, timer);
+    return null;
+  }, [persistPending]);
+
+  const setShotDraft = useCallback((updater) => {
+    const current = currentDraftRef.current;
+    const proposed = typeof updater === "function" ? updater(current) : updater;
+    const next = cloneShotDraft(proposed);
+    if (shotDraftFingerprint(next) === shotDraftFingerprint(current)) return;
+    const target = activeTargetRef.current;
+    applyLocalDraft(next, target);
+    if (!target?.key) return;
+    const record = recordsRef.current.get(target.shotPlanId);
+    if (
+      record
+      && !inFlightRef.current.has(target.key)
+      && !shotDraftHasChanges(record, target.visualBeatId, next)
+    ) {
+      pendingRef.current.delete(target.key);
+      const timer = saveTimersRef.current.get(target.key);
+      if (timer) window.clearTimeout(timer);
+      saveTimersRef.current.delete(target.key);
+      setTargetSaveState(target.key, "saved");
+      return;
+    }
+    pendingRef.current.set(target.key, {
+      ...target,
+      draft: next,
+      fingerprint: shotDraftFingerprint(next),
+    });
+    setTargetSaveState(target.key, "dirty");
+    scheduleSave(target.key);
+  }, [applyLocalDraft, scheduleSave, setTargetSaveState]);
+
+  const hydrateShotDraft = useCallback(({ detail, shotPlanId, visualBeatId }) => {
+    if (!detail?.plan || !shotPlanId || !visualBeatId) return { ...EMPTY_SHOT_DRAFT };
+    recordsRef.current.set(shotPlanId, detail);
+    const key = shotDraftTargetKey(shotPlanId, visualBeatId);
+    const target = { key, shotPlanId, visualBeatId };
+    activeTargetRef.current = target;
+    const localDraft = localDraftsRef.current.get(key);
+    const next = pendingRef.current.has(key) && localDraft
+      ? localDraft
+      : shotDraftFromDetail(detail, visualBeatId);
+    applyLocalDraft(next, target);
+    setSaveState(
+      pendingRef.current.has(key)
+        ? saveStatesRef.current.get(key) || "dirty"
+        : "saved",
+    );
+    return next;
+  }, [applyLocalDraft]);
+
+  const flushShotDraft = useCallback(async (target = activeTargetRef.current) => {
+    if (!target?.key) {
+      await saveChainRef.current;
+      return null;
+    }
+    const timer = saveTimersRef.current.get(target.key);
+    if (timer) window.clearTimeout(timer);
+    saveTimersRef.current.delete(target.key);
+    if (!pendingRef.current.has(target.key)) {
+      await saveChainRef.current;
+      return recordsRef.current.get(target.shotPlanId) || null;
+    }
+    return persistPending(target.key);
+  }, [persistPending]);
+
+  const retryShotDraftSave = useCallback(() => {
+    const target = activeTargetRef.current;
+    if (!target?.key) return Promise.resolve(null);
+    return scheduleSave(target.key, true);
+  }, [scheduleSave]);
+
+  const resetShotDraft = useCallback(() => {
+    for (const [key, timer] of saveTimersRef.current.entries()) {
+      window.clearTimeout(timer);
+      saveTimersRef.current.delete(key);
+      persistPending(key).catch(() => undefined);
+    }
+    activeTargetRef.current = null;
+    currentDraftRef.current = { ...EMPTY_SHOT_DRAFT };
+    setShotDraftState({ ...EMPTY_SHOT_DRAFT });
+    setSaveState("idle");
+  }, [persistPending]);
+
+  useEffect(() => () => {
+    for (const timer of saveTimersRef.current.values()) window.clearTimeout(timer);
+    saveTimersRef.current.clear();
+  }, []);
+
+  return {
+    flushShotDraft,
+    hydrateShotDraft,
+    resetShotDraft,
+    retryShotDraftSave,
+    saveState,
+    setShotDraft,
+    shotDraft,
+  };
 }
 
 function useObjectUrl(file) {
@@ -1346,12 +1628,12 @@ export function ProductionHub({
   const [selectedShotId, setSelectedShotId] = useState(null);
   const [selectedVisualBeatId, setSelectedVisualBeatId] = useState(null);
   const [shotDetail, setShotDetail] = useState(null);
-  const [shotDraft, setShotDraft] = useState({ ...EMPTY_SHOT_DRAFT });
   const {
     applyPersistedVideoDraft,
     flushVideoDraft,
     hydrateVideoDraft,
     resetVideoDraft,
+    saveState: videoDraftSaveState,
     setVideoDraft,
     videoDraft,
   } = useShotVideoGenerationDraft({ request, onNotice });
@@ -1400,13 +1682,67 @@ export function ProductionHub({
     imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
   );
   const [focusedCandidateId, setFocusedCandidateId] = useState("");
+  const handleShotImageDraftPersisted = useCallback(({ detail: persisted }) => {
+    if (!persisted?.plan) return;
+    const projectId = String(persisted.plan.project_id || "");
+    setDetail((current) => (
+      current?.project && String(current.project.id) === projectId
+        ? {
+            ...current,
+            project: {
+              ...current.project,
+              current_revision_id: persisted.current_revision_id,
+            },
+          }
+        : current
+    ));
+    setShotDetail((current) => (
+      current?.plan?.id === persisted.plan.id ? persisted : current
+    ));
+    setShots((current) => current.map((item) => (
+      item.plan.id === persisted.plan.id
+        ? {
+            ...item,
+            plan: persisted.plan,
+            image_preview: persisted.image_preview,
+            video_preview: persisted.video_preview,
+            reference_bindings: persisted.reference_bindings,
+          }
+        : item
+    )));
+    if (projectId) {
+      request(`/productions/${projectId}/gate-status`)
+        .then((nextGate) => {
+          if (String(nextGate?.project_id || "") === projectId) setGate(nextGate);
+        })
+        .catch(() => undefined);
+    }
+    Promise.resolve(onProjectsChanged?.()).catch(() => undefined);
+  }, [onProjectsChanged, request]);
+  const {
+    flushShotDraft,
+    hydrateShotDraft,
+    resetShotDraft,
+    retryShotDraftSave,
+    saveState: shotDraftSaveState,
+    setShotDraft,
+    shotDraft,
+  } = useShotImageDraftAutosave({
+    onNotice,
+    onPersisted: handleShotImageDraftPersisted,
+    request,
+  });
   const referencePreviewUrl = useObjectUrl(referenceFile);
   const imageGate = useMemo(() => {
     const requiredShots = shots.filter(
       (item) => item.plan.lifecycle_status !== "discarded" && item.plan.required !== false,
     );
     const approvedCount = requiredShots.filter(
-      (item) => item.plan.image_status === "approved",
+      (item) => (
+        item.plan.output_mode === "source_video"
+          ? item.plan.video_status === "approved"
+          : item.plan.image_status === "approved"
+      ),
     ).length;
     return {
       allowed: requiredShots.length > 0 && approvedCount === requiredShots.length,
@@ -1414,7 +1750,7 @@ export function ProductionHub({
       approved_shot_count: approvedCount,
       blocker_messages: approvedCount === requiredShots.length
         ? []
-        : [`仍有 ${requiredShots.length - approvedCount} 个必需分镜图片未确认`],
+        : [`仍有 ${requiredShots.length - approvedCount} 个必需分镜输出未确认`],
     };
   }, [shots]);
 
@@ -1469,7 +1805,7 @@ export function ProductionHub({
     setSelectedShotId(null);
     setSelectedVisualBeatId(null);
     setShotDetail(null);
-    setShotDraft({ ...EMPTY_SHOT_DRAFT });
+    resetShotDraft();
     resetVideoDraft();
     setImpactReview(null);
     setActiveSection("project_setup");
@@ -1609,7 +1945,15 @@ export function ProductionHub({
       );
       setShotDetail(nextShotDetail);
       setSelectedVisualBeatId(targetVisualBeat?.id || null);
-      setShotDraft(shotDraftFromDetail(nextShotDetail, targetVisualBeat?.id));
+      if (targetVisualBeat?.id) {
+        hydrateShotDraft({
+          detail: nextShotDetail,
+          shotPlanId: targetShotId,
+          visualBeatId: targetVisualBeat.id,
+        });
+      } else {
+        resetShotDraft();
+      }
       hydrateVideoDraft({
         shotPlanId: targetShotId,
         detail: nextShotDetail,
@@ -1619,7 +1963,7 @@ export function ProductionHub({
     } else {
       setShotDetail(null);
       setSelectedVisualBeatId(null);
-      setShotDraft({ ...EMPTY_SHOT_DRAFT });
+      resetShotDraft();
       resetVideoDraft();
     }
     await refreshAnalysisUpdate(projectId);
@@ -1654,6 +1998,10 @@ export function ProductionHub({
     projectId,
     { section = "project_setup", shotPlanId = null } = {},
   ) {
+    const pendingSaves = Promise.allSettled([
+      flushShotDraft(),
+      flushVideoDraft(),
+    ]);
     setSelectedProjectId(projectId);
     setContentLoading(true);
     setContentError("");
@@ -1669,6 +2017,7 @@ export function ProductionHub({
     setAnalysisUpdateDecisions({});
     setAnalysisUpdateError("");
     try {
+      await pendingSaves;
       await refreshProject(projectId, shotPlanId);
     } catch (requestError) {
       setContentError(requestError.message);
@@ -1678,12 +2027,16 @@ export function ProductionHub({
   }
 
   async function selectShot(shotPlanId) {
-    await flushVideoDraft().catch(() => undefined);
+    const pendingSaves = Promise.allSettled([
+      flushShotDraft(),
+      flushVideoDraft(),
+    ]);
     setSelectedShotId(shotPlanId);
     setActionError("");
     setImpactReview(null);
     setShotDetail(null);
     try {
+      await pendingSaves;
       const [nextShotDetail, persistedVideoDraft] = await Promise.all([
         request(`/production-shots/${shotPlanId}`),
         request(`/production-shots/${shotPlanId}/video-generation-draft`),
@@ -1691,7 +2044,15 @@ export function ProductionHub({
       const firstVisualBeat = visualBeatFromDetail(nextShotDetail);
       setShotDetail(nextShotDetail);
       setSelectedVisualBeatId(firstVisualBeat?.id || null);
-      setShotDraft(shotDraftFromDetail(nextShotDetail, firstVisualBeat?.id));
+      if (firstVisualBeat?.id) {
+        hydrateShotDraft({
+          detail: nextShotDetail,
+          shotPlanId,
+          visualBeatId: firstVisualBeat.id,
+        });
+      } else {
+        resetShotDraft();
+      }
       hydrateVideoDraft({
         shotPlanId,
         detail: nextShotDetail,
@@ -1764,50 +2125,6 @@ export function ProductionHub({
       setActionError(requestError.message);
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function submitShot(event) {
-    event.preventDefault();
-    const { activeBeat, beatChanges, shotChanges } = shotDraftPatch(
-      shotDetail,
-      selectedVisualBeatId,
-      shotDraft,
-    );
-    if (!shotDetail?.plan || !activeBeat) return;
-    if (
-      Object.keys(beatChanges).length === 0
-      && Object.keys(shotChanges).length === 0
-    ) {
-      onNotice("当前画面没有需要保存的修改");
-      return;
-    }
-    const apply = async (confirmStale) => {
-      await persistShotDraftChanges({
-        activeBeat,
-        beatChanges,
-        shotChanges,
-        confirmStale,
-      });
-      await Promise.all([
-        refreshProject(detail.project.id, shotDetail.plan.id, activeBeat.id),
-        onProjectsChanged(),
-      ]);
-      onNotice(`分镜 ${shotDetail.plan.index} 的画面 ${activeBeat.index} 已保存`);
-    };
-    const changesImageInput = Object.keys(beatChanges).length > 0
-      || Object.keys(shotChanges).length > 0;
-    if (changesImageInput) {
-      await prepareImpact(
-        {
-          changeType: "shot_plan",
-          shotPlanIds: [shotDetail.plan.id],
-          title: "保存分镜修改",
-        },
-        apply,
-      );
-    } else {
-      await executeAction(apply);
     }
   }
 
@@ -1925,11 +2242,11 @@ export function ProductionHub({
     await executeAction(async () => {
       const draftChanged = Object.keys(beatChanges).length > 0
         || Object.keys(shotChanges).length > 0;
-      const expectedRevisionId = await persistShotDraftChanges({
-        activeBeat,
-        beatChanges,
-        shotChanges,
-      });
+      const persistedShotDetail = await flushShotDraft();
+      const expectedRevisionId = (
+        persistedShotDetail?.current_revision_id
+        || detail.project.current_revision_id
+      );
       const effectiveInputMode = shotDraft.referenceBindings.some(
         (binding) => binding.role === "identity",
       )
@@ -2051,6 +2368,90 @@ export function ProductionHub({
     }
   }
 
+  async function setShotOutputMode({
+    shotPlanIds,
+    outputMode,
+  }) {
+    const selectedIds = (shotPlanIds || []).filter(Boolean);
+    if (!detail?.project || selectedIds.length === 0 || !outputMode) return;
+    const labels = {
+      source_video: "保留原视频",
+      image_to_video: "使用图片流程",
+    };
+    const apply = async (confirmDownstreamStale) => {
+      const selectedIdSet = new Set(selectedIds);
+      const previousModes = new Map(
+        shots
+          .filter((item) => selectedIdSet.has(item.plan.id))
+          .map((item) => [item.plan.id, item.plan.output_mode]),
+      );
+      setShots((current) => current.map((item) => (
+        selectedIdSet.has(item.plan.id)
+          ? { ...item, plan: { ...item.plan, output_mode: outputMode } }
+          : item
+      )));
+      setShotDetail((current) => (
+        current?.plan && selectedIdSet.has(current.plan.id)
+          ? { ...current, plan: { ...current.plan, output_mode: outputMode } }
+          : current
+      ));
+      try {
+        await request(`/productions/${detail.project.id}/shot-output-mode`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expected_revision_id: detail.project.current_revision_id,
+            shot_plan_ids: selectedIds,
+            output_mode: outputMode,
+            confirm_downstream_stale: confirmDownstreamStale,
+          }),
+        });
+      } catch (requestError) {
+        setShots((current) => current.map((item) => (
+          previousModes.has(item.plan.id)
+            ? {
+              ...item,
+              plan: {
+                ...item.plan,
+                output_mode: previousModes.get(item.plan.id),
+              },
+            }
+            : item
+        )));
+        setShotDetail((current) => (
+          current?.plan && previousModes.has(current.plan.id)
+            ? {
+              ...current,
+              plan: {
+                ...current.plan,
+                output_mode: previousModes.get(current.plan.id),
+              },
+            }
+            : current
+        ));
+        throw requestError;
+      }
+      await Promise.all([
+        refreshProject(detail.project.id, selectedShotId),
+        onProjectsChanged(),
+      ]);
+      if (activeSection !== "shot_images") setActiveSection("shot_images");
+      onNotice(
+        selectedIds.length === 1
+          ? `当前分镜已设为${labels[outputMode]}`
+          : `${selectedIds.length} 个分镜已设为${labels[outputMode]}`,
+      );
+    };
+    await prepareImpact(
+      {
+        changeType: "shot_plan",
+        shotPlanIds: selectedIds,
+        title: `修改分镜处理方式为${labels[outputMode]}`,
+      },
+      apply,
+    );
+  }
+
   async function selectCandidate(candidateId) {
     await executeAction(async () => {
       await request(`/generation-candidates/${candidateId}/select`, {
@@ -2112,49 +2513,6 @@ export function ProductionHub({
     }
   }
 
-  async function persistShotDraftChanges({
-    activeBeat,
-    beatChanges,
-    shotChanges,
-    confirmStale = false,
-  }) {
-    let expectedRevisionId = detail.project.current_revision_id;
-    const visualBeatChanges = { ...beatChanges };
-    const remainingShotChanges = { ...shotChanges };
-    if (Object.hasOwn(remainingShotChanges, "reference_bindings")) {
-      visualBeatChanges.reference_bindings = remainingShotChanges.reference_bindings;
-      delete remainingShotChanges.reference_bindings;
-    }
-    if (Object.keys(visualBeatChanges).length > 0) {
-      const updated = await request(
-        `/production-shots/${shotDetail.plan.id}/visual-beats/${activeBeat.id}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision_id: expectedRevisionId,
-            confirm_stale: confirmStale,
-            ...visualBeatChanges,
-          }),
-        },
-      );
-      expectedRevisionId = updated.current_revision_id;
-    }
-    if (Object.keys(remainingShotChanges).length > 0) {
-      const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            expected_revision_id: expectedRevisionId,
-            confirm_stale: confirmStale,
-            ...remainingShotChanges,
-          }),
-      });
-      expectedRevisionId = updated.current_revision_id;
-    }
-    return expectedRevisionId;
-  }
-
   async function syncAnalysisPrompts() {
     if (!detail?.project || !analysisUpdatePreview) return;
     setBusy(true);
@@ -2202,8 +2560,13 @@ export function ProductionHub({
   function selectVisualBeat(visualBeatId) {
     const beat = visualBeatFromDetail(shotDetail, visualBeatId);
     if (!beat) return;
+    flushShotDraft().catch(() => undefined);
     setSelectedVisualBeatId(beat.id);
-    setShotDraft(shotDraftFromDetail(shotDetail, beat.id));
+    hydrateShotDraft({
+      detail: shotDetail,
+      shotPlanId: shotDetail.plan.id,
+      visualBeatId: beat.id,
+    });
     setActionError("");
   }
 
@@ -3422,15 +3785,17 @@ export function ProductionHub({
                 onCreateVisualBeat={createVisualBeat}
                 onDeleteVisualBeat={deleteVisualBeat}
                 onDiscardShot={discardShot}
+                onFlushDraft={flushShotDraft}
                 onArchiveCandidate={archiveImageCandidate}
                 onGenerate={generateShotCandidates}
                 onRevokeApproval={revokeImageApproval}
                 onReorderShots={reorderShots}
                 onReorderVisualBeats={reorderVisualBeats}
+                onRetryDraftSave={retryShotDraftSave}
                 onRestoreShot={restoreShot}
-                onSave={submitShot}
                 onSelectCandidate={selectCandidate}
                 onSelectKeyframe={selectSourceKeyframe}
+                onSetOutputMode={setShotOutputMode}
                 onSelectShot={selectShot}
                 onSelectVisualBeat={selectVisualBeat}
                 onUpdateVisualBeat={updateVisualBeat}
@@ -3438,6 +3803,7 @@ export function ProductionHub({
                 project={detail.project}
                 request={request}
                 resolveUrl={resolveUrl}
+                saveState={shotDraftSaveState}
                 selectedShotId={selectedShotId}
                 selectedVisualBeatId={selectedVisualBeatId}
                 setDraft={setShotDraft}
@@ -3482,8 +3848,10 @@ export function ProductionHub({
                 onRetryRun={retryVideoGeneration}
                 onRestoreCandidates={restoreVideoCandidates}
                 onRevokeApproval={revokeVideoApproval}
+                onSetOutputMode={setShotOutputMode}
                 onSelectShot={selectShot}
                 applyPersistedVideoDraft={applyPersistedVideoDraft}
+                draftSaveState={videoDraftSaveState}
                 flushVideoDraft={flushVideoDraft}
                 project={detail.project}
                 request={request}

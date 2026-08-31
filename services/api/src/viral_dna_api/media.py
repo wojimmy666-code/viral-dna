@@ -581,6 +581,68 @@ class MediaProcessor:
                 "没有从源视频提取到关键帧",
             )
 
+    async def extract_video_clip(
+        self,
+        source_path: Path,
+        output_path: Path,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> None:
+        """Create a frame-accurate, editor-safe copy of one source-video segment."""
+
+        if start_seconds < 0 or end_seconds <= start_seconds:
+            raise MediaProcessingError(
+                "video_clip_range_invalid",
+                "原视频片段的结束时间必须晚于开始时间",
+            )
+        duration_seconds = end_seconds - start_seconds
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        await _run_command(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-ss",
+                f"{start_seconds:.3f}",
+                "-i",
+                str(source_path),
+                "-t",
+                f"{duration_seconds:.3f}",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ],
+            timeout_seconds=max(120, min(600, duration_seconds * 30)),
+        )
+        valid_output = await asyncio.to_thread(
+            lambda: output_path.is_file() and output_path.stat().st_size > 0
+        )
+        if not valid_output:
+            raise MediaProcessingError(
+                "video_clip_extract_failed",
+                "没有从原视频提取到可播放片段",
+            )
+
     async def create_still_video(
         self,
         image_path: Path,

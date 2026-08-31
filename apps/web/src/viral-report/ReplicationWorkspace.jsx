@@ -1,9 +1,6 @@
 import {
   ArrowClockwise,
-  CaretDown,
-  Check,
   CircleNotch,
-  LockSimple,
   MagicWand,
   ShieldWarning,
   Sparkle,
@@ -128,28 +125,21 @@ export function ReplicationWorkspace({
         value={selectedCategoryId}
       />
 
-      <div className={`replication-preparation-grid ${insight.replacement_opportunities.length ? "" : "dna-only"}`}>
-        <details className="replication-dna-locks">
-          <summary className="replication-section-title"><LockSimple size={20} /><div><strong>内容 DNA 已锁定</strong><p>{insight.dna.invariants.length} 项机制会自动写入新方案，点击查看</p></div><CaretDown size={17} /></summary>
-          <div className="dna-lock-list">{insight.dna.invariants.map((item) => <span key={item}><Check size={14} weight="bold" />{item}</span>)}</div>
-        </details>
+      {insight.replacement_opportunities.length > 0 && <section className="replacement-opportunities">
+        <div className="replication-section-title"><Swap size={20} /><div><strong>元素替换</strong><p>留空表示继续使用原描述；填写后会同步进入三套方案的逐镜头提示词。</p></div></div>
+        <div className="replacement-opportunity-list">
+          {insight.replacement_opportunities.map((item) => (
+            <label key={item.entity_id}>
+              <span className="replacement-entity-meta"><strong>{item.label}</strong><small>{item.entity_type} · 影响 {item.affected_shot_ids.length} 个分镜 · {item.risk === "high" ? "高一致性风险" : item.risk === "medium" ? "中等风险" : "低风险"}</small></span>
+              <span className="replacement-current">{item.current_description}</span>
+              <input value={replacementValues[item.entity_id] || ""} onChange={(event) => setReplacementValues((current) => ({ ...current, [item.entity_id]: event.target.value }))} placeholder={`替换为，例如：${item.suggested_alternatives[0] || "同功能新元素"}`} />
+            </label>
+          ))}
+        </div>
+      </section>}
 
-        {insight.replacement_opportunities.length > 0 && <section className="replacement-opportunities">
-          <div className="replication-section-title"><Swap size={20} /><div><strong>元素替换</strong><p>留空表示继续使用原描述；填写后会同步进入三套方案的逐镜头提示词。</p></div></div>
-          <div className="replacement-opportunity-list">
-            {insight.replacement_opportunities.map((item) => (
-              <label key={item.entity_id}>
-                <span className="replacement-entity-meta"><strong>{item.label}</strong><small>{item.entity_type} · 影响 {item.affected_shot_ids.length} 个分镜 · {item.risk === "high" ? "高一致性风险" : item.risk === "medium" ? "中等风险" : "低风险"}</small></span>
-                <span className="replacement-current">{item.current_description}</span>
-                <input value={replacementValues[item.entity_id] || ""} onChange={(event) => setReplacementValues((current) => ({ ...current, [item.entity_id]: event.target.value }))} placeholder={`替换为，例如：${item.suggested_alternatives[0] || "同功能新元素"}`} />
-              </label>
-            ))}
-          </div>
-        </section>}
-      </div>
-
-      <section className="replication-generate-bar">
-        <div><strong>{selectedCategoryId ? (selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案") : "尚未选择品类档案"}</strong><span>{selectedCategoryId ? "一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00" : "必须手动选择本次品类；历史方案不会自动回填。"}</span><TextModelIndicator label={textModelLabel} /></div>
+      <section className={`replication-generate-bar ${selectedCategoryId ? "" : "action-only"}`}>
+        {selectedCategoryId && <div><strong>{selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案"}</strong><span>一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00</span><TextModelIndicator label={textModelLabel} /></div>}
         <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading || !selectedCategoryId}>
           {conceptLoading ? <CircleNotch className="spin" size={19} /> : <MagicWand size={19} weight="fill" />}
           {hasSelectedCategoryConcepts ? "重新生成三套方案" : "生成三套方案"}

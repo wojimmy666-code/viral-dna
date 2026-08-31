@@ -143,6 +143,11 @@ function generationRunCostLabel(run) {
 }
 
 function candidateModelLabel(run) {
+  if (
+    run?.execution_mode === "source_video"
+    || run?.provider === "source_video"
+    || run?.model === "source_video"
+  ) return "沿用原视频";
   return run?.model_display_name || run?.model_alias || run?.model || "未记录模型";
 }
 
@@ -419,10 +424,6 @@ export function VideoCandidateLibrary({
       <header className="shot-candidate-library-heading">
         <div>
           <strong>视频候选</strong>
-          <small>
-            可用 {activeCandidates.length} 个
-            {!managing && "，点击缩略图切换预览"}
-          </small>
         </div>
         <div className="shot-candidate-library-actions">
           {managing ? (
@@ -523,31 +524,27 @@ export function VideoCandidateLibrary({
       {displayedCandidate && !managing && (
         <div className="shot-candidate-current-detail">
           <strong>当前预览</strong>
-          <span>
-            {candidateModelLabel(displayedRun)}
-            {" · "}{formatCandidateBatchTime(displayedRun?.completed_at || displayedRun?.created_at)}
-            {" · "}{formatVideoDuration(displayedCandidate.duration_seconds || 0)} 秒
-            {" · "}{generationRunCostLabel(displayedRun)}
-          </span>
-          <em className={
-            plan.video_status === "approved"
+          <span>{generationRunCostLabel(displayedRun)}</span>
+          {(plan.video_status === "approved"
             && approvedCandidateId === displayedCandidate.id
-              ? "approved"
-              : displayedCandidate.status === "rejected"
-                ? "rejected"
-              : oldInput
-                ? "old-input"
-                : ""
-          }>
-            {plan.video_status === "approved"
-            && approvedCandidateId === displayedCandidate.id
-              ? "已采用"
-              : displayedCandidate.status === "rejected"
-                ? `已退回${oldInput ? " · 旧输入" : ""}`
-              : oldInput
-                ? "可采用 · 旧输入"
-                : "可采用"}
-          </em>
+            || displayedCandidate.status === "rejected"
+            || oldInput) && (
+            <em className={
+              plan.video_status === "approved"
+              && approvedCandidateId === displayedCandidate.id
+                ? "approved"
+                : displayedCandidate.status === "rejected"
+                  ? "rejected"
+                  : "old-input"
+            }>
+              {plan.video_status === "approved"
+              && approvedCandidateId === displayedCandidate.id
+                ? "已采用"
+                : displayedCandidate.status === "rejected"
+                  ? `已退回${oldInput ? " · 旧输入" : ""}`
+                  : "可采用 · 旧输入"}
+            </em>
+          )}
           <AddToAssetsButton
             artifactKind="video_candidate"
             assetType="motion_reference"

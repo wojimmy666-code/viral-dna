@@ -48,6 +48,7 @@ from viral_dna_api.models import (
     ReferenceAssetType,
     SceneBoundaryCandidate,
     SegmentationMetadata,
+    ShotOutputModeUpdateRequest,
     ShotPlan,
     ShotPlanUpdate,
     ShotVideoApprovalRevokeRequest,
@@ -118,6 +119,35 @@ class FakeFrameProcessor:
             timestamp_seconds,
             output_path,
         )
+
+
+class FakeSourceVideoProcessor(FakeFrameProcessor):
+    async def extract_video_clip(
+        self,
+        source_path: Path,
+        output_path: Path,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> None:
+        assert await asyncio.to_thread(source_path.is_file)
+        assert end_seconds > start_seconds >= 0
+        await asyncio.to_thread(output_path.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            output_path.write_bytes,
+            b"\x00\x00\x00\x18ftypmp42viral-dna-source-segment"
+        )
+
+
+@pytest.mark.parametrize("legacy_mode", ["source_images", "generated_images"])
+def test_legacy_shot_output_modes_use_the_unified_image_route(legacy_mode: str) -> None:
+    payload = ShotOutputModeUpdateRequest(
+        expected_revision_id=uuid4(),
+        shot_plan_ids=[uuid4()],
+        output_mode=legacy_mode,
+    )
+
+    assert payload.output_mode.value == "image_to_video"
 
 
 class FakeStillVideoProcessor:
@@ -1623,6 +1653,108 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
             f"/api/v1/production-shots/{branch_plan['id']}/source-keyframe"
         )
         assert client.get(branch_plan["source_keyframe_url"]).status_code == 200
+
+
+def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(root))
+    workspace = WorkspaceManager()
+    repository = InMemoryStore()
+    record, video, analysis, _ = asyncio.run(seed_completed_analysis(repository))
+    source_video = workspace.source_root(record.id) / "source.mp4"
+    source_video.parent.mkdir(parents=True, exist_ok=True)
+    source_video.write_bytes(b"fake-source-video")
+    video = video.model_copy(
+        update={
+            "stored_relative_path": workspace.relative(source_video),
+            "sha256": "b" * 64,
+        }
+    )
+    asyncio.run(repository.add_video(video))
+    service = ProductionService(
+        repository,
+        workspace,
+        media_processor=FakeSourceVideoProcessor(),
+        video_inspector=FakeVideoInspector(),
+    )
+    monkeypatch.setattr(main, "production_service", service)
+
+    with TestClient(main.app) as client:
+        created = client.post(
+            f"/api/v1/records/{record.id}/productions",
+            json={"base_analysis_id": str(analysis.id), "name": "分镜直通方案"},
+        ).json()
+        project_id = created["project"]["id"]
+        revision_id = created["project"]["current_revision_id"]
+        initial_shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
+        assert all(item["plan"]["output_mode"] == "image_to_video" for item in initial_shots)
+        first = initial_shots[0]
+
+        selected_response = client.post(
+            f"/api/v1/productions/{project_id}/shot-output-mode",
+            json={
+                "expected_revision_id": revision_id,
+                "shot_plan_ids": [first["plan"]["id"]],
+                "output_mode": "source_video",
+            },
+        )
+        assert selected_response.status_code == 200, selected_response.text
+        selected_shots = selected_response.json()
+        selected = next(
+            item for item in selected_shots if item["plan"]["id"] == first["plan"]["id"]
+        )
+        assert selected["plan"]["output_mode"] == "source_video"
+        assert selected["plan"]["video_status"] == "approved"
+        assert selected["video_preview"]["execution_mode"] == "source_video"
+
+        detail = client.get(
+            f"/api/v1/production-shots/{first['plan']['id']}"
+        ).json()
+        source_run = next(
+            run for run in detail["generation_runs"] if run["execution_mode"] == "source_video"
+        )
+        source_candidate = source_run["candidates"][0]
+        assert source_run["input_mode"] == "video_to_video"
+        assert source_run["actual_cost_micros"] == 0
+        assert source_candidate["status"] == "selected"
+        assert client.get(source_candidate["content_url"]).status_code == 200
+
+        gate = client.get(f"/api/v1/productions/{project_id}/gate-status").json()
+        assert gate["approved_shot_count"] == 1
+
+        switched_response = client.post(
+            f"/api/v1/productions/{project_id}/shot-output-mode",
+            json={
+                "expected_revision_id": selected["current_revision_id"],
+                "shot_plan_ids": [first["plan"]["id"]],
+                "output_mode": "image_to_video",
+                "confirm_downstream_stale": True,
+            },
+        )
+        assert switched_response.status_code == 200, switched_response.text
+        switched = next(
+            item
+            for item in switched_response.json()
+            if item["plan"]["id"] == first["plan"]["id"]
+        )
+        assert switched["plan"]["output_mode"] == "image_to_video"
+        assert switched["plan"]["video_status"] == "ready"
+        assert switched["plan"]["approved_video_candidate_id"] is None
+
+        switched_detail = client.get(
+            f"/api/v1/production-shots/{first['plan']['id']}"
+        ).json()
+        historical_source = next(
+            candidate
+            for run in switched_detail["generation_runs"]
+            if run["id"] == source_run["id"]
+            for candidate in run["candidates"]
+        )
+        assert historical_source["status"] == "ready"
+        assert client.get(historical_source["content_url"]).status_code == 200
 
 
 def test_batch41_shot_generation_approval_stale_and_gate_flow(

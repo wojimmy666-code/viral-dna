@@ -6,7 +6,7 @@ import {
   ImageSquare,
   ShieldWarning,
 } from "@phosphor-icons/react";
-import { confidenceLabel, formatInsightTime, useViralInsight } from "./viral-report-ui.js";
+import { formatInsightTime, useViralInsight } from "./viral-report-ui.js";
 
 const IMPACT_LABELS = {
   click: "点击承接",
@@ -24,14 +24,11 @@ export function ViralMechanismWorkspace({ analysisId, request, resolveUrl, onSee
     return <div className="viral-error-state"><ShieldWarning size={22} /><div><strong>无法读取爆款机制</strong><p>{error}</p></div><button type="button" onClick={() => reload()}><ArrowClockwise size={17} />重试</button></div>;
   }
   if (!insight) return null;
-  const distinctScores = new Set(insight.mechanisms.map((item) => item.score));
-  const showScores = distinctScores.size > 1;
 
   return (
     <div className="viral-report-page viral-mechanism-workspace">
       <header className="viral-section-header">
-        <div><h2>爆款机制与证据链</h2><p>先看结论，需要核对时再展开视频事实和证据。</p></div>
-        <span className="viral-basis-badge">内容推断 · {Math.round(insight.evidence_coverage * 100)}% 有证据</span>
+        <h2>爆款机制与证据链</h2>
       </header>
 
       <div className="viral-mechanism-list">
@@ -47,17 +44,12 @@ export function ViralMechanismWorkspace({ analysisId, request, resolveUrl, onSee
                 </span>
                 <span className="viral-mechanism-summary-meta">
                   <small><Clock size={14} />{formatInsightTime(firstEvidence?.start_seconds || 0)}</small>
-                  <span>置信度 {confidenceLabel(mechanism.confidence)}</span>
-                  {showScores && <strong>{mechanism.score}</strong>}
                   <CaretDown className="viral-disclosure-caret" size={17} />
                 </span>
               </summary>
               <div className="viral-mechanism-body">
                 <div className="viral-mechanism-footer">
                   <div className="viral-impact-tags">{mechanism.impact_dimensions.map((item) => <span key={item}>{IMPACT_LABELS[item] || item}</span>)}</div>
-                  <button type="button" onClick={() => onSeek?.(firstEvidence?.start_seconds || 0)}>
-                    <Clock size={15} />跳到 {formatInsightTime(firstEvidence?.start_seconds || 0)}
-                  </button>
                 </div>
                 <div className="viral-logic-chain">
                   <div><span>视频事实</span><p>{mechanism.observation}</p></div>
@@ -79,7 +71,6 @@ export function ViralMechanismWorkspace({ analysisId, request, resolveUrl, onSee
           );
         })}
       </div>
-      <p className="viral-global-disclaimer">流量作用来自内容结构推断，需要结合发布后的平台数据验证。</p>
     </div>
   );
 }

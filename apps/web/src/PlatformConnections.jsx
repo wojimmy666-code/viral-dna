@@ -279,7 +279,7 @@ export function PlatformConnections({
           <span className="platform-local-badge"><ShieldCheck size={15} weight="fill" /> 仅此设备</span>
           {onBack && (
             <button className="platform-secondary-button" onClick={onBack} type="button">
-              返回新建分析
+              返回新建项目
             </button>
           )}
         </div>

@@ -3,19 +3,26 @@ import test from "node:test";
 
 import {
   pathForNav,
+  projectLifecyclePath,
   recordWorkspacePath,
   resolveAppRoute,
 } from "../src/app-routing.js";
 
 test("maps first-phase navigation to independent page URLs", () => {
-  assert.equal(pathForNav("workspace"), "/workbench");
-  assert.equal(pathForNav("new-analysis"), "/analyses/new");
-  assert.equal(pathForNav("history"), "/records");
+  assert.equal(pathForNav("new-analysis"), "/projects/new");
+  assert.equal(pathForNav("history"), "/projects");
   assert.equal(pathForNav("assets"), "/assets");
   assert.equal(pathForNav("categories"), "/category-profiles");
   assert.equal(pathForNav("platform-connections"), "/settings/platform-connections");
   assert.equal(pathForNav("settings"), "/settings/profile");
   assert.equal(pathForNav("admin"), "/admin/providers");
+  assert.equal(pathForNav("unknown"), "/projects");
+});
+
+test("maps project lifecycle navigation to canonical URLs", () => {
+  assert.equal(projectLifecyclePath("active"), "/projects");
+  assert.equal(projectLifecyclePath("archived"), "/projects/archived");
+  assert.equal(projectLifecyclePath("trashed"), "/projects/trash");
 });
 
 test("resolves the account category library as a primary page", () => {
@@ -40,22 +47,39 @@ test("keeps user settings and platform administration on separate route trees", 
     adminSection: "media",
   });
 });
-test("resolves new analysis and record workspaces as different pages", () => {
-  assert.deepEqual(resolveAppRoute("/analyses/new"), {
+test("resolves new projects and project details as different pages", () => {
+  assert.deepEqual(resolveAppRoute("/projects/new"), {
     name: "new-analysis",
     activeNav: "new-analysis",
     recordId: "",
   });
-  assert.deepEqual(resolveAppRoute("/workbench/records/record-1"), {
+  assert.deepEqual(resolveAppRoute("/projects/record-1"), {
     name: "record-workspace",
-    activeNav: "workspace",
+    activeNav: "project-detail",
     recordId: "record-1",
   });
-  assert.equal(recordWorkspacePath("记录 1"), "/workbench/records/%E8%AE%B0%E5%BD%95%201");
+  assert.equal(recordWorkspacePath("项目 1"), "/projects/%E9%A1%B9%E7%9B%AE%201");
 });
 
-test("uses the workbench home for root and explicit workbench paths", () => {
-  assert.equal(resolveAppRoute("/").name, "workbench-home");
-  assert.equal(resolveAppRoute("/workbench/").name, "workbench-home");
+test("resolves each project lifecycle as an independent page", () => {
+  assert.equal(resolveAppRoute("/projects").lifecycle, "active");
+  assert.equal(resolveAppRoute("/projects/archived").lifecycle, "archived");
+  assert.equal(resolveAppRoute("/projects/trash").lifecycle, "trashed");
+});
+
+test("redirects removed workbench and legacy record URLs", () => {
+  assert.deepEqual(resolveAppRoute("/"), {
+    name: "redirect",
+    activeNav: "history",
+    recordId: "",
+    to: "/projects",
+  });
+  assert.equal(resolveAppRoute("/workbench/").to, "/projects");
+  assert.equal(resolveAppRoute("/records").to, "/projects");
+  assert.equal(resolveAppRoute("/analyses/new").to, "/projects/new");
+  assert.equal(
+    resolveAppRoute("/workbench/records/record-1").to,
+    "/projects/record-1",
+  );
   assert.equal(resolveAppRoute("/missing").name, "not-found");
 });

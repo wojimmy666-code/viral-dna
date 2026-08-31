@@ -8,7 +8,6 @@ import {
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { InlineMessage, StatusBadge } from "../ui/system/index.js";
-import { TextModelIndicator } from "../ui/text-model/TextModelIndicator.jsx";
 import { CreativeIntentMentionEditor } from "./CreativeIntentMentionEditor.jsx";
 import "./creative-intent.css";
 
@@ -43,7 +42,7 @@ function intentStatus(status, hasInterpretation, conflicts, errorCode) {
   }
   if (status === "failed") return { label: "生成失败", tone: "danger" };
   if (status === "ready" || hasInterpretation) return { label: "已生成", tone: "success" };
-  return { label: "尚未生成", tone: "neutral" };
+  return null;
 }
 
 export function CreativeIntentPanel({
@@ -63,7 +62,6 @@ export function CreativeIntentPanel({
   onRestore,
   referenceFrames,
   resolveUrl,
-  textModelLabel = "Qwen3.7 Plus",
   videoReferenceBindings,
 }) {
   const [mentionsValid, setMentionsValid] = useState(true);
@@ -97,10 +95,8 @@ export function CreativeIntentPanel({
       <header className="creative-intent-heading">
         <div>
           <h4 id="creative-intent-title">创作意图</h4>
-          <p>说明要保留、替换或重设计什么；输入 @ 可精确指定资产，系统会生成可编辑提示词。</p>
-          <TextModelIndicator label={textModelLabel} />
         </div>
-        <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+        {status && <StatusBadge tone={status.tone}>{status.label}</StatusBadge>}
       </header>
 
       <div className="creative-intent-command">

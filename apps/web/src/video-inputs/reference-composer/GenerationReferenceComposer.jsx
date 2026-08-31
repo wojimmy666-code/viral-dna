@@ -131,13 +131,13 @@ export function GenerationReferenceComposer({
         <div className="generation-reference-summary">
           <div>
             <strong>生成参考</strong>
-            <small>
-              {automaticCount > 0
-                ? `已自动加入 ${automaticCount} 张分镜图 · 与画面轨道同步`
-                : excludedAutomaticCount > 0
+            {automaticCount === 0 && (
+              <small>
+                {excludedAutomaticCount > 0
                   ? "自动分镜图已手动移除"
                   : "分镜图将在采用后自动加入"}
-            </small>
+              </small>
+            )}
           </div>
           {excludedAutomaticCount > 0 && (
             <button onClick={onRestoreAutomaticReferences} type="button">

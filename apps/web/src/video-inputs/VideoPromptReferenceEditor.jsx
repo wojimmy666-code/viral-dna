@@ -38,6 +38,7 @@ export function VideoPromptReferenceEditor({
   assets,
   depthAssets,
   managedAssetBinding,
+  onBlur,
   onChange,
   referenceFrames,
   resolveUrl,
@@ -343,6 +344,7 @@ export function VideoPromptReferenceEditor({
           className="prompt-editor-textarea"
           id={editorId}
           maxLength={8000}
+          onBlur={onBlur}
           onChange={updatePrompt}
           onKeyDown={handlePromptKeyDown}
           onScroll={syncHighlightScroll}

@@ -12,6 +12,7 @@ import {
   ArrowClockwise,
   Archive,
   Bell,
+  Briefcase,
   CaretDown,
   CaretLeft,
   CaretRight,
@@ -41,7 +42,6 @@ import {
   Question,
   ShieldCheck,
   Sparkle,
-  SquaresFour,
   Swap,
   Target,
   Tag,
@@ -79,10 +79,10 @@ import { notificationToastPayload } from "./notification-ui.js";
 import { ProductionHub } from "./ProductionWorkflow.jsx";
 import {
   buildRecordBreadcrumb,
-  shouldShowTopbarCreate,
 } from "./app-layout.js";
 import {
   pathForNav,
+  projectLifecyclePath,
   recordWorkspacePath,
   resolveAppRoute,
 } from "./app-routing.js";
@@ -119,7 +119,6 @@ import {
   NewAnalysisPage,
   RecordWorkspacePage,
   RecordWorkspaceState,
-  WorkbenchHomePage,
 } from "./WorkspacePages.jsx";
 import {
   hasReportableNarrativeStructure,
@@ -337,17 +336,9 @@ const stageLabels = {
   completed: "已完成",
   failed: "失败",
 };
-const recordStatusLabels = {
-  ready: "待分析",
-  analyzing: "分析中",
-  completed: "已完成",
-  failed: "失败",
-};
-
 const navItems = [
-  { id: "workspace", label: "工作台", icon: SquaresFour },
-  { id: "new-analysis", label: "新建分析", icon: Plus },
-  { id: "history", label: "分析记录", icon: ClockCounterClockwise },
+  { id: "new-analysis", label: "新建项目", icon: Plus },
+  { id: "history", label: "项目", icon: Briefcase },
   { id: "assets", label: "资产库", icon: FolderOpen },
   { id: "categories", label: "品类库", icon: Tag },
 ];
@@ -359,6 +350,13 @@ const reportTabs = [
   { id: "replicate", label: "复刻与改进", icon: Swap },
   { id: "prompts", label: "提示词", icon: TextT },
 ];
+
+function projectFacingMessage(value) {
+  return String(value || "")
+    .replaceAll("分析记录", "项目")
+    .replaceAll("当前记录", "当前项目")
+    .replaceAll("记录名称", "项目名称");
+}
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, options);
@@ -373,7 +371,7 @@ async function apiRequest(path, options = {}) {
           : typeof payload?.message === "string"
             ? payload.message
             : "请求失败，请稍后重试";
-    const requestError = new Error(message);
+    const requestError = new Error(projectFacingMessage(message));
     if (detail && typeof detail === "object") {
       requestError.code = detail.code || null;
       requestError.platform = detail.platform || null;
@@ -676,9 +674,6 @@ export function App() {
   const [historyPage, setHistoryPage] = useState(initialHistoryState.page);
   const [historyPageSize, setHistoryPageSize] = useState(initialHistoryState.pageSize);
   const [historyActionBusy, setHistoryActionBusy] = useState(false);
-  const [workbenchRecords, setWorkbenchRecords] = useState([]);
-  const [workbenchTotal, setWorkbenchTotal] = useState(0);
-  const [workbenchLoading, setWorkbenchLoading] = useState(false);
   const [platformConnections, setPlatformConnections] = useState(
     DEFAULT_PLATFORM_CONNECTIONS,
   );
@@ -871,10 +866,19 @@ export function App() {
     historyPageSize,
   ]);
 
-  useEffect(() => {
-    if (appRoute.name !== "workbench-home") return;
-    loadWorkbenchRecords().catch(() => undefined);
-  }, [appRoute.name]);
+  useLayoutEffect(() => {
+    if (appRoute.name !== "redirect" || !appRoute.to) return;
+    navigate(appRoute.to, { replace: true });
+  }, [appRoute.name, appRoute.to, navigate]);
+
+  useLayoutEffect(() => {
+    if (appRoute.name !== "history") return;
+    const routeLifecycle = normalizeRecordLifecycle(appRoute.lifecycle);
+    setHistoryPage(1);
+    setHistoryLifecycle((current) => (
+      current === routeLifecycle ? current : routeLifecycle
+    ));
+  }, [appRoute.name, appRoute.lifecycle]);
 
   useEffect(() => {
     if (appRoute.name !== "record-workspace" || !appRoute.recordId) return;
@@ -890,7 +894,7 @@ export function App() {
 
   useEffect(() => {
     if (appRoute.name !== "not-found") return;
-    navigate(pathForNav("workspace"), { replace: true });
+    navigate(pathForNav("history"), { replace: true });
   }, [appRoute.name, navigate]);
 
   useEffect(() => {
@@ -1187,29 +1191,6 @@ export function App() {
     setHistorySort(value);
   }
 
-  async function loadWorkbenchRecords() {
-    setWorkbenchLoading(true);
-    const params = buildRecordListParams({
-      lifecycle: "active",
-      page: 1,
-      pageSize: 6,
-      sort: "updated_desc",
-    });
-    try {
-      const payload = await apiRequest(`/records?${params.toString()}`);
-      setWorkbenchRecords(payload.items || []);
-      setWorkbenchTotal(payload.total || 0);
-      setHistoryLifecycleCounts(payload.lifecycle_counts || {
-        active: 0,
-        archived: 0,
-        trashed: 0,
-      });
-      return payload.items || [];
-    } finally {
-      setWorkbenchLoading(false);
-    }
-  }
-
   function applyRecordWorkspaceDetail(detail) {
     resetProductionWorkspace();
     setVideo(detail.video);
@@ -1249,8 +1230,10 @@ export function App() {
   }
 
   function changeHistoryLifecycle(value) {
+    const nextLifecycle = normalizeRecordLifecycle(value);
     setHistoryPage(1);
-    setHistoryLifecycle(normalizeRecordLifecycle(value));
+    setHistoryLifecycle(nextLifecycle);
+    navigate(projectLifecyclePath(nextLifecycle));
   }
 
   function changeHistoryPageSize(value) {
@@ -1373,7 +1356,7 @@ export function App() {
         sort: DEFAULT_HISTORY_STATE.sort,
         lifecycle: "active",
       });
-      showNotice("工作区已切换，历史记录已重新加载");
+      showNotice("工作区已切换，项目列表已重新加载");
     } catch (requestError) {
       setWorkspaceError(requestError.message);
     } finally {
@@ -1428,9 +1411,9 @@ export function App() {
   }
 
   async function renameHistoryRecord(record) {
-    const name = window.prompt("修改分析记录名称", record.name);
+    const name = window.prompt("修改项目名称", record.name);
     if (!name?.trim() || name.trim() === record.name) return;
-    await updateHistoryRecord(record.id, { name: name.trim() }, "记录名称已更新");
+    await updateHistoryRecord(record.id, { name: name.trim() }, "项目名称已更新");
   }
 
   async function openHistoryRecord(recordId) {
@@ -1443,7 +1426,7 @@ export function App() {
       return detail;
     } catch (requestError) {
       setHistoryError(requestError.message);
-      showNotice({ type: "error", title: "无法打开分析记录", message: requestError.message });
+      showNotice({ type: "error", title: "无法打开项目", message: requestError.message });
       return null;
     }
   }
@@ -1460,7 +1443,7 @@ export function App() {
     if (!ids.length || historyActionBusy) return false;
     if (
       action === "purge"
-      && !window.confirm(`将永久删除选中的 ${ids.length} 条记录。共享资产会保留，但记录无法恢复。是否继续？`)
+      && !window.confirm(`将永久删除选中的 ${ids.length} 个项目。共享资产会保留，但项目无法恢复。是否继续？`)
     ) {
       return false;
     }
@@ -1486,7 +1469,7 @@ export function App() {
       return true;
     } catch (requestError) {
       setHistoryError(requestError.message);
-      showNotice({ type: "error", title: "记录操作失败", message: requestError.message });
+      showNotice({ type: "error", title: "项目操作失败", message: requestError.message });
       return false;
     } finally {
       setHistoryActionBusy(false);
@@ -2310,25 +2293,7 @@ export function App() {
     }
   }
 
-  function openWorkspaceHome() {
-    setError("");
-    setVideo(null);
-    setAnalysis(null);
-    setAnalysisVersions([]);
-    setReport(null);
-    setActiveReportTab("overview");
-    setActiveShotId(null);
-    setReplacementVersion(null);
-    resetProductionWorkspace();
-    navigate(pathForNav("workspace"));
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
   function navigateRecordBreadcrumb(destination) {
-    if (destination === "workspace") {
-      openWorkspaceHome();
-      return;
-    }
     if (destination === "history") {
       selectNav("history");
       return;
@@ -2340,6 +2305,7 @@ export function App() {
   }
 
   const recordDetailMode = appRoute.name === "record-workspace";
+  const sidebarActiveNav = recordDetailMode ? "history" : activeNav;
   const recordBreadcrumbItems = buildRecordBreadcrumb(
     recordWorkspaceMode,
     activeProductionProjectName,
@@ -2400,7 +2366,7 @@ export function App() {
         adminAvailable={userSession?.auth_mode === "local_bootstrap"}
         imageSettings={serverImageSettings}
         loading={userSettingsLoading}
-        onBack={() => navigate(pathForNav("workspace"))}
+        onBack={() => navigate(pathForNav("history"))}
         onNavigate={(section) => navigate(`/settings/${section}`)}
         onOpenAdmin={() => navigate(pathForNav("admin"))}
         onOpenConnections={() => navigate(pathForNav("platform-connections"))}
@@ -2425,14 +2391,11 @@ export function App() {
   return (
     <div className="app-shell">
       <Sidebar
-        activeNav={activeNav}
+        activeNav={sidebarActiveNav}
         historyLifecycle={historyLifecycle}
         historyLifecycleCounts={historyLifecycleCounts}
         onSelect={selectNav}
-        onSelectHistoryLifecycle={(value) => {
-          changeHistoryLifecycle(value);
-          navigate(pathForNav("history"));
-        }}
+        onSelectHistoryLifecycle={changeHistoryLifecycle}
         onOpenSettings={() => openModelSettings("profile")}
         settingsOpen={activeNav === "settings"}
         historyCount={historyLifecycleCounts.active}
@@ -2442,7 +2405,7 @@ export function App() {
         <Topbar
           assetMode={["assets", "categories", "platform-connections"].includes(activeNav)}
           focusMode={recordDetailMode}
-          hideCreate={!shouldShowTopbarCreate(activeNav, report)}
+          hideCreate
           notificationOpen={notificationOpen}
           notificationUnreadCount={notificationUnreadCount}
           onCreate={() => selectNav("new-analysis")}
@@ -2505,7 +2468,7 @@ export function App() {
               onCreateFolder={createHistoryFolder}
               onRenameFolder={renameHistoryFolder}
               onRenameRecord={renameHistoryRecord}
-              onMoveRecord={(recordId, folderId) => updateHistoryRecord(recordId, { folder_id: folderId || null }, "记录目录已更新")}
+              onMoveRecord={(recordId, folderId) => updateHistoryRecord(recordId, { folder_id: folderId || null }, "项目目录已更新")}
               onMutateRecords={mutateHistoryRecords}
               onOpenRecord={openHistoryRecord}
               onOpenProductions={openHistoryProductions}
@@ -2721,16 +2684,7 @@ export function App() {
               </>
               )}
             </RecordWorkspacePage>
-          ) : (
-            <WorkbenchHomePage
-              loading={workbenchLoading}
-              onCreate={() => selectNav("new-analysis")}
-              onOpenHistory={() => selectNav("history")}
-              onOpenRecord={openHistoryRecord}
-              records={workbenchRecords}
-              total={workbenchTotal}
-            />
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -2824,6 +2778,7 @@ function RecordThumbnail({ record }) {
           {record.source_type === "upload" ? <FileVideo size={24} /> : <LinkSimple size={24} />}
         </span>
       )}
+      {record.status === "failed" && <span className="record-thumbnail-alert">失败</span>}
     </span>
   );
 }
@@ -2929,13 +2884,13 @@ function HistoryPage({
         <section className="page-intro history-intro">
           <div>
             <div className="breadcrumb">
-              <span>工作台</span>
+              <span>项目</span>
               <CaretRight size={14} />
-              <span className="breadcrumb-current">分析记录</span>
+              <span className="breadcrumb-current">{lifecycleMeta.title}</span>
             </div>
             <div className="history-title-line">
               <h1>{lifecycleMeta.title}</h1>
-              <span>{total} 条结果</span>
+              <span>{total} 个项目</span>
               {filteredFolderName && (
                 <button
                   aria-label={`清除目录筛选：${filteredFolderName}`}
@@ -2949,11 +2904,11 @@ function HistoryPage({
                 </button>
               )}
             </div>
-            <p>{lifecycleMeta.description}</p>
+            {lifecycleMeta.description && <p>{lifecycleMeta.description}</p>}
           </div>
         </section>
 
-        <nav className="history-lifecycle-mobile" aria-label="分析记录范围">
+        <nav className="history-lifecycle-mobile" aria-label="项目范围">
           {RECORD_LIFECYCLES.map((item) => (
             <button
               className={lifecycle === item ? "active" : ""}
@@ -2967,13 +2922,13 @@ function HistoryPage({
           ))}
         </nav>
 
-        <section className="history-toolbar" aria-label="分析记录筛选" ref={resultHeadingRef}>
+        <section className="history-toolbar" aria-label="项目筛选" ref={resultHeadingRef}>
           <label className="history-search">
             <MagnifyingGlass size={18} />
             <input
-              aria-label="搜索分析记录"
+              aria-label="搜索项目"
               onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="搜索记录名称、链接或作者"
+              placeholder="搜索项目名称、链接或作者"
               value={query}
             />
             {query && (
@@ -3034,16 +2989,16 @@ function HistoryPage({
         {loading && records.length === 0 ? (
           <div className="history-loading" role="status">
             <CircleNotch className="spin" size={20} />
-            正在读取工作区记录…
+            正在读取项目…
           </div>
         ) : records.length === 0 ? (
           <section className="history-empty">
             <span><FolderOpen size={30} /></span>
-            <h2>{query || folderFilter || statusFilter ? "没有匹配的分析记录" : lifecycleMeta.emptyTitle}</h2>
+            <h2>{query || folderFilter || statusFilter ? "没有匹配的项目" : lifecycleMeta.emptyTitle}</h2>
             <p>{query || folderFilter || statusFilter ? "调整搜索或筛选条件后再试。" : lifecycleMeta.emptyDescription}</p>
             {lifecycle === "active" && !query && !folderFilter && !statusFilter && (
               <button className="primary-button compact" onClick={onCreate} type="button">
-                <Plus size={16} />新建分析
+                <Plus size={16} />新建项目
               </button>
             )}
           </section>
@@ -3056,15 +3011,14 @@ function HistoryPage({
               <div className="record-table-head" role="row">
                 <label className="record-select-cell">
                   <input
-                    aria-label="选择本页记录"
+                    aria-label="选择本页项目"
                     checked={allVisibleSelected}
                     onChange={toggleVisibleSelection}
                     ref={selectAllRef}
                     type="checkbox"
                   />
                 </label>
-                <span className="record-main-head">记录</span>
-                <span className="record-status-head">状态</span>
+                <span className="record-main-head">项目</span>
                 <span className="record-source-head">来源</span>
                 <span className="record-folder-head">目录</span>
                 <span className="record-production-head">创作方案</span>
@@ -3105,15 +3059,11 @@ function HistoryPage({
                           <strong>{record.name}</strong>
                           <small>
                             {duration ? `时长 ${duration}` : "时长未知"}
-                            <i className="record-id-divider" />
-                            <span className="record-id-meta">ID: {record.id.slice(0, 8)}</span>
                             <span className="record-production-mobile">{productionCount} 个方案</span>
                           </small>
+                          {record.status === "failed" && <span className="record-status-accessible">分析失败</span>}
                         </span>
                       </button>
-                      <span className={`record-status ${record.status}`}>
-                        {recordStatusLabels[record.status] || record.status}
-                      </span>
                       <span className="record-source-cell">
                         {sourceTypeLabel(record.source_type)}
                       </span>
@@ -3140,7 +3090,7 @@ function HistoryPage({
                         className={`record-production-cell ${productionCount === 0 ? "empty" : ""}`}
                         disabled={lifecycle === "trashed"}
                         onClick={() => onOpenProductions(record.id)}
-                        title={lifecycle === "trashed" ? "恢复记录后可查看创作方案" : undefined}
+                        title={lifecycle === "trashed" ? "恢复项目后可查看创作方案" : undefined}
                         type="button"
                       >
                         <span>{productionCount} 个方案</span>
@@ -3182,19 +3132,19 @@ function HistoryPage({
               </div>
             </section>
 
-            <nav className="history-pagination" aria-label="分析记录分页">
+            <nav className="history-pagination" aria-label="项目分页">
               <div className="history-page-summary">
-                <span>显示 {firstResult}–{lastResult} 条，共 {total} 条</span>
+                <span>显示 {firstResult}–{lastResult} 个，共 {total} 个</span>
                 <label>
                   每页
                   <select
-                    aria-label="每页记录数"
+                    aria-label="每页项目数"
                     disabled={loading}
                     onChange={(event) => selectHistoryPageSize(event.target.value)}
                     value={pageSize}
                   >
                     {HISTORY_PAGE_SIZES.map((size) => (
-                      <option key={size} value={size}>{size} 条</option>
+                      <option key={size} value={size}>{size} 个</option>
                     ))}
                   </select>
                 </label>
@@ -3237,7 +3187,7 @@ function HistoryPage({
             </nav>
             {selectedRecordIds.length > 0 && (
               <div className="history-batch-bar" role="region" aria-label="批量操作">
-                <strong>已选择 {selectedRecordIds.length} 条</strong>
+                <strong>已选择 {selectedRecordIds.length} 个项目</strong>
                 {batchActions.map((item) => {
                   const ActionIcon = item.action === "archive"
                     ? Archive
@@ -3323,7 +3273,7 @@ function Sidebar({
                 {item.id === "history" && <span className="nav-count">{historyCount || 0}</span>}
               </button>
               {item.id === "history" && activeNav === "history" && (
-                <div className="history-lifecycle-nav" aria-label="分析记录范围">
+                <div className="history-lifecycle-nav" aria-label="项目范围">
                   {RECORD_LIFECYCLES.map((lifecycle) => (
                     <button
                       className={historyLifecycle === lifecycle ? "active" : ""}
@@ -3500,7 +3450,7 @@ function ModelSettingsDialog({
           <div>
             <span className="settings-kicker"><Sparkle size={14} weight="fill" /> 分析模型</span>
             <h2 id="model-settings-title">模型与设置</h2>
-            <p id="model-settings-description">验证成功后应用于新建分析；运行中的任务不会改变。</p>
+            <p id="model-settings-description">验证成功后应用于新建项目；运行中的任务不会改变。</p>
           </div>
           <button
             autoFocus
@@ -3519,9 +3469,9 @@ function ModelSettingsDialog({
             <div className="settings-section-heading">
               <div>
                 <h3 id="workspace-settings-title">本地工作区</h3>
-                <p>源视频、分析记录和导出文件统一保存在这个文件夹。</p>
+                <p>源视频、项目和导出文件统一保存在这个文件夹。</p>
               </div>
-              <span className="recommended-chip">{workspace.record_count || 0} 条记录</span>
+              <span className="recommended-chip">{workspace.record_count || 0} 个项目</span>
             </div>
             <div className="workspace-current-path">
               <span><FolderOpen size={19} weight="fill" /></span>
@@ -4725,9 +4675,9 @@ function Topbar({
         <div className="global-search">
           <MagnifyingGlass size={18} />
           <input
-            aria-label="搜索分析记录"
+            aria-label="搜索项目"
             onChange={(event) => onSearch(event.target.value)}
-            placeholder="搜索视频或报告"
+            placeholder="搜索项目或报告"
             value={searchValue}
           />
           <kbd>⌘ K</kbd>
@@ -4754,7 +4704,7 @@ function Topbar({
         {!primaryActionsHidden && !hideCreate && (
           <button className="primary-button compact" type="button" onClick={onCreate}>
             <Plus size={17} weight="bold" />
-            新建分析
+            新建项目
           </button>
         )}
       </div>
@@ -4978,7 +4928,7 @@ const ImportPanel = forwardRef(function ImportPanel({
       <div className="import-actions">
         <button className="primary-button" type="button" onClick={() => onStart()} disabled={submitting}>
           {submitting ? <CircleNotch className="spin" size={18} /> : <Sparkle size={18} weight="fill" />}
-          {submitting ? "正在创建任务" : "开始精细拆解"}
+          {submitting ? "正在创建项目" : "创建项目并开始分析"}
         </button>
       </div>
     </section>
@@ -5076,7 +5026,7 @@ function RecordBreadcrumb({ items, onNavigate }) {
 
 function RecordWorkspaceTabs({ active, count, onChange }) {
   return (
-    <div className="record-workspace-tabs" role="tablist" aria-label="记录工作区">
+    <div className="record-workspace-tabs" role="tablist" aria-label="项目工作区">
       <button
         aria-selected={active === "analysis"}
         className={active === "analysis" ? "active" : ""}
@@ -5531,8 +5481,6 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
   const activeShot = shots.find((shot) => shot.id === activeShotId) || shots[0];
   const isMediaEvidence = analysisMode === "media_evidence";
   const hasHybridSegmentation = Boolean(segmentation);
-  const segmentationVerified = Boolean(segmentation?.verified_by_model);
-  const hasFourFrameEvidence = segmentation?.detector_version?.endsWith("-v3");
   return (
     <div className="shots-layout">
       <div className="shot-list">
@@ -5540,14 +5488,6 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
           <span>分镜时间线</span>
           <div className="shot-list-meta">
             <small>{shots.length} 个镜头</small>
-            {hasHybridSegmentation && (
-              <span
-                className={`segmentation-status ${segmentationVerified ? "verified" : "fallback"}`}
-                title={segmentation?.fallback_reason || segmentation?.model_summary || ""}
-              >
-                {segmentationVerified ? "程序候选 + VLM 确认" : "程序边界 · VLM 已降级"}
-              </span>
-            )}
           </div>
         </div>
         {shots.map((shot) => (
@@ -5583,62 +5523,8 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
             <div>
               <span className="eyebrow">镜头 {String(activeShot.index).padStart(2, "0")}</span>
               <h3>{activeShot.title}</h3>
-              <p>
-                {formatTime(activeShot.start_seconds)} — {formatTime(activeShot.end_seconds)} · {isMediaEvidence ? "真实时间边界" : `内容置信度 ${Math.round(activeShot.confidence * 100)}%`}
-                {hasHybridSegmentation && ` · ${formatBoundaryMethod(activeShot.boundary_method)}`}
-                {activeShot.boundary_confidence != null && ` ${Math.round(activeShot.boundary_confidence * 100)}%`}
-              </p>
             </div>
           </div>
-
-          {hasHybridSegmentation && (
-            <details className="segmentation-evidence">
-              <summary>
-                查看边界候选证据
-                <span>{segmentation.candidate_count} 个候选 · 最终 {segmentation.final_shot_count} 个镜头</span>
-              </summary>
-              {hasFourFrameEvidence && (
-                <p className="segmentation-evidence-guide">
-                  每张候选图从左到右：远前、近前｜近后、远后；中间白线为候选时刻。
-                </p>
-              )}
-              <div className="segmentation-candidate-grid">
-                {segmentation.candidates.map((candidate) => (
-                  <article
-                    className={`segmentation-candidate ${segmentation.selected_candidate_ids?.includes(candidate.id) ? "selected" : ""}`}
-                    key={candidate.id}
-                  >
-                    {candidate.comparison_image_url && (
-                      <img
-                        className={hasFourFrameEvidence ? "micro-timeline" : ""}
-                        src={resolveArtifactUrl(candidate.comparison_image_url)}
-                        alt={
-                          hasFourFrameEvidence
-                            ? `${candidate.id} 边界四帧微时间线`
-                            : `${candidate.id} 边界前后对比`
-                        }
-                      />
-                    )}
-                    <div>
-                      <strong>{formatTime(candidate.timestamp_seconds)}</strong>
-                      <span>
-                        {candidate.hard_boundary
-                          ? "硬切锁定"
-                          : candidate.selected_by_model
-                            ? "VLM 已确认"
-                            : candidate.model_consistency_adjusted
-                              ? "一致性校验已合并"
-                              : candidate.model_reason
-                                ? "VLM 已拒绝"
-                                : "候选已合并"}
-                      </span>
-                      <small>{candidate.model_reason || candidate.methods.join(" / ")}</small>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </details>
-          )}
 
           {activeShot.keyframe_url && (
             <figure className="shot-keyframe">

@@ -60,6 +60,10 @@ test("overlays the shot number instead of consuming another list column", () => 
   assert.doesNotMatch(videoWorkspaceSource, /<span className="shot-video-index">/);
   assert.match(
     cssRule(".shot-navigation-main"),
-    /grid-template-columns:\s*52px minmax\(0, 1fr\) auto/,
+    /grid-template-columns:\s*52px minmax\(0, 1fr\)/,
+  );
+  assert.match(
+    cssRule(".shot-navigation-item"),
+    /grid-template-columns:\s*auto minmax\(0, 1fr\) auto/,
   );
 });

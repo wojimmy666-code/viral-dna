@@ -262,7 +262,9 @@ def _negative_prompt(request: ImageGenerationRequest) -> str:
         "手指畸形",
         "产品结构变形",
     ]
-    values = [*identity_constraints, *request.shot.image_negative_constraints, *base]
+    # Historical user-entered image constraints stay readable in old revisions,
+    # but the removed UI must not keep silently affecting new generations.
+    values = [*identity_constraints, *base]
     normalized: list[str] = []
     for value in values:
         text = (to_simplified(value) or value).strip()

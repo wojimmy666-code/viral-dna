@@ -1,7 +1,6 @@
 const NAV_PATHS = Object.freeze({
-  workspace: "/workbench",
-  "new-analysis": "/analyses/new",
-  history: "/records",
+  "new-analysis": "/projects/new",
+  history: "/projects",
   assets: "/assets",
   categories: "/category-profiles",
   "platform-connections": "/settings/platform-connections",
@@ -14,34 +13,64 @@ function normalizePathname(pathname) {
   return normalized === "/" ? "/" : normalized;
 }
 export function pathForNav(navId) {
-  return NAV_PATHS[navId] || NAV_PATHS.workspace;
+  return NAV_PATHS[navId] || NAV_PATHS.history;
+}
+
+export function projectLifecyclePath(lifecycle) {
+  if (lifecycle === "archived") return "/projects/archived";
+  if (lifecycle === "trashed") return "/projects/trash";
+  return NAV_PATHS.history;
 }
 
 export function recordWorkspacePath(recordId) {
   const normalizedId = String(recordId || "").trim();
   return normalizedId
-    ? `/workbench/records/${encodeURIComponent(normalizedId)}`
-    : NAV_PATHS.workspace;
+    ? `/projects/${encodeURIComponent(normalizedId)}`
+    : NAV_PATHS.history;
 }
 
 export function resolveAppRoute(pathname) {
   const normalized = normalizePathname(pathname);
-  const recordMatch = normalized.match(/^\/workbench\/records\/([^/]+)$/);
+  if (normalized === "/projects/new") {
+    return { name: "new-analysis", activeNav: "new-analysis", recordId: "" };
+  }
+  if (normalized === "/projects/archived") {
+    return { name: "history", activeNav: "history", recordId: "", lifecycle: "archived" };
+  }
+  if (normalized === "/projects/trash") {
+    return { name: "history", activeNav: "history", recordId: "", lifecycle: "trashed" };
+  }
+  if (normalized === NAV_PATHS.history) {
+    return { name: "history", activeNav: "history", recordId: "", lifecycle: "active" };
+  }
+  const recordMatch = normalized.match(/^\/projects\/([^/]+)$/);
   if (recordMatch) {
     return {
       name: "record-workspace",
-      activeNav: "workspace",
+      activeNav: "project-detail",
       recordId: decodeURIComponent(recordMatch[1]),
     };
   }
-  if (normalized === "/" || normalized === NAV_PATHS.workspace) {
-    return { name: "workbench-home", activeNav: "workspace", recordId: "" };
+
+  const legacyRecordMatch = normalized.match(/^\/workbench\/records\/([^/]+)$/);
+  if (legacyRecordMatch) {
+    return {
+      name: "redirect",
+      activeNav: "history",
+      recordId: "",
+      to: recordWorkspacePath(decodeURIComponent(legacyRecordMatch[1])),
+    };
   }
-  if (normalized === NAV_PATHS["new-analysis"]) {
-    return { name: "new-analysis", activeNav: "new-analysis", recordId: "" };
+  if (["/", "/workbench", "/records"].includes(normalized)) {
+    return { name: "redirect", activeNav: "history", recordId: "", to: NAV_PATHS.history };
   }
-  if (normalized === NAV_PATHS.history) {
-    return { name: "history", activeNav: "history", recordId: "" };
+  if (normalized === "/analyses/new") {
+    return {
+      name: "redirect",
+      activeNav: "new-analysis",
+      recordId: "",
+      to: NAV_PATHS["new-analysis"],
+    };
   }
   if (normalized === NAV_PATHS.assets) {
     return { name: "assets", activeNav: "assets", recordId: "" };
@@ -82,5 +111,5 @@ export function resolveAppRoute(pathname) {
       adminSection: adminMatch?.[1] || "providers",
     };
   }
-  return { name: "not-found", activeNav: "workspace", recordId: "" };
+  return { name: "not-found", activeNav: "history", recordId: "" };
 }
