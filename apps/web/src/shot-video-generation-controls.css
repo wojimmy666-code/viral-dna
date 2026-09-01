@@ -48,6 +48,7 @@
 .shot-video-output-summary:focus-visible,
 .video-model-option:focus-visible,
 .video-setting-segments button:focus-visible,
+.video-audio-options button:focus-visible,
 .video-duration-section input[type="range"]:focus-visible {
   border-color: #7968ee;
   box-shadow: 0 0 0 3px rgba(100, 83, 218, 0.12);
@@ -60,6 +61,11 @@
 .video-setting-segments button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+}
+
+.video-audio-options button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .shot-video-model-trigger {
@@ -526,6 +532,75 @@
   border-color: #6453da;
   color: var(--text-on-accent);
   background: #6453da;
+}
+
+.video-audio-setting {
+  gap: 9px;
+}
+
+.video-audio-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.video-audio-options button {
+  min-width: 0;
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 11px 9px;
+  border: 1px solid #dedbe7;
+  border-radius: 10px;
+  color: var(--text-primary);
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.video-audio-options button:hover:not(:disabled) {
+  border-color: #bdb5f0;
+  background: #f8f7ff;
+}
+
+.video-audio-options button.active {
+  border-color: #6453da;
+  background: #f5f3ff;
+  box-shadow: inset 0 0 0 1px #6453da;
+}
+
+.video-audio-options button > svg {
+  margin-top: 1px;
+  color: var(--text-secondary);
+}
+
+.video-audio-options button.active > svg,
+.video-audio-options button.active strong {
+  color: var(--accent);
+}
+
+.video-audio-options button > span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.video-audio-options strong,
+.video-audio-options small {
+  display: block;
+}
+
+.video-audio-options strong {
+  font-size: var(--type-label-size);
+  line-height: 1.25;
+}
+
+.video-audio-options small {
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  line-height: 1.35;
 }
 
 .video-duration-section input[type="range"] {

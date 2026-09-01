@@ -13,6 +13,7 @@ import {
   latestRunByKind,
   normalizeVideoDuration,
   preferredVideoResolution,
+  sourceRangePlaybackUrl,
   videoCandidatePlaybackUrl,
   videoDurationOptions,
   workflowStatusClass,
@@ -87,6 +88,86 @@ function generationRunCostLabel(run) {
     return `预计 ¥${(Number(run.estimated_cost_micros || 0) / 1_000_000).toFixed(2)}`;
   }
   return "费用待回传";
+}
+
+function candidateAudioLabel(candidate) {
+  if (candidate?.source_range) return "原分镜音频";
+  if (candidate?.audio_strategy === "generate_native") {
+    return candidate.native_audio_present ? "新生成音频" : "新音频未生成";
+  }
+  if (candidate?.audio_strategy === "muted") return "静音";
+  return "原分镜音频";
+}
+
+function VideoCandidatePlayer({
+  candidate,
+  enhancementKey,
+  plan,
+  posterUrl,
+  sourceUrl,
+  sourceVideoUrl,
+  usesSourceVideo,
+}) {
+  const videoRef = useRef(null);
+  const sourceAudioRef = useRef(null);
+  const strategy = candidate?.audio_strategy || "reuse_source";
+  const reuseSourceAudio = Boolean(
+    !usesSourceVideo && strategy === "reuse_source" && sourceVideoUrl,
+  );
+
+  function syncSourceAudio(video, force = false) {
+    const audio = sourceAudioRef.current;
+    if (!audio || !video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    const sourceStart = Number(plan?.start_seconds || 0);
+    const sourceDuration = Math.max(
+      0.05,
+      Number(plan?.end_seconds || 0) - sourceStart,
+    );
+    const target = sourceStart + (video.currentTime / video.duration) * sourceDuration;
+    const playbackRate = sourceDuration / video.duration;
+    audio.playbackRate = Math.min(4, Math.max(0.25, playbackRate));
+    if (force || Math.abs(audio.currentTime - target) > 0.12) {
+      audio.currentTime = target;
+    }
+  }
+
+  function playSourceAudio(video) {
+    if (!reuseSourceAudio) return;
+    syncSourceAudio(video, true);
+    sourceAudioRef.current?.play().catch(() => undefined);
+  }
+
+  function pauseSourceAudio() {
+    sourceAudioRef.current?.pause();
+  }
+
+  useEffect(() => () => {
+    sourceAudioRef.current?.pause();
+  }, [candidate?.id]);
+
+  return (
+    <>
+      <video
+        controls
+        key={`${candidate.id}:${enhancementKey || "active"}`}
+        muted={reuseSourceAudio || (!usesSourceVideo && strategy === "muted")}
+        onEnded={pauseSourceAudio}
+        onLoadedMetadata={(event) => syncSourceAudio(event.currentTarget, true)}
+        onPause={pauseSourceAudio}
+        onPlay={(event) => playSourceAudio(event.currentTarget)}
+        onSeeking={(event) => syncSourceAudio(event.currentTarget, true)}
+        onTimeUpdate={(event) => syncSourceAudio(event.currentTarget)}
+        playsInline
+        poster={usesSourceVideo ? undefined : posterUrl}
+        preload="metadata"
+        ref={videoRef}
+        src={sourceUrl}
+      />
+      {reuseSourceAudio && (
+        <audio aria-hidden="true" preload="metadata" ref={sourceAudioRef} src={sourceVideoUrl} />
+      )}
+    </>
+  );
 }
 
 function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
@@ -183,6 +264,7 @@ export function ShotVideoWorkspace({
   shotDetail,
   shots,
   sourceVideoUrl,
+  sourceAudioAvailable = false,
   videoDraft,
   videoGenerationSettings,
   videoGenerationSettingsError = "",
@@ -617,6 +699,11 @@ export function ShotVideoWorkspace({
         ? "当前分镜还没有可用于视频生成的画面"
         : usesApprovedImages && !allReferencesApproved
           ? `请先确认全部必需画面（${approvedReferenceCount}/${referenceFrames.length}）`
+          : videoDraft.audioStrategy === "reuse_source" && !sourceAudioAvailable
+            ? "原视频没有可用音频，请改为生成新音频或静音"
+          : videoDraft.audioStrategy === "generate_native"
+            && !selectedModel.capabilities?.native_audio
+            ? "当前模型不支持生成新音频，请改为沿用原音频或静音"
           : !providerSettings?.api_key_configured
               ? `尚未配置 ${providerSettings?.label || selectedModel.provider} API Key`
               : null;
@@ -665,6 +752,11 @@ export function ShotVideoWorkspace({
       modelAlias,
       durationSeconds: String(nextDuration),
       resolution: preferredVideoResolution(model, current.resolution),
+      audioStrategy: (
+        current.audioStrategy === "generate_native" && !model?.capabilities?.native_audio
+          ? (sourceAudioAvailable ? "reuse_source" : "muted")
+          : current.audioStrategy
+      ),
     }));
     setDurationAdjustmentMessage(
       Number.isFinite(previousDuration)
@@ -895,15 +987,25 @@ export function ShotVideoWorkspace({
             <div className="shot-video-media-frame shot-video-candidate-frame">
               {displayedCandidate ? (
                 <>
-                  <video
-                    controls
-                    key={`${displayedCandidate.id}:${enhancementPreview?.key || "active"}`}
-                    playsInline
-                    poster={resolveUrl(displayedCandidate.thumbnail_url)}
-                    preload="metadata"
-                    src={resolveUrl(displayedVideoUrl)}
+                  <VideoCandidatePlayer
+                    candidate={displayedCandidate}
+                    enhancementKey={enhancementPreview?.key}
+                    plan={plan}
+                    posterUrl={resolveUrl(displayedCandidate.thumbnail_url)}
+                    sourceUrl={
+                      displayedCandidateUsesSourceVideo
+                        ? sourceRangePlaybackUrl(
+                            displayedCandidate,
+                            resolveUrl(displayedVideoUrl),
+                            plan.start_seconds,
+                            plan.end_seconds,
+                          )
+                        : resolveUrl(displayedVideoUrl)
+                    }
+                    sourceVideoUrl={sourceVideoUrl}
+                    usesSourceVideo={displayedCandidateUsesSourceVideo}
                   />
-                  <a
+                  {!displayedCandidateUsesSourceVideo && <a
                     aria-label={`下载视频 ${displayedCandidate.sequence || displayedCandidate.ordinal}`}
                     className="shot-video-download-button"
                     download={`shot-${plan.index}-video-${displayedCandidate.sequence || displayedCandidate.ordinal}.mp4`}
@@ -911,7 +1013,7 @@ export function ShotVideoWorkspace({
                     title="下载视频候选"
                   >
                     <DownloadSimple size={16} />
-                  </a>
+                  </a>}
                 </>
               ) : (
                 <div className="shot-video-media-placeholder"><PlayCircle size={30} /><span>生成后可在这里播放候选</span></div>
@@ -1100,6 +1202,10 @@ export function ShotVideoWorkspace({
                 ...current,
                 candidateCount,
               }))}
+              onAudioStrategyChange={(audioStrategy) => setVideoDraft((current) => ({
+                ...current,
+                audioStrategy,
+              }))}
               onDurationChange={selectDuration}
               onGenerate={onGenerate}
               onModelChange={selectVideoModel}
@@ -1113,6 +1219,7 @@ export function ShotVideoWorkspace({
               project={project}
               providerOptions={videoGenerationSettings?.providers || []}
               selectedModel={selectedModel}
+              sourceAudioAvailable={sourceAudioAvailable}
               supportedResolutions={supportedResolutions}
               videoDraft={videoDraft}
             />
@@ -1126,7 +1233,7 @@ export function ShotVideoWorkspace({
                   {!displayedCandidateUsesSourceVideo && ` · ${displayedCandidateRun?.model_display_name || displayedCandidateRun?.model_alias || displayedCandidateRun?.model || "视频模型"}`}
                 </strong>
                 <span>
-                  {displayedCandidate.duration_seconds?.toFixed(1)} 秒 · {displayedCandidate.width} × {displayedCandidate.height} · {displayedCandidateCostLabel}
+                  {displayedCandidate.duration_seconds?.toFixed(1)} 秒 · {displayedCandidate.width} × {displayedCandidate.height} · {candidateAudioLabel(displayedCandidate)} · {displayedCandidateCostLabel}
                 </span>
               </div>
               {plan.video_status === "approved" && plan.approved_video_candidate_id === displayedCandidate.id ? (

@@ -8,7 +8,6 @@ import {
   CheckCircle,
   CircleNotch,
   ClockCounterClockwise,
-  FloppyDisk,
   Pause,
   Play,
   Plus,
@@ -29,19 +28,53 @@ import {
   nextTimelineClip,
   reflowTimelineDraft,
   reorderTimelineClips,
+  sourceAudioPlaybackRate,
   sourceTimeToTimelineTime,
   timelineClipAtTime,
+  timelineClipSourceBounds,
+  timelineTimeToSourceAudioTime,
   timelineTimeToSourceTime,
 } from "./timeline-math.js";
+import { AutosaveStatus } from "../ui/system/index.js";
 import "./video-editor.css";
 
 const PREVIEW_MAX_HEIGHT_PX = 600;
 const LOCAL_HISTORY_LIMIT = 20;
+const TIMELINE_AUTOSAVE_DELAY_MS = 800;
+const SOURCE_AUDIO_SYNC_TOLERANCE_SECONDS = 0.08;
 
 function cloneTimelineDraft(timeline) {
   return typeof structuredClone === "function"
     ? structuredClone(timeline)
     : JSON.parse(JSON.stringify(timeline));
+}
+
+function clampPlaybackVolume(value) {
+  return Math.min(1, Math.max(0, Number(value) || 0));
+}
+
+function timelineUpdatePayload(draft) {
+  const lastEnabledClipId = draft.clips.filter((clip) => clip.enabled).at(-1)?.id;
+  return {
+    expected_revision_id: draft.revision_id,
+    clip_order: draft.clips.map((clip) => clip.id),
+    clip_updates: draft.clips.map((clip) => ({
+      clip_id: clip.id,
+      enabled: clip.enabled,
+      trim_in_seconds: Number(clip.trim_in_seconds),
+      trim_out_seconds: Number(clip.trim_out_seconds),
+      timeline_duration_seconds: Number(clip.timeline_duration_seconds),
+      audio_mode: clip.audio_mode,
+      audio_volume: Number(clip.audio_volume),
+      transition_after: clip.id === lastEnabledClipId
+        ? { kind: "none", duration_seconds: 0 }
+        : clip.transition_after,
+    })),
+    audio_track: draft.audio_track,
+    background_audio_track: draft.background_audio_track,
+    subtitle_cues: draft.subtitle_cues,
+    summary: "从剪辑工作台自动保存时间线",
+  };
 }
 
 function readAudioFileDuration(file) {
@@ -86,6 +119,7 @@ function TimelinePreviewPlayer({
 }) {
   const playerRef = useRef(null);
   const videoRef = useRef(null);
+  const sourceAudioRef = useRef(null);
   const frameCallbackRef = useRef(null);
   const playIntentRef = useRef(false);
   const lastPublishedTimeRef = useRef(-1);
@@ -108,7 +142,82 @@ function TimelinePreviewPlayer({
   const sourceUrl = usingCompositePreview
     ? previewUrl
     : resolveUrl(activeClip?.candidate_content_url);
+  const sourceAudioUrl = timeline?.audio_track?.source_audio_url
+    ? resolveUrl(timeline.audio_track.source_audio_url)
+    : "";
+  const activeAudioMode = usingCompositePreview
+    ? "composite"
+    : !timeline?.audio_track?.enabled || timeline.audio_track.strategy === "muted"
+      ? "muted"
+      : activeClip?.audio_mode === "source" && sourceAudioUrl
+        ? "source"
+        : activeClip?.audio_mode === "candidate" && activeClip.candidate_audio_available
+          ? "candidate"
+          : "muted";
+  const usesSourceAudio = activeAudioMode === "source";
+  const usesCandidateAudio = activeAudioMode === "candidate";
+  const hasPreviewAudio = usingCompositePreview || usesSourceAudio || usesCandidateAudio;
+  const effectivelyMuted = muted || volume === 0 || !hasPreviewAudio;
   const atTimelineEnd = timelineDuration > 0 && displayTime >= timelineDuration - 0.01;
+
+  function clipAudioMode(clip) {
+    if (usingCompositePreview) return "composite";
+    if (!timeline?.audio_track?.enabled || timeline.audio_track.strategy === "muted") {
+      return "muted";
+    }
+    if (clip?.audio_mode === "source" && sourceAudioUrl) return "source";
+    if (clip?.audio_mode === "candidate" && clip.candidate_audio_available) return "candidate";
+    return "muted";
+  }
+
+  function syncSourceAudioToTimeline(
+    audio,
+    timelineTime = displayTime,
+    clip = activeClip,
+    { force = false } = {},
+  ) {
+    if (!audio || !clip || clipAudioMode(clip) !== "source") return;
+    const nextTime = timelineTimeToSourceAudioTime(clip, timelineTime);
+    audio.playbackRate = sourceAudioPlaybackRate(clip);
+    try {
+      if (force || Math.abs(audio.currentTime - nextTime) > SOURCE_AUDIO_SYNC_TOLERANCE_SECONDS) {
+        audio.currentTime = nextTime;
+      }
+    } catch {
+      // Metadata may still be loading; onLoadedMetadata performs the same synchronization.
+    }
+  }
+
+  function applyAudioRouting(clip = activeClip) {
+    const video = videoRef.current;
+    const sourceAudio = sourceAudioRef.current;
+    const mode = clipAudioMode(clip);
+    const trackVolume = Number(timeline?.audio_track?.volume ?? 1);
+    const clipVolume = Number(clip?.audio_volume ?? 1);
+    const routedVolume = clampPlaybackVolume(volume * trackVolume * clipVolume);
+    if (video) {
+      video.volume = usingCompositePreview ? clampPlaybackVolume(volume) : routedVolume;
+      video.muted = muted || volume === 0 || (!usingCompositePreview && mode !== "candidate");
+    }
+    if (sourceAudio) {
+      sourceAudio.volume = routedVolume;
+      sourceAudio.muted = muted || volume === 0 || mode !== "source";
+      if (mode !== "source") sourceAudio.pause();
+    }
+    return mode;
+  }
+
+  async function playSourceAudio(timelineTime = displayTime, clip = activeClip) {
+    const sourceAudio = sourceAudioRef.current;
+    if (!sourceAudio || clipAudioMode(clip) !== "source") return;
+    applyAudioRouting(clip);
+    syncSourceAudioToTimeline(sourceAudio, timelineTime, clip, { force: true });
+    try {
+      await sourceAudio.play();
+    } catch {
+      // Keep visual playback available if the browser temporarily rejects auxiliary audio.
+    }
+  }
 
   function cancelFrameLoop() {
     const video = videoRef.current;
@@ -125,6 +234,7 @@ function TimelinePreviewPlayer({
     playIntentRef.current = false;
     setPlaying(false);
     videoRef.current?.pause();
+    sourceAudioRef.current?.pause();
     onTimelineTimeChange?.(timelineDuration);
   }
 
@@ -138,6 +248,7 @@ function TimelinePreviewPlayer({
       finishPlayback();
       return;
     }
+    sourceAudioRef.current?.pause();
     onTimelineTimeChange?.(Number(nextClip.timeline_start_seconds));
   }
 
@@ -152,12 +263,13 @@ function TimelinePreviewPlayer({
       return;
     }
     if (!activeClip) return;
-    const sourceEnd = Number(activeClip.trim_out_seconds);
+    const sourceEnd = timelineClipSourceBounds(activeClip).end;
     if (mediaTime >= sourceEnd - 0.02) {
       advanceFromClipBoundary();
       return;
     }
     const nextTime = sourceTimeToTimelineTime(activeClip, mediaTime);
+    syncSourceAudioToTimeline(sourceAudioRef.current, nextTime, activeClip);
     if (Math.abs(nextTime - lastPublishedTimeRef.current) >= 0.008) {
       lastPublishedTimeRef.current = nextTime;
       onTimelineTimeChange?.(nextTime);
@@ -194,28 +306,85 @@ function TimelinePreviewPlayer({
     if (Math.abs(video.currentTime - nextTime) > 0.06) {
       video.currentTime = nextTime;
     }
+    syncSourceAudioToTimeline(sourceAudioRef.current, timelineTime, clip);
   }
 
   useEffect(() => {
     setPlaying(false);
     lastPublishedTimeRef.current = -1;
     cancelFrameLoop();
+    sourceAudioRef.current?.pause();
   }, [sourceUrl]);
+
+  useEffect(() => {
+    const mode = applyAudioRouting();
+    const video = videoRef.current;
+    if (mode === "source" && video && !video.paused && !video.ended) {
+      playSourceAudio();
+    }
+  }, [
+    activeClip?.audio_mode,
+    activeClip?.audio_volume,
+    activeClip?.candidate_audio_available,
+    activeClip?.id,
+    activeClip?.source_audio_end_seconds,
+    activeClip?.source_audio_start_seconds,
+    activeClip?.timeline_duration_seconds,
+    activeClip?.timeline_start_seconds,
+    muted,
+    sourceAudioUrl,
+    timeline?.audio_track?.enabled,
+    timeline?.audio_track?.strategy,
+    timeline?.audio_track?.volume,
+    usingCompositePreview,
+    volume,
+  ]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || video.readyState < 1) return;
     syncVideoToTimeline(video);
-  }, [activeClip?.id, displayTime, sourceUrl, usingCompositePreview]);
+  }, [
+    activeClip?.id,
+    activeClip?.playback_rate,
+    activeClip?.source_range?.end_pts,
+    activeClip?.source_range?.start_pts,
+    activeClip?.timeline_end_seconds,
+    activeClip?.timeline_start_seconds,
+    activeClip?.trim_in_seconds,
+    activeClip?.trim_out_seconds,
+    displayTime,
+    sourceUrl,
+    usingCompositePreview,
+  ]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || video.paused || video.ended) return;
+    beginFrameLoop(video);
+  }, [
+    activeClip?.id,
+    activeClip?.playback_rate,
+    activeClip?.source_range?.end_pts,
+    activeClip?.source_range?.start_pts,
+    activeClip?.timeline_end_seconds,
+    activeClip?.timeline_start_seconds,
+    activeClip?.trim_in_seconds,
+    activeClip?.trim_out_seconds,
+  ]);
 
   useEffect(() => {
     if (!isScrubbing) return;
     playIntentRef.current = false;
     videoRef.current?.pause();
+    sourceAudioRef.current?.pause();
     setPlaying(false);
   }, [isScrubbing]);
 
-  useEffect(() => () => cancelFrameLoop(), []);
+  useEffect(() => () => {
+    cancelFrameLoop();
+    sourceAudioRef.current?.pause();
+  }, []);
 
   async function togglePlayback() {
     const video = videoRef.current;
@@ -223,6 +392,7 @@ function TimelinePreviewPlayer({
     if (playing || !video.paused) {
       playIntentRef.current = false;
       video.pause();
+      sourceAudioRef.current?.pause();
       return;
     }
     const requestedTime = atTimelineEnd ? 0 : displayTime;
@@ -236,6 +406,7 @@ function TimelinePreviewPlayer({
     syncVideoToTimeline(video, requestedTime, requestedClip);
     try {
       await video.play();
+      await playSourceAudio(requestedTime, requestedClip);
     } catch {
       playIntentRef.current = false;
       setPlaying(false);
@@ -250,27 +421,17 @@ function TimelinePreviewPlayer({
   }
 
   function changeVolume(event) {
-    const video = videoRef.current;
-    const nextVolume = Math.min(1, Math.max(0, Number(event.target.value)));
-    if (!video) return;
-    video.volume = nextVolume;
-    video.muted = nextVolume === 0;
+    const nextVolume = clampPlaybackVolume(event.target.value);
     setVolume(nextVolume);
     setMuted(nextVolume === 0);
   }
 
   function toggleMute() {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.muted || video.volume === 0) {
-      const restoredVolume = video.volume === 0 ? 0.8 : video.volume;
-      video.volume = restoredVolume;
-      video.muted = false;
-      setVolume(restoredVolume);
+    if (muted || volume === 0) {
+      if (volume === 0) setVolume(0.8);
       setMuted(false);
       return;
     }
-    video.muted = true;
     setMuted(true);
   }
 
@@ -308,30 +469,29 @@ function TimelinePreviewPlayer({
             }}
             onLoadedMetadata={(event) => {
               const video = event.currentTarget;
-              setVolume(video.volume);
-              setMuted(video.muted);
+              applyAudioRouting();
               syncVideoToTimeline(video);
               if (playIntentRef.current && !isScrubbing) {
-                video.play().catch(() => {
-                  playIntentRef.current = false;
-                  setPlaying(false);
-                });
+                video.play()
+                  .then(() => playSourceAudio())
+                  .catch(() => {
+                    playIntentRef.current = false;
+                    setPlaying(false);
+                  });
               }
             }}
             onPause={() => {
               cancelFrameLoop();
+              sourceAudioRef.current?.pause();
               setPlaying(false);
             }}
             onPlay={(event) => {
               setPlaying(true);
               beginFrameLoop(event.currentTarget);
+              playSourceAudio();
             }}
             onTimeUpdate={(event) => {
               publishMediaTime(event.currentTarget.currentTime);
-            }}
-            onVolumeChange={(event) => {
-              setVolume(event.currentTarget.volume);
-              setMuted(event.currentTarget.muted);
             }}
             playsInline
             preload="metadata"
@@ -340,6 +500,20 @@ function TimelinePreviewPlayer({
           >
             {usingCompositePreview && subtitleUrl && <track default kind="subtitles" label="简体中文" src={subtitleUrl} srcLang="zh-CN" />}
           </video>
+          <audio
+            aria-hidden="true"
+            hidden
+            onLoadedMetadata={(event) => {
+              applyAudioRouting();
+              syncSourceAudioToTimeline(event.currentTarget, displayTime, activeClip, { force: true });
+              if (playIntentRef.current && !videoRef.current?.paused && usesSourceAudio) {
+                event.currentTarget.play().catch(() => {});
+              }
+            }}
+            preload="auto"
+            ref={sourceAudioRef}
+            src={sourceAudioUrl}
+          />
         </div>
         <div className="timeline-preview-controls" role="group" aria-label="视频播放控制">
           <button
@@ -370,18 +544,18 @@ function TimelinePreviewPlayer({
             {formatEditorSeconds(displayTime)} / {formatEditorSeconds(timelineDuration)}
           </output>
           <button
-            aria-label={muted || volume === 0 ? "取消静音" : "静音"}
+            aria-label={effectivelyMuted ? "取消静音" : "静音"}
             className="timeline-player-button"
-            disabled={!sourceUrl}
+            disabled={!sourceUrl || !hasPreviewAudio}
             onClick={toggleMute}
             type="button"
           >
-            {muted || volume === 0 ? <SpeakerSlash size={17} /> : <SpeakerHigh size={17} />}
+            {effectivelyMuted ? <SpeakerSlash size={17} /> : <SpeakerHigh size={17} />}
           </button>
           <input
             aria-label="播放音量"
             className="timeline-player-volume"
-            disabled={!sourceUrl}
+            disabled={!sourceUrl || !hasPreviewAudio}
             max="1"
             min="0"
             onChange={changeVolume}
@@ -398,7 +572,7 @@ function TimelinePreviewPlayer({
   );
 }
 
-function ClipInspector({ clip, clips, dirty, inspecting, onChange, onInspect, onMove }) {
+function ClipInspector({ clip, clips, inspecting, onChange, onInspect, onMove }) {
   if (!clip) {
     return <div className="timeline-inspector-empty">选择一个片段后调整裁剪、节奏和转场。</div>;
   }
@@ -450,13 +624,16 @@ function ClipInspector({ clip, clips, dirty, inspecting, onChange, onInspect, on
       <label className="timeline-field">
         <span>成片时长</span>
         <div><input min="0.1" max="300" step="0.1" type="number" value={clip.timeline_duration_seconds} onChange={(event) => onChange({ timeline_duration_seconds: Number(event.target.value) })} /><small>秒</small></div>
-        <em>保存后自动计算播放速率；当前约 {((clip.trim_out_seconds - clip.trim_in_seconds) / clip.timeline_duration_seconds).toFixed(2)}x</em>
+        <em>自动保存后计算播放速率；当前约 {((clip.trim_out_seconds - clip.trim_in_seconds) / clip.timeline_duration_seconds).toFixed(2)}x</em>
       </label>
       <label className="timeline-field">
         <span>片段声音</span>
         <select value={clip.audio_mode} onChange={(event) => onChange({ audio_mode: event.target.value })}>
-          <option value="source">映射原视频音轨</option>
-          <option value="muted">静音画面</option>
+          <option value="source">沿用原分镜音频</option>
+          <option disabled={!clip.candidate_audio_available} value="candidate">
+            {clip.candidate_audio_available ? "使用候选新音频" : "候选没有新音频"}
+          </option>
+          <option value="muted">静音</option>
         </select>
       </label>
       <label className="timeline-field">
@@ -517,9 +694,9 @@ function ClipInspector({ clip, clips, dirty, inspecting, onChange, onInspect, on
         )}
         <button
           className="secondary-button compact"
-          disabled={dirty || inspecting}
+          disabled={inspecting}
           onClick={onInspect}
-          title={dirty ? "请先保存时间线修改" : "检查文件、时长、画幅和帧率"}
+          title="检查文件、时长、画幅和帧率"
           type="button"
         >
           {inspecting ? <CircleNotch className="spin" size={15} /> : <CheckCircle size={15} />}
@@ -534,8 +711,8 @@ function AudioInspector({
   audio,
   background,
   busy,
-  dirty,
   duration,
+  hasCandidateAudio,
   onBackgroundChange,
   onChange,
   onDeleteBackground,
@@ -544,25 +721,25 @@ function AudioInspector({
   return (
     <div className="timeline-inspector-form">
       <div className="timeline-inspector-heading">
-        <div><small>全局轨道</small><h4>原视频声音</h4></div>
+        <div><small>A1 主音轨</small><h4>分镜声音</h4></div>
         <label className="timeline-toggle">
           <input checked={audio.enabled} onChange={(event) => onChange({
             enabled: event.target.checked,
             strategy: event.target.checked && audio.strategy === "muted"
-              ? "continuous_source_track"
+              ? "per_shot"
               : audio.strategy,
-          })} disabled={!audio.source_audio_url} type="checkbox" />
+          })} disabled={!audio.source_audio_url && !hasCandidateAudio} type="checkbox" />
           <span>{audio.enabled ? "已启用" : "已静音"}</span>
         </label>
       </div>
       <label className="timeline-field">
-        <span>映射策略</span>
-        <select disabled={!audio.source_audio_url} value={audio.enabled ? audio.strategy : "muted"} onChange={(event) => onChange({ strategy: event.target.value, enabled: event.target.value !== "muted" })}>
-          {audio.source_audio_url && <option value="continuous_source_track">连续原音轨</option>}
-          {audio.source_audio_url && <option value="per_shot">逐片段映射</option>}
+        <span>主音轨策略</span>
+        <select disabled={!audio.source_audio_url && !hasCandidateAudio} value={audio.enabled ? audio.strategy : "muted"} onChange={(event) => onChange({ strategy: event.target.value, enabled: event.target.value !== "muted" })}>
+          {audio.source_audio_url && !hasCandidateAudio && <option value="continuous_source_track">连续原音轨</option>}
+          {(audio.source_audio_url || hasCandidateAudio) && <option value="per_shot">按分镜声音来源</option>}
           <option value="muted">全局静音</option>
         </select>
-        <em>{audio.source_audio_url ? "声音来自被分析的源视频，不使用生成候选自带音频。" : "当前分析没有可用原音轨。"}</em>
+        <em>{audio.source_audio_url || hasCandidateAudio ? "每个分镜可独立选择原音频、候选新音频或静音。" : "当前没有可用的分镜音频。"}</em>
       </label>
       <label className="timeline-field">
         <span>全局音量 · {Math.round(audio.volume * 100)}%</span>
@@ -590,11 +767,11 @@ function AudioInspector({
       {audio.enabled && audio.linked_to_video === false && (
         <div className="timeline-field-pair">
           <label>
-            <span>原音开始</span>
+            <span>主音轨开始</span>
             <div><input max={(audio.timeline_end_seconds ?? duration) - 0.1} min="0" onChange={(event) => onChange({ timeline_start_seconds: Number(event.target.value) })} step="0.05" type="number" value={audio.timeline_start_seconds || 0} /><small>秒</small></div>
           </label>
           <label>
-            <span>原音结束</span>
+            <span>主音轨结束</span>
             <div><input max={duration} min={(audio.timeline_start_seconds || 0) + 0.1} onChange={(event) => onChange({ timeline_end_seconds: Number(event.target.value) })} step="0.05" type="number" value={audio.timeline_end_seconds ?? duration} /><small>秒</small></div>
           </label>
         </div>
@@ -615,7 +792,7 @@ function AudioInspector({
       <label className="timeline-audio-upload secondary-button compact">
         <input
           accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,.mp3,.wav,.m4a,.aac,.ogg,.flac"
-          disabled={busy || dirty}
+          disabled={busy}
           onChange={(event) => {
             const file = event.target.files?.[0];
             if (file) onUploadBackground(file);
@@ -679,7 +856,6 @@ function AudioInspector({
           </div>
         </>
       )}
-      {dirty && <em className="timeline-audio-help">请先保存当前修改，再上传或替换音频。</em>}
     </div>
   );
 }
@@ -734,10 +910,16 @@ export function VideoEditorWorkspace({
   const [redoStack, setRedoStack] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [autosaveState, setAutosaveState] = useState("saved");
   const [error, setError] = useState("");
   const timelineRef = useRef(timeline);
+  const savedSnapshotRef = useRef(savedSnapshot);
   const gestureSnapshotRef = useRef(null);
+  const autosaveTimerRef = useRef(null);
+  const saveInFlightRef = useRef(null);
+  const projectIdRef = useRef(project.id);
   timelineRef.current = timeline;
+  projectIdRef.current = project.id;
   const dirty = Boolean(timeline && editableTimelineSnapshot(timeline) !== savedSnapshot);
   const selectedClip = useMemo(
     () => timeline?.clips.find((clip) => clip.id === selectedClipId) || timeline?.clips[0] || null,
@@ -759,6 +941,12 @@ export function VideoEditorWorkspace({
     [playheadSeconds, timeline],
   );
 
+  function markTimelineSnapshotSaved(nextTimeline) {
+    const snapshot = editableTimelineSnapshot(nextTimeline);
+    savedSnapshotRef.current = snapshot;
+    setSavedSnapshot(snapshot);
+  }
+
   function rememberSnapshot(snapshot) {
     if (!snapshot) return;
     setUndoStack((current) => [
@@ -776,6 +964,8 @@ export function VideoEditorWorkspace({
     if (record) rememberSnapshot(current);
     timelineRef.current = next;
     setTimeline(next);
+    setError("");
+    setAutosaveState(saveInFlightRef.current ? "saving" : "dirty");
   }
 
   function beginTimelineGesture() {
@@ -806,6 +996,8 @@ export function VideoEditorWorkspace({
     ]);
     timelineRef.current = cloneTimelineDraft(previous);
     setTimeline(timelineRef.current);
+    setError("");
+    setAutosaveState(saveInFlightRef.current ? "saving" : "dirty");
   }
 
   function redoTimelineEdit() {
@@ -818,11 +1010,15 @@ export function VideoEditorWorkspace({
     ]);
     timelineRef.current = cloneTimelineDraft(next);
     setTimeline(timelineRef.current);
+    setError("");
+    setAutosaveState(saveInFlightRef.current ? "saving" : "dirty");
   }
 
   async function loadTimeline() {
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
     setLoading(true);
     setError("");
+    setAutosaveState("saved");
     try {
       const nextTimeline = await request(`/productions/${project.id}/timeline`);
       const [nextRevisions, nextValidation] = await Promise.all([
@@ -831,7 +1027,7 @@ export function VideoEditorWorkspace({
       ]);
       timelineRef.current = nextTimeline;
       setTimeline(nextTimeline);
-      setSavedSnapshot(editableTimelineSnapshot(nextTimeline));
+      markTimelineSnapshotSaved(nextTimeline);
       setSelectedClipId((current) => (
         nextTimeline.clips.some((clip) => clip.id === current)
           ? current
@@ -892,6 +1088,38 @@ export function VideoEditorWorkspace({
     if (!timeline) return;
     setPlayheadSeconds((current) => Math.min(current, timeline.duration_seconds));
   }, [timeline?.duration_seconds]);
+
+  useEffect(() => {
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = null;
+    if (!timeline || loading) return undefined;
+    if (!dirty) {
+      if (!saveInFlightRef.current) setAutosaveState("saved");
+      return undefined;
+    }
+    autosaveTimerRef.current = window.setTimeout(() => {
+      autosaveTimerRef.current = null;
+      flushTimelineSave().catch(() => {});
+    }, TIMELINE_AUTOSAVE_DELAY_MS);
+    return () => {
+      if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    };
+  }, [dirty, loading, project.id, timeline]);
+
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const warnBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [dirty]);
+
+  useEffect(() => () => {
+    if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+  }, []);
 
   function updateClip(values) {
     if (!selectedClip) return;
@@ -992,68 +1220,101 @@ export function VideoEditorWorkspace({
     setSelectedTrack("");
   }
 
-  async function saveTimeline() {
-    if (!timeline || !dirty) return;
-    const lastEnabledClipId = timeline.clips.filter((clip) => clip.enabled).at(-1)?.id;
-    setBusy(true);
-    setError("");
-    try {
-      const saved = await request(`/productions/${project.id}/timeline`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_revision_id: timeline.revision_id,
-          clip_order: timeline.clips.map((clip) => clip.id),
-          clip_updates: timeline.clips.map((clip) => ({
-            clip_id: clip.id,
-            enabled: clip.enabled,
-            trim_in_seconds: Number(clip.trim_in_seconds),
-            trim_out_seconds: Number(clip.trim_out_seconds),
-            cover_timestamp_seconds: clip.cover_timestamp_seconds == null
-              ? null
-              : Number(clip.cover_timestamp_seconds),
-            timeline_duration_seconds: Number(clip.timeline_duration_seconds),
-            audio_mode: clip.audio_mode,
-            audio_volume: Number(clip.audio_volume),
-            transition_after: clip.id === lastEnabledClipId
-              ? { kind: "none", duration_seconds: 0 }
-              : clip.transition_after,
-          })),
-          audio_track: timeline.audio_track,
-          background_audio_track: timeline.background_audio_track,
-          subtitle_cues: timeline.subtitle_cues,
-          summary: "从剪辑工作台更新时间线",
-        }),
-      });
-      const [nextValidation, nextRevisions] = await Promise.all([
-        request(`/productions/${project.id}/timeline/validation`),
-        request(`/productions/${project.id}/timeline/revisions`),
-      ]);
-      timelineRef.current = saved;
-      setTimeline(saved);
-      setSavedSnapshot(editableTimelineSnapshot(saved));
-      setValidation(nextValidation);
-      setRevisions(nextRevisions.items || []);
-      setRenderJob(null);
-      setUndoStack([]);
-      setRedoStack([]);
-      onNotice({ type: "success", title: "时间线已保存", message: `已创建版本 ${saved.revision_number}` });
-    } catch (requestError) {
-      setError(requestError.message);
-      onNotice({ type: "error", title: "时间线保存失败", message: requestError.message });
-    } finally {
-      setBusy(false);
+  function persistCurrentTimeline() {
+    if (saveInFlightRef.current) return saveInFlightRef.current;
+    const draft = timelineRef.current;
+    const sentSnapshot = editableTimelineSnapshot(draft);
+    if (!draft || sentSnapshot === savedSnapshotRef.current) {
+      setAutosaveState("saved");
+      return Promise.resolve(draft);
     }
+
+    const projectId = project.id;
+    setAutosaveState("saving");
+    setError("");
+    const saveTask = (async () => {
+      try {
+        const saved = await request(`/productions/${projectId}/timeline`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(timelineUpdatePayload(draft)),
+        });
+        if (projectIdRef.current !== projectId) return timelineRef.current;
+
+        const current = timelineRef.current;
+        const currentSnapshot = editableTimelineSnapshot(current);
+        const nextTimeline = currentSnapshot === sentSnapshot
+          ? saved
+          : {
+            ...current,
+            revision_id: saved.revision_id,
+            revision_number: saved.revision_number,
+            updated_at: saved.updated_at,
+            last_preview_job_id: null,
+            last_export_job_id: null,
+          };
+        const persistedSnapshot = editableTimelineSnapshot(saved);
+        timelineRef.current = nextTimeline;
+        savedSnapshotRef.current = persistedSnapshot;
+        setTimeline(nextTimeline);
+        setSavedSnapshot(persistedSnapshot);
+        setAutosaveState(
+          editableTimelineSnapshot(nextTimeline) === persistedSnapshot ? "saved" : "dirty",
+        );
+        setRenderJob(null);
+
+        Promise.all([
+          request(`/productions/${projectId}/timeline/validation`),
+          request(`/productions/${projectId}/timeline/revisions`),
+        ]).then(([nextValidation, nextRevisions]) => {
+          if (projectIdRef.current !== projectId) return;
+          setValidation(nextValidation);
+          setRevisions(nextRevisions.items || []);
+        }).catch(() => {
+          // The timeline is already saved; metadata will refresh on the next save or page load.
+        });
+        return nextTimeline;
+      } catch (requestError) {
+        if (projectIdRef.current === projectId) {
+          setAutosaveState("error");
+          setError(requestError.message);
+          onNotice({ type: "error", title: "时间线自动保存失败", message: requestError.message });
+        }
+        throw requestError;
+      } finally {
+        saveInFlightRef.current = null;
+      }
+    })();
+    saveInFlightRef.current = saveTask;
+    return saveTask;
+  }
+
+  async function flushTimelineSave() {
+    if (autosaveTimerRef.current) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (saveInFlightRef.current) await saveInFlightRef.current;
+      const current = timelineRef.current;
+      if (!current || editableTimelineSnapshot(current) === savedSnapshotRef.current) {
+        setAutosaveState("saved");
+        return current;
+      }
+      await persistCurrentTimeline();
+    }
+    throw new Error("时间线仍在持续修改，请稍后重试");
   }
 
   async function uploadBackgroundAudio(file) {
-    if (!timeline || dirty || !file) return;
+    if (!timelineRef.current || !file) return;
     setBusy(true);
     setError("");
     try {
+      const savedTimeline = await flushTimelineSave();
       const durationSeconds = await readAudioFileDuration(file);
       const form = new FormData();
-      form.append("expected_revision_id", timeline.revision_id);
+      form.append("expected_revision_id", savedTimeline.revision_id);
       if (durationSeconds) form.append("duration_seconds", String(durationSeconds));
       form.append("file", file);
       const updated = await request(
@@ -1063,7 +1324,8 @@ export function VideoEditorWorkspace({
       const nextRevisions = await request(`/productions/${project.id}/timeline/revisions`);
       timelineRef.current = updated;
       setTimeline(updated);
-      setSavedSnapshot(editableTimelineSnapshot(updated));
+      markTimelineSnapshotSaved(updated);
+      setAutosaveState("saved");
       setRevisions(nextRevisions.items || []);
       setRenderJob(null);
       setUndoStack([]);
@@ -1078,16 +1340,19 @@ export function VideoEditorWorkspace({
   }
 
   async function inspectSelectedClip() {
-    if (!timeline || !selectedClip || dirty) return;
+    if (!timelineRef.current || !selectedClip) return;
+    const selectedClipIdForInspection = selectedClip.id;
+    const selectedShotIndex = selectedClip.shot_index;
     setBusy(true);
     setError("");
     try {
+      const savedTimeline = await flushTimelineSave();
       const inspected = await request(
-        `/productions/${project.id}/timeline/clips/${selectedClip.id}/inspect`,
+        `/productions/${project.id}/timeline/clips/${selectedClipIdForInspection}/inspect`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ expected_revision_id: timeline.revision_id }),
+          body: JSON.stringify({ expected_revision_id: savedTimeline.revision_id }),
         },
       );
       const [nextValidation, nextRevisions] = await Promise.all([
@@ -1096,16 +1361,17 @@ export function VideoEditorWorkspace({
       ]);
       timelineRef.current = inspected;
       setTimeline(inspected);
-      setSavedSnapshot(editableTimelineSnapshot(inspected));
+      markTimelineSnapshotSaved(inspected);
+      setAutosaveState("saved");
       setValidation(nextValidation);
       setRevisions(nextRevisions.items || []);
       setRenderJob(null);
       setUndoStack([]);
       setRedoStack([]);
-      const inspectedClip = inspected.clips.find((item) => item.id === selectedClip.id);
+      const inspectedClip = inspected.clips.find((item) => item.id === selectedClipIdForInspection);
       onNotice({
         type: inspectedClip?.quality_status === "passed" ? "success" : "warning",
-        title: `分镜 ${selectedClip.shot_index} 已完成基础质检`,
+        title: `分镜 ${selectedShotIndex} 已完成基础质检`,
         message: inspectedClip?.warning_messages?.[0] || "技术信息已更新。",
       });
     } catch (requestError) {
@@ -1117,14 +1383,15 @@ export function VideoEditorWorkspace({
   }
 
   async function generatePreview() {
-    if (!timeline || dirty) return;
+    if (!timelineRef.current) return;
     setBusy(true);
     setError("");
     try {
+      const savedTimeline = await flushTimelineSave();
       const job = await request(`/productions/${project.id}/timeline/preview-renders`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_revision_id: timeline.revision_id }),
+        body: JSON.stringify({ expected_revision_id: savedTimeline.revision_id }),
       });
       setRenderJob(job);
       onNotice({ type: "info", title: "低清预览已排队", message: "可以继续留在页面查看进度。" });
@@ -1148,18 +1415,20 @@ export function VideoEditorWorkspace({
   }
 
   async function restoreRevision(revision) {
-    if (!timeline || dirty || revision.id === timeline.revision_id) return;
+    if (!timelineRef.current || revision.id === timelineRef.current.revision_id) return;
     setBusy(true);
     setError("");
     try {
+      const savedTimeline = await flushTimelineSave();
       const restored = await request(`/productions/${project.id}/timeline/revisions/${revision.id}/restore`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_revision_id: timeline.revision_id }),
+        body: JSON.stringify({ expected_revision_id: savedTimeline.revision_id }),
       });
       timelineRef.current = restored;
       setTimeline(restored);
-      setSavedSnapshot(editableTimelineSnapshot(restored));
+      markTimelineSnapshotSaved(restored);
+      setAutosaveState("saved");
       setSelectedClipId(restored.clips[0]?.id || "");
       setSelectedCueId("");
       setSelectedTrack("");
@@ -1207,10 +1476,11 @@ export function VideoEditorWorkspace({
           <button className="secondary-button compact" onClick={() => setHistoryOpen((value) => !value)} type="button">
             <ClockCounterClockwise size={16} />版本 {timeline.revision_number}
           </button>
-          <button className="secondary-button compact" disabled={!dirty || busy} onClick={saveTimeline} type="button">
-            {busy && dirty ? <CircleNotch className="spin" size={16} /> : <FloppyDisk size={16} />}保存时间线
-          </button>
-          <button className="primary-button compact" disabled={dirty || busy || ACTIVE_RENDER_STATUSES.has(renderJob?.status)} onClick={generatePreview} type="button">
+          <AutosaveStatus
+            onRetry={() => flushTimelineSave().catch(() => {})}
+            state={autosaveState}
+          />
+          <button className="primary-button compact" disabled={busy || ACTIVE_RENDER_STATUSES.has(renderJob?.status)} onClick={generatePreview} type="button">
             <Play size={16} weight="fill" />{renderJob?.status === "succeeded" ? "重新生成合成预览" : "生成合成预览"}
           </button>
         </div>
@@ -1221,7 +1491,7 @@ export function VideoEditorWorkspace({
           <div><strong>时间线版本</strong><small>恢复历史会创建新版本，不覆盖旧快照。</small></div>
           <div className="timeline-history-list">
             {[...revisions].reverse().map((revision) => (
-              <button disabled={dirty || busy || revision.id === timeline.revision_id} key={revision.id} onClick={() => restoreRevision(revision)} type="button">
+              <button disabled={busy || revision.id === timeline.revision_id} key={revision.id} onClick={() => restoreRevision(revision)} type="button">
                 <span><strong>v{revision.revision_number}</strong><small>{revisionChangeLabel(revision.change_kind)}</small></span>
                 <em>{revision.id === timeline.revision_id ? "当前" : "恢复"}</em>
               </button>
@@ -1230,10 +1500,10 @@ export function VideoEditorWorkspace({
         </div>
       )}
 
-      {(error || dirty || validation?.warnings?.length > 0) && (
-        <div className={`timeline-context-notice ${error ? "error" : dirty ? "warning" : "info"}`}>
+      {(error || validation?.warnings?.length > 0) && (
+        <div className={`timeline-context-notice ${error ? "error" : "info"}`}>
           <WarningCircle size={17} />
-          <span>{error || (dirty ? "有未保存修改；保存后才能生成新预览。" : validation.warnings[0])}</span>
+          <span>{error || validation.warnings[0]}</span>
         </div>
       )}
 
@@ -1243,7 +1513,7 @@ export function VideoEditorWorkspace({
             <div className="timeline-preview-heading">
               <div>
                 <strong>{compositePreviewUrl ? "低清合成预览" : `分镜 ${playheadClip?.shot_index || "-"} 实时预览`}</strong>
-                <small>{compositePreviewUrl ? "已包含原音轨映射、字幕轨和转场" : "画面跟随播放轴；生成预览后可检查完整转场与混音"}</small>
+                <small>{compositePreviewUrl ? "已包含分镜音频、字幕轨和转场" : "画面跟随播放轴；生成预览后可检查完整转场与混音"}</small>
               </div>
               {compositePreviewUrl && <span><CheckCircle size={15} weight="fill" />预览就绪</span>}
               {renderJob?.status === "failed" && <span className="failed"><WarningCircle size={15} />生成失败</span>}
@@ -1280,11 +1550,6 @@ export function VideoEditorWorkspace({
               onSelectClip={(clipId) => { setSelectedClipId(clipId); setInspectorTab("clip"); }}
               onSelectCue={(cueId) => { setSelectedCueId(cueId); setInspectorTab("subtitles"); }}
               playheadSeconds={playheadSeconds}
-              previewFrameUrl={(clip, frameIndex, frameCount) => resolveUrl(
-                `/api/v1/productions/${project.id}/timeline/clips/${clip.id}/preview-frames/${frameIndex}`
-                + `?count=${frameCount}&v=${encodeURIComponent(`${clip.candidate_id}:${clip.trim_in_seconds}:${clip.trim_out_seconds}`)}`,
-              )}
-              resolveUrl={resolveUrl}
               selectedClipId={selectedClip?.id}
               selectedCueId={selectedCueId}
               selectedTrack={selectedTrack}
@@ -1303,7 +1568,6 @@ export function VideoEditorWorkspace({
             <ClipInspector
               clip={selectedClip}
               clips={timeline.clips}
-              dirty={dirty}
               inspecting={busy}
               onChange={updateClip}
               onInspect={inspectSelectedClip}
@@ -1315,8 +1579,10 @@ export function VideoEditorWorkspace({
               audio={timeline.audio_track}
               background={timeline.background_audio_track}
               busy={busy}
-              dirty={dirty}
               duration={timeline.duration_seconds}
+              hasCandidateAudio={timeline.clips.some(
+                (clip) => clip.enabled && clip.candidate_audio_available,
+              )}
               onBackgroundChange={updateBackgroundAudio}
               onChange={updateAudio}
               onDeleteBackground={deleteBackgroundAudio}

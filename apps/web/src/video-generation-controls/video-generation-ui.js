@@ -99,11 +99,24 @@ export function videoCandidateCountOptions(model) {
   return Array.from({ length: maximum }, (_, index) => index + 1);
 }
 
-export function videoOutputSummary({ aspectRatio, candidateCount, duration, resolution }) {
+export function videoAudioStrategyLabel(strategy) {
+  if (strategy === "generate_native") return "新音频";
+  if (strategy === "muted") return "静音";
+  return "原音频";
+}
+
+export function videoOutputSummary({
+  aspectRatio,
+  audioStrategy,
+  candidateCount,
+  duration,
+  resolution,
+}) {
   return [
     aspectRatio || "未设置画幅",
     resolution || "未设置分辨率",
     `${formatVideoDuration(duration)}秒`,
     `${Number(candidateCount) || 1}个`,
+    videoAudioStrategyLabel(audioStrategy),
   ].join(" · ");
 }

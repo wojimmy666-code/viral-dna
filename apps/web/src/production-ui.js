@@ -173,6 +173,28 @@ export function videoCandidatePlaybackUrl(candidate, enhancementPreview) {
   return candidate.content_url || "";
 }
 
+export function sourceRangePlaybackUrl(
+  candidate,
+  resolvedUrl,
+  fallbackStartSeconds = 0,
+  fallbackEndSeconds = null,
+) {
+  if (!resolvedUrl) return "";
+  const sourceRange = candidate?.source_range;
+  const numerator = Number(sourceRange?.time_base_numerator || 1);
+  const denominator = Number(sourceRange?.time_base_denominator || 1_000_000);
+  const start = sourceRange
+    ? Number(sourceRange.start_pts) * numerator / denominator
+    : Number(fallbackStartSeconds || 0);
+  const end = sourceRange
+    ? Number(sourceRange.end_pts) * numerator / denominator
+    : Number(fallbackEndSeconds);
+  const baseUrl = String(resolvedUrl).split("#", 1)[0];
+  return Number.isFinite(end) && end > start
+    ? `${baseUrl}#t=${start.toFixed(6)},${end.toFixed(6)}`
+    : baseUrl;
+}
+
 export function duplicateVisualBeatSourceIds(beats = []) {
   const firstByFingerprint = new Map();
   const duplicates = new Set();

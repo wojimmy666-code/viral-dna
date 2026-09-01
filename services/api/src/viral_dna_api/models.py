@@ -471,6 +471,13 @@ class ApprovalDecision(StrEnum):
 
 class VideoClipAudioMode(StrEnum):
     SOURCE = "source"
+    CANDIDATE = "candidate"
+    MUTED = "muted"
+
+
+class VideoGenerationAudioStrategy(StrEnum):
+    REUSE_SOURCE = "reuse_source"
+    GENERATE_NATIVE = "generate_native"
     MUTED = "muted"
 
 
@@ -1106,6 +1113,35 @@ class Video(BaseModel):
     video_codec: str | None = None
     audio_codec: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class SourceVideoRangeReference(BaseModel):
+    """A stable half-open range on the original source-video timeline."""
+
+    source_video_id: UUID
+    source_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    start_pts: int = Field(ge=0)
+    end_pts: int = Field(gt=0)
+    time_base_numerator: Literal[1] = 1
+    time_base_denominator: Literal[1_000_000] = 1_000_000
+
+    @model_validator(mode="after")
+    def validate_range(self) -> SourceVideoRangeReference:
+        if self.end_pts <= self.start_pts:
+            raise ValueError("原视频范围结束位置必须晚于开始位置")
+        return self
+
+    @property
+    def start_seconds(self) -> float:
+        return self.start_pts * self.time_base_numerator / self.time_base_denominator
+
+    @property
+    def end_seconds(self) -> float:
+        return self.end_pts * self.time_base_numerator / self.time_base_denominator
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.end_seconds - self.start_seconds
 
 
 class AnalysisCreate(BaseModel):
@@ -2444,6 +2480,9 @@ class GenerationCandidate(BaseModel):
     duration_seconds: float | None = Field(default=None, gt=0)
     sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     metadata_relative_path: str = Field(min_length=1, max_length=2048)
+    source_range: SourceVideoRangeReference | None = None
+    audio_strategy: VideoGenerationAudioStrategy | None = None
+    native_audio_present: bool = False
     quality_report: dict[str, Any] = Field(default_factory=dict)
     status: GenerationCandidateStatus = GenerationCandidateStatus.READY
     archived_at: datetime | None = None
@@ -2459,6 +2498,21 @@ class GenerationCandidate(BaseModel):
     @classmethod
     def validate_candidate_paths(cls, value: str | None) -> str | None:
         return _normalize_workspace_relative_path(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_source_range_candidate(self) -> GenerationCandidate:
+        if self.source_range is None:
+            return self
+        if self.kind != GenerationKind.VIDEO:
+            raise ValueError("原视频时间范围只能用于视频候选")
+        if self.thumbnail_relative_path is not None:
+            raise ValueError("原视频时间范围不生成分镜封面")
+        if (
+            self.duration_seconds is not None
+            and abs(self.duration_seconds - self.source_range.duration_seconds) > 0.001
+        ):
+            raise ValueError("原视频时间范围与候选时长不一致")
+        return self
 
 
 class VideoMappedTextCue(BaseModel):
@@ -2498,9 +2552,11 @@ class VideoClipPreparation(BaseModel):
     audio_mode: VideoClipAudioMode = VideoClipAudioMode.SOURCE
     audio_mapping_strategy: Literal[
         "preserve_source_timeline",
+        "candidate_native_audio",
         "muted",
         "source_audio_unavailable",
     ]
+    candidate_audio_available: bool = False
     source_audio_url: str | None = Field(default=None, max_length=2048)
     source_audio_start_seconds: float = Field(ge=0)
     source_audio_end_seconds: float = Field(gt=0)
@@ -3126,6 +3182,7 @@ class VideoGenerationCreate(BaseModel):
     )
     resolution: str | None = Field(default=None, pattern=r"^(?:[0-9]{3,4}P|2K)$")
     duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
+    audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE
     allow_unknown_cost: bool = False
     generation_intent: Literal["standard", "new_variation"] = "standard"
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
@@ -3276,6 +3333,7 @@ class ShotVideoGenerationDraft(BaseModel):
     resolution: str = Field(pattern=r"^(?:[0-9]{3,4}P|2K)$")
     duration_seconds: float = Field(ge=0.1, le=60)
     candidate_count: int = Field(default=1, ge=1, le=4)
+    audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE
     input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
     video_prompt: str = Field(default="", max_length=8000)
     video_prompt_mentions: list[VideoPromptMention] = Field(
@@ -3335,6 +3393,7 @@ class ShotVideoGenerationDraftUpdate(BaseModel):
     resolution: str = Field(pattern=r"^(?:[0-9]{3,4}P|2K)$")
     duration_seconds: float = Field(ge=0.1, le=60)
     candidate_count: int = Field(default=1, ge=1, le=4)
+    audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE
     input_plan: VideoGenerationInputPlan = Field(default_factory=VideoGenerationInputPlan)
     video_prompt: str = Field(default="", max_length=8000)
     video_prompt_mentions: list[VideoPromptMention] = Field(
@@ -3445,6 +3504,7 @@ class VideoClipPreparationResponse(BaseModel):
     audio_mode: VideoClipAudioMode
     audio_mapping_strategy: str
     source_audio_available: bool
+    candidate_audio_available: bool = False
     source_audio_start_seconds: float
     source_audio_end_seconds: float
     transcript_cues: list[VideoMappedTextCue] = Field(default_factory=list)
@@ -3467,13 +3527,16 @@ class GenerationCandidateResponse(BaseModel):
     height: int | None = None
     duration_seconds: float | None = None
     sha256: str
+    source_range: SourceVideoRangeReference | None = None
+    audio_strategy: VideoGenerationAudioStrategy | None = None
+    native_audio_present: bool = False
     quality_report: dict[str, Any] = Field(default_factory=dict)
     status: GenerationCandidateStatus
     archived_at: datetime | None = None
     archived_by_account_id: UUID | None = None
     archive_reason: GenerationCandidateArchiveReason | None = None
     content_url: str
-    thumbnail_url: str
+    thumbnail_url: str | None = None
     created_at: datetime
 
 
@@ -3586,8 +3649,7 @@ class EditingHandoffClip(BaseModel):
     shot_index: int = Field(ge=1)
     candidate_id: UUID
     candidate_content_url: str
-    cover_url: str
-    cover_timestamp_seconds: float | None = Field(default=None, ge=0)
+    source_range: SourceVideoRangeReference | None = None
     timeline_start_seconds: float = Field(ge=0)
     timeline_end_seconds: float = Field(gt=0)
     timeline_duration_seconds: float = Field(gt=0)
@@ -3595,6 +3657,7 @@ class EditingHandoffClip(BaseModel):
     trim_out_seconds: float = Field(gt=0)
     video_playback_rate: float = Field(gt=0)
     audio_mode: VideoClipAudioMode
+    candidate_audio_available: bool = False
     source_audio_start_seconds: float = Field(ge=0)
     source_audio_end_seconds: float = Field(gt=0)
     transcript_cues: list[VideoMappedTextCue] = Field(default_factory=list)
@@ -3606,7 +3669,7 @@ class EditingHandoffClip(BaseModel):
 
 
 class EditingHandoffManifest(BaseModel):
-    schema_version: Literal["viral-dna-editing-handoff/v1"] = "viral-dna-editing-handoff/v1"
+    schema_version: Literal["viral-dna-editing-handoff/v2"] = "viral-dna-editing-handoff/v2"
     project_id: UUID
     revision_id: UUID
     source_analysis_id: UUID
@@ -3656,9 +3719,7 @@ class TimelineClip(BaseModel):
     shot_index: int = Field(ge=1)
     candidate_id: UUID
     candidate_content_url: str = Field(min_length=1, max_length=2048)
-    cover_url: str = Field(min_length=1, max_length=2048)
-    cover_relative_path: str | None = Field(default=None, max_length=2048)
-    cover_timestamp_seconds: float | None = Field(default=None, ge=0)
+    source_range: SourceVideoRangeReference | None = None
     order: int = Field(ge=1)
     enabled: bool = True
     candidate_duration_seconds: float = Field(gt=0)
@@ -3669,6 +3730,7 @@ class TimelineClip(BaseModel):
     timeline_end_seconds: float = Field(gt=0)
     timeline_duration_seconds: float = Field(gt=0)
     audio_mode: VideoClipAudioMode = VideoClipAudioMode.SOURCE
+    candidate_audio_available: bool = False
     audio_volume: float = Field(default=1, ge=0, le=2)
     source_audio_start_seconds: float = Field(ge=0)
     source_audio_end_seconds: float = Field(gt=0)
@@ -3678,26 +3740,21 @@ class TimelineClip(BaseModel):
     blocker_messages: list[str] = Field(default_factory=list, max_length=20)
     warning_messages: list[str] = Field(default_factory=list)
 
-    @field_validator("cover_relative_path")
-    @classmethod
-    def validate_cover_relative_path(cls, value: str | None) -> str | None:
-        return _normalize_workspace_relative_path(value) if value is not None else None
-
     @model_validator(mode="after")
     def validate_clip_ranges(self) -> TimelineClip:
         if self.trim_out_seconds <= self.trim_in_seconds:
             raise ValueError("片段出点必须晚于入点")
         if self.trim_out_seconds > self.candidate_duration_seconds + 0.05:
             raise ValueError("片段出点不能超过候选视频时长")
-        if (
-            self.cover_timestamp_seconds is not None
-            and not self.trim_in_seconds <= self.cover_timestamp_seconds <= self.trim_out_seconds
-        ):
-            raise ValueError("封面帧必须位于当前片段裁剪范围内")
         if self.timeline_end_seconds <= self.timeline_start_seconds:
             raise ValueError("时间线片段结束时间必须晚于开始时间")
         if self.source_audio_end_seconds <= self.source_audio_start_seconds:
             raise ValueError("原音轨结束时间必须晚于开始时间")
+        if (
+            self.source_range is not None
+            and abs(self.candidate_duration_seconds - self.source_range.duration_seconds) > 0.001
+        ):
+            raise ValueError("原视频范围与时间线候选时长不一致")
         return self
 
 
@@ -3743,7 +3800,7 @@ class TimelineAudioTrack(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> TimelineAudioTrack:
-        if self.strategy != "muted" and not self.source_audio_url:
+        if self.strategy == "continuous_source_track" and not self.source_audio_url:
             raise ValueError("启用原音轨时必须存在音频来源")
         if (
             self.source_trim_out_seconds is not None
@@ -3806,7 +3863,7 @@ class TimelineBackgroundAudioTrack(BaseModel):
 
 
 class ProductionTimeline(BaseModel):
-    schema_version: Literal["viral-dna-timeline/v1"] = "viral-dna-timeline/v1"
+    schema_version: Literal["viral-dna-timeline/v2"] = "viral-dna-timeline/v2"
     project_id: UUID
     source_handoff_revision_id: UUID
     revision_id: UUID
@@ -3835,7 +3892,6 @@ class TimelineClipUpdate(BaseModel):
     enabled: bool | None = None
     trim_in_seconds: float | None = Field(default=None, ge=0)
     trim_out_seconds: float | None = Field(default=None, gt=0)
-    cover_timestamp_seconds: float | None = Field(default=None, ge=0)
     timeline_duration_seconds: float | None = Field(default=None, gt=0, le=300)
     audio_mode: VideoClipAudioMode | None = None
     audio_volume: float | None = Field(default=None, ge=0, le=2)

@@ -97,7 +97,7 @@ def build_seedance_request(request: ProviderVideoRequest) -> dict[str, object]:
         "duration": round(request.duration_seconds),
         "ratio": request.aspect_ratio,
         "resolution": request.resolution.lower(),
-        "generate_audio": False,
+        "generate_audio": request.generate_audio,
         "watermark": False,
     }
     if request.seed is not None:

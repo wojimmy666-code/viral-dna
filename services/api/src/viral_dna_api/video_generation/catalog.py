@@ -110,6 +110,7 @@ def _capability(
     reference_route: VideoReferenceRouteCapability | None = None,
     text_to_video: bool = False,
     reference_video: bool = False,
+    native_audio: bool = False,
 ) -> VideoGenerationCapability:
     resolved_route = reference_route or VideoReferenceRouteCapability()
     return VideoGenerationCapability(
@@ -135,7 +136,7 @@ def _capability(
         supported_durations=durations,
         maximum_width=maximum_width,
         maximum_height=maximum_height,
-        native_audio=False,
+        native_audio=native_audio,
         supports_negative_prompt=True,
         supports_seed=seed,
         supports_camera_constraints=True,
@@ -320,6 +321,7 @@ _MODELS = (
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             reference_route=SEEDANCE_MANAGED_ROUTE,
             text_to_video=True,
+            native_audio=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",
@@ -345,6 +347,7 @@ _MODELS = (
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             reference_route=SEEDANCE_MANAGED_ROUTE,
             text_to_video=True,
+            native_audio=True,
         ),
         pricing={
             "kind": "provider_usage_tokens",

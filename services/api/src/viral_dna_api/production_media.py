@@ -128,7 +128,7 @@ class ProductionVideoInspector:
     async def inspect(
         self,
         source_path: Path,
-        cover_path: Path,
+        cover_path: Path | None,
         *,
         cover_timestamp_seconds: float,
         expected_width: int | None,
@@ -147,11 +147,12 @@ class ProductionVideoInspector:
             cover_timestamp_seconds,
             metadata.duration_seconds,
         )
-        try:
-            await asyncio.to_thread(cover_path.parent.mkdir, parents=True, exist_ok=True)
-            await self._extract_cover(source_path, cover_path, cover_timestamp)
-        except (OSError, ProductionVideoInspectionError):
-            raise
+        if cover_path is not None:
+            try:
+                await asyncio.to_thread(cover_path.parent.mkdir, parents=True, exist_ok=True)
+                await self._extract_cover(source_path, cover_path, cover_timestamp)
+            except (OSError, ProductionVideoInspectionError):
+                raise
 
         checks: dict[str, dict[str, Any]] = {
             "file_integrity": {

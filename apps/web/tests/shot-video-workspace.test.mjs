@@ -253,6 +253,13 @@ test("uses a compact generation command bar with upward anchored model and setti
   assert.match(anchoredPopoverSource, /contains\(event\.target\)/);
   assert.doesNotMatch(anchoredPopoverSource, /Math\.max\(180, placeAbove/);
   assert.match(settingsPopoverSource, /className="video-settings-scroll-region"/);
+  assert.match(settingsPopoverSource, /<legend>分镜声音<\/legend>/);
+  assert.match(settingsPopoverSource, /onAudioStrategyChange\("reuse_source"\)/);
+  assert.match(settingsPopoverSource, /onAudioStrategyChange\("generate_native"\)/);
+  assert.match(settingsPopoverSource, /onAudioStrategyChange\("muted"\)/);
+  assert.match(settingsPopoverSource, /capabilities\?\.native_audio/);
+  assert.match(workspaceSource, /sourceAudioRef/);
+  assert.match(workspaceSource, /candidate\.native_audio_present/);
   assert.match(generationControlsStyles, /\.video-settings-scroll-region\s*\{[\s\S]*overflow-y:\s*auto/);
   assert.match(generationControlsStyles, /\.video-settings-footer\s*\{[\s\S]*flex:\s*0 0 auto/);
   assert.match(modelPopoverSource, /尚未配置/);
@@ -264,10 +271,11 @@ test("uses a compact generation command bar with upward anchored model and setti
 test("derives compact output summaries and candidate choices from model capabilities", () => {
   assert.equal(videoOutputSummary({
     aspectRatio: "9:16",
+    audioStrategy: "reuse_source",
     candidateCount: 2,
     duration: 5,
     resolution: "720P",
-  }), "9:16 · 720P · 5秒 · 2个");
+  }), "9:16 · 720P · 5秒 · 2个 · 原音频");
   assert.deepEqual(
     videoCandidateCountOptions({ capabilities: { max_candidates: 3 } }),
     [1, 2, 3],
@@ -342,6 +350,7 @@ test("persists each shot video model instead of reapplying the global default", 
     resolution: "1080P",
     duration_seconds: 5,
     candidate_count: 2,
+    audio_strategy: "generate_native",
     draft_version: 3,
   };
 
@@ -350,11 +359,13 @@ test("persists each shot video model instead of reapplying the global default", 
   assert.equal(restored.resolution, "1080P");
   assert.equal(restored.durationSeconds, "5");
   assert.equal(restored.candidateCount, 2);
+  assert.equal(restored.audioStrategy, "generate_native");
   assert.deepEqual(videoDraftParameters(restored), {
     model_alias: "seedance_2_0_fast",
     resolution: "1080P",
     duration_seconds: 5,
     candidate_count: 2,
+    audio_strategy: "generate_native",
     input_plan: {
       schema_version: "viral-dna-video-input-plan/v1",
       sources: [],
@@ -649,6 +660,7 @@ test("composes optional video inputs without exposing audio as a generation inpu
   assert.doesNotMatch(workspaceSource, /shot-video-foundation-note/);
   assert.doesNotMatch(workspaceSource, /可组合生成输入/);
   assert.match(productionWorkflowSource, /input_plan:\s*\{/);
+  assert.match(productionWorkflowSource, /audio_strategy:\s*videoDraft\.audioStrategy/);
   assert.match(productionWorkflowSource, /sources:\s*Array\.from/);
 });
 
@@ -1057,11 +1069,11 @@ test("advances after approval and keeps editing controls in the video editor mod
   assert.match(workspaceSource, /进入视频剪辑/);
   assert.match(videoEditorSource, /trim_in_seconds/);
   assert.match(videoEditorSource, /trim_out_seconds/);
-  assert.match(videoEditorSource, /cover_timestamp_seconds/);
+  assert.doesNotMatch(videoEditorSource, /cover_timestamp_seconds|preview-frames/);
   assert.match(videoEditorSource, /audio_mode/);
   assert.match(videoEditorSource, /background_audio_track/);
   assert.match(timelineCanvasSource, /V1 视频/);
-  assert.match(timelineCanvasSource, /A1 原音/);
+  assert.match(timelineCanvasSource, /A1 分镜音频/);
   assert.match(timelineCanvasSource, /A2 附加/);
   assert.match(timelineCanvasSource, /T1 字幕/);
   assert.match(videoEditorSource, /timeline\/background-audio/);

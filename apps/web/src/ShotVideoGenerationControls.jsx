@@ -4,7 +4,6 @@ import {
   CircleNotch,
   MagicWand,
   Prohibit,
-  SpeakerSlash,
   VideoCamera,
   WarningCircle,
 } from "@phosphor-icons/react";
@@ -36,6 +35,7 @@ export function ShotVideoGenerationControls({
   modelCatalogError = "",
   modelCatalogStatus = "ready",
   onCancelRun,
+  onAudioStrategyChange,
   onCandidateCountChange,
   onDurationChange,
   onGenerate,
@@ -47,6 +47,7 @@ export function ShotVideoGenerationControls({
   project,
   providerOptions,
   selectedModel,
+  sourceAudioAvailable,
   supportedResolutions,
   videoDraft,
 }) {
@@ -70,6 +71,7 @@ export function ShotVideoGenerationControls({
   const providerReady = modelCatalog.providerReady;
   const outputSummary = videoOutputSummary({
     aspectRatio,
+    audioStrategy: videoDraft.audioStrategy,
     candidateCount,
     duration: durationNumber,
     resolution: videoDraft.resolution,
@@ -152,9 +154,6 @@ export function ShotVideoGenerationControls({
           type="button"
         >
           <span>{outputSummary}</span>
-          {!selectedModel?.capabilities?.native_audio && (
-            <SpeakerSlash aria-label="不生成原生音频" size={16} />
-          )}
           <CaretUp aria-hidden="true" size={16} />
         </button>
 
@@ -233,6 +232,8 @@ export function ShotVideoGenerationControls({
         durationScaleValues={durationScaleValues}
         estimatedCostKnown={estimatedCostKnown}
         estimatedCostLabel={estimatedCostLabel}
+        audioStrategy={videoDraft.audioStrategy}
+        onAudioStrategyChange={onAudioStrategyChange}
         onCandidateCountChange={onCandidateCountChange}
         onClose={() => setOpenPopover(null)}
         onDurationChange={onDurationChange}
@@ -241,6 +242,7 @@ export function ShotVideoGenerationControls({
         popoverId={settingsPopoverId}
         providerReady={providerReady}
         selectedModel={selectedModel}
+        sourceAudioAvailable={sourceAudioAvailable}
         selectedResolution={videoDraft.resolution}
         supportedResolutions={supportedResolutions}
       />

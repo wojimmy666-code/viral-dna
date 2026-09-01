@@ -23,58 +23,45 @@ const DEFAULT_ZOOM = 80;
 const MIN_ZOOM = 40;
 const MAX_ZOOM = 160;
 
-function previewFrameCount(width) {
-  if (width < 210) return 1;
-  if (width < 360) return 3;
-  return 5;
-}
-
-function TimelineFrame({ fallbackSrc, src }) {
-  const [currentSrc, setCurrentSrc] = useState(src || fallbackSrc);
-  const [unavailable, setUnavailable] = useState(!src && !fallbackSrc);
-
-  useEffect(() => {
-    setCurrentSrc(src || fallbackSrc);
-    setUnavailable(!src && !fallbackSrc);
-  }, [fallbackSrc, src]);
-
-  if (unavailable) {
-    return <span aria-hidden="true" className="timeline-frame-unavailable"><FilmSlate size={16} /></span>;
-  }
-  return (
-    <img
-      alt=""
-      draggable="false"
-      loading="lazy"
-      onError={() => {
-        if (fallbackSrc && currentSrc !== fallbackSrc) {
-          setCurrentSrc(fallbackSrc);
-          return;
-        }
-        setUnavailable(true);
-      }}
-      src={currentSrc}
-    />
+function sourceRangeBounds(clip) {
+  const sourceRange = clip?.source_range;
+  if (!sourceRange) return null;
+  const pointsPerSecond = (
+    Number(sourceRange.time_base_denominator || 1_000_000)
+    / Number(sourceRange.time_base_numerator || 1)
   );
+  const trimIn = Number(clip.trim_in_seconds);
+  const trimOut = Number(clip.trim_out_seconds);
+  const candidateDuration = Number(clip.candidate_duration_seconds);
+  return {
+    start: Math.abs(trimIn) <= 0.000001
+      ? Number(sourceRange.start_pts)
+      : Number(sourceRange.start_pts) + Math.round(trimIn * pointsPerSecond),
+    end: Math.abs(trimOut - candidateDuration) <= 0.001
+      ? Number(sourceRange.end_pts)
+      : Number(sourceRange.start_pts) + Math.round(trimOut * pointsPerSecond),
+  };
 }
 
-function TimelineFilmstrip({ clip, previewFrameUrl, resolveUrl, width }) {
-  const frameCount = previewFrameCount(width);
-  const fallbackSrc = resolveUrl(clip.cover_url);
+function sourceRangesContinue(left, right) {
+  const leftRange = left?.source_range;
+  const rightRange = right?.source_range;
+  const leftBounds = sourceRangeBounds(left);
+  const rightBounds = sourceRangeBounds(right);
+  if (!leftRange || !rightRange || !leftBounds || !rightBounds) return false;
+  const leftDuration = Number(left.trim_out_seconds) - Number(left.trim_in_seconds);
+  const rightDuration = Number(right.trim_out_seconds) - Number(right.trim_in_seconds);
   return (
-    <div
-      aria-hidden="true"
-      className="timeline-filmstrip"
-      style={{ "--timeline-frame-count": frameCount }}
-    >
-      {Array.from({ length: frameCount }, (_, frameIndex) => (
-        <TimelineFrame
-          fallbackSrc={fallbackSrc}
-          key={`${clip.id}:${frameCount}:${frameIndex}`}
-          src={previewFrameUrl?.(clip, frameIndex, frameCount) || fallbackSrc}
-        />
-      ))}
-    </div>
+    leftRange.source_video_id === rightRange.source_video_id
+    && leftRange.source_sha256 === rightRange.source_sha256
+    && Number(leftRange.time_base_numerator || 1) === Number(rightRange.time_base_numerator || 1)
+    && Number(leftRange.time_base_denominator || 1_000_000) === Number(rightRange.time_base_denominator || 1_000_000)
+    && leftBounds.end === rightBounds.start
+    && left.transition_after?.kind === "none"
+    && Math.abs(Number(left.playback_rate) - 1) <= 0.000001
+    && Math.abs(Number(right.playback_rate) - 1) <= 0.000001
+    && Math.abs(leftDuration - Number(left.timeline_duration_seconds)) <= 0.001
+    && Math.abs(rightDuration - Number(right.timeline_duration_seconds)) <= 0.001
   );
 }
 
@@ -251,8 +238,6 @@ export function TimelineCanvas({
   activeClipId,
   timeline,
   playheadSeconds,
-  previewFrameUrl,
-  resolveUrl,
   selectedClipId,
   selectedCueId,
   selectedTrack,
@@ -515,15 +500,23 @@ export function TimelineCanvas({
 
           <TrackLabel icon={<FilmSlate size={16} />}>V1 视频</TrackLabel>
           <div className="timeline-canvas-lane video">
-            {enabledClips.map((clip) => {
+            {enabledClips.map((clip, enabledIndex) => {
               const width = Math.max(48, clip.timeline_duration_seconds * zoom);
               const selected = selectedClipId === clip.id;
               const active = activeClipId === clip.id;
               const orderIndex = orderedClips.findIndex((item) => item.id === clip.id);
+              const continuesFromPrevious = sourceRangesContinue(
+                enabledClips[enabledIndex - 1],
+                clip,
+              );
+              const continuesToNext = sourceRangesContinue(
+                clip,
+                enabledClips[enabledIndex + 1],
+              );
               return (
                 <div
                   aria-label={`${selected ? "已选择，" : ""}${active ? "当前播放，" : ""}分镜 ${clip.shot_index}，${formatEditorSeconds(clip.timeline_duration_seconds)}`}
-                  className={`timeline-video-block ${selected ? "selected" : ""} ${active ? "active" : ""} ${width < 130 ? "compact" : ""}`}
+                  className={`timeline-video-block ${selected ? "selected" : ""} ${active ? "active" : ""} ${width < 130 ? "compact" : ""} ${clip.source_range ? "source-range" : "generated"} ${continuesFromPrevious ? "continues-from-previous" : ""} ${continuesToNext ? "continues-to-next" : ""}`}
                   data-timeline-clip-id={clip.id}
                   key={clip.id}
                   onClick={() => onSelectClip(clip.id)}
@@ -560,13 +553,10 @@ export function TimelineCanvas({
                       beginGesture(event, { type: "clip-trim", edge: "start", initial: clip });
                     }}
                   />
-                  <TimelineFilmstrip
-                    clip={clip}
-                    previewFrameUrl={previewFrameUrl}
-                    resolveUrl={resolveUrl}
-                    width={width}
-                  />
-                  <span className="timeline-video-meta"><strong>分镜 {clip.shot_index}</strong><small>{formatEditorSeconds(clip.timeline_duration_seconds)}</small></span>
+                  <span className="timeline-video-meta">
+                    <strong>分镜 {clip.shot_index}</strong>
+                    <small>{clip.source_range ? "原视频 · " : ""}{formatEditorSeconds(clip.timeline_duration_seconds)}</small>
+                  </span>
                   <TrimHandle
                     edge="end"
                     label={`裁剪分镜 ${clip.shot_index} 出点`}
@@ -587,12 +577,12 @@ export function TimelineCanvas({
             })}
           </div>
 
-          <TrackLabel icon={timeline.audio_track.enabled ? <SpeakerHigh size={16} /> : <SpeakerSlash size={16} />}>A1 原音</TrackLabel>
+          <TrackLabel icon={timeline.audio_track.enabled ? <SpeakerHigh size={16} /> : <SpeakerSlash size={16} />}>A1 分镜音频</TrackLabel>
           <div className="timeline-canvas-lane audio">
             {timeline.audio_track.enabled ? (
               <AudioBlock
                 kind="source"
-                label="源视频原音"
+                label="分镜主音轨"
                 onBeginGesture={beginGesture}
                 onChange={onAudioChange}
                 onSelect={() => onSelectAudio("source")}
@@ -601,7 +591,7 @@ export function TimelineCanvas({
                 track={timeline.audio_track}
                 zoom={zoom}
               />
-            ) : <span className="timeline-empty-lane">原音轨已静音</span>}
+            ) : <span className="timeline-empty-lane">分镜音轨已静音</span>}
           </div>
 
           <TrackLabel

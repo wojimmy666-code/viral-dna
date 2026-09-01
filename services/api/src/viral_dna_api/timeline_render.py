@@ -45,11 +45,163 @@ class TimelineMediaResolver(Protocol):
         thumbnail: bool = False,
     ) -> tuple[Path, str]: ...
 
+    async def resolve_source_video_reference(
+        self,
+        source_video_id: UUID,
+        source_sha256: str,
+    ) -> tuple[Path, str]: ...
+
 
 class TimelineRenderError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineVideoUnit:
+    """One independently decoded video unit.
+
+    Consecutive untouched source ranges share one unit so there is no synthetic
+    cut at their internal shot boundary.
+    """
+
+    clips: tuple[TimelineClip, ...]
+
+    @property
+    def first(self) -> TimelineClip:
+        return self.clips[0]
+
+    @property
+    def last(self) -> TimelineClip:
+        return self.clips[-1]
+
+    @property
+    def duration_seconds(self) -> float:
+        if self.is_source_range and all(_identity_source_clip(clip) for clip in self.clips):
+            source_range = self.first.source_range
+            first_bounds = _source_range_bounds_pts(self.first)
+            last_bounds = _source_range_bounds_pts(self.last)
+            if source_range is not None and first_bounds is not None and last_bounds is not None:
+                return (last_bounds[1] - first_bounds[0]) * (
+                    source_range.time_base_numerator / source_range.time_base_denominator
+                )
+        return sum(clip.timeline_duration_seconds for clip in self.clips)
+
+    @property
+    def is_source_range(self) -> bool:
+        return self.first.source_range is not None
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineAudioUnit:
+    """One independently decoded source-audio or silence unit."""
+
+    clips: tuple[TimelineClip, ...]
+
+    @property
+    def first(self) -> TimelineClip:
+        return self.clips[0]
+
+    @property
+    def last(self) -> TimelineClip:
+        return self.clips[-1]
+
+    @property
+    def duration_seconds(self) -> float:
+        if all(_identity_source_audio_clip(clip) for clip in self.clips):
+            return self.last.source_audio_end_seconds - self.first.source_audio_start_seconds
+        return sum(clip.timeline_duration_seconds for clip in self.clips)
+
+
+def _source_range_bounds_pts(clip: TimelineClip) -> tuple[int, int] | None:
+    source_range = clip.source_range
+    if source_range is None:
+        return None
+    seconds_to_pts = source_range.time_base_denominator / source_range.time_base_numerator
+    start_pts = (
+        source_range.start_pts
+        if abs(clip.trim_in_seconds) <= 1e-6
+        else source_range.start_pts + round(clip.trim_in_seconds * seconds_to_pts)
+    )
+    end_pts = (
+        source_range.end_pts
+        if abs(clip.trim_out_seconds - clip.candidate_duration_seconds) <= 0.001
+        else source_range.start_pts + round(clip.trim_out_seconds * seconds_to_pts)
+    )
+    return start_pts, end_pts
+
+
+def _identity_source_clip(clip: TimelineClip) -> bool:
+    if clip.source_range is None:
+        return False
+    source_duration = clip.trim_out_seconds - clip.trim_in_seconds
+    return (
+        abs(clip.playback_rate - 1) <= 1e-6
+        and abs(source_duration - clip.timeline_duration_seconds) <= 0.001
+    )
+
+
+def _source_clips_are_contiguous(left: TimelineClip, right: TimelineClip) -> bool:
+    left_range = left.source_range
+    right_range = right.source_range
+    left_bounds = _source_range_bounds_pts(left)
+    right_bounds = _source_range_bounds_pts(right)
+    return bool(
+        left_range is not None
+        and right_range is not None
+        and left_bounds is not None
+        and right_bounds is not None
+        and _identity_source_clip(left)
+        and _identity_source_clip(right)
+        and left.transition_after.kind == TimelineTransitionKind.NONE
+        and left_range.source_video_id == right_range.source_video_id
+        and left_range.source_sha256 == right_range.source_sha256
+        and left_range.time_base_numerator == right_range.time_base_numerator
+        and left_range.time_base_denominator == right_range.time_base_denominator
+        and left_bounds[1] == right_bounds[0]
+    )
+
+
+def build_video_render_units(clips: list[TimelineClip]) -> list[TimelineVideoUnit]:
+    units: list[TimelineVideoUnit] = []
+    for clip in clips:
+        if units and _source_clips_are_contiguous(units[-1].last, clip):
+            units[-1] = TimelineVideoUnit((*units[-1].clips, clip))
+        else:
+            units.append(TimelineVideoUnit((clip,)))
+    return units
+
+
+def _identity_source_audio_clip(clip: TimelineClip) -> bool:
+    source_duration = clip.source_audio_end_seconds - clip.source_audio_start_seconds
+    return (
+        clip.audio_mode == VideoClipAudioMode.SOURCE
+        and abs(source_duration - clip.timeline_duration_seconds) <= 0.001
+    )
+
+
+def _audio_clips_are_contiguous(left: TimelineClip, right: TimelineClip) -> bool:
+    if left.transition_after.kind != TimelineTransitionKind.NONE:
+        return False
+    if left.audio_mode == VideoClipAudioMode.MUTED:
+        return right.audio_mode == VideoClipAudioMode.MUTED
+    return bool(
+        _identity_source_audio_clip(left)
+        and _identity_source_audio_clip(right)
+        and abs(left.audio_volume - right.audio_volume) <= 1e-6
+        and abs(left.source_audio_end_seconds - right.source_audio_start_seconds) <= 1e-6
+    )
+
+
+def build_audio_render_units(clips: list[TimelineClip]) -> list[TimelineAudioUnit]:
+    units: list[TimelineAudioUnit] = []
+    for clip in clips:
+        if units and _audio_clips_are_contiguous(units[-1].last, clip):
+            units[-1] = TimelineAudioUnit((*units[-1].clips, clip))
+        else:
+            units.append(TimelineAudioUnit((clip,)))
+    return units
 
 
 def preview_dimensions(width: int, height: int, max_edge: int = 960) -> tuple[int, int]:
@@ -139,44 +291,68 @@ class TimelinePreviewRenderer:
             )
 
         await progress(4)
+        video_units = build_video_render_units(enabled_clips)
         clip_paths: list[Path] = []
-        for index, clip in enumerate(enabled_clips):
+        for index, unit in enumerate(video_units):
             self._require_not_cancelled(is_cancelled)
-            source_path, _ = await self.media_resolver.resolve_candidate_content(
-                clip.candidate_id
-            )
             output_path = intermediate_root / f"video-{index + 1:03d}.mp4"
             previous_transition = (
-                enabled_clips[index - 1].transition_after if index > 0 else None
+                video_units[index - 1].last.transition_after if index > 0 else None
             )
-            await self._render_video_clip(
-                source_path,
-                output_path,
-                clip,
-                width=profile.width,
-                height=profile.height,
-                fps=timeline.fps,
-                fade_in_seconds=(
-                    previous_transition.duration_seconds
-                    if previous_transition
-                    and previous_transition.kind == TimelineTransitionKind.FADE
-                    else 0
-                ),
-                fade_out_seconds=(
-                    clip.transition_after.duration_seconds
-                    if clip.transition_after.kind == TimelineTransitionKind.FADE
-                    else 0
-                ),
-                is_cancelled=is_cancelled,
-                profile=profile,
+            fade_in_seconds = (
+                previous_transition.duration_seconds
+                if previous_transition
+                and previous_transition.kind == TimelineTransitionKind.FADE
+                else 0
             )
+            fade_out_seconds = (
+                unit.last.transition_after.duration_seconds
+                if unit.last.transition_after.kind == TimelineTransitionKind.FADE
+                else 0
+            )
+            if unit.is_source_range:
+                source_range = unit.first.source_range
+                assert source_range is not None
+                source_path, _ = await self.media_resolver.resolve_source_video_reference(
+                    source_range.source_video_id,
+                    source_range.source_sha256,
+                )
+                await self._render_source_video_unit(
+                    source_path,
+                    output_path,
+                    unit,
+                    width=profile.width,
+                    height=profile.height,
+                    fps=timeline.fps,
+                    fade_in_seconds=fade_in_seconds,
+                    fade_out_seconds=fade_out_seconds,
+                    is_cancelled=is_cancelled,
+                    profile=profile,
+                )
+            else:
+                clip = unit.first
+                source_path, _ = await self.media_resolver.resolve_candidate_content(
+                    clip.candidate_id
+                )
+                await self._render_video_clip(
+                    source_path,
+                    output_path,
+                    clip,
+                    width=profile.width,
+                    height=profile.height,
+                    fps=timeline.fps,
+                    fade_in_seconds=fade_in_seconds,
+                    fade_out_seconds=fade_out_seconds,
+                    is_cancelled=is_cancelled,
+                    profile=profile,
+                )
             clip_paths.append(output_path)
-            await progress(8 + round(37 * (index + 1) / len(enabled_clips)))
+            await progress(8 + round(37 * (index + 1) / len(video_units)))
 
         assembled_video = intermediate_root / "video-track.mp4"
         await self._assemble_video_track(
             clip_paths,
-            enabled_clips,
+            video_units,
             assembled_video,
             is_cancelled,
             profile=profile,
@@ -187,27 +363,41 @@ class TimelinePreviewRenderer:
         if (
             timeline.audio_track.enabled
             and timeline.audio_track.strategy != "muted"
-            and source_audio_path is not None
-            and await asyncio.to_thread(source_audio_path.is_file)
         ):
+            audio_units = build_audio_render_units(enabled_clips)
             audio_segments: list[Path] = []
-            for index, clip in enumerate(enabled_clips):
+            for index, unit in enumerate(audio_units):
                 segment_path = intermediate_root / f"audio-{index + 1:03d}.m4a"
-                await self._render_audio_clip(
-                    source_audio_path,
+                unit_source_path: Path | None = None
+                if unit.first.audio_mode == VideoClipAudioMode.SOURCE:
+                    if (
+                        source_audio_path is None
+                        or not await asyncio.to_thread(source_audio_path.is_file)
+                    ):
+                        raise TimelineRenderError(
+                            "timeline_source_audio_missing",
+                            f"分镜 {unit.first.shot_index} 选择了原音频，但原音频文件不存在",
+                        )
+                    unit_source_path = source_audio_path
+                elif unit.first.audio_mode == VideoClipAudioMode.CANDIDATE:
+                    unit_source_path, _ = await self.media_resolver.resolve_candidate_content(
+                        unit.first.candidate_id
+                    )
+                await self._render_audio_unit(
+                    unit_source_path,
                     segment_path,
-                    clip,
+                    unit,
                     track_volume=timeline.audio_track.volume,
                     normalize_loudness=timeline.audio_track.normalize_loudness,
                     is_cancelled=is_cancelled,
                     profile=profile,
                 )
                 audio_segments.append(segment_path)
-                await progress(57 + round(18 * (index + 1) / len(enabled_clips)))
+                await progress(57 + round(18 * (index + 1) / len(audio_units)))
             audio_path = intermediate_root / "audio-track.m4a"
             await self._assemble_audio_track(
                 audio_segments,
-                enabled_clips,
+                audio_units,
                 audio_path,
                 is_cancelled,
                 profile=profile,
@@ -415,6 +605,94 @@ class TimelinePreviewRenderer:
             timeout_seconds=profile.timeout_seconds,
         )
 
+    async def _render_source_video_unit(
+        self,
+        source_path: Path,
+        output_path: Path,
+        unit: TimelineVideoUnit,
+        *,
+        width: int,
+        height: int,
+        fps: int,
+        fade_in_seconds: float,
+        fade_out_seconds: float,
+        is_cancelled: CancellationCheck,
+        profile: TimelineRenderProfile,
+    ) -> None:
+        first_range = unit.first.source_range
+        first_bounds = _source_range_bounds_pts(unit.first)
+        last_bounds = _source_range_bounds_pts(unit.last)
+        if first_range is None or first_bounds is None or last_bounds is None:
+            raise TimelineRenderError(
+                f"{profile.error_prefix}_source_range_invalid",
+                "原视频时间范围无效",
+            )
+        pts_to_seconds = (
+            first_range.time_base_numerator / first_range.time_base_denominator
+        )
+        source_start = first_bounds[0] * pts_to_seconds
+        source_end = last_bounds[1] * pts_to_seconds
+        source_duration = source_end - source_start
+        target_duration = unit.duration_seconds
+        if source_duration <= 0 or target_duration <= 0:
+            raise TimelineRenderError(
+                f"{profile.error_prefix}_source_range_invalid",
+                "原视频时间范围时长无效",
+            )
+        playback_rate = source_duration / target_duration
+        filters = [
+            f"setpts=(PTS-STARTPTS)/{playback_rate:.8f}",
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "setsar=1",
+            f"fps={fps}",
+            "format=yuv420p",
+        ]
+        if fade_in_seconds > 0:
+            filters.append(
+                f"fade=t=in:st=0:d={min(fade_in_seconds, target_duration / 2):.6f}"
+            )
+        if fade_out_seconds > 0:
+            duration = min(fade_out_seconds, target_duration / 2)
+            filters.append(
+                f"fade=t=out:st={max(0, target_duration - duration):.6f}:d={duration:.6f}"
+            )
+        await self._run(
+            [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(source_path),
+                "-ss",
+                f"{source_start:.6f}",
+                "-an",
+                "-vf",
+                ",".join(filters),
+                "-t",
+                f"{target_duration:.6f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                profile.video_preset,
+                "-crf",
+                str(profile.video_crf),
+                "-pix_fmt",
+                "yuv420p",
+                str(output_path),
+            ],
+            is_cancelled=is_cancelled,
+            code=f"{profile.error_prefix}_source_range_failed",
+            message=(
+                f"分镜 {unit.first.shot_index}–{unit.last.shot_index} 的"
+                f"{profile.operation_label}原视频范围转码失败"
+            ),
+            timeout_seconds=profile.timeout_seconds,
+        )
+
     async def _render_video_clip(
         self,
         source_path: Path,
@@ -488,7 +766,7 @@ class TimelinePreviewRenderer:
     async def _assemble_video_track(
         self,
         inputs: list[Path],
-        clips: list[TimelineClip],
+        units: list[TimelineVideoUnit],
         output_path: Path,
         is_cancelled: CancellationCheck,
         *,
@@ -504,13 +782,13 @@ class TimelinePreviewRenderer:
         current = "0:v"
         for index in range(1, len(inputs)):
             output = f"v{index}"
-            transition = clips[index - 1].transition_after
+            transition = units[index - 1].last.transition_after
             if transition.kind == TimelineTransitionKind.CROSSFADE:
-                duration_before = sum(item.timeline_duration_seconds for item in clips[:index])
+                duration_before = sum(item.duration_seconds for item in units[:index])
                 overlap_before = sum(
-                    item.transition_after.duration_seconds
-                    for item in clips[: index - 1]
-                    if item.transition_after.kind == TimelineTransitionKind.CROSSFADE
+                    item.last.transition_after.duration_seconds
+                    for item in units[: index - 1]
+                    if item.last.transition_after.kind == TimelineTransitionKind.CROSSFADE
                 )
                 offset = max(0, duration_before - overlap_before - transition.duration_seconds)
                 filters.append(
@@ -546,19 +824,19 @@ class TimelinePreviewRenderer:
             timeout_seconds=profile.timeout_seconds,
         )
 
-    async def _render_audio_clip(
+    async def _render_audio_unit(
         self,
-        source_audio_path: Path,
+        source_media_path: Path | None,
         output_path: Path,
-        clip: TimelineClip,
+        unit: TimelineAudioUnit,
         *,
         track_volume: float,
         normalize_loudness: bool,
         is_cancelled: CancellationCheck,
         profile: TimelineRenderProfile,
     ) -> None:
-        duration = clip.timeline_duration_seconds
-        if clip.audio_mode == VideoClipAudioMode.MUTED:
+        duration = unit.duration_seconds
+        if unit.first.audio_mode == VideoClipAudioMode.MUTED:
             command = [
                 self.ffmpeg,
                 "-hide_banner",
@@ -579,10 +857,25 @@ class TimelinePreviewRenderer:
                 str(output_path),
             ]
         else:
-            source_duration = clip.source_audio_end_seconds - clip.source_audio_start_seconds
+            if source_media_path is None:
+                raise TimelineRenderError(
+                    "timeline_audio_source_missing",
+                    f"分镜 {unit.first.shot_index} 的音频来源不存在",
+                )
+            if unit.first.audio_mode == VideoClipAudioMode.CANDIDATE:
+                source_start = unit.first.trim_in_seconds
+                source_end = unit.last.trim_out_seconds
+            else:
+                source_start = unit.first.source_audio_start_seconds
+                source_end = unit.last.source_audio_end_seconds
+            source_duration = source_end - source_start
             tempo = source_duration / duration
-            filters = atempo_filters(tempo)
-            filters.append(f"volume={track_volume * clip.audio_volume:.6f}")
+            filters = [
+                f"atrim=start={source_start:.6f}:end={source_end:.6f}",
+                "asetpts=PTS-STARTPTS",
+                *atempo_filters(tempo),
+                f"volume={track_volume * unit.first.audio_volume:.6f}",
+            ]
             if normalize_loudness:
                 filters.append("loudnorm=I=-16:LRA=11:TP=-1.5")
             filters.extend(["apad", f"atrim=duration={duration:.6f}"])
@@ -593,12 +886,8 @@ class TimelinePreviewRenderer:
                 "error",
                 "-nostdin",
                 "-y",
-                "-ss",
-                f"{clip.source_audio_start_seconds:.6f}",
-                "-t",
-                f"{source_duration:.6f}",
                 "-i",
-                str(source_audio_path),
+                str(source_media_path),
                 "-vn",
                 "-af",
                 ",".join(filters),
@@ -614,14 +903,16 @@ class TimelinePreviewRenderer:
             command,
             is_cancelled=is_cancelled,
             code=f"{profile.error_prefix}_audio_clip_failed",
-            message=f"分镜 {clip.shot_index} 的原音轨映射失败",
+            message=(
+                f"分镜 {unit.first.shot_index}–{unit.last.shot_index} 的原音轨映射失败"
+            ),
             timeout_seconds=profile.timeout_seconds,
         )
 
     async def _assemble_audio_track(
         self,
         inputs: list[Path],
-        clips: list[TimelineClip],
+        units: list[TimelineAudioUnit],
         output_path: Path,
         is_cancelled: CancellationCheck,
         *,
@@ -637,7 +928,7 @@ class TimelinePreviewRenderer:
         current = "0:a"
         for index in range(1, len(inputs)):
             output = f"a{index}"
-            transition = clips[index - 1].transition_after
+            transition = units[index - 1].last.transition_after
             if transition.kind == TimelineTransitionKind.CROSSFADE:
                 filters.append(
                     f"[{current}][{index}:a]acrossfade=d={transition.duration_seconds:.6f}:"

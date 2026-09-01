@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -180,6 +181,7 @@ def test_catalog_keeps_stable_aliases_and_versioned_costs() -> None:
         float(value) for value in range(4, 16)
     ]
     assert seedance.capability.supported_resolutions == ["480P", "720P", "1080P"]
+    assert seedance.capability.native_audio is True
     assert video_duration_is_supported(seedance.capability, 4) is True
     assert video_duration_is_supported(seedance.capability, 2) is False
     assert (
@@ -196,6 +198,7 @@ def test_catalog_keeps_stable_aliases_and_versioned_costs() -> None:
     assert seedance_fast.capability.maximum_reference_images == 9
     assert seedance_fast.capability.minimum_duration_seconds == 4
     assert seedance_fast.capability.supported_resolutions == ["480P", "720P", "1080P"]
+    assert seedance_fast.capability.native_audio is True
     seedance_mini = catalog.option("seedance_2_0_mini")
     assert seedance_mini.model == "doubao-seedance-2-0-mini-260615"
     assert seedance_mini.capability.ordered_reference_images is True
@@ -203,6 +206,7 @@ def test_catalog_keeps_stable_aliases_and_versioned_costs() -> None:
     assert seedance_mini.capability.minimum_duration_seconds == 4
     assert seedance_mini.capability.maximum_duration_seconds == 15
     assert seedance_mini.capability.supported_resolutions == ["480P", "720P"]
+    assert seedance_mini.capability.native_audio is False
     assert video_duration_is_supported(seedance_mini.capability, 3) is False
     assert video_duration_is_supported(seedance_mini.capability, 15) is True
     with pytest.raises(VideoModelCatalogError):
@@ -382,22 +386,21 @@ def test_seedance_maps_every_reference_image_in_order(tmp_path: Path) -> None:
         ordered_reference_frame(second, ordinal=2, start_ratio=0.5, end_ratio=1),
     )
 
-    payload = build_seedance_request(
-        ProviderVideoRequest(
-            request_id=uuid4(),
-            ordinal=1,
-            model_alias="seedance_2_0",
-            provider_model="doubao-seedance-2-0-260128",
-            prompt="图1走向图2，图号顺序就是画面出现顺序",
-            negative_prompt="身份漂移",
-            reference_frames=frames,
-            duration_seconds=5,
-            resolution="720P",
-            aspect_ratio="9:16",
-            width=720,
-            height=1280,
-        )
+    request = ProviderVideoRequest(
+        request_id=uuid4(),
+        ordinal=1,
+        model_alias="seedance_2_0",
+        provider_model="doubao-seedance-2-0-260128",
+        prompt="图1走向图2，图号顺序就是画面出现顺序",
+        negative_prompt="身份漂移",
+        reference_frames=frames,
+        duration_seconds=5,
+        resolution="720P",
+        aspect_ratio="9:16",
+        width=720,
+        height=1280,
     )
+    payload = build_seedance_request(request)
 
     assert "\n图片1走向图片2" in payload["content"][0]["text"]
     references = payload["content"][1:]
@@ -406,6 +409,10 @@ def test_seedance_maps_every_reference_image_in_order(tmp_path: Path) -> None:
         "reference_image",
     ]
     assert references[0]["image_url"]["url"] != references[1]["image_url"]["url"]
+    assert payload["generate_audio"] is False
+    assert build_seedance_request(
+        replace(request, generate_audio=True)
+    )["generate_audio"] is True
 
 
 def test_bailian_r2v_maps_every_reference_image_in_order(tmp_path: Path) -> None:
@@ -934,6 +941,7 @@ def test_ambiguous_submission_is_not_repeated(
             "height": 1280,
             "prompt": "人物向前走",
             "negative_prompt": "身份漂移",
+            "audio_strategy": "reuse_source",
             "seed": 7,
             "route_id": None,
             "effective_route_id": None,

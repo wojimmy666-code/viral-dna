@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import mimetypes
 import os
@@ -33,6 +32,7 @@ from .models import (
     TimelineTransitionKind,
     TimelineUpdateRequest,
     TimelineValidationResponse,
+    VideoClipAudioMode,
     utc_now,
 )
 from .notifications import NotificationPublisher
@@ -58,6 +58,12 @@ class EditingHandoffProvider(Protocol):
         candidate_id: UUID,
         *,
         thumbnail: bool = False,
+    ) -> tuple[Path, str]: ...
+
+    async def resolve_source_video_reference(
+        self,
+        source_video_id: UUID,
+        source_sha256: str,
     ) -> tuple[Path, str]: ...
 
 
@@ -103,8 +109,6 @@ class TimelineService:
         self.video_inspector = video_inspector or ProductionVideoInspector()
         self.notification_publisher = notification_publisher
         self._project_locks: dict[UUID, asyncio.Lock] = {}
-        self._preview_frame_locks: dict[tuple[UUID, UUID, str], asyncio.Lock] = {}
-        self._preview_frame_semaphore = asyncio.Semaphore(2)
         self._render_tasks: dict[UUID, asyncio.Task[None]] = {}
         self._render_cancellations: set[UUID] = set()
 
@@ -115,7 +119,6 @@ class TimelineService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._render_tasks.clear()
-        self._preview_frame_locks.clear()
 
     async def get_timeline(self, project_id: UUID) -> ProductionTimeline:
         project = await self._require_project(project_id)
@@ -175,51 +178,41 @@ class TimelineService:
                 raise _fail(404, "timeline_clip_missing", "要质检的时间线片段不存在")
 
             candidate = await self.repository.get_generation_candidate(source_clip.candidate_id)
-            source_path, _ = await self.handoff_provider.resolve_candidate_content(
-                source_clip.candidate_id
-            )
             revision_id = uuid4()
-            cover_path = (
-                self._timeline_root(project)
-                / "covers"
-                / str(source_clip.id)
-                / str(revision_id)
-                / "cover.webp"
-            )
-            cover_timestamp = (
-                source_clip.cover_timestamp_seconds
-                if source_clip.cover_timestamp_seconds is not None
-                else source_clip.trim_in_seconds
-                + (source_clip.trim_out_seconds - source_clip.trim_in_seconds) / 2
-            )
-            try:
-                inspection = await self.video_inspector.inspect(
-                    source_path,
-                    cover_path,
-                    cover_timestamp_seconds=cover_timestamp,
-                    expected_width=getattr(candidate, "width", None),
-                    expected_height=getattr(candidate, "height", None),
-                    expected_duration_seconds=getattr(candidate, "duration_seconds", None),
+            if source_clip.source_range is not None:
+                quality_status = source_clip.quality_status
+                quality_report = source_clip.quality_report
+                warnings = source_clip.warning_messages
+            else:
+                source_path, _ = await self.handoff_provider.resolve_candidate_content(
+                    source_clip.candidate_id
                 )
-            except ProductionVideoInspectionError as exc:
-                raise _fail(409, exc.code, str(exc)) from exc
-
-            warnings = [
-                str(item)
-                for item in inspection.quality_report.get("warnings", [])
-                if str(item).strip()
-            ]
+                cover_timestamp = source_clip.trim_in_seconds + (
+                    source_clip.trim_out_seconds - source_clip.trim_in_seconds
+                ) / 2
+                try:
+                    inspection = await self.video_inspector.inspect(
+                        source_path,
+                        None,
+                        cover_timestamp_seconds=cover_timestamp,
+                        expected_width=getattr(candidate, "width", None),
+                        expected_height=getattr(candidate, "height", None),
+                        expected_duration_seconds=getattr(candidate, "duration_seconds", None),
+                    )
+                except ProductionVideoInspectionError as exc:
+                    raise _fail(409, exc.code, str(exc)) from exc
+                quality_status = inspection.quality_status
+                quality_report = inspection.quality_report
+                warnings = [
+                    str(item)
+                    for item in quality_report.get("warnings", [])
+                    if str(item).strip()
+                ]
             next_clips = [
                 item.model_copy(
                     update={
-                        "cover_url": (
-                            f"/api/v1/productions/{project.id}/timeline/clips/"
-                            f"{item.id}/cover?v={revision_id}"
-                        ),
-                        "cover_relative_path": self.workspace.relative(cover_path),
-                        "cover_timestamp_seconds": inspection.cover_timestamp_seconds,
-                        "quality_status": inspection.quality_status,
-                        "quality_report": inspection.quality_report,
+                        "quality_status": quality_status,
+                        "quality_report": quality_report,
                         "blocker_messages": [],
                         "warning_messages": warnings,
                     }
@@ -250,107 +243,9 @@ class TimelineService:
                 project,
                 next_timeline,
                 TimelineChangeKind.CLIPS_UPDATED,
-                f"更新分镜 {source_clip.shot_index} 的封面与基础质检",
+                f"更新分镜 {source_clip.shot_index} 的基础质检",
                 current.revision_id,
             )
-
-    async def resolve_clip_cover(
-        self,
-        project_id: UUID,
-        clip_id: UUID,
-    ) -> tuple[Path, str]:
-        project = await self._require_project(project_id)
-        timeline = await self.get_timeline(project_id)
-        clip = next((item for item in timeline.clips if item.id == clip_id), None)
-        if clip is None or not clip.cover_relative_path:
-            raise _fail(404, "timeline_clip_cover_missing", "当前片段尚未生成剪辑封面")
-        try:
-            path = self.workspace.resolve(clip.cover_relative_path).resolve()
-            path.relative_to(self._timeline_root(project).resolve())
-        except (WorkspaceError, ValueError) as exc:
-            raise _fail(409, "timeline_clip_cover_invalid", "片段封面路径无效") from exc
-        if not path.is_file():
-            raise _fail(404, "timeline_clip_cover_missing", "片段封面文件不存在")
-        return path, "image/webp"
-
-    async def resolve_clip_preview_frame(
-        self,
-        project_id: UUID,
-        clip_id: UUID,
-        frame_index: int,
-        *,
-        count: int,
-    ) -> tuple[Path, str]:
-        if count < 1 or count > 5:
-            raise _fail(422, "timeline_preview_frame_count_invalid", "预览帧数量必须为 1–5")
-        if frame_index < 0 or frame_index >= count:
-            raise _fail(422, "timeline_preview_frame_index_invalid", "预览帧序号超出范围")
-
-        project = await self._require_project(project_id)
-        timeline = await self.get_timeline(project_id)
-        clip = next((item for item in timeline.clips if item.id == clip_id), None)
-        if clip is None:
-            raise _fail(404, "timeline_clip_missing", "时间线片段不存在")
-
-        signature = self._preview_frame_signature(clip, count)
-        frame_root = self._timeline_root(project) / "pf" / clip.id.hex[:12] / signature
-        frame_paths = [frame_root / f"frame-{index + 1:02d}.webp" for index in range(count)]
-        lock_key = (project.id, clip.id, signature)
-        lock = self._preview_frame_locks.setdefault(lock_key, asyncio.Lock())
-        async with lock:
-            missing = [path for path in frame_paths if not path.is_file()]
-            if missing:
-                source_path, _ = await self.handoff_provider.resolve_candidate_content(
-                    clip.candidate_id
-                )
-                timestamps = self._preview_frame_timestamps(clip, count)
-                async with self._preview_frame_semaphore:
-                    for path, timestamp in zip(frame_paths, timestamps, strict=True):
-                        if path.is_file():
-                            continue
-                        try:
-                            await self.video_inspector.extract_preview_frame(
-                                source_path,
-                                path,
-                                timestamp_seconds=timestamp,
-                            )
-                        except ProductionVideoInspectionError as exc:
-                            raise _fail(409, exc.code, str(exc)) from exc
-                        except OSError as exc:
-                            raise _fail(
-                                409,
-                                "timeline_preview_frame_failed",
-                                "无法生成时间线预览帧",
-                            ) from exc
-
-        frame_path = frame_paths[frame_index].resolve()
-        try:
-            frame_path.relative_to(self._timeline_root(project).resolve())
-        except ValueError as exc:
-            raise _fail(409, "timeline_preview_frame_invalid", "预览帧路径无效") from exc
-        if not frame_path.is_file():
-            raise _fail(404, "timeline_preview_frame_missing", "时间线预览帧不存在")
-        return frame_path, "image/webp"
-
-    @staticmethod
-    def _preview_frame_signature(clip: TimelineClip, count: int) -> str:
-        payload = (
-            f"{clip.candidate_id}:{clip.trim_in_seconds:.3f}:"
-            f"{clip.trim_out_seconds:.3f}:{count}"
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
-
-    @staticmethod
-    def _preview_frame_timestamps(clip: TimelineClip, count: int) -> list[float]:
-        if count == 1:
-            fractions = [0.5]
-        else:
-            fractions = [0.1 + 0.8 * index / (count - 1) for index in range(count)]
-        trim_in = float(clip.trim_in_seconds)
-        trim_out = float(clip.trim_out_seconds)
-        safe_upper = max(trim_in, min(trim_out, float(clip.candidate_duration_seconds) - 0.04))
-        available = max(0.0, safe_upper - trim_in)
-        return [round(trim_in + available * fraction, 3) for fraction in fractions]
 
     async def set_background_audio(
         self,
@@ -485,8 +380,19 @@ class TimelineService:
                         errors.append(
                             f"分镜 {clip.shot_index} 的转场时长不能超过 {maximum:.2f} 秒"
                         )
-        if timeline.audio_track.strategy != "muted" and not timeline.audio_track.source_audio_url:
-            errors.append("原音轨已启用，但音频来源不存在")
+        if (
+            timeline.audio_track.enabled
+            and any(clip.audio_mode == VideoClipAudioMode.SOURCE for clip in enabled)
+            and not timeline.audio_track.source_audio_url
+        ):
+            errors.append("有分镜选择沿用原音频，但原音频来源不存在")
+        for clip in enabled:
+            if (
+                timeline.audio_track.enabled
+                and clip.audio_mode == VideoClipAudioMode.CANDIDATE
+                and not clip.candidate_audio_available
+            ):
+                errors.append(f"分镜 {clip.shot_index} 的视频候选没有可用新音频")
         enabled_clip_ids = {clip.id for clip in enabled}
         for cue in timeline.subtitle_cues:
             if not cue.enabled:
@@ -660,8 +566,7 @@ class TimelineService:
             shot_index=source.shot_index,
             candidate_id=source.candidate_id,
             candidate_content_url=source.candidate_content_url,
-            cover_url=source.cover_url,
-            cover_timestamp_seconds=source.cover_timestamp_seconds,
+            source_range=source.source_range,
             order=order,
             candidate_duration_seconds=max(candidate_duration, source.trim_out_seconds),
             trim_in_seconds=source.trim_in_seconds,
@@ -671,6 +576,7 @@ class TimelineService:
             timeline_end_seconds=source.timeline_end_seconds,
             timeline_duration_seconds=source.timeline_duration_seconds,
             audio_mode=source.audio_mode,
+            candidate_audio_available=source.candidate_audio_available,
             source_audio_start_seconds=source.source_audio_start_seconds,
             source_audio_end_seconds=source.source_audio_end_seconds,
             quality_status=source.quality_status,
@@ -741,6 +647,7 @@ class TimelineService:
                             "order": order,
                             "shot_index": source.shot_index,
                             "candidate_content_url": source.candidate_content_url,
+                            "source_range": source.source_range,
                             "source_audio_start_seconds": source.source_audio_start_seconds,
                             "source_audio_end_seconds": source.source_audio_end_seconds,
                         }
@@ -758,12 +665,21 @@ class TimelineService:
                 existing.timeline_duration_seconds,
                 round(trimmed_duration / 8, 3),
             )
+            preserved_audio_mode = existing.audio_mode
+            if (
+                preserved_audio_mode == VideoClipAudioMode.CANDIDATE
+                and not replacement.candidate_audio_available
+            ) or (
+                preserved_audio_mode == VideoClipAudioMode.SOURCE
+                and not handoff.source_audio_url
+            ):
+                preserved_audio_mode = replacement.audio_mode
             replacement = replacement.model_copy(
                 update={
                     "enabled": existing.enabled,
                     "timeline_duration_seconds": timeline_duration,
                     "playback_rate": round(trimmed_duration / timeline_duration, 6),
-                    "audio_mode": existing.audio_mode,
+                    "audio_mode": preserved_audio_mode,
                     "audio_volume": existing.audio_volume,
                     "transition_after": existing.transition_after,
                 }
@@ -806,7 +722,7 @@ class TimelineService:
 
         audio_track = current.audio_track
         if audio_track.strategy != "muted":
-            if handoff.audio_strategy == "muted" or not handoff.source_audio_url:
+            if handoff.audio_strategy == "muted":
                 audio_track = audio_track.model_copy(
                     update={
                         "strategy": "muted",
@@ -819,6 +735,7 @@ class TimelineService:
                     update={
                         "strategy": handoff.audio_strategy,
                         "source_audio_url": handoff.source_audio_url,
+                        "enabled": True,
                     }
                 )
 
@@ -929,11 +846,19 @@ class TimelineService:
             values = clip.model_dump(mode="python")
             values["order"] = order
             if update is not None:
+                if (
+                    update.audio_mode == VideoClipAudioMode.CANDIDATE
+                    and not clip.candidate_audio_available
+                ):
+                    raise _fail(
+                        422,
+                        "timeline_candidate_audio_unavailable",
+                        f"分镜 {clip.shot_index} 的视频候选没有可用新音频",
+                    )
                 for field in (
                     "enabled",
                     "trim_in_seconds",
                     "trim_out_seconds",
-                    "cover_timestamp_seconds",
                     "timeline_duration_seconds",
                     "audio_mode",
                     "audio_volume",
@@ -942,12 +867,6 @@ class TimelineService:
                     value = getattr(update, field)
                     if value is not None:
                         values[field] = value
-            cover_timestamp = values.get("cover_timestamp_seconds")
-            if cover_timestamp is not None:
-                values["cover_timestamp_seconds"] = min(
-                    max(float(cover_timestamp), float(values["trim_in_seconds"])),
-                    float(values["trim_out_seconds"]),
-                )
             trimmed_duration = values["trim_out_seconds"] - values["trim_in_seconds"]
             if trimmed_duration <= 0:
                 raise _fail(422, "timeline_trim_invalid", f"分镜 {clip.shot_index} 的裁剪范围无效")
@@ -1162,6 +1081,10 @@ class TimelineService:
             if (
                 timeline.audio_track.enabled
                 and timeline.audio_track.strategy != "muted"
+                and any(
+                    clip.enabled and clip.audio_mode == VideoClipAudioMode.SOURCE
+                    for clip in timeline.clips
+                )
                 and audio_path is None
             ):
                 raise TimelineRenderError(

@@ -2666,6 +2666,10 @@ export function App() {
                         || report.overview?.aspect_ratio
                         || currentPromptPackage?.aspect_ratio,
                       height: video.height || report.media_evidence?.metadata?.height,
+                      hasAudio: Boolean(
+                        report.media_evidence?.metadata?.has_audio
+                        && report.media_evidence?.audio_url
+                      ),
                       width: video.width || report.media_evidence?.metadata?.width,
                     }}
                     sourceTitle={video.title}

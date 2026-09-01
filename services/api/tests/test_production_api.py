@@ -58,6 +58,7 @@ from viral_dna_api.models import (
     VideoClipAudioMode,
     VideoClipPreparationStatus,
     VideoClipPreparationUpdate,
+    VideoGenerationAudioStrategy,
     VideoGenerationCreate,
     VideoQualityStatus,
     VideoStatus,
@@ -1014,6 +1015,7 @@ def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
             VideoGenerationCreate(
                 expected_revision_id=current.project.current_revision_id,
                 duration_seconds=3,
+                audio_strategy=VideoGenerationAudioStrategy.MUTED,
             ),
         )
         video_run = await wait_for_generation(service, queued_video.id)
@@ -1705,7 +1707,7 @@ def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_
         )
         assert selected["plan"]["output_mode"] == "source_video"
         assert selected["plan"]["video_status"] == "approved"
-        assert selected["video_preview"]["execution_mode"] == "source_video"
+        assert selected["video_preview"] is None
 
         detail = client.get(
             f"/api/v1/production-shots/{first['plan']['id']}"
@@ -1717,7 +1719,32 @@ def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_
         assert source_run["input_mode"] == "video_to_video"
         assert source_run["actual_cost_micros"] == 0
         assert source_candidate["status"] == "selected"
-        assert client.get(source_candidate["content_url"]).status_code == 200
+        assert source_candidate["thumbnail_url"] is None
+        assert source_candidate["source_range"]["source_video_id"] == str(video.id)
+        assert source_candidate["source_range"]["source_sha256"] == "b" * 64
+        assert source_candidate["source_range"]["start_pts"] == round(
+            first["plan"]["start_seconds"] * 1_000_000
+        )
+        assert source_candidate["source_range"]["end_pts"] == round(
+            first["plan"]["end_seconds"] * 1_000_000
+        )
+        source_content = client.get(source_candidate["content_url"])
+        assert source_content.status_code == 200
+        assert source_content.content == b"fake-source-video"
+        assert client.get(
+            f"/api/v1/generation-candidates/{source_candidate['id']}/thumbnail"
+        ).status_code == 404
+        source_run_root = (
+            workspace.production_shot_root(
+                record.id,
+                UUID(project_id),
+                UUID(first["plan"]["id"]),
+            )
+            / "videos"
+            / source_run["id"]
+        )
+        assert not (source_run_root / "source-video.mp4").exists()
+        assert not (source_run_root / "source-video.webp").exists()
 
         gate = client.get(f"/api/v1/productions/{project_id}/gate-status").json()
         assert gate["approved_shot_count"] == 1
@@ -2852,6 +2879,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     expected_revision_id=current.project.current_revision_id,
                     candidate_count=2 if index == 0 else 1,
                     duration_seconds=requested_duration,
+                    audio_strategy=VideoGenerationAudioStrategy.MUTED,
                 ),
             )
             video_run = await wait_for_generation(service, video_run.id)
@@ -2979,6 +3007,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                         expected_revision_id=current.project.current_revision_id,
                         candidate_count=1,
                         duration_seconds=requested_duration,
+                        audio_strategy=VideoGenerationAudioStrategy.MUTED,
                         generation_intent="new_variation",
                         seed=20260810,
                     ),

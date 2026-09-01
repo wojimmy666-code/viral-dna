@@ -7,8 +7,11 @@ import {
   reflowTimelineDraft,
   reorderTimelineClips,
   snapTimelineTime,
+  sourceAudioPlaybackRate,
   sourceTimeToTimelineTime,
   timelineClipAtTime,
+  timelineClipSourceBounds,
+  timelineTimeToSourceAudioTime,
   timelineTimeToSourceTime,
   trimTimelineClip,
   trimTimelineRange,
@@ -35,7 +38,6 @@ function clip(id, order, start = 0, duration = 2) {
     timeline_duration_seconds: duration,
     timeline_start_seconds: 0,
     timeline_end_seconds: duration,
-    cover_timestamp_seconds: start + duration / 2,
     transition_after: { kind: "none", duration_seconds: 0 },
   };
 }
@@ -68,6 +70,55 @@ test("maps the global playhead to trimmed source time and back", () => {
   assert.equal(timelineTimeToSourceTime(first, 4.25), 3.5);
   assert.equal(sourceTimeToTimelineTime(first, 3.5), 4.25);
   assert.equal(timelineTimeToSourceTime(first, 8), 5);
+});
+
+test("maps source-range clips onto the original video clock", () => {
+  const ranged = {
+    ...clip("source", 1, 0.5, 2),
+    source_range: {
+      start_pts: 2_667_000,
+      end_pts: 5_167_000,
+      time_base_numerator: 1,
+      time_base_denominator: 1_000_000,
+    },
+    timeline_start_seconds: 4,
+    timeline_end_seconds: 6,
+  };
+
+  assert.deepEqual(timelineClipSourceBounds(ranged), { start: 3.167, end: 5.167 });
+  assert.equal(timelineTimeToSourceTime(ranged, 5), 4.167);
+  assert.equal(sourceTimeToTimelineTime(ranged, 4.167), 5);
+
+  const unrounded = {
+    ...clip("unrounded-source", 1, 0, 2.5),
+    candidate_duration_seconds: 2.500333,
+    source_range: {
+      start_pts: 2_667_123,
+      end_pts: 5_167_456,
+      time_base_numerator: 1,
+      time_base_denominator: 1_000_000,
+    },
+  };
+  assert.deepEqual(
+    timelineClipSourceBounds(unrounded),
+    { start: 2.667123, end: 5.167456 },
+  );
+});
+
+test("maps original shot audio onto an edited clip duration", () => {
+  const edited = {
+    ...clip("generated", 1, 0, 4),
+    timeline_start_seconds: 5,
+    timeline_end_seconds: 9,
+    timeline_duration_seconds: 4,
+    source_audio_start_seconds: 12.6,
+    source_audio_end_seconds: 18.6,
+  };
+
+  assert.equal(timelineTimeToSourceAudioTime(edited, 5), 12.6);
+  assert.equal(timelineTimeToSourceAudioTime(edited, 7), 15.6);
+  assert.equal(timelineTimeToSourceAudioTime(edited, 9), 18.6);
+  assert.equal(sourceAudioPlaybackRate(edited), 1.5);
 });
 
 test("selects the incoming clip at boundaries and finds the next enabled clip", () => {
@@ -126,7 +177,9 @@ test("ships pointer, keyboard, audio upload, and subtitle editing controls", () 
   assert.match(canvasSource, /event\.key === "Delete"/);
   assert.match(canvasSource, /aria-label="时间线缩放"/);
   assert.match(canvasSource, /在播放头添加字幕/);
-  assert.match(canvasSource, /previewFrameUrl/);
+  assert.doesNotMatch(canvasSource, /previewFrameUrl|TimelineFilmstrip|cover_url/);
+  assert.match(canvasSource, /sourceRangesContinue/);
+  assert.match(canvasSource, /原视频 ·/);
   assert.match(canvasSource, /onScrubStart/);
   assert.match(workspaceSource, /duration_seconds", String\(durationSeconds\)/);
   assert.match(workspaceSource, /createTimelineSubtitle/);

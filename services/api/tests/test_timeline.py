@@ -63,26 +63,6 @@ class FakeHandoffProvider:
         raise AssertionError("测试渲染器不应解析候选媒体")
 
 
-class FakeFrameInspector:
-    def __init__(self) -> None:
-        self.calls: list[tuple[Path, float]] = []
-
-    async def extract_preview_frame(
-        self,
-        source_path: Path,
-        destination_path: Path,
-        *,
-        timestamp_seconds: float,
-    ) -> None:
-        assert await asyncio.to_thread(source_path.is_file)
-        await asyncio.to_thread(destination_path.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(
-            destination_path.write_bytes,
-            f"frame:{timestamp_seconds:.3f}".encode(),
-        )
-        self.calls.append((destination_path, timestamp_seconds))
-
-
 class FakeRenderer:
     async def render(
         self,
@@ -226,46 +206,90 @@ async def test_timeline_initializes_from_handoff_and_persists_revision(timeline_
 
 
 @pytest.mark.asyncio
-async def test_timeline_preview_frames_are_extracted_at_safe_cached_positions(
-    timeline_context,
-    tmp_path,
-):
-    original_service, workspace, project, _ = timeline_context
-    source_path = tmp_path / "candidate.mp4"
-    source_path.write_bytes(b"video")
-    inspector = FakeFrameInspector()
-    service = TimelineService(
-        original_service.repository,
-        workspace,
-        FakeHandoffProvider(original_service.handoff_provider.manifest, source_path),
-        renderer=FakeRenderer(),
-        video_inspector=inspector,
-    )
+async def test_timeline_only_allows_verified_candidate_audio(timeline_context):
+    service, _, project, _ = timeline_context
     timeline = await service.get_timeline(project.id)
-    clip = timeline.clips[0]
+    first = timeline.clips[0]
 
-    first_path, media_type = await service.resolve_clip_preview_frame(
-        project.id,
-        clip.id,
-        0,
-        count=3,
+    with pytest.raises(TimelineServiceError) as unavailable:
+        await service.update_timeline(
+            project.id,
+            TimelineUpdateRequest(
+                expected_revision_id=timeline.revision_id,
+                clip_updates=[
+                    TimelineClipUpdate(
+                        clip_id=first.id,
+                        audio_mode=VideoClipAudioMode.CANDIDATE,
+                    )
+                ],
+                summary="尝试使用不存在的候选音频",
+            ),
+        )
+    assert unavailable.value.code == "timeline_candidate_audio_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_timeline_initializes_with_verified_candidate_audio(timeline_context):
+    service, _, project, _ = timeline_context
+    handoff = service.handoff_provider.manifest
+    first, second = handoff.clips
+    service.handoff_provider.manifest = handoff.model_copy(
+        update={
+            "audio_strategy": "per_shot",
+            "clips": [
+                first.model_copy(
+                    update={
+                        "audio_mode": VideoClipAudioMode.CANDIDATE,
+                        "candidate_audio_available": True,
+                    }
+                ),
+                second,
+            ],
+        }
     )
-    second_path, _ = await service.resolve_clip_preview_frame(
+
+    timeline = await service.get_timeline(project.id)
+    initialized = timeline.clips[0]
+    assert initialized.audio_mode == VideoClipAudioMode.CANDIDATE
+    assert initialized.candidate_audio_available is True
+
+    muted = await service.update_timeline(
         project.id,
-        clip.id,
-        1,
-        count=3,
+        TimelineUpdateRequest(
+            expected_revision_id=timeline.revision_id,
+            clip_updates=[
+                TimelineClipUpdate(
+                    clip_id=initialized.id,
+                    audio_mode=VideoClipAudioMode.MUTED,
+                )
+            ],
+            summary="暂时静音",
+        ),
     )
+    restored = await service.update_timeline(
+        project.id,
+        TimelineUpdateRequest(
+            expected_revision_id=muted.revision_id,
+            clip_updates=[
+                TimelineClipUpdate(
+                    clip_id=initialized.id,
+                    audio_mode=VideoClipAudioMode.CANDIDATE,
+                )
+            ],
+            summary="恢复候选新音频",
+        ),
+    )
+    assert restored.clips[0].audio_mode == VideoClipAudioMode.CANDIDATE
 
-    assert media_type == "image/webp"
-    assert first_path.read_bytes() == b"frame:0.400"
-    assert second_path.read_bytes() == b"frame:2.000"
-    assert [timestamp for _, timestamp in inspector.calls] == [0.4, 2.0, 3.6]
-    assert len(inspector.calls) == 3
 
-    with pytest.raises(TimelineServiceError) as exc_info:
-        await service.resolve_clip_preview_frame(project.id, clip.id, 3, count=3)
-    assert exc_info.value.code == "timeline_preview_frame_index_invalid"
+@pytest.mark.asyncio
+async def test_timeline_does_not_create_per_shot_covers(timeline_context):
+    service, _, project, _ = timeline_context
+    timeline = await service.get_timeline(project.id)
+
+    assert not hasattr(service, "resolve_clip_cover")
+    assert not hasattr(service, "resolve_clip_preview_frame")
+    assert all("cover_url" not in clip.model_fields_set for clip in timeline.clips)
 
 
 @pytest.mark.asyncio
@@ -361,8 +385,6 @@ async def test_timeline_syncs_replaced_video_without_losing_editor_choices(
         update={
             "candidate_id": replacement_id,
             "candidate_content_url": f"/candidates/{replacement_id}",
-            "cover_url": "/covers/replacement",
-            "cover_timestamp_seconds": 3,
             "timeline_end_seconds": 6,
             "timeline_duration_seconds": 6,
             "trim_out_seconds": 6,
@@ -402,7 +424,6 @@ async def test_timeline_syncs_replaced_video_without_losing_editor_choices(
     assert synced_first.id == first.id
     assert synced_first.candidate_id == replacement_id
     assert synced_first.candidate_content_url == f"/candidates/{replacement_id}"
-    assert synced_first.cover_url == "/covers/replacement"
     assert synced_first.trim_in_seconds == 0
     assert synced_first.trim_out_seconds == 6
     assert synced_first.timeline_duration_seconds == 3.5

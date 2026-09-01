@@ -35,18 +35,32 @@ test("opens the editing step only after workflow advancement", () => {
 });
 
 test("persists controlled edits with optimistic timeline revisions", () => {
-  assert.match(workspaceSource, /expected_revision_id: timeline\.revision_id/);
-  assert.match(workspaceSource, /clip_order: timeline\.clips\.map/);
-  assert.match(workspaceSource, /clip_updates: timeline\.clips\.map/);
-  assert.match(workspaceSource, /audio_track: timeline\.audio_track/);
-  assert.match(workspaceSource, /subtitle_cues: timeline\.subtitle_cues/);
+  assert.match(workspaceSource, /expected_revision_id: draft\.revision_id/);
+  assert.match(workspaceSource, /clip_order: draft\.clips\.map/);
+  assert.match(workspaceSource, /clip_updates: draft\.clips\.map/);
+  assert.match(workspaceSource, /audio_track: draft\.audio_track/);
+  assert.match(workspaceSource, /subtitle_cues: draft\.subtitle_cues/);
   assert.match(workspaceSource, /timeline\/revisions\/\$\{revision\.id\}\/restore/);
   assert.match(editorStateSource, /handoff_synced: "同步最新分段视频"/);
 });
 
-test("offers source audio subtitles transitions and low-resolution preview jobs", () => {
+test("auto-saves timeline edits and flushes them before revision-bound actions", () => {
+  assert.match(workspaceSource, /const TIMELINE_AUTOSAVE_DELAY_MS = 800/);
+  assert.match(workspaceSource, /window\.setTimeout\(\(\) => \{\s+autosaveTimerRef\.current = null;\s+flushTimelineSave\(\)/);
+  assert.match(workspaceSource, /function persistCurrentTimeline\(\)/);
+  assert.match(workspaceSource, /function flushTimelineSave\(\)/);
+  assert.match(workspaceSource, /currentSnapshot === sentSnapshot/);
+  assert.match(workspaceSource, /<AutosaveStatus/);
+  assert.match(workspaceSource, /onRetry=\{\(\) => flushTimelineSave\(\)/);
+  assert.doesNotMatch(workspaceSource, />保存时间线</);
+  assert.match(workspaceSource, /const savedTimeline = await flushTimelineSave\(\);[\s\S]+timeline\/preview-renders/);
+  assert.match(workspaceSource, /window\.addEventListener\("beforeunload", warnBeforeUnload\)/);
+});
+
+test("offers per-shot audio subtitles transitions and low-resolution preview jobs", () => {
   assert.match(workspaceSource, /option value="crossfade">叠化/);
-  assert.match(workspaceSource, /option value="source">映射原视频音轨/);
+  assert.match(workspaceSource, /option value="source">沿用原分镜音频/);
+  assert.match(workspaceSource, /option disabled=\{!clip\.candidate_audio_available\} value="candidate"/);
   assert.match(workspaceSource, /timeline\/preview-renders/);
   assert.match(workspaceSource, /render-jobs\/\$\{renderJob\.id\}\/cancel/);
   assert.match(workspaceSource, /<TimelinePreviewPlayer/);
@@ -54,9 +68,15 @@ test("offers source audio subtitles transitions and low-resolution preview jobs"
   assert.match(workspaceSource, /aria-label="播放音量"/);
   assert.match(workspaceSource, /playsInline/);
   assert.match(workspaceSource, /<track default kind="subtitles"/);
+  assert.match(workspaceSource, /const sourceAudioRef = useRef\(null\)/);
+  assert.match(workspaceSource, /timelineTimeToSourceAudioTime/);
+  assert.match(workspaceSource, /clipAudioMode\(clip\) !== "source"/);
+  assert.match(workspaceSource, /video\.muted = muted \|\| volume === 0 \|\| \(!usingCompositePreview && mode !== "candidate"\)/);
+  assert.match(workspaceSource, /<audio[\s\S]+ref=\{sourceAudioRef\}[\s\S]+src=\{sourceAudioUrl\}/);
+  assert.match(workspaceSource, /beginFrameLoop\(video\);[\s\S]+activeClip\?\.playback_rate/);
   assert.match(workspaceSource, /onNotificationsChanged/);
-  assert.match(workspaceSource, /cover_timestamp_seconds/);
-  assert.match(workspaceSource, /timeline\/clips\/\$\{selectedClip\.id\}\/inspect/);
+  assert.doesNotMatch(workspaceSource, /cover_timestamp_seconds|preview-frames/);
+  assert.match(workspaceSource, /timeline\/clips\/\$\{selectedClipIdForInspection\}\/inspect/);
   assert.match(workspaceSource, /重新质检/);
   assert.doesNotMatch(workspaceSource, /timeline-cover-field|封面帧必须位于入点和出点之间/);
 });

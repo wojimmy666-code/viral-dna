@@ -127,12 +127,14 @@ from .models import (
     ShotVisualBeatDelete,
     ShotVisualBeatReorder,
     ShotVisualBeatUpdate,
+    SourceVideoRangeReference,
     Video,
     VideoClipAudioMode,
     VideoClipPreparation,
     VideoClipPreparationResponse,
     VideoClipPreparationStatus,
     VideoClipPreparationUpdate,
+    VideoGenerationAudioStrategy,
     VideoGenerationCreate,
     VideoGenerationInputMode,
     VideoGenerationInputSource,
@@ -226,6 +228,23 @@ def _step_after_reference_change(
 
 def _duration_alignment_warning(playback_rate: float) -> str:
     return f"裁剪后时长与原分镜差异过大，将以 {playback_rate:.3f}× 对齐时间线；请在剪辑阶段复核节奏"
+
+
+def _candidate_default_audio_mode(
+    candidate: GenerationCandidate,
+    *,
+    source_audio_available: bool,
+) -> VideoClipAudioMode:
+    if (
+        candidate.audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+        and candidate.native_audio_present
+    ):
+        return VideoClipAudioMode.CANDIDATE
+    if candidate.audio_strategy == VideoGenerationAudioStrategy.MUTED:
+        return VideoClipAudioMode.MUTED
+    if source_audio_available:
+        return VideoClipAudioMode.SOURCE
+    return VideoClipAudioMode.MUTED
 
 
 def _apply_video_preparation_policy(
@@ -489,7 +508,7 @@ class VideoInspector(Protocol):
     async def inspect(
         self,
         source_path: Path,
-        cover_path: Path,
+        cover_path: Path | None,
         *,
         cover_timestamp_seconds: float,
         expected_width: int | None,
@@ -1016,6 +1035,14 @@ def _frame_sha256_and_dhash(path: Path) -> tuple[str, int]:
             if pixels[row_offset + column] > pixels[row_offset + column + 1]:
                 difference_hash |= 1
     return hashlib.sha256(payload).hexdigest(), difference_hash
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _hash_distance(left: int, right: int) -> int:
@@ -4309,7 +4336,10 @@ class ProductionService:
             audio_mode = (
                 payload.audio_mode
                 or (existing.audio_mode if same_candidate else None)
-                or (VideoClipAudioMode.SOURCE if source_audio_url else VideoClipAudioMode.MUTED)
+                or _candidate_default_audio_mode(
+                    candidate,
+                    source_audio_available=bool(source_audio_url),
+                )
             )
             transcript_cues = (
                 map_timed_text(
@@ -4342,6 +4372,8 @@ class ProductionService:
                 warning_messages.append(_duration_alignment_warning(playback_rate))
             if audio_mode == VideoClipAudioMode.SOURCE and not source_audio_url:
                 blockers.append("基础分析没有可用原音轨，请改为静音或重新分析音频")
+            if audio_mode == VideoClipAudioMode.CANDIDATE and not candidate.native_audio_present:
+                blockers.append("当前视频候选没有可用的新音频，请改为沿用原音频或静音")
             quality_status = VideoQualityStatus(inspection.quality_status)
             if quality_status == VideoQualityStatus.FAILED:
                 blockers.append("视频技术质检未通过")
@@ -4369,8 +4401,11 @@ class ProductionService:
                     if audio_mode == VideoClipAudioMode.SOURCE and source_audio_url
                     else "source_audio_unavailable"
                     if audio_mode == VideoClipAudioMode.SOURCE
+                    else "candidate_native_audio"
+                    if audio_mode == VideoClipAudioMode.CANDIDATE
                     else "muted"
                 ),
+                candidate_audio_available=candidate.native_audio_present,
                 source_audio_url=source_audio_url,
                 source_audio_start_seconds=round(plan.start_seconds, 3),
                 source_audio_end_seconds=round(plan.end_seconds, 3),
@@ -4906,6 +4941,24 @@ class ProductionService:
         }.get(path.suffix.lower(), "application/octet-stream")
         return path, media_type
 
+    async def resolve_source_video_reference(
+        self,
+        source_video_id: UUID,
+        source_sha256: str,
+    ) -> tuple[Path, str]:
+        video = await self.repository.get_video(source_video_id)
+        if video is None:
+            raise _fail(404, "source_video_not_found", "引用的原视频不存在")
+        if video.sha256 is not None and video.sha256 != source_sha256:
+            raise _fail(409, "source_video_changed", "引用的原视频内容已经变化")
+        path = self._resolve_video_file(video)
+        media_type = {
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            ".webm": "video/webm",
+        }.get(path.suffix.lower(), "application/octet-stream")
+        return path, media_type
+
     async def resolve_source_keyframe_content(
         self,
         shot_plan_id: UUID,
@@ -5371,11 +5424,24 @@ class ProductionService:
         payload: VideoGenerationCreate,
         capability,
     ) -> None:
-        """Validate only the media inputs explicitly selected by the user.
-
-        Prompt text is always submitted. Audio intentionally does not exist in
-        this contract; source/generated audio is handled later by the editor.
-        """
+        """Validate the explicitly selected generation inputs and audio strategy."""
+        if (
+            payload.audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+            and not capability.native_audio
+        ):
+            raise _fail(
+                422,
+                "video_native_audio_unsupported",
+                "当前视频模型不支持生成新音频，请改为沿用原音频或静音",
+            )
+        if payload.audio_strategy == VideoGenerationAudioStrategy.REUSE_SOURCE:
+            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            if not report or not report.media_evidence or not report.media_evidence.audio_url:
+                raise _fail(
+                    409,
+                    "source_audio_unavailable",
+                    "当前原视频没有可用音频，请改为生成新音频或静音",
+                )
         sources = set(payload.input_plan.sources)
         source_by_reference_kind = {
             VideoPromptReferenceKind.APPROVED_IMAGE: VideoGenerationInputSource.APPROVED_IMAGES,
@@ -6625,6 +6691,7 @@ class ProductionService:
                     execution_mode=payload.execution_mode,
                     model_alias=payload.model_alias,
                     resolution=payload.resolution,
+                    audio_strategy=payload.audio_strategy,
                     allow_unknown_cost=payload.allow_unknown_cost,
                     seed=payload.seed,
                     input_plan=payload.input_plan,
@@ -7918,6 +7985,15 @@ class ProductionService:
         run = await self._require_run(candidate.generation_run_id)
         plan = await self._require_shot(run.shot_plan_id)
         project = await self._require_project(run.project_id)
+        if candidate.source_range is not None:
+            if thumbnail:
+                raise _fail(404, "candidate_thumbnail_missing", "原视频范围不生成分镜封面")
+            if candidate.source_range.source_video_id != project.video_id:
+                raise _fail(409, "source_video_mismatch", "原视频范围与当前创作方案不匹配")
+            return await self.resolve_source_video_reference(
+                candidate.source_range.source_video_id,
+                candidate.source_range.source_sha256,
+            )
         relative_path = candidate.thumbnail_relative_path if thumbnail else candidate.relative_path
         if not thumbnail and variant == "original":
             enhancement = (candidate.quality_report or {}).get("video_enhancement")
@@ -8190,17 +8266,16 @@ class ProductionService:
                     )
                 continue
 
-            candidate_duration = round(
-                float(candidate.duration_seconds or plan.duration_seconds),
-                3,
+            candidate_duration = (
+                candidate.source_range.duration_seconds
+                if candidate.source_range is not None
+                else round(float(candidate.duration_seconds or plan.duration_seconds), 3)
             )
-            if legacy_preparation is not None:
+            if legacy_preparation is not None and candidate.source_range is None:
                 trim_in = legacy_preparation.trim_in_seconds
                 trim_out = legacy_preparation.trim_out_seconds
                 timeline_duration = legacy_preparation.timeline_duration_seconds
                 playback_rate = legacy_preparation.video_playback_rate
-                cover_url = f"/api/v1/production-shots/{plan.id}/video-preparation/cover"
-                cover_timestamp = legacy_preparation.cover_timestamp_seconds
                 audio_mode = legacy_preparation.audio_mode
                 source_audio_start = legacy_preparation.source_audio_start_seconds
                 source_audio_end = legacy_preparation.source_audio_end_seconds
@@ -8213,18 +8288,30 @@ class ProductionService:
             else:
                 trim_in = 0.0
                 trim_out = candidate_duration
-                timeline_duration = round(float(plan.duration_seconds), 3)
-                playback_rate, duration_alignment = playback_alignment(
-                    candidate_duration,
-                    timeline_duration,
+                if candidate.source_range is not None:
+                    timeline_duration = candidate_duration
+                    playback_rate = 1.0
+                    duration_alignment = "exact"
+                else:
+                    timeline_duration = round(float(plan.duration_seconds), 3)
+                    playback_rate, duration_alignment = playback_alignment(
+                        candidate_duration,
+                        timeline_duration,
+                    )
+                audio_mode = _candidate_default_audio_mode(
+                    candidate,
+                    source_audio_available=bool(source_audio_url),
                 )
-                cover_url = f"/api/v1/generation-candidates/{candidate.id}/thumbnail"
-                cover_timestamp = round(candidate_duration / 2, 3)
-                audio_mode = (
-                    VideoClipAudioMode.SOURCE if source_audio_url else VideoClipAudioMode.MUTED
+                source_audio_start = (
+                    candidate.source_range.start_seconds
+                    if candidate.source_range is not None
+                    else round(plan.start_seconds, 3)
                 )
-                source_audio_start = round(plan.start_seconds, 3)
-                source_audio_end = round(plan.end_seconds, 3)
+                source_audio_end = (
+                    candidate.source_range.end_seconds
+                    if candidate.source_range is not None
+                    else round(plan.end_seconds, 3)
+                )
                 evidence = report.evidence_timeline
                 transcript_cues = (
                     map_timed_text(
@@ -8261,6 +8348,15 @@ class ProductionService:
                     warning_messages.append("将在视频剪辑阶段完成基础质检")
                 if duration_alignment == "outside_safe_range":
                     warning_messages.append(_duration_alignment_warning(playback_rate))
+                if (
+                    candidate.audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+                    and not candidate.native_audio_present
+                ):
+                    warning_messages.append(
+                        "新音频未生成，已改为沿用原分镜音频"
+                        if source_audio_url
+                        else "新音频未生成，当前分镜已静音"
+                    )
                 warning_messages = list(dict.fromkeys(warning_messages))
             timeline_start = round(timeline_cursor, 3)
             timeline_end = round(timeline_start + timeline_duration, 3)
@@ -8269,9 +8365,12 @@ class ProductionService:
                     shot_plan_id=plan.id,
                     shot_index=plan.index,
                     candidate_id=candidate.id,
-                    candidate_content_url=(f"/api/v1/generation-candidates/{candidate.id}/content"),
-                    cover_url=cover_url,
-                    cover_timestamp_seconds=cover_timestamp,
+                    candidate_content_url=(
+                        f"/api/v1/productions/{project.id}/source-video"
+                        if candidate.source_range is not None
+                        else f"/api/v1/generation-candidates/{candidate.id}/content"
+                    ),
+                    source_range=candidate.source_range,
                     timeline_start_seconds=timeline_start,
                     timeline_end_seconds=timeline_end,
                     timeline_duration_seconds=timeline_duration,
@@ -8279,6 +8378,7 @@ class ProductionService:
                     trim_out_seconds=trim_out,
                     video_playback_rate=playback_rate,
                     audio_mode=audio_mode,
+                    candidate_audio_available=candidate.native_audio_present,
                     source_audio_start_seconds=source_audio_start,
                     source_audio_end_seconds=source_audio_end,
                     transcript_cues=transcript_cues,
@@ -8294,6 +8394,9 @@ class ProductionService:
             raise _fail(409, "editing_handoff_empty", "没有可交给剪辑阶段的视频片段")
 
         source_clips = [item for item in clips if item.audio_mode == VideoClipAudioMode.SOURCE]
+        candidate_audio_clips = [
+            item for item in clips if item.audio_mode == VideoClipAudioMode.CANDIDATE
+        ]
         ranges_are_contiguous = all(
             abs(left.source_audio_end_seconds - right.source_audio_start_seconds) <= 0.05
             for left, right in zip(
@@ -8304,7 +8407,7 @@ class ProductionService:
         )
         if source_audio_url and len(source_clips) == len(clips) and ranges_are_contiguous:
             audio_strategy = "continuous_source_track"
-        elif source_clips:
+        elif source_clips or candidate_audio_clips:
             audio_strategy = "per_shot"
         else:
             audio_strategy = "muted"
@@ -10217,13 +10320,20 @@ class ProductionService:
             height=candidate.height,
             duration_seconds=candidate.duration_seconds,
             sha256=candidate.sha256,
+            audio_strategy=candidate.audio_strategy,
+            native_audio_present=candidate.native_audio_present,
             quality_report=candidate.quality_report,
             status=candidate.status,
             archived_at=candidate.archived_at,
             archived_by_account_id=candidate.archived_by_account_id,
             archive_reason=candidate.archive_reason,
             content_url=f"/api/v1/generation-candidates/{candidate.id}/content",
-            thumbnail_url=f"/api/v1/generation-candidates/{candidate.id}/thumbnail",
+            thumbnail_url=(
+                f"/api/v1/generation-candidates/{candidate.id}/thumbnail"
+                if candidate.thumbnail_relative_path is not None
+                else None
+            ),
+            source_range=candidate.source_range,
             created_at=candidate.created_at,
         )
 
@@ -10251,6 +10361,7 @@ class ProductionService:
             audio_mode=preparation.audio_mode,
             audio_mapping_strategy=preparation.audio_mapping_strategy,
             source_audio_available=preparation.source_audio_url is not None,
+            candidate_audio_available=preparation.candidate_audio_available,
             source_audio_start_seconds=preparation.source_audio_start_seconds,
             source_audio_end_seconds=preparation.source_audio_end_seconds,
             transcript_cues=preparation.transcript_cues,
@@ -10435,24 +10546,30 @@ class ProductionService:
             / "videos"
             / str(run_id)
         )
-        candidate_path = run_root / "source-video.mp4"
-        thumbnail_path = run_root / "source-video.webp"
         metadata_path = run_root / "source-video.json"
         input_path = run_root / "input.json"
         manifest_path = run_root / "manifest.json"
+        source_sha256 = source_video.sha256 or await asyncio.to_thread(
+            _file_sha256,
+            _filesystem_path(source_path),
+        )
+        source_range = SourceVideoRangeReference(
+            source_video_id=source_video.id,
+            source_sha256=source_sha256,
+            start_pts=round(plan.start_seconds * 1_000_000),
+            end_pts=round(plan.end_seconds * 1_000_000),
+        )
         input_payload = {
-            "schema_version": "viral-dna-source-video/v1",
+            "schema_version": "viral-dna-source-video-range/v2",
             "project_id": str(project.id),
             "shot_plan_id": str(plan.id),
             "revision_id": str(revision_id),
             "source_video_id": str(source_video.id),
-            "source_sha256": source_video.sha256,
-            "start_seconds": round(plan.start_seconds, 3),
-            "end_seconds": round(plan.end_seconds, 3),
-            "duration_seconds": round(plan.end_seconds - plan.start_seconds, 3),
+            "source_range": source_range.model_dump(mode="json"),
             "execution": {
                 "mode": ImageExecutionMode.SOURCE_VIDEO.value,
                 "model_call": False,
+                "materialized_clip": False,
             },
         }
         fingerprint = hashlib.sha256(
@@ -10463,63 +10580,58 @@ class ProductionService:
                 sort_keys=True,
             ).encode("utf-8")
         ).hexdigest()
-        try:
-            await self.media_processor.extract_video_clip(
-                _filesystem_path(source_path),
-                _filesystem_path(candidate_path),
-                start_seconds=plan.start_seconds,
-                end_seconds=plan.end_seconds,
-            )
-            inspection = await self.video_inspector.inspect(
-                _filesystem_path(candidate_path),
-                _filesystem_path(thumbnail_path),
-                cover_timestamp_seconds=max(0.0, plan.duration_seconds / 2),
-                expected_width=project.output_width,
-                expected_height=project.output_height,
-                expected_duration_seconds=plan.duration_seconds,
-            )
-        except (MediaProcessingError, ProductionVideoInspectionError, OSError) as exc:
-            raise _fail(
-                422,
-                "source_video_clip_failed",
-                f"无法提取分镜 {plan.index} 的原视频片段：{exc}",
-            ) from exc
-
         quality_report = {
-            **inspection.quality_report,
-            "source_video_passthrough": True,
-            "summary": "已沿用原视频分镜片段，未调用图片或视频生成模型。",
+            "schema_version": "viral-dna-source-video-quality/v2",
+            "status": VideoQualityStatus.PASSED.value,
+            "source_video_reference": True,
+            "source_range": source_range.model_dump(mode="json"),
+            "warnings": [],
+            "summary": "已引用原视频时间范围，未生成独立分镜文件。",
         }
+        source_relative_path = source_video.stored_relative_path
+        if source_relative_path is None:
+            try:
+                source_relative_path = self.workspace.relative(source_path)
+            except WorkspaceError:
+                # source_range is authoritative; keep the required legacy path
+                # field inside the run without materializing another video.
+                source_relative_path = self.workspace.relative(metadata_path)
         candidate = GenerationCandidate(
             generation_run_id=run_id,
             ordinal=1,
             kind=GenerationKind.VIDEO,
-            relative_path=self.workspace.relative(candidate_path),
-            thumbnail_relative_path=self.workspace.relative(thumbnail_path),
-            width=inspection.metadata.width,
-            height=inspection.metadata.height,
-            duration_seconds=inspection.metadata.duration_seconds,
-            sha256=inspection.metadata.sha256,
+            relative_path=source_relative_path,
+            thumbnail_relative_path=None,
+            width=source_video.width,
+            height=source_video.height,
+            duration_seconds=source_range.duration_seconds,
+            sha256=source_sha256,
             metadata_relative_path=self.workspace.relative(metadata_path),
+            source_range=source_range,
+            audio_strategy=VideoGenerationAudioStrategy.REUSE_SOURCE,
+            native_audio_present=False,
             quality_report=quality_report,
             status=GenerationCandidateStatus.SELECTED,
         )
         metadata = {
-            "schema_version": "viral-dna-generation-candidate/v1",
-            "source_video": True,
+            "schema_version": "viral-dna-generation-candidate/v2",
+            "source_video_reference": True,
             "candidate_id": str(candidate.id),
             "request_fingerprint": fingerprint,
             "sha256": candidate.sha256,
             "width": candidate.width,
             "height": candidate.height,
             "duration_seconds": candidate.duration_seconds,
+            "audio_strategy": candidate.audio_strategy.value,
+            "native_audio_present": candidate.native_audio_present,
+            "source_range": source_range.model_dump(mode="json"),
             "quality_report": quality_report,
         }
         manifest = {
-            "schema_version": "viral-dna-video-generation-result/v1",
+            "schema_version": "viral-dna-video-generation-result/v2",
             "status": "completed",
             "request_id": str(run_id),
-            "source_video": True,
+            "source_video_reference": True,
             "candidate_ids": [str(candidate.id)],
             "candidate_sha256": [candidate.sha256],
             "estimated_cost_micros": 0,
@@ -10538,28 +10650,30 @@ class ProductionService:
             kind=GenerationKind.VIDEO,
             input_mode=VideoGenerationInputMode.VIDEO_TO_VIDEO,
             provider="source_video",
-            model="source-segment",
-            model_snapshot="source-video-v1",
+            model="source-range",
+            model_snapshot="source-video-range-v2",
             model_alias="source_video",
             model_display_name="沿用原视频",
-            prompt_version="source-video-v1",
-            schema_version="viral-dna-source-video/v1",
+            prompt_version="source-video-range-v2",
+            schema_version="viral-dna-source-video-range/v2",
             pricing_version="zero-cost-v1",
             request_fingerprint=fingerprint,
             input_snapshot_relative_path=self.workspace.relative(input_path),
             execution_mode=ImageExecutionMode.SOURCE_VIDEO,
             adapter_id="source-video",
-            adapter_version="batch4.3",
-            capability_snapshot={"source_video_passthrough": True},
+            adapter_version="source-range-v2",
+            capability_snapshot={
+                "source_video_range_reference": True,
+                "materialized_clip": False,
+            },
             execution_summary={
                 "model_call": False,
-                "start_seconds": round(plan.start_seconds, 3),
-                "end_seconds": round(plan.end_seconds, 3),
+                "source_range": source_range.model_dump(mode="json"),
             },
             cost_source=GenerationCostSource.UNMETERED,
             cost_estimate_known=True,
             actual_cost_known=True,
-            usage={"model_calls": 0, "source_video_segments": 1},
+            usage={"model_calls": 0, "source_video_range_references": 1},
             output_manifest_relative_path=self.workspace.relative(manifest_path),
             status=ProductionRunStatus.COMPLETED,
             estimated_cost_micros=0,

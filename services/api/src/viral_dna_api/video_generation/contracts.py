@@ -11,6 +11,7 @@ from ..models import (
     ImageExecutionMode,
     ProductionProject,
     ShotPlan,
+    VideoGenerationAudioStrategy,
     VideoGenerationCapability,
     VideoGenerationInputPlan,
     VideoProviderTaskStatus,
@@ -104,6 +105,7 @@ class VideoGenerationRequest:
     candidate_count: int
     duration_seconds: float
     execution_mode: ImageExecutionMode
+    audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE
     model_alias: str | None = None
     resolution: str | None = None
     allow_unknown_cost: bool = False
@@ -129,6 +131,7 @@ class VideoAdapterRequest:
     negative_prompt: str
     seed: int | None
     capability: VideoGenerationCapability
+    audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE
     managed_asset_references: tuple[ProviderManagedAssetReference, ...] = ()
     depth_control_videos: tuple[DepthControlVideo, ...] = ()
     reference_manifest: dict[str, Any] = field(default_factory=dict)
@@ -215,6 +218,7 @@ class ProviderVideoRequest:
     aspect_ratio: str
     width: int
     height: int
+    generate_audio: bool = False
     route_id: str = "ordered_multi_image"
     effective_route_id: str = "ordered_multi_image"
     spatial_control_semantics: str = "none"

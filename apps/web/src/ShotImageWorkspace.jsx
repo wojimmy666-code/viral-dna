@@ -29,6 +29,7 @@ import {
   isRecoverableImageGenerationRun,
   productionPreviewLayout,
   resolveImageExecutionMode,
+  sourceRangePlaybackUrl,
   workflowStatusClass,
   workflowStatusLabel,
 } from "./production-ui.js";
@@ -1214,7 +1215,7 @@ export function ShotImageWorkspace({
                       {sourceVideoReady
                         ? <CheckCircle size={15} weight="fill" />
                         : <CircleNotch className="spin" size={15} />}
-                      {sourceVideoReady ? "已直接传入剪辑流程" : "正在准备原视频片段"}
+                      {sourceVideoReady ? "已引用原视频范围" : "正在保存原视频范围"}
                     </span>
                   </header>
                   <div className="shot-source-video-frame">
@@ -1222,13 +1223,13 @@ export function ShotImageWorkspace({
                       controls
                       key={sourceVideoCandidate?.id || shotPlan.id}
                       playsInline
-                      poster={resolveUrl(sourceVideoCandidate?.thumbnail_url || "")}
                       preload="metadata"
-                      src={
-                        sourceVideoCandidate?.content_url
-                          ? resolveUrl(sourceVideoCandidate.content_url)
-                          : `${sourceVideoUrl}#t=${shotPlan.start_seconds},${shotPlan.end_seconds}`
-                      }
+                      src={sourceRangePlaybackUrl(
+                        sourceVideoCandidate,
+                        resolveUrl(sourceVideoCandidate?.content_url || sourceVideoUrl),
+                        shotPlan.start_seconds,
+                        shotPlan.end_seconds,
+                      )}
                     />
                   </div>
                   <p>保留该分镜的原动作、原转场和画面，不调用图片或视频生成模型。</p>

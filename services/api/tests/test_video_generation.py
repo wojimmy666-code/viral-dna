@@ -368,7 +368,9 @@ def test_video_gateway_creates_persistent_simulated_candidates(
             references[0].candidate_id
         )
         assert input_payload["reference_images"][1]["sha256"] == "b" * 64
-        assert input_payload["output"]["native_audio"] is False
+        assert input_payload["output"]["audio_strategy"] == "reuse_source"
+        assert input_payload["output"]["generate_native_audio"] is False
+        assert input_payload["output"]["native_audio_capable"] is False
         assert input_payload["prompt"]["positive"].startswith("用户视频提示词")
         assert "使用下列有序安全参考画面" in input_payload["prompt"]["positive"]
         assert "图1到图2由视频模型结合前后画面和用户转场意图" in input_payload["prompt"]["positive"]

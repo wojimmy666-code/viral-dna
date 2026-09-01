@@ -17,6 +17,7 @@ export const EMPTY_VIDEO_DRAFT = Object.freeze({
   negativeConstraints: "",
   durationSeconds: "",
   candidateCount: 1,
+  audioStrategy: "reuse_source",
   modelAlias: "",
   resolution: "720P",
   inputSources: [],
@@ -60,6 +61,7 @@ export function videoDraftParameters(draft) {
     resolution: String(draft?.resolution || "720P").trim().toUpperCase(),
     duration_seconds: normalizedDuration(draft?.durationSeconds),
     candidate_count: normalizedCandidateCount(draft?.candidateCount),
+    audio_strategy: draft?.audioStrategy || "reuse_source",
     input_plan: {
       schema_version: "viral-dna-video-input-plan/v1",
       sources: Array.from(new Set(draft?.inputSources || [])),
@@ -101,6 +103,7 @@ function localVideoDraftParameters(draft) {
     resolution: draft.resolution,
     durationSeconds: draft.durationSeconds,
     candidateCount: draft.candidateCount,
+    audioStrategy: draft.audioStrategy || "reuse_source",
     inputSources: [...(draft.inputSources || [])],
     selectedReferences: (draft.selectedReferences || []).map((item) => ({ ...item })),
     referenceSyncMode: draft.referenceSyncMode || "auto",
@@ -195,6 +198,7 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
     candidateCount: normalizedCandidateCount(
       persistedDraft?.candidate_count,
     ),
+    audioStrategy: persistedDraft?.audio_strategy || "reuse_source",
     modelAlias,
     resolution: (
       persistedDraft?.resolution

@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { SpeakerSlash } from "@phosphor-icons/react";
+import { SpeakerHigh, SpeakerSlash, Waveform } from "@phosphor-icons/react";
 import {
   formatVideoDuration,
   videoDurationConstraintLabel,
@@ -18,6 +18,7 @@ function ratioShape(aspectRatio) {
 
 export function VideoGenerationSettingsPopover({
   anchorRef,
+  audioStrategy,
   aspectRatio,
   candidateCount,
   controlsDisabled,
@@ -31,6 +32,7 @@ export function VideoGenerationSettingsPopover({
   estimatedCostKnown,
   estimatedCostLabel,
   onCandidateCountChange,
+  onAudioStrategyChange,
   onClose,
   onDurationChange,
   onResolutionChange,
@@ -39,6 +41,7 @@ export function VideoGenerationSettingsPopover({
   providerReady,
   selectedModel,
   selectedResolution,
+  sourceAudioAvailable,
   supportedResolutions,
 }) {
   const generatedId = useId().replaceAll(":", "");
@@ -133,6 +136,42 @@ export function VideoGenerationSettingsPopover({
           )}
         </section>
 
+        <fieldset className="video-setting-section video-audio-setting">
+          <legend>分镜声音</legend>
+          <div className="video-audio-options">
+            <button
+              aria-pressed={audioStrategy === "reuse_source"}
+              className={audioStrategy === "reuse_source" ? "active" : ""}
+              disabled={controlsDisabled || !sourceAudioAvailable}
+              onClick={() => onAudioStrategyChange("reuse_source")}
+              type="button"
+            >
+              <SpeakerHigh size={18} />
+              <span><strong>沿用原音频</strong><small>{sourceAudioAvailable ? "使用该分镜在原视频中的声音" : "原视频没有可用音频"}</small></span>
+            </button>
+            <button
+              aria-pressed={audioStrategy === "generate_native"}
+              className={audioStrategy === "generate_native" ? "active" : ""}
+              disabled={controlsDisabled || !selectedModel?.capabilities?.native_audio}
+              onClick={() => onAudioStrategyChange("generate_native")}
+              type="button"
+            >
+              <Waveform size={18} />
+              <span><strong>生成新音频</strong><small>{selectedModel?.capabilities?.native_audio ? "由视频模型生成同步声音" : "当前模型不支持"}</small></span>
+            </button>
+            <button
+              aria-pressed={audioStrategy === "muted"}
+              className={audioStrategy === "muted" ? "active" : ""}
+              disabled={controlsDisabled}
+              onClick={() => onAudioStrategyChange("muted")}
+              type="button"
+            >
+              <SpeakerSlash size={18} />
+              <span><strong>静音</strong><small>下一阶段不带分镜声音</small></span>
+            </button>
+          </div>
+        </fieldset>
+
         <fieldset className="video-setting-section">
           <legend>生成数量</legend>
           <div className="video-setting-segments candidates">
@@ -151,12 +190,6 @@ export function VideoGenerationSettingsPopover({
           </div>
         </fieldset>
 
-        {!selectedModel?.capabilities?.native_audio && (
-          <div className="video-audio-capability">
-            <SpeakerSlash size={17} />
-            <span>当前模型不生成原生音频，成片音频在视频剪辑阶段处理。</span>
-          </div>
-        )}
       </div>
 
       <footer className="video-settings-footer">

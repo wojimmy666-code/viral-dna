@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -28,6 +29,7 @@ from ..models import (
     ProductionProject,
     ProductionRunStatus,
     ShotPlan,
+    VideoGenerationAudioStrategy,
     VideoGenerationCapability,
     VideoGenerationInputMode,
     VideoGenerationInputPlan,
@@ -425,10 +427,11 @@ class VideoGenerationGateway:
         media_staging_service: MediaStagingService | None = None,
     ) -> None:
         self.workspace = workspace
+        self.media_processor = media_processor or MediaProcessor()
         self.public_media_stager = public_media_stager or PublicMediaStager(workspace)
         self.media_staging_service = media_staging_service
         if adapters is None:
-            simulated = SimulatedVideoAdapter(media_processor)
+            simulated = SimulatedVideoAdapter(self.media_processor)
             self.adapters: dict[ImageExecutionMode, VideoGenerationAdapter] = {
                 ImageExecutionMode.SIMULATED: simulated,
             }
@@ -591,6 +594,7 @@ class VideoGenerationGateway:
         execution_mode: str = "simulated",
         model_alias: str | None = None,
         resolution: str | None = None,
+        audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE,
         allow_unknown_cost: bool = False,
         seed: int | None = None,
         run_id: UUID | None = None,
@@ -618,6 +622,15 @@ class VideoGenerationGateway:
         )
         adapter = self.adapters.get(mode)
         capability = identity.capability
+        if (
+            audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+            and not capability.native_audio
+        ):
+            raise VideoGenerationGatewayError(
+                422,
+                "video_native_audio_unsupported",
+                "当前视频模型不支持生成新音频，请改为沿用原音频或静音",
+            )
         if input_plan.sources and not capability.reference_route.enabled:
             raise VideoGenerationGatewayError(
                 409,
@@ -859,6 +872,7 @@ class VideoGenerationGateway:
             candidate_count=candidate_count,
             duration_seconds=duration_seconds,
             execution_mode=mode,
+            audio_strategy=audio_strategy,
             model_alias=identity.model_alias,
             resolution=selected_resolution,
             allow_unknown_cost=allow_unknown_cost,
@@ -896,6 +910,7 @@ class VideoGenerationGateway:
                 negative_prompt=negative_prompt,
                 seed=seed,
                 capability=capability,
+                audio_strategy=audio_strategy,
                 managed_asset_references=managed_references,
                 depth_control_videos=depth_control_videos,
                 reference_manifest=reference_manifest,
@@ -925,6 +940,7 @@ class VideoGenerationGateway:
                     height=height,
                     positive_prompt=prompt,
                     negative_prompt=negative_prompt,
+                    audio_strategy=audio_strategy,
                     seed=seed,
                     cancel_event=cancel_event,
                     reference_manifest=reference_manifest,
@@ -962,8 +978,9 @@ class VideoGenerationGateway:
                 "视频执行器返回的候选数量与请求不一致",
             )
 
-        candidates = [
-            self._save_candidate(
+        candidates: list[GenerationCandidate] = []
+        for ordinal, generated in enumerate(result.videos, start=1):
+            candidates.append(await self._save_candidate(
                 run_root,
                 run_id,
                 int(generated.metadata.get("provider_ordinal") or ordinal),
@@ -973,9 +990,7 @@ class VideoGenerationGateway:
                 request_fingerprint=fingerprint,
                 target_width=width,
                 target_height=height,
-            )
-            for ordinal, generated in enumerate(result.videos, start=1)
-        ]
+            ))
         actual_cost_known = result.actual_cost_micros is not None
         actual_cost = result.actual_cost_micros or 0
         cost_source = result.cost_source or identity.cost_source
@@ -1072,7 +1087,11 @@ class VideoGenerationGateway:
                 "duration_seconds": request.duration_seconds,
                 "candidate_count": request.candidate_count,
                 "resolution": request.resolution,
-                "native_audio": identity.capability.native_audio,
+                "audio_strategy": request.audio_strategy.value,
+                "generate_native_audio": (
+                    request.audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+                ),
+                "native_audio_capable": identity.capability.native_audio,
             },
             "prompt": {
                 "positive": prompt,
@@ -1137,7 +1156,7 @@ class VideoGenerationGateway:
             },
         }
 
-    def _save_candidate(
+    async def _save_candidate(
         self,
         run_root: Path,
         run_id: UUID,
@@ -1151,8 +1170,11 @@ class VideoGenerationGateway:
         target_height: int,
     ) -> GenerationCandidate:
         try:
-            resolved = generated.path.resolve()
-            resolved.relative_to(run_root.resolve())
+            resolved, resolved_run_root = await asyncio.gather(
+                asyncio.to_thread(generated.path.resolve),
+                asyncio.to_thread(run_root.resolve),
+            )
+            resolved.relative_to(resolved_run_root)
         except (OSError, ValueError) as exc:
             raise VideoGenerationGatewayError(
                 502,
@@ -1181,6 +1203,15 @@ class VideoGenerationGateway:
                 "视频候选为空或超过工作区安全限制",
             )
 
+        native_audio_present = bool(generated.metadata.get("native_audio_present", False))
+        probe = getattr(self.media_processor, "probe", None)
+        if callable(probe):
+            try:
+                media_metadata = await probe(filesystem_path)
+                native_audio_present = bool(media_metadata.has_audio)
+            except MediaProcessingError:
+                native_audio_present = False
+
         width = generated.width or target_width
         height = generated.height or target_height
         duration = generated.duration_seconds or request.duration_seconds
@@ -1194,6 +1225,14 @@ class VideoGenerationGateway:
                 width=width,
                 height=height,
             )
+        native_audio_requested = (
+            request.audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+        )
+        audio_warnings = (
+            ["模型未返回可用的新音频，可在剪辑阶段改用原分镜音频或静音"]
+            if native_audio_requested and not native_audio_present
+            else []
+        )
         quality_report = {
             "schema_version": "viral-dna-video-quality/v1",
             "status": "manual_review_required",
@@ -1219,10 +1258,18 @@ class VideoGenerationGateway:
                     "height": height,
                 },
                 "native_audio": {
-                    "status": "not_requested",
-                    "present": False,
+                    "status": (
+                        "passed"
+                        if native_audio_requested and native_audio_present
+                        else "failed"
+                        if native_audio_requested
+                        else "not_requested"
+                    ),
+                    "requested": native_audio_requested,
+                    "present": native_audio_present,
                 },
             },
+            "warnings": audio_warnings,
             "manual_checks": [
                 {"id": "motion", "label": "动作与运镜", "status": "required"},
                 {"id": "identity", "label": "人物与产品稳定性", "status": "required"},
@@ -1241,6 +1288,8 @@ class VideoGenerationGateway:
             "width": width,
             "height": height,
             "duration_seconds": duration,
+            "audio_strategy": request.audio_strategy.value,
+            "native_audio_present": native_audio_present,
             "quality_report": quality_report,
             "adapter_metadata": generated.metadata,
         }
@@ -1256,6 +1305,8 @@ class VideoGenerationGateway:
             duration_seconds=round(duration, 3),
             sha256=sha256,
             metadata_relative_path=self.workspace.relative(metadata_path),
+            audio_strategy=request.audio_strategy,
+            native_audio_present=native_audio_present,
             quality_report=quality_report,
         )
 

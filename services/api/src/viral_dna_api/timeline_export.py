@@ -27,6 +27,7 @@ from .models import (
     TimelineRenderJobList,
     TimelineRenderKind,
     TimelineRenderStatus,
+    VideoClipAudioMode,
     utc_now,
 )
 from .notifications import NotificationPublisher
@@ -423,6 +424,10 @@ class TimelineExportService:
             if (
                 timeline.audio_track.enabled
                 and timeline.audio_track.strategy != "muted"
+                and any(
+                    clip.enabled and clip.audio_mode == VideoClipAudioMode.SOURCE
+                    for clip in timeline.clips
+                )
                 and source_audio_path is None
             ):
                 raise TimelineRenderError(

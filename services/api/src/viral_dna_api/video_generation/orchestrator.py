@@ -14,6 +14,7 @@ from uuid import UUID
 from ..models import (
     GenerationCostSource,
     ImageExecutionMode,
+    VideoGenerationAudioStrategy,
     VideoProviderTask,
     VideoProviderTaskStatus,
 )
@@ -193,6 +194,7 @@ class RemoteVideoOrchestrator:
         cancel_event: Event | None,
         managed_asset_references: tuple[ProviderManagedAssetReference, ...] = (),
         reference_manifest: dict[str, object] | None = None,
+        audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE,
     ) -> VideoAdapterResult:
         provider = self.registry.get(execution.spec.provider)
         existing = {
@@ -220,6 +222,7 @@ class RemoteVideoOrchestrator:
                 "height": height,
                 "prompt": positive_prompt,
                 "negative_prompt": negative_prompt,
+                "audio_strategy": audio_strategy.value,
                 "seed": seed,
                 "route_id": (reference_manifest or {}).get("route_id"),
                 "effective_route_id": (reference_manifest or {}).get("effective_route_id"),
@@ -312,6 +315,9 @@ class RemoteVideoOrchestrator:
                             aspect_ratio=aspect_ratio,
                             width=width,
                             height=height,
+                            generate_audio=(
+                                audio_strategy == VideoGenerationAudioStrategy.GENERATE_NATIVE
+                            ),
                             route_id=str(
                                 (reference_manifest or {}).get("route_id")
                                 or "ordered_multi_image"

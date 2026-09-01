@@ -11,6 +11,10 @@ export function roundTimelineValue(value) {
   return Math.round((Number(value) || 0) * 1000) / 1000;
 }
 
+function roundSourceValue(value) {
+  return Math.round((Number(value) || 0) * 1_000_000) / 1_000_000;
+}
+
 export function enabledTimelineClips(timeline) {
   return [...(timeline?.clips || [])]
     .filter((clip) => clip.enabled)
@@ -42,36 +46,98 @@ export function nextTimelineClip(timeline, clipId) {
   return index >= 0 ? clips[index + 1] || null : null;
 }
 
+export function timelineClipSourceBounds(clip) {
+  if (!clip) return { start: 0, end: 0 };
+  const sourceRange = clip.source_range;
+  const rangeStart = sourceRange
+    ? Number(sourceRange.start_pts)
+      * Number(sourceRange.time_base_numerator || 1)
+      / Number(sourceRange.time_base_denominator || 1_000_000)
+    : 0;
+  const rangeEnd = sourceRange
+    ? Number(sourceRange.end_pts)
+      * Number(sourceRange.time_base_numerator || 1)
+      / Number(sourceRange.time_base_denominator || 1_000_000)
+    : 0;
+  const trimIn = Number(clip.trim_in_seconds);
+  const trimOut = Number(clip.trim_out_seconds);
+  const candidateDuration = Number(clip.candidate_duration_seconds);
+  return {
+    start: roundSourceValue(
+      sourceRange && Math.abs(trimIn) <= 0.000001 ? rangeStart : rangeStart + trimIn,
+    ),
+    end: roundSourceValue(
+      sourceRange && Math.abs(trimOut - candidateDuration) <= 0.001
+        ? rangeEnd
+        : rangeStart + trimOut,
+    ),
+  };
+}
+
 export function timelineTimeToSourceTime(clip, timelineSeconds) {
   if (!clip) return 0;
+  const sourceBounds = timelineClipSourceBounds(clip);
   const timelineTime = clampTimelineValue(
     timelineSeconds,
     Number(clip.timeline_start_seconds),
     Number(clip.timeline_end_seconds),
   );
-  const sourceTime = Number(clip.trim_in_seconds)
+  const sourceTime = sourceBounds.start
     + (timelineTime - Number(clip.timeline_start_seconds)) * Number(clip.playback_rate || 1);
-  return roundTimelineValue(clampTimelineValue(
+  return roundSourceValue(clampTimelineValue(
     sourceTime,
-    Number(clip.trim_in_seconds),
-    Number(clip.trim_out_seconds),
+    sourceBounds.start,
+    sourceBounds.end,
   ));
 }
 
 export function sourceTimeToTimelineTime(clip, sourceSeconds) {
   if (!clip) return 0;
+  const sourceBounds = timelineClipSourceBounds(clip);
   const sourceTime = clampTimelineValue(
     sourceSeconds,
-    Number(clip.trim_in_seconds),
-    Number(clip.trim_out_seconds),
+    sourceBounds.start,
+    sourceBounds.end,
   );
   const timelineTime = Number(clip.timeline_start_seconds)
-    + (sourceTime - Number(clip.trim_in_seconds)) / Number(clip.playback_rate || 1);
+    + (sourceTime - sourceBounds.start) / Number(clip.playback_rate || 1);
   return roundTimelineValue(clampTimelineValue(
     timelineTime,
     Number(clip.timeline_start_seconds),
     Number(clip.timeline_end_seconds),
   ));
+}
+
+export function timelineTimeToSourceAudioTime(clip, timelineSeconds) {
+  if (!clip) return 0;
+  const timelineStart = Number(clip.timeline_start_seconds) || 0;
+  const timelineDuration = Math.max(
+    0.001,
+    Number(clip.timeline_duration_seconds) || 0.001,
+  );
+  const sourceStart = Number(clip.source_audio_start_seconds) || 0;
+  const sourceEnd = Math.max(
+    sourceStart,
+    Number(clip.source_audio_end_seconds) || sourceStart,
+  );
+  const progress = clampTimelineValue(
+    (Number(timelineSeconds) - timelineStart) / timelineDuration,
+    0,
+    1,
+  );
+  return roundSourceValue(sourceStart + (sourceEnd - sourceStart) * progress);
+}
+
+export function sourceAudioPlaybackRate(clip) {
+  if (!clip) return 1;
+  const sourceDuration = Math.max(
+    0.001,
+    Number(clip.source_audio_end_seconds) - Number(clip.source_audio_start_seconds),
+  );
+  return roundSourceValue(Math.min(8, Math.max(0.25, sourceDuration / Math.max(
+    0.001,
+    Number(clip.timeline_duration_seconds) || 0.001,
+  ))));
 }
 
 export function snapTimelineTime(
@@ -132,13 +198,6 @@ export function trimTimelineClip(clip, edge, deltaSeconds) {
     trim_in_seconds: roundTimelineValue(trimIn),
     trim_out_seconds: roundTimelineValue(trimOut),
     timeline_duration_seconds: roundTimelineValue(timelineDuration),
-    cover_timestamp_seconds: clip.cover_timestamp_seconds == null
-      ? null
-      : roundTimelineValue(clampTimelineValue(
-        clip.cover_timestamp_seconds,
-        trimIn,
-        trimOut,
-      )),
   };
 }
 

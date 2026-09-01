@@ -2836,6 +2836,7 @@ export function ProductionHub({
             execution_mode: "remote_api",
             model_alias: videoDraft.modelAlias,
             resolution: videoDraft.resolution,
+            audio_strategy: videoDraft.audioStrategy || "reuse_source",
             duration_seconds: Number.isFinite(durationSeconds)
               ? durationSeconds
               : shotDetail.plan.duration_seconds,
@@ -3864,6 +3865,7 @@ export function ProductionHub({
                 sourceVideoUrl={resolveUrl(
                   "/api/v1/productions/" + detail.project.id + "/source-video",
                 )}
+                sourceAudioAvailable={Boolean(sourceMedia.hasAudio)}
                 videoDraft={videoDraft}
                 videoGenerationSettings={videoGenerationSettings}
                 videoGenerationSettingsError={videoGenerationSettingsError}

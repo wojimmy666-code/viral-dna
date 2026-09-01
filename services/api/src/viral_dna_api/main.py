@@ -1946,57 +1946,6 @@ async def inspect_production_timeline_clip(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
-@app.get(
-    f"{API_PREFIX}/productions/{{project_id}}/timeline/clips/{{clip_id}}/cover",
-)
-async def get_production_timeline_clip_cover(
-    project_id: UUID,
-    clip_id: UUID,
-) -> FileResponse:
-    try:
-        path, media_type = await timeline_service.resolve_clip_cover(project_id, clip_id)
-    except TimelineServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return FileResponse(
-        path,
-        media_type=media_type,
-        content_disposition_type="inline",
-        headers={
-            "Cache-Control": "private, max-age=86400",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
-@app.get(
-    f"{API_PREFIX}/productions/{{project_id}}/timeline/clips/{{clip_id}}/preview-frames/{{frame_index}}",
-)
-async def get_production_timeline_clip_preview_frame(
-    project_id: UUID,
-    clip_id: UUID,
-    frame_index: int,
-    count: Annotated[int, Query(ge=1, le=5)] = 3,
-) -> FileResponse:
-    try:
-        path, media_type = await timeline_service.resolve_clip_preview_frame(
-            project_id,
-            clip_id,
-            frame_index,
-            count=count,
-        )
-    except TimelineServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return FileResponse(
-        path,
-        media_type=media_type,
-        content_disposition_type="inline",
-        headers={
-            "Cache-Control": "private, max-age=31536000, immutable",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
 @app.post(
     f"{API_PREFIX}/productions/{{project_id}}/timeline/background-audio",
     response_model=ProductionTimeline,

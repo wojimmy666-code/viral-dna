@@ -26,9 +26,6 @@ export function editableTimelineSnapshot(timeline) {
       enabled: clip.enabled,
       trimIn: Number(clip.trim_in_seconds),
       trimOut: Number(clip.trim_out_seconds),
-      coverTimestamp: clip.cover_timestamp_seconds == null
-        ? null
-        : Number(clip.cover_timestamp_seconds),
       duration: Number(clip.timeline_duration_seconds),
       audioMode: clip.audio_mode,
       audioVolume: Number(clip.audio_volume),
