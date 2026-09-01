@@ -25,8 +25,8 @@ from ..video_references.domain import (
     VideoReferenceRole,
 )
 
-CATALOG_VERSION = "video-model-catalog-2026-08-16.1"
-PRICING_VERSION = "video-pricing-cn-2026-08-10"
+CATALOG_VERSION = "video-model-catalog-2026-09-01.1"
+PRICING_VERSION = "video-pricing-2026-09-01"
 
 
 class VideoModelCatalogError(ValueError):
@@ -111,6 +111,9 @@ def _capability(
     text_to_video: bool = False,
     reference_video: bool = False,
     native_audio: bool = False,
+    end_frame: bool = False,
+    supports_negative_prompt: bool = True,
+    supported_aspect_ratios: list[str] | None = None,
 ) -> VideoGenerationCapability:
     resolved_route = reference_route or VideoReferenceRouteCapability()
     return VideoGenerationCapability(
@@ -123,7 +126,7 @@ def _capability(
         minimum_reference_images=1,
         maximum_reference_images=maximum_reference_images,
         start_frame=True,
-        end_frame=False,
+        end_frame=end_frame,
         max_candidates=4,
         minimum_duration_seconds=minimum,
         maximum_duration_seconds=maximum,
@@ -137,11 +140,15 @@ def _capability(
         maximum_width=maximum_width,
         maximum_height=maximum_height,
         native_audio=native_audio,
-        supports_negative_prompt=True,
+        supports_negative_prompt=supports_negative_prompt,
         supports_seed=seed,
         supports_camera_constraints=True,
         supported_resolutions=resolutions,
-        supported_aspect_ratios=["16:9", "9:16", "1:1", "4:3", "3:4"],
+        supported_aspect_ratios=(
+            supported_aspect_ratios
+            if supported_aspect_ratios is not None
+            else ["16:9", "9:16", "1:1", "4:3", "3:4"]
+        ),
         maximum_prompt_characters=prompt_characters,
         managed_assets=(
             ProviderManagedAssetCapability(
@@ -278,6 +285,41 @@ _MODELS = (
             "source_url": "https://help.aliyun.com/zh/model-studio/wan2-7-r2v",
         },
         recommended=True,
+    ),
+    VideoModelSpec(
+        alias="gemini_omni_1_1_flash",
+        provider="gemini_omni",
+        model="gemini-omni-1.1-flash",
+        label="Gemini Omni 1.1 Flash",
+        description=(
+            "通过 Gemini Interactions API 使用有序分镜图生成视频；"
+            "模型、分辨率和音频均由用户明确选择。"
+        ),
+        capability=_capability(
+            minimum=3,
+            maximum=10,
+            durations=[float(value) for value in range(3, 11)],
+            resolutions=["360P", "720P", "1080P", "4K"],
+            default_duration=5,
+            maximum_width=3840,
+            maximum_height=3840,
+            prompt_characters=10_000,
+            seed=False,
+            ordered_multi_image=True,
+            maximum_reference_images=6,
+            reference_route=ORDERED_IMAGE_ROUTE,
+            text_to_video=True,
+            native_audio=True,
+            end_frame=True,
+            supports_negative_prompt=False,
+            supported_aspect_ratios=["16:9", "9:16"],
+        ),
+        pricing={
+            "kind": "provider_usage_tokens",
+            "currency": "USD",
+            "source": "Google Gemini API 实际 usage",
+            "source_url": "https://ai.google.dev/gemini-api/docs/pricing",
+        },
     ),
     VideoModelSpec(
         alias="bailian_wan_vace_depth",

@@ -5,6 +5,7 @@ import {
 
 const PROVIDER_LABELS = Object.freeze({
   bailian: "阿里云百炼",
+  gemini_omni: "Google Gemini Omni",
   minimax: "MiniMax",
   volc_ark: "火山方舟",
 });

@@ -697,7 +697,7 @@ class VideoGenerationCapability(BaseModel):
 
 class VideoGenerationModelOption(BaseModel):
     alias: str = Field(min_length=1, max_length=80, pattern=r"^[a-zA-Z0-9_.-]+$")
-    provider: Literal["bailian", "volc_ark", "minimax"]
+    provider: Literal["bailian", "volc_ark", "minimax", "gemini_omni"]
     model: str | None = Field(default=None, max_length=160)
     label: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
@@ -710,7 +710,7 @@ class VideoGenerationModelOption(BaseModel):
 
 
 class VideoProviderCredentialUpdate(BaseModel):
-    provider: Literal["bailian", "volc_ark", "minimax"]
+    provider: Literal["bailian", "volc_ark", "minimax", "gemini_omni"]
     api_key: SecretStr | None = Field(default=None, max_length=2048)
     base_url: str | None = Field(default=None, max_length=500)
     clear_api_key: bool = False
@@ -747,12 +747,12 @@ class VideoGenerationSettingsUpdate(BaseModel):
         max_length=80,
         pattern=r"^[a-zA-Z0-9_.-]+$",
     )
-    default_resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    default_resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K|4K)$")
     poll_interval_seconds: float = Field(default=5, ge=0.2, le=60)
     task_timeout_seconds: int = Field(default=900, ge=30, le=7200)
     public_media_base_url: str | None = Field(default=None, max_length=1000)
     public_media_ttl_seconds: int = Field(default=3600, ge=900, le=604800)
-    providers: list[VideoProviderCredentialUpdate] = Field(default_factory=list, max_length=3)
+    providers: list[VideoProviderCredentialUpdate] = Field(default_factory=list, max_length=4)
 
     @field_validator("providers")
     @classmethod
@@ -767,7 +767,7 @@ class VideoGenerationSettingsUpdate(BaseModel):
 
 
 class VideoProviderSettingsResponse(BaseModel):
-    provider: Literal["bailian", "volc_ark", "minimax"]
+    provider: Literal["bailian", "volc_ark", "minimax", "gemini_omni"]
     label: str
     api_key_configured: bool = False
     api_key_hint: str | None = None
@@ -815,7 +815,7 @@ class VideoProviderValidationRequest(BaseModel):
 
 
 class VideoProviderValidationResponse(BaseModel):
-    provider: Literal["bailian", "volc_ark", "minimax"]
+    provider: Literal["bailian", "volc_ark", "minimax", "gemini_omni"]
     valid: bool
     message: str
     latency_ms: int | None = Field(default=None, ge=0)
@@ -829,7 +829,7 @@ class VideoProviderValidationResponse(BaseModel):
 class VideoCostEstimateRequest(BaseModel):
     model_alias: str = Field(min_length=1, max_length=80)
     duration_seconds: float = Field(gt=0, le=60)
-    resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    resolution: str = Field(default="720P", pattern=r"^(?:[0-9]{3,4}P|2K|4K)$")
     candidate_count: int = Field(default=1, ge=1, le=4)
 
 
@@ -2405,7 +2405,7 @@ class VideoProviderTask(BaseModel):
     project_id: UUID
     shot_plan_id: UUID
     ordinal: int = Field(ge=1, le=20)
-    provider: Literal["bailian", "volc_ark", "minimax"]
+    provider: Literal["bailian", "volc_ark", "minimax", "gemini_omni"]
     model_alias: str = Field(min_length=1, max_length=80)
     provider_model: str = Field(min_length=1, max_length=160)
     provider_task_id: str | None = Field(default=None, max_length=500)
@@ -3180,7 +3180,7 @@ class VideoGenerationCreate(BaseModel):
         max_length=80,
         pattern=r"^[a-zA-Z0-9_.-]+$",
     )
-    resolution: str | None = Field(default=None, pattern=r"^(?:[0-9]{3,4}P|2K)$")
+    resolution: str | None = Field(default=None, pattern=r"^(?:[0-9]{3,4}P|2K|4K)$")
     duration_seconds: float | None = Field(default=None, ge=0.1, le=60)
     audio_strategy: VideoGenerationAudioStrategy = VideoGenerationAudioStrategy.REUSE_SOURCE
     allow_unknown_cost: bool = False

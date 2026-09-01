@@ -150,7 +150,7 @@ export function PlatformAdminConsole({
               {videoProviders.map((provider) => (
                 <article key={provider.provider}>
                   <div>
-                    <strong>{provider.display_name || provider.provider}</strong>
+                    <strong>{provider.label || provider.provider}</strong>
                     <small>{provider.base_url}</small>
                   </div>
                   <span className={provider.api_key_configured ? "ready" : ""}>
@@ -185,6 +185,9 @@ export function PlatformAdminConsole({
                       type="url"
                       value={draft.videoProviderBaseUrls?.[provider.provider] || provider.base_url || ""}
                     />
+                    {provider.provider === "gemini_omni" && (
+                      <small>支持 Google 官方地址或兼容 Interactions API 的公网 HTTPS 中转地址。</small>
+                    )}
                   </label>
                 </article>
               ))}

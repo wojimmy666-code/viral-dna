@@ -240,6 +240,7 @@ class ProviderPollResult:
     status: VideoProviderTaskStatus
     raw: dict[str, Any] = field(default_factory=dict)
     output_url: str | None = None
+    output_bytes: bytes | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     width: int | None = None
     height: int | None = None

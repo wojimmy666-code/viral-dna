@@ -24,6 +24,7 @@ _PROVIDER_LABELS = {
     "bailian": "百炼",
     "volc_ark": "火山方舟",
     "minimax": "MiniMax",
+    "gemini_omni": "Gemini Omni",
 }
 
 

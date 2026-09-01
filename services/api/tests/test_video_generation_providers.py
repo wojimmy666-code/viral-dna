@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +46,13 @@ from viral_dna_api.video_generation.providers.bailian.error_mapper import (
 )
 from viral_dna_api.video_generation.providers.bailian.request_mapper import (
     build_bailian_request,
+)
+from viral_dna_api.video_generation.providers.gemini_omni.adapter import (
+    GeminiOmniVideoProvider,
+)
+from viral_dna_api.video_generation.providers.gemini_omni.client import GeminiOmniClient
+from viral_dna_api.video_generation.providers.gemini_omni.request_mapper import (
+    build_gemini_omni_request,
 )
 from viral_dna_api.video_generation.providers.minimax.adapter import (
     MiniMaxVideoProvider,
@@ -217,6 +225,16 @@ def test_catalog_keeps_stable_aliases_and_versioned_costs() -> None:
     assert options["seedance_2_0_mini"].available is True
     assert options["seedance_2_5"].available is False
 
+    gemini = catalog.option("gemini_omni_1_1_flash")
+    assert gemini.model == "gemini-omni-1.1-flash"
+    assert gemini.recommended is False
+    assert gemini.capability.supported_resolutions == ["360P", "720P", "1080P", "4K"]
+    assert gemini.capability.default_duration_seconds == 5
+    assert gemini.capability.supported_durations == [
+        float(value) for value in range(3, 11)
+    ]
+    assert gemini.capability.native_audio is True
+
 
 def test_video_settings_expose_every_ordered_multi_image_model() -> None:
     response = VideoGenerationSettingsService().get()
@@ -230,6 +248,7 @@ def test_video_settings_expose_every_ordered_multi_image_model() -> None:
 
     assert selectable_aliases == {
         "bailian_wan_2_7_r2v",
+        "gemini_omni_1_1_flash",
         "minimax_h3",
         "seedance_2_0",
         "seedance_2_0_fast",
@@ -261,6 +280,150 @@ def test_video_requests_accept_minimax_2k_resolution() -> None:
     )
 
     assert request.resolution == "2K"
+
+
+def test_video_requests_accept_gemini_4k_resolution() -> None:
+    request = VideoCostEstimateRequest(
+        model_alias="gemini_omni_1_1_flash",
+        resolution="4K",
+        duration_seconds=5,
+        candidate_count=1,
+    )
+
+    assert request.resolution == "4K"
+
+
+def test_gemini_omni_request_preserves_user_model_resolution_and_reference_order(
+    tmp_path: Path,
+) -> None:
+    paths = [tmp_path / f"frame-{index}.jpg" for index in range(1, 4)]
+    for index, path in enumerate(paths, start=1):
+        path.write_bytes(f"frame-{index}".encode())
+    frames = tuple(
+        ordered_reference_frame(
+            path,
+            ordinal=index,
+            start_ratio=(index - 1) / 3,
+            end_ratio=index / 3,
+        )
+        for index, path in enumerate(paths, start=1)
+    )
+    request = ProviderVideoRequest(
+        request_id=uuid4(),
+        ordinal=1,
+        model_alias="gemini_omni_1_1_flash",
+        provider_model="gemini-omni-1.1-flash",
+        prompt="图1 过渡到图2，再过渡到图3",
+        negative_prompt="画面闪烁",
+        reference_frames=frames,
+        duration_seconds=6,
+        resolution="4K",
+        aspect_ratio="9:16",
+        width=2160,
+        height=3840,
+        generate_audio=False,
+    )
+
+    payload = build_gemini_omni_request(request)
+    assert payload["model"] == "gemini-omni-1.1-flash"
+    assert payload["response_format"] == {
+        "type": "video",
+        "aspect_ratio": "9:16",
+        "duration": "6s",
+        "resolution": "4k",
+        "delivery": "uri",
+    }
+    assert payload["generation_config"] == {
+        "video_config": {"task": "reference_to_video"}
+    }
+    assert [item["type"] for item in payload["input"]] == [
+        "image",
+        "image",
+        "image",
+        "text",
+    ]
+    prompt = payload["input"][-1]["text"]
+    assert "<IMAGE_REF_0>" in prompt
+    assert "<IMAGE_REF_1>" in prompt
+    assert "<IMAGE_REF_2>" in prompt
+    assert "No dialogue, no music" in prompt
+
+
+def test_gemini_omni_poll_decodes_inline_video_without_persisting_base64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = base64.b64encode(b"\x00\x00\x00\x18ftypmp42gemini-video").decode()
+
+    class StubGeminiClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get_interaction(self, task_id: str) -> httpx.Response:
+            assert task_id == "interaction-1"
+            return httpx.Response(
+                200,
+                json={
+                    "id": task_id,
+                    "status": "completed",
+                    "usage": {"total_tokens": 123},
+                    "steps": [
+                        {
+                            "type": "model_output",
+                            "content": [
+                                {
+                                    "type": "video",
+                                    "mime_type": "video/mp4",
+                                    "data": encoded,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                request=httpx.Request("GET", "https://example.com/interactions/1"),
+            )
+
+    monkeypatch.setattr(
+        "viral_dna_api.video_generation.providers.gemini_omni.adapter.GeminiOmniClient",
+        StubGeminiClient,
+    )
+    result = asyncio.run(
+        GeminiOmniVideoProvider().poll(
+            "interaction-1",
+            api_key="test-key",
+            base_url="https://relay.example.com/v1beta",
+        )
+    )
+
+    assert result.status == VideoProviderTaskStatus.SUCCEEDED
+    assert result.output_bytes == b"\x00\x00\x00\x18ftypmp42gemini-video"
+    assert result.output_url is None
+    assert "steps" not in result.raw
+    assert result.raw["video_output"]["delivery"] == "inline"
+
+
+def test_gemini_omni_uses_native_auth_officially_and_bearer_for_relays() -> None:
+    async def scenario() -> None:
+        async with GeminiOmniClient(
+            "official-key",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ) as official:
+            assert official.auth_headers == {"x-goog-api-key": "official-key"}
+        async with GeminiOmniClient(
+            "relay-key",
+            "https://gemini-relay.example.com/v1beta",
+        ) as relay:
+            assert relay.auth_headers == {
+                "x-goog-api-key": "relay-key",
+                "Authorization": "Bearer relay-key",
+            }
+
+    asyncio.run(scenario())
 
 
 def test_minimax_h3_uses_the_v2_multimodal_request(tmp_path: Path) -> None:
@@ -595,6 +758,33 @@ def test_minimax_base_urls_accept_current_official_regions() -> None:
     )
 
 
+def test_gemini_base_url_accepts_official_and_public_compatible_relays() -> None:
+    assert normalize_provider_base_url(
+        "gemini_omni",
+        "https://generativelanguage.googleapis.com/v1beta/",
+    ) == "https://generativelanguage.googleapis.com/v1beta"
+    assert normalize_provider_base_url(
+        "gemini_omni",
+        "https://gemini-relay.example.com/google/v1beta/",
+    ) == "https://gemini-relay.example.com/google/v1beta"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://gemini-relay.example.com/v1beta",
+        "https://localhost/v1beta",
+        "https://127.0.0.1/v1beta",
+        "https://10.0.0.8/v1beta",
+    ],
+)
+def test_gemini_base_url_rejects_non_https_and_private_targets(value: str) -> None:
+    with pytest.raises(VideoGenerationSettingsServiceError) as caught:
+        normalize_provider_base_url("gemini_omni", value)
+
+    assert caught.value.code == "video_endpoint_not_allowed"
+
+
 def test_video_settings_preserve_minimax_validation_failure_type(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -904,6 +1094,75 @@ def test_remote_orchestrator_persists_one_upstream_task_per_candidate_and_resume
         )
         assert len(resumed.videos) == 2
         assert provider.submit_calls == 2
+
+    asyncio.run(scenario())
+
+
+def test_remote_orchestrator_materializes_inline_provider_video(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InlineFakeProvider(FakeProvider):
+        async def poll(
+            self,
+            task_id: str,
+            *,
+            api_key: str,
+            base_url: str,
+            provider_model: str | None = None,
+        ) -> ProviderPollResult:
+            self.poll_calls += 1
+            return ProviderPollResult(
+                status=VideoProviderTaskStatus.SUCCEEDED,
+                output_bytes=b"\x00\x00\x00\x18ftypmp42inline-video",
+                duration_seconds=2,
+                raw={"id": task_id, "status": "completed"},
+            )
+
+    async def scenario() -> None:
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "valid-key")
+        monkeypatch.setenv("VIRAL_DNA_VIDEO_POLL_INTERVAL_SECONDS", "0.2")
+        provider = InlineFakeProvider()
+        registry = VideoProviderRegistry([provider])
+        repository = InMemoryStore()
+        orchestrator = RemoteVideoOrchestrator(
+            VideoGenerationSettingsService(registry),
+            repository,
+            registry,
+        )
+        execution = orchestrator.resolve(
+            model_alias="bailian_wan_2_7_r2v",
+            duration_seconds=2,
+            resolution="720P",
+            candidate_count=1,
+            allow_unknown_cost=False,
+        )
+        frame = tmp_path / "frame.jpg"
+        frame.write_bytes(b"frame")
+        run_id = uuid4()
+        run_root = tmp_path / "inline-run"
+        result = await orchestrator.generate(
+            execution,
+            run_id=run_id,
+            project_id=uuid4(),
+            shot_plan_id=uuid4(),
+            run_root=run_root,
+            reference_frames=(ordered_reference_frame(frame),),
+            candidate_count=1,
+            duration_seconds=2,
+            aspect_ratio="16:9",
+            width=1280,
+            height=720,
+            positive_prompt="连续镜头",
+            negative_prompt="闪烁",
+            seed=None,
+            cancel_event=None,
+        )
+
+        assert result.videos[0].path.read_bytes().endswith(b"inline-video")
+        tasks = await repository.list_video_provider_tasks(run_id)
+        assert tasks[0].output_url is None
+        assert tasks[0].output_relative_path == "candidate_001.mp4"
 
     asyncio.run(scenario())
 

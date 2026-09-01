@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
@@ -56,26 +57,31 @@ DEFAULT_BASE_URLS = {
     "bailian": "https://dashscope.aliyuncs.com/api/v1",
     "volc_ark": "https://ark.cn-beijing.volces.com/api/v3",
     "minimax": "https://api.minimaxi.com/v1",
+    "gemini_omni": "https://generativelanguage.googleapis.com/v1beta",
 }
 PROVIDER_LABELS = {
     "bailian": "阿里云百炼",
     "volc_ark": "火山方舟 Seedance",
     "minimax": "MiniMax",
+    "gemini_omni": "Google Gemini Omni",
 }
 KEY_ENV = {
     "bailian": "DASHSCOPE_API_KEY",
     "volc_ark": "ARK_API_KEY",
     "minimax": "MINIMAX_API_KEY",
+    "gemini_omni": "GEMINI_API_KEY",
 }
 BASE_ENV = {
     "bailian": "DASHSCOPE_VIDEO_BASE_URL",
     "volc_ark": "ARK_VIDEO_BASE_URL",
     "minimax": "MINIMAX_VIDEO_BASE_URL",
+    "gemini_omni": "GEMINI_OMNI_BASE_URL",
 }
 VALIDATED_ENV = {
     "bailian": "VIRAL_DNA_VIDEO_BAILIAN_VALIDATED_AT",
     "volc_ark": "VIRAL_DNA_VIDEO_VOLC_ARK_VALIDATED_AT",
     "minimax": "VIRAL_DNA_VIDEO_MINIMAX_VALIDATED_AT",
+    "gemini_omni": "VIRAL_DNA_VIDEO_GEMINI_OMNI_VALIDATED_AT",
 }
 
 VALIDATION_ERROR_STATUS = {
@@ -141,6 +147,19 @@ def normalize_provider_base_url(provider: str, value: str) -> str:
     elif provider == "minimax":
         allowed = host in {"api.minimaxi.com", "api.minimax.io", "api.minimax.chat"}
         required_path = "/v1"
+    elif provider == "gemini_omni":
+        if host in {"localhost", "localhost.localdomain"} or host.endswith(
+            (".localhost", ".local", ".internal", ".lan")
+        ):
+            allowed = False
+        else:
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                allowed = bool(host and "." in host)
+            else:
+                allowed = address.is_global
+        required_path = parts.path.rstrip("/") or "/v1beta"
     if (
         not allowed
         or parts.scheme.lower() != "https"
@@ -149,12 +168,17 @@ def normalize_provider_base_url(provider: str, value: str) -> str:
         or port not in {None, 443}
         or parts.query
         or parts.fragment
-        or parts.path.rstrip("/") != required_path
+        or (provider != "gemini_omni" and parts.path.rstrip("/") != required_path)
+        or (provider == "gemini_omni" and ".." in required_path.split("/"))
     ):
         raise _fail(
             422,
             "video_endpoint_not_allowed",
-            "为保护 API Key，只允许对应 Provider 的官方 HTTPS 接口",
+            (
+                "Gemini Omni 只允许官方地址或公网 HTTPS 兼容中转地址"
+                if provider == "gemini_omni"
+                else "为保护 API Key，只允许对应 Provider 的官方 HTTPS 接口"
+            ),
         )
     return urlunsplit(("https", parts.netloc, required_path, "", ""))
 
@@ -211,7 +235,7 @@ class VideoGenerationSettingsService:
             timeout = 900
         provider_settings: list[VideoProviderSettingsResponse] = []
         managed_asset_status = self.managed_assets.status()
-        for provider in ("bailian", "volc_ark", "minimax"):
+        for provider in ("bailian", "volc_ark", "minimax", "gemini_omni"):
             key = self.api_key(provider)
             validated_at = _parse_time(get_config_value(VALIDATED_ENV[provider], ""))
             provider_settings.append(

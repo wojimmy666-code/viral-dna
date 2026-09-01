@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 from .contracts import VideoProviderAdapter
 from .providers.bailian import BailianVideoProvider
+from .providers.gemini_omni import GeminiOmniVideoProvider
 from .providers.minimax import MiniMaxVideoProvider
 from .providers.seedance import SeedanceVideoProvider
 
@@ -21,6 +22,7 @@ class VideoProviderRegistry:
                 BailianVideoProvider(),
                 SeedanceVideoProvider(),
                 MiniMaxVideoProvider(),
+                GeminiOmniVideoProvider(),
             ]
         )
         self._providers = {item.provider_id: item for item in configured}

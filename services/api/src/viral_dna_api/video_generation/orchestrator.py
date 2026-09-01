@@ -25,6 +25,7 @@ from .catalog import (
     video_duration_is_supported,
 )
 from .contracts import (
+    MAX_GENERATED_VIDEO_BYTES,
     DepthControlVideo,
     GeneratedVideo,
     OrderedReferenceFrame,
@@ -69,6 +70,28 @@ def _fingerprint(payload: object) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_provider_video_bytes(payload: bytes, destination: Path) -> None:
+    if not payload:
+        raise VideoProviderError(
+            502, "video_provider_output_empty", "Provider 返回了空视频"
+        )
+    if len(payload) > MAX_GENERATED_VIDEO_BYTES:
+        raise VideoProviderError(
+            502, "video_provider_output_too_large", "Provider 视频超过工作区 500MB 安全限制"
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.provider"
+    try:
+        temporary.write_bytes(payload)
+        temporary.replace(destination)
+    except OSError as exc:
+        raise VideoProviderError(
+            500, "video_provider_output_write_failed", "无法保存 Provider 生成的视频"
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class RemoteVideoOrchestrator:
@@ -391,12 +414,11 @@ class RemoteVideoOrchestrator:
 
             if task.provider_task_id:
                 provider_request_ids.append(task.provider_task_id)
-            if task.status == VideoProviderTaskStatus.SUCCEEDED and task.output_relative_path:
-                output_path = run_root / f"candidate_{ordinal:03d}.mp4"
-                if not output_path.is_file():
-                    # The stored workspace path may already point at the same location; a missing
-                    # local file requires a fresh provider URL and normal polling below.
-                    task = task.model_copy(update={"status": VideoProviderTaskStatus.RUNNING})
+            destination = run_root / f"candidate_{ordinal:03d}.mp4"
+            if task.status == VideoProviderTaskStatus.SUCCEEDED and not destination.is_file():
+                # A completed Interactions task can be queried again without resubmitting or
+                # charging twice. This also restores an inline result after a process restart.
+                task = task.model_copy(update={"status": VideoProviderTaskStatus.RUNNING})
             if task.status not in {
                 VideoProviderTaskStatus.SUCCEEDED,
                 VideoProviderTaskStatus.FAILED,
@@ -407,13 +429,17 @@ class RemoteVideoOrchestrator:
                     provider=provider,
                     execution=execution,
                     cancel_event=cancel_event,
+                    destination=destination,
                 )
-            if task.status != VideoProviderTaskStatus.SUCCEEDED or not task.output_url:
+            if task.status != VideoProviderTaskStatus.SUCCEEDED:
                 failures.append(task)
                 actual_cost_known = False
                 continue
-            destination = run_root / f"candidate_{ordinal:03d}.mp4"
             if not destination.is_file():
+                if not task.output_url:
+                    failures.append(task)
+                    actual_cost_known = False
+                    continue
                 await download_provider_video(task.output_url, destination)
             task_cost = task.actual_cost_micros
             if task_cost is None:
@@ -432,6 +458,7 @@ class RemoteVideoOrchestrator:
                 total_cost += task_cost
             task = task.model_copy(
                 update={
+                    "output_relative_path": destination.name,
                     "actual_cost_micros": task_cost,
                     "cost_known": task_cost is not None,
                     "updated_at": datetime.now(UTC),
@@ -512,6 +539,7 @@ class RemoteVideoOrchestrator:
         provider: VideoProviderAdapter,
         execution: ResolvedVideoExecution,
         cancel_event: Event | None,
+        destination: Path,
     ) -> VideoProviderTask:
         if not task.provider_task_id:
             return task
@@ -541,6 +569,12 @@ class RemoteVideoOrchestrator:
                 provider_model=task.provider_model,
             )
             now = datetime.now(UTC)
+            has_terminal_bytes = (
+                result.status == VideoProviderTaskStatus.SUCCEEDED
+                and result.output_bytes is not None
+            )
+            if has_terminal_bytes:
+                _write_provider_video_bytes(result.output_bytes, destination)
             usage = dict(result.usage)
             if result.width:
                 usage["width"] = result.width
@@ -563,6 +597,11 @@ class RemoteVideoOrchestrator:
                     "response_snapshot": result.raw,
                     "usage": usage,
                     "output_url": result.output_url,
+                    "output_relative_path": (
+                        destination.name
+                        if has_terminal_bytes
+                        else task.output_relative_path
+                    ),
                     "actual_cost_micros": result.actual_cost_micros,
                     "cost_known": result.cost_known,
                     "error_code": failure.code if failure else result.error_code,

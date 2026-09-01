@@ -4447,11 +4447,13 @@ function ModelSettingsDialog({
                       <small>
                         {provider.provider === "minimax"
                           ? "请使用“接口密钥”创建的按量付费 Key；Token Plan Key 与视频接口不互通。"
-                          : "仅当填写新 Key 时，保存操作才会联网校验该 Provider。"}
+                          : provider.provider === "gemini_omni"
+                            ? "可填写 Google Gemini API Key，或兼容中转服务分配的 Key；保存时会校验连接。"
+                            : "仅当填写新 Key 时，保存操作才会联网校验该 Provider。"}
                       </small>
                     </label>
                     <label className="settings-field">
-                      <span>官方服务地址</span>
+                      <span>API 服务地址</span>
                       <input
                         disabled={saving}
                         onChange={(event) => onChange({
@@ -4467,7 +4469,9 @@ function ModelSettingsDialog({
                       <small>
                         {provider.provider === "minimax"
                           ? "国内使用 api.minimaxi.com，国际使用 api.minimax.io；Key 不写入项目快照。"
-                          : "只接受该 Provider 的官方 HTTPS 域名，Key 不写入项目快照。"}
+                          : provider.provider === "gemini_omni"
+                            ? "默认使用 Google 官方 v1beta 地址；也可填写兼容 Interactions API 的公网 HTTPS 中转地址。"
+                            : "只接受该 Provider 的官方 HTTPS 域名，Key 不写入项目快照。"}
                       </small>
                     </label>
                   </div>
