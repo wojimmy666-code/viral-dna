@@ -1592,7 +1592,6 @@ export function ShotImageWorkspace({
                   </div>
                 )}
               </div>
-              <small className="shot-prompt-help">输入 @ 选择资产；系统会保存资产 ID，并自动加入本次图片生成参考。</small>
               {draft.imagePromptMentions.length > 0 && (
                 <span className="shot-mention-chips">
                   {draft.imagePromptMentions.map((mention) => (

@@ -220,6 +220,9 @@ test("viral workspaces use the same dense report frame without redundant DNA pre
   assert.doesNotMatch(replication, /replication-preparation-grid|replication-dna-locks/);
   assert.match(source, /\.viral-report-page\s*\{[^}]*width:\s*100%[^}]*padding:\s*1\.25rem/s);
   assert.doesNotMatch(source, /\.replication-preparation-grid|\.replication-dna-locks|\.dna-lock-list/);
+  assert.match(source, /\.replication-generate-bar\s*\{[^}]*min-height:\s*var\(--control-height-prominent\)[^}]*align-items:\s*center/s);
+  assert.doesNotMatch(source, /\.replication-generate-bar\s*\{[^}]*padding:|\.replication-generate-bar\s*\{[^}]*background:/s);
+  assert.doesNotMatch(replication, /一次生成结构迁移、场景叙事、证据说服三套独立方案/);
 });
 
 test("overview, mechanisms, and replication share the report typography hierarchy", async () => {

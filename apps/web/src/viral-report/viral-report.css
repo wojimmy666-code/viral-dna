@@ -370,10 +370,9 @@
 .replacement-current { min-width: 0; overflow: hidden; color: var(--text-secondary); font-size: var(--type-label-size); text-overflow: ellipsis; white-space: nowrap; }
 .replacement-opportunity-list input { width: 100%; min-height: var(--control-height); padding: 0 0.8rem; border: 1px solid var(--border-strong); border-radius: var(--radius-control); color: var(--text-primary); background: var(--surface-panel); }
 .replication-empty { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-default); color: var(--text-secondary); }
-.replication-generate-bar { align-items: center; padding: 0.75rem 0.875rem; border: 1px solid var(--border-default); border-radius: var(--radius-panel); background: var(--surface-subtle); }
+.replication-generate-bar { min-height: var(--control-height-prominent); align-items: center; }
 .replication-generate-bar.action-only { justify-content: flex-end; }
-.replication-generate-bar > div { display: grid; gap: 0.25rem; }
-.replication-generate-bar strong { font-size: var(--type-label-size); }
+.replication-generate-bar > div { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .replication-generate-bar span { color: var(--text-secondary); font-size: var(--type-caption-size); }
 
 .concept-stale-notice,

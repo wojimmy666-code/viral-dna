@@ -198,6 +198,8 @@ test("removes secondary candidate metadata and the visible generation manifest",
   assert.doesNotMatch(shotImageSource, /TextModelIndicator/);
   assert.match(shotImageSource, /<span>\{displayedCandidateModelLabel\}<\/span>/);
   assert.match(shotImageSource, /inputCount=\{generationInputManifest\.length\}/);
+  assert.doesNotMatch(shotImageSource, /输入 @ 选择资产；系统会保存资产 ID|shot-prompt-help/);
+  assert.doesNotMatch(productionWorkflowStyles, /\.shot-prompt-help/);
 });
 
 test("recovers already generated Codex images without submitting another generation", () => {

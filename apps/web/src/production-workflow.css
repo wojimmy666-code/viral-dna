@@ -3702,12 +3702,6 @@
   width: 100%;
 }
 
-.shot-prompt-help {
-  color: var(--text-secondary);
-  font-size: var(--type-caption-size);
-  line-height: 1.45;
-}
-
 .shot-mention-menu {
   position: absolute;
   z-index: 20;
@@ -5435,8 +5429,7 @@
   line-height: var(--type-leading-editor);
 }
 
-.production-field > small,
-.shot-prompt-help {
+.production-field > small {
   color: var(--text-secondary);
   font-size: var(--type-caption-size);
   line-height: var(--type-leading-copy);
@@ -5731,8 +5724,7 @@
   .shot-candidate-library-heading small,
   .shot-candidate-quality:not(.warning),
   .shot-reference-list small,
-  .shot-required-check small,
-  .shot-prompt-help
+  .shot-required-check small
 ) {
   color: var(--text-secondary);
 }

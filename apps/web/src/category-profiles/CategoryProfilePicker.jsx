@@ -57,9 +57,6 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
 
   return (
     <section className="category-profile-picker" aria-label="本次生成使用的品类档案">
-      <div className="category-profile-picker-actions">
-        <button className="text-button compact" onClick={onManage} type="button">管理品类库</button>
-      </div>
       {loading ? (
         <div className="category-picker-state"><CircleNotch className="spin" size={19} />正在读取品类库…</div>
       ) : error ? (
@@ -71,21 +68,23 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
         </div>
       ) : (
         <>
-          <button
-            aria-expanded={open}
-            aria-haspopup="listbox"
-            className={`category-picker-trigger ${selected ? "" : "is-empty"}`}
-            onClick={() => setOpen((current) => !current)}
-            type="button"
-          >
-            <span className="category-picker-icon"><Tag size={18} /></span>
-            <span>
-              <strong>{selected?.display_name || "选择本次使用的品类档案"}</strong>
-              {selected && <small>{[selected.brand_name, selected.category_name].filter(Boolean).join(" · ")}</small>}
-            </span>
-            {selected && <em>{selected.brief}</em>}
-            <CaretDown size={17} />
-          </button>
+          <div className="category-picker-control">
+            <button
+              aria-expanded={open}
+              aria-haspopup="listbox"
+              className="category-picker-trigger"
+              onClick={() => setOpen((current) => !current)}
+              type="button"
+            >
+              <span className="category-picker-icon"><Tag size={18} /></span>
+              <span>
+                <strong>{selected?.display_name || "选择本次使用的品类档案"}</strong>
+                {selected && <small>{[selected.brand_name, selected.category_name].filter(Boolean).join(" · ")}</small>}
+              </span>
+              <CaretDown size={17} />
+            </button>
+            <button className="text-button compact" onClick={onManage} type="button">管理品类库</button>
+          </div>
           {open && (
             <div className="category-picker-options">
               <label>
@@ -108,13 +107,6 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
                 ))}
                 {!filtered.length && <p>没有匹配的品类档案</p>}
               </div>
-            </div>
-          )}
-          {selected && (
-            <div className="category-picker-summary">
-              <span><small>目标人群</small><strong>{selected.audiences.slice(0, 2).join("、")}</strong></span>
-              <span><small>核心卖点</small><strong>{selected.selling_points.slice(0, 2).join("、")}</strong></span>
-              <span><small>常用场景</small><strong>{selected.scenes.slice(0, 2).join("、") || "按内容推导"}</strong></span>
             </div>
           )}
         </>

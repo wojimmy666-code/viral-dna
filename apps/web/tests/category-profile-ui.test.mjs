@@ -49,7 +49,7 @@ test("ships account category CRUD with soft delete and undo", async () => {
   assert.match(library, /历史方案仍保留此档案快照/);
 });
 
-test("uses a searchable required picker and a single-column mobile fallback", async () => {
+test("uses a compact searchable required picker and a single-column mobile fallback", async () => {
   const picker = await readFile(PICKER_URL, "utf8");
   const css = await readFile(CSS_URL, "utf8");
   assert.match(picker, /搜索品类、品牌或卖点/);
@@ -59,9 +59,11 @@ test("uses a searchable required picker and a single-column mobile fallback", as
   assert.match(picker, /if \(loading \|\| !value \|\| profiles\.some/);
   assert.match(picker, /onChange\(""\)/);
   assert.doesNotMatch(picker, /items\[0\]\?\.id/);
-  assert.match(picker, /目标人群/);
-  assert.match(picker, /核心卖点/);
-  assert.match(css, /\.category-picker-trigger\.is-empty\s*\{/);
+  assert.match(picker, /category-picker-control/);
+  assert.doesNotMatch(picker, /category-picker-summary|目标人群|核心卖点|常用场景/);
+  assert.match(css, /\.category-picker-control\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto/s);
+  assert.match(css, /\.category-picker-options\s*\{[^}]*position:\s*absolute/s);
+  assert.doesNotMatch(css, /\.category-picker-summary/);
   assert.match(css, /\.category-profile-workspace\s*\{[^}]*grid-template-columns:\s*20rem minmax\(0, 1fr\)/s);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.category-profile-workspace\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(css, /\.category-picker-options input\s*\{\s*font-size:\s*var\(--type-subheading-size\)/s);

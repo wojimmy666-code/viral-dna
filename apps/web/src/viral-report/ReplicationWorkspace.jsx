@@ -139,7 +139,12 @@ export function ReplicationWorkspace({
       </section>}
 
       <section className={`replication-generate-bar ${selectedCategoryId ? "" : "action-only"}`}>
-        {selectedCategoryId && <div><strong>{selectedReplacements.length ? `已选择品类档案并设置 ${selectedReplacements.length} 项替换` : "已选择品类档案"}</strong><span>一次生成结构迁移、场景叙事、证据说服三套独立方案 · 额外成本 ¥0.00</span><TextModelIndicator label={textModelLabel} /></div>}
+        {selectedCategoryId && (
+          <div>
+            {selectedReplacements.length > 0 && <span>已设置 {selectedReplacements.length} 项替换</span>}
+            <TextModelIndicator label={textModelLabel} />
+          </div>
+        )}
         <button className="primary-button" type="button" onClick={generateConcepts} disabled={conceptLoading || !selectedCategoryId}>
           {conceptLoading ? <CircleNotch className="spin" size={19} /> : <MagicWand size={19} weight="fill" />}
           {hasSelectedCategoryConcepts ? "重新生成三套方案" : "生成三套方案"}
