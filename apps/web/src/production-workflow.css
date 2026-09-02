@@ -4852,7 +4852,7 @@
 
 }
 
-/* Batch 4.6.6: final render and delivery */
+/* Final render and delivery */
 .production-export-workspace {
   display: grid;
   gap: 18px;
@@ -4862,8 +4862,7 @@
 
 .production-export-toolbar,
 .production-export-section-heading,
-.production-export-job,
-.production-export-validation {
+.production-export-job {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4876,16 +4875,14 @@
 }
 
 .production-export-toolbar h3 {
-  margin: 4px 0 2px;
+  margin: 0;
   color: var(--accent);
   font-size: var(--type-subheading-size);
   line-height: 1.15;
 }
 
-.production-export-toolbar p,
 .production-export-section-heading small,
-.production-export-job-main small,
-.production-export-validation small {
+.production-export-job-main small {
   margin: 0;
   color: var(--text-secondary);
   font-size: var(--type-caption-size);
@@ -5061,43 +5058,6 @@
   accent-color: #6753f5;
 }
 
-.production-export-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid #e5e1ed;
-  border-radius: 11px;
-  background: #e5e1ed;
-}
-
-.production-export-summary span {
-  display: grid;
-  align-content: center;
-  gap: 5px;
-  min-width: 0;
-  min-height: 72px;
-  padding: 12px 14px;
-  background: #fbfaff;
-}
-
-.production-export-summary small {
-  color: var(--text-secondary);
-  font-size: var(--type-caption-size);
-  line-height: var(--type-leading-ui);
-}
-
-.production-export-summary strong {
-  overflow: visible;
-  color: var(--text-primary);
-  font-size: var(--type-body-size);
-  font-weight: var(--type-weight-semibold);
-  line-height: var(--type-leading-tight);
-  overflow-wrap: anywhere;
-  text-overflow: clip;
-  white-space: normal;
-}
-
 .production-export-submit {
   justify-content: center;
   width: 100%;
@@ -5162,22 +5122,6 @@
 
 .production-export-empty span {
   font-size: var(--type-caption-size);
-}
-
-.production-export-validation {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #f2faf5;
-}
-
-.production-export-validation span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--status-success-text);
-  font-size: var(--type-caption-size);
-  font-weight: var(--type-weight-semibold);
 }
 
 .production-export-history > .production-export-section-heading {
@@ -5325,14 +5269,12 @@
 
 @media (max-width: 700px) {
   .production-export-toolbar,
-  .production-export-job,
-  .production-export-validation {
+  .production-export-job {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .production-export-option-row,
-  .production-export-summary {
+  .production-export-option-row {
     grid-template-columns: 1fr;
   }
 
@@ -5465,7 +5407,6 @@
   .production-empty-state p,
   .shot-workspace-header p,
   .shot-video-stage-header p,
-  .production-export-toolbar p,
   .timeline-workspace-toolbar p
 ) {
   font-size: var(--type-body-size);
@@ -5700,7 +5641,6 @@
   .production-empty-state p,
   .shot-workspace-header p,
   .shot-video-stage-header p,
-  .production-export-toolbar p,
   .production-export-section-heading small,
   .production-export-job-main small,
   .production-export-history-empty,

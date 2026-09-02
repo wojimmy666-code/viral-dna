@@ -1093,12 +1093,10 @@ test("removes automated continuity checks from entry to the editor", () => {
   assert.doesNotMatch(workflowStyles, /\.shot-video-gate-summary\s*\{/);
 });
 
-test("shows clip quality warnings inside the independent editor inspector", () => {
-  assert.match(videoEditorSource, /clip\.warning_messages/);
-  assert.match(videoEditorSource, /timeline-quality-summary/);
-  assert.match(videoEditorSource, /重新质检/);
+test("keeps clip review manual inside the independent editor", () => {
+  assert.doesNotMatch(videoEditorSource, /clip\.warning_messages|timeline-quality-summary|重新质检|质检通过/);
   assert.doesNotMatch(videoEditorSource, /timeline-cover-field|封面帧必须位于入点和出点之间/);
-  assert.match(videoEditorStyles, /\.timeline-quality-summary/);
+  assert.doesNotMatch(videoEditorStyles, /\.timeline-quality-summary/);
 });
 
 test("submits approved visual beats without a duplicate storyboard preview", () => {

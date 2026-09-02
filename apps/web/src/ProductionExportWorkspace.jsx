@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  CheckCircle,
   CircleNotch,
   DownloadSimple,
   FileVideo,
@@ -22,31 +21,6 @@ const SUBTITLE_OPTIONS = [
   { value: "embedded", label: "内嵌字幕", description: "播放器可开关字幕轨" },
   { value: "none", label: "无字幕", description: "输出清洁版画面" },
 ];
-
-function even(value) {
-  return Math.max(2, Math.round(value) - (Math.round(value) % 2));
-}
-
-function dimensionsForExport(timeline, resolution) {
-  if (!timeline) return { width: 0, height: 0 };
-  if (resolution === "project") {
-    return { width: even(timeline.output_width), height: even(timeline.output_height) };
-  }
-  const shortEdge = resolution === "720p" ? 720 : 1080;
-  if (timeline.output_width === timeline.output_height) {
-    return { width: shortEdge, height: shortEdge };
-  }
-  if (timeline.output_width < timeline.output_height) {
-    return {
-      width: shortEdge,
-      height: even((timeline.output_height * shortEdge) / timeline.output_width),
-    };
-  }
-  return {
-    width: even((timeline.output_width * shortEdge) / timeline.output_height),
-    height: shortEdge,
-  };
-}
 
 function formatBytes(value) {
   if (!Number.isFinite(value) || value <= 0) return "待生成";
@@ -101,11 +75,6 @@ export function ProductionExportWorkspace({
   const activeJob = jobs.find((item) => ACTIVE_STATUSES.has(item.status)) || null;
   const successfulJobs = jobs.filter((item) => item.status === "succeeded");
   const latestSuccess = successfulJobs[0] || null;
-  const dimensions = useMemo(
-    () => dimensionsForExport(timeline, resolution),
-    [resolution, timeline],
-  );
-
   useEffect(() => {
     let disposed = false;
     async function load() {
@@ -147,7 +116,7 @@ export function ProductionExportWorkspace({
           onNotice({
             type: "success",
             title: "高清成片已导出",
-            message: "成片已完成校验并归档，可以下载。",
+            message: "成片已归档，可以下载。",
           });
           await onProjectChanged?.();
         } else if (next.status === "failed") {
@@ -211,10 +180,10 @@ export function ProductionExportWorkspace({
     }
   }
 
-  function download(job, artifact = "download") {
+  function download(job) {
     const anchor = document.createElement("a");
-    anchor.href = resolveUrl(`/api/v1/productions/${project.id}/export-jobs/${job.id}/${artifact}`);
-    anchor.download = artifact === "manifest" ? "manifest.json" : (job.output_filename || "成片.mp4");
+    anchor.href = resolveUrl(`/api/v1/productions/${project.id}/export-jobs/${job.id}/download`);
+    anchor.download = job.output_filename || "成片.mp4";
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -228,9 +197,7 @@ export function ProductionExportWorkspace({
     <section className="production-export-workspace">
       <header className="production-export-toolbar">
         <div>
-          <span className="timeline-eyebrow">Batch 4.6.6 · 最终交付</span>
           <h3>导出成片</h3>
-          <p>冻结时间线 v{timeline?.revision_number || "-"} · {timeline?.output_aspect_ratio} · {timeline?.duration_seconds?.toFixed(1) || "-"} 秒</p>
         </div>
         {activeJob && (
           <div className="production-export-progress" aria-live="polite">
@@ -246,7 +213,7 @@ export function ProductionExportWorkspace({
       <div className="production-export-grid">
         <section className="production-export-settings">
           <div className="production-export-section-heading">
-            <div><strong>导出设置</strong><small>每次导出绑定当前时间线版本，不读取未保存草稿。</small></div>
+            <div><strong>导出设置</strong></div>
           </div>
 
           <fieldset className="production-export-option-group">
@@ -280,12 +247,6 @@ export function ProductionExportWorkspace({
             </div>
           </fieldset>
 
-          <div className="production-export-summary">
-            <span><small>输出尺寸</small><strong>{dimensions.width} × {dimensions.height}</strong></span>
-            <span><small>格式</small><strong>MP4 · H.264 · AAC</strong></span>
-            <span><small>字幕</small><strong>{optionLabel(SUBTITLE_OPTIONS, subtitleMode)}</strong></span>
-          </div>
-
           <button className="primary-button production-export-submit" disabled={busy || Boolean(activeJob) || !timeline} onClick={startExport} type="button">
             {busy || activeJob ? <CircleNotch className="spin" size={18} /> : <FilmSlate size={18} weight="fill" />}
             {activeJob ? "正在导出" : successfulJobs.length ? "重新导出高清成片" : "开始高清导出"}
@@ -298,21 +259,15 @@ export function ProductionExportWorkspace({
             {latestSuccess && <button aria-label="下载最新成片" onClick={() => download(latestSuccess)} type="button"><DownloadSimple size={18} /></button>}
           </div>
           {latestSuccess ? (
-            <>
-              <div
-                className="production-export-video"
-                style={{
-                  "--export-aspect": `${latestSuccess.preview_width} / ${latestSuccess.preview_height}`,
-                  "--export-ratio": latestSuccess.preview_width / latestSuccess.preview_height,
-                }}
-              >
-                <video controls poster={resolveUrl(latestSuccess.cover_url)} preload="metadata" src={resolveUrl(latestSuccess.output_url)} />
-              </div>
-              <div className="production-export-validation">
-                <span><CheckCircle size={16} weight="fill" />校验通过</span>
-                <small>{latestSuccess.validation_summary?.width} × {latestSuccess.validation_summary?.height} · {latestSuccess.validation_summary?.video_codec?.toUpperCase()} · SHA-256 已记录</small>
-              </div>
-            </>
+            <div
+              className="production-export-video"
+              style={{
+                "--export-aspect": `${latestSuccess.preview_width} / ${latestSuccess.preview_height}`,
+                "--export-ratio": latestSuccess.preview_width / latestSuccess.preview_height,
+              }}
+            >
+              <video controls poster={resolveUrl(latestSuccess.cover_url)} preload="metadata" src={resolveUrl(latestSuccess.output_url)} />
+            </div>
           ) : (
             <div className="production-export-empty"><FileVideo size={42} /><strong>尚未生成高清成片</strong><span>低清预览不会被当作最终交付文件。</span></div>
           )}
@@ -320,7 +275,7 @@ export function ProductionExportWorkspace({
       </div>
 
       <section className="production-export-history">
-        <div className="production-export-section-heading"><div><strong>导出历史</strong><small>{jobs.length} 次任务，旧产物不会被新导出覆盖。</small></div></div>
+        <div className="production-export-section-heading"><div><strong>导出历史</strong></div></div>
         {jobs.length === 0 ? (
           <div className="production-export-history-empty">暂无导出记录</div>
         ) : (
@@ -332,12 +287,11 @@ export function ProductionExportWorkspace({
                 </div>
                 <div className="production-export-job-main">
                   <div><strong>{job.output_filename || "高清成片"}</strong><span className={`production-export-status ${job.status}`}>{statusLabel(job.status)}</span></div>
-                  <small>时间线 v{timeline?.revision_number || "-"} · {job.preview_width} × {job.preview_height} · {optionLabel(SUBTITLE_OPTIONS, job.subtitle_mode)} · {formatDate(job.created_at)}</small>
+                  <small>{job.preview_width} × {job.preview_height} · {optionLabel(SUBTITLE_OPTIONS, job.subtitle_mode)} · {formatDate(job.created_at)}</small>
                   {job.error_message && <p>{job.error_message}</p>}
                 </div>
                 <div className="production-export-job-actions">
                   {job.status === "succeeded" && <button onClick={() => download(job)} type="button"><DownloadSimple size={16} />下载</button>}
-                  {job.status === "succeeded" && job.manifest_url && <button onClick={() => download(job, "manifest")} type="button">清单</button>}
                   {ACTIVE_STATUSES.has(job.status) && <span>{job.progress_percent}%</span>}
                 </div>
               </article>

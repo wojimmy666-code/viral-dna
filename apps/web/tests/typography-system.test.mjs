@@ -167,14 +167,8 @@ test("binds responsive video controls to the real editor pane", () => {
   assert.match(videoGenerationStyles, /@media \(max-width: 620px\)/);
 });
 
-test("keeps essential export values visible instead of ellipsizing them", () => {
-  const summaryRule = cssRule(workflowStyles, ".production-export-summary");
-  const valueRule = cssRule(workflowStyles, ".production-export-summary strong");
-
-  assert.match(summaryRule, /repeat\(auto-fit, minmax\(min\(100%, 10rem\), 1fr\)\)/);
-  assert.match(valueRule, /white-space:\s*normal/);
-  assert.match(valueRule, /overflow-wrap:\s*anywhere/);
-  assert.doesNotMatch(valueRule, /text-overflow:\s*ellipsis/);
+test("does not retain styling for the removed export summary card", () => {
+  assert.doesNotMatch(workflowStyles, /\.production-export-summary/);
 });
 
 test("ships reusable system primitives and a durable design contract", () => {

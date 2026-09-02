@@ -1041,7 +1041,6 @@ function ProjectSettings({ detail, draft, setDraft, busy, error, onSave, onOpenR
         <div className="production-form-heading">
           <div>
             <h3>方案设置</h3>
-            <p>修改会创建新版本。已保存的历史版本保持不变。</p>
           </div>
           <button className="primary-button compact" disabled={busy || !dirty} type="submit">
             {busy ? <CircleNotch className="spin" size={16} /> : <FloppyDisk size={16} />}
@@ -1057,7 +1056,6 @@ function ProjectSettings({ detail, draft, setDraft, busy, error, onSave, onOpenR
             required
             value={draft.name}
           />
-          <small>用于区分人物替换版、产品版或不同成本方案。</small>
         </label>
         <fieldset className="production-field production-field-wide">
           <legend>输出画幅</legend>

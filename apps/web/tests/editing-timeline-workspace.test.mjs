@@ -76,8 +76,8 @@ test("offers per-shot audio subtitles transitions and low-resolution preview job
   assert.match(workspaceSource, /beginFrameLoop\(video\);[\s\S]+activeClip\?\.playback_rate/);
   assert.match(workspaceSource, /onNotificationsChanged/);
   assert.doesNotMatch(workspaceSource, /cover_timestamp_seconds|preview-frames/);
-  assert.match(workspaceSource, /timeline\/clips\/\$\{selectedClipIdForInspection\}\/inspect/);
-  assert.match(workspaceSource, /重新质检/);
+  assert.doesNotMatch(workspaceSource, /timeline\/clips\/[^\n]+\/inspect|重新质检|质检通过|timeline-quality-summary/);
+  assert.doesNotMatch(workspaceSource, /画面跟随播放轴；生成预览后可检查完整转场与混音/);
   assert.doesNotMatch(workspaceSource, /timeline-cover-field|封面帧必须位于入点和出点之间/);
 });
 

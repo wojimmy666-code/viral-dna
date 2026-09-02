@@ -37,14 +37,28 @@ test("binds final renders to an immutable timeline revision and exposes presets"
   assert.match(exportSource, /timeline\/final-renders/);
 });
 
-test("shows compact progress, validated history and downloadable artifacts", () => {
+test("shows compact progress and downloadable render history", () => {
   assert.match(exportSource, /export-jobs\/\$\{activeJob\.id\}/);
-  assert.match(exportSource, /validation_summary/);
-  assert.match(exportSource, /artifact = "download"/);
-  assert.match(exportSource, /download\(job, "manifest"\)/);
+  assert.match(exportSource, /export-jobs\/\$\{job\.id\}\/download/);
+  assert.doesNotMatch(exportSource, /validation_summary|manifest_url|"manifest"|>清单</);
   assert.match(exportSource, /onNotificationsChanged/);
   assert.match(workflowStyles, /\.production-export-progress\s*\{/);
   assert.match(workflowStyles, /\.production-export-video video\s*\{[^}]+object-fit:\s*contain/s);
+});
+
+test("keeps project settings, editing preview and final export free of redundant metadata", () => {
+  assert.doesNotMatch(
+    workflowSource,
+    /修改会创建新版本。已保存的历史版本保持不变。|用于区分人物替换版、产品版或不同成本方案。/,
+  );
+  assert.doesNotMatch(
+    exportSource,
+    /Batch 4\.6\.6|冻结时间线|每次导出绑定当前时间线版本|输出尺寸|MP4 · H\.264 · AAC|旧产物不会被新导出覆盖|时间线 v|校验通过|SHA-256 已记录/,
+  );
+  assert.doesNotMatch(workflowStyles, /\.production-export-(?:summary|validation)\s*\{/);
+  assert.match(exportSource, /<strong>导出设置<\/strong>/);
+  assert.match(exportSource, /<strong>导出历史<\/strong>/);
+  assert.match(exportSource, /<DownloadSimple size=\{16\} \/>下载/);
 });
 
 test("keeps the final player canvas on the exported media aspect ratio", () => {

@@ -1268,52 +1268,6 @@
   line-height: 1.5;
 }
 
-.timeline-quality-summary {
-  display: grid;
-  gap: 8px;
-  padding: 11px;
-  border: 1px solid #e1dff0;
-  border-radius: 9px;
-  color: var(--text-secondary);
-  background: #faf9ff;
-}
-
-.timeline-quality-summary > div {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--accent);
-}
-
-.timeline-quality-summary.passed {
-  border-color: #d2e8da;
-  background: #f5fbf7;
-}
-
-.timeline-quality-summary.passed > div {
-  color: var(--status-success-text);
-}
-
-.timeline-quality-summary.failed {
-  border-color: #f0d3d8;
-  background: #fff8f9;
-}
-
-.timeline-quality-summary.failed > div,
-.timeline-quality-summary p.blocking {
-  color: var(--status-danger-text);
-}
-
-.timeline-quality-summary p {
-  margin: 0;
-  font-size: var(--type-caption-size);
-  line-height: 1.5;
-}
-
-.timeline-quality-summary button {
-  justify-self: stretch;
-}
-
 .timeline-subtitle-editor {
   max-height: none;
 }

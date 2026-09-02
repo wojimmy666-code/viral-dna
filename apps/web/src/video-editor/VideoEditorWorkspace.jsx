@@ -572,7 +572,7 @@ function TimelinePreviewPlayer({
   );
 }
 
-function ClipInspector({ clip, clips, inspecting, onChange, onInspect, onMove }) {
+function ClipInspector({ clip, clips, onChange, onMove }) {
   if (!clip) {
     return <div className="timeline-inspector-empty">选择一个片段后调整裁剪、节奏和转场。</div>;
   }
@@ -580,11 +580,6 @@ function ClipInspector({ clip, clips, inspecting, onChange, onInspect, onMove })
   const enabled = clips.filter((item) => item.enabled);
   const lastEnabled = enabled.at(-1)?.id === clip.id;
   const maxTransition = Math.max(0.1, Math.min(2, clip.timeline_duration_seconds / 2));
-  const qualityLabel = clip.quality_status === "passed"
-    ? "质检通过"
-    : clip.quality_status === "failed"
-      ? "存在阻断"
-      : "需要复核";
   return (
     <div className="timeline-inspector-form">
       <div className="timeline-inspector-heading">
@@ -678,31 +673,6 @@ function ClipInspector({ clip, clips, inspecting, onChange, onInspect, onMove })
           </div>
         </label>
       </div>
-      <section className={`timeline-quality-summary ${clip.quality_status || "warning"}`}>
-        <div>
-          {clip.quality_status === "passed"
-            ? <CheckCircle size={17} weight="fill" />
-            : <WarningCircle size={17} weight="fill" />}
-          <strong>{qualityLabel}</strong>
-        </div>
-        {(clip.blocker_messages || []).map((message) => (
-          <p className="blocking" key={message}>{message}</p>
-        ))}
-        {(clip.warning_messages || []).map((message) => <p key={message}>{message}</p>)}
-        {!clip.quality_report?.schema_version && (
-          <p>尚未在视频剪辑阶段执行基础技术质检。</p>
-        )}
-        <button
-          className="secondary-button compact"
-          disabled={inspecting}
-          onClick={onInspect}
-          title="检查文件、时长、画幅和帧率"
-          type="button"
-        >
-          {inspecting ? <CircleNotch className="spin" size={15} /> : <CheckCircle size={15} />}
-          {inspecting ? "正在质检" : "重新质检"}
-        </button>
-      </section>
     </div>
   );
 }
@@ -1339,49 +1309,6 @@ export function VideoEditorWorkspace({
     }
   }
 
-  async function inspectSelectedClip() {
-    if (!timelineRef.current || !selectedClip) return;
-    const selectedClipIdForInspection = selectedClip.id;
-    const selectedShotIndex = selectedClip.shot_index;
-    setBusy(true);
-    setError("");
-    try {
-      const savedTimeline = await flushTimelineSave();
-      const inspected = await request(
-        `/productions/${project.id}/timeline/clips/${selectedClipIdForInspection}/inspect`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ expected_revision_id: savedTimeline.revision_id }),
-        },
-      );
-      const [nextValidation, nextRevisions] = await Promise.all([
-        request(`/productions/${project.id}/timeline/validation`),
-        request(`/productions/${project.id}/timeline/revisions`),
-      ]);
-      timelineRef.current = inspected;
-      setTimeline(inspected);
-      markTimelineSnapshotSaved(inspected);
-      setAutosaveState("saved");
-      setValidation(nextValidation);
-      setRevisions(nextRevisions.items || []);
-      setRenderJob(null);
-      setUndoStack([]);
-      setRedoStack([]);
-      const inspectedClip = inspected.clips.find((item) => item.id === selectedClipIdForInspection);
-      onNotice({
-        type: inspectedClip?.quality_status === "passed" ? "success" : "warning",
-        title: `分镜 ${selectedShotIndex} 已完成基础质检`,
-        message: inspectedClip?.warning_messages?.[0] || "技术信息已更新。",
-      });
-    } catch (requestError) {
-      setError(requestError.message);
-      onNotice({ type: "error", title: "片段质检失败", message: requestError.message });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function generatePreview() {
     if (!timelineRef.current) return;
     setBusy(true);
@@ -1513,7 +1440,7 @@ export function VideoEditorWorkspace({
             <div className="timeline-preview-heading">
               <div>
                 <strong>{compositePreviewUrl ? "低清合成预览" : `分镜 ${playheadClip?.shot_index || "-"} 实时预览`}</strong>
-                <small>{compositePreviewUrl ? "已包含分镜音频、字幕轨和转场" : "画面跟随播放轴；生成预览后可检查完整转场与混音"}</small>
+                {compositePreviewUrl && <small>已包含分镜音频、字幕轨和转场</small>}
               </div>
               {compositePreviewUrl && <span><CheckCircle size={15} weight="fill" />预览就绪</span>}
               {renderJob?.status === "failed" && <span className="failed"><WarningCircle size={15} />生成失败</span>}
@@ -1568,9 +1495,7 @@ export function VideoEditorWorkspace({
             <ClipInspector
               clip={selectedClip}
               clips={timeline.clips}
-              inspecting={busy}
               onChange={updateClip}
-              onInspect={inspectSelectedClip}
               onMove={moveSelectedClip}
             />
           )}
