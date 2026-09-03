@@ -95,6 +95,28 @@ def estimate_visual_tokens(*, image_count: int, width: int = 640, height: int = 
     return max(0, image_count) * per_image
 
 
+def committed_model_cost_micros(runs: list[ModelRun]) -> int:
+    """Return charged cost plus conservative reservations for unfinished calls.
+
+    Completed calls and failures with provider usage are reconciled to their
+    measured cost. Running calls, and failures for which the provider supplied
+    no usage, keep their estimate reserved. Cached and blocked ledger rows do
+    not consume additional budget.
+    """
+
+    total = 0
+    for run in runs:
+        if run.status == ModelRunStatus.RUNNING:
+            total += run.estimated_cost_micros
+        elif run.status in {ModelRunStatus.COMPLETED, ModelRunStatus.FAILED}:
+            total += (
+                run.measured_cost_micros
+                if run.usage.total_tokens > 0 or run.measured_cost_micros > 0
+                else run.estimated_cost_micros
+            )
+    return total
+
+
 def summarize_model_runs(
     analysis_id: UUID,
     runs: list[ModelRun],
@@ -127,10 +149,7 @@ def summarize_model_runs(
         )
         else CostStatus.ESTIMATED
     )
-    total_estimated = max(
-        estimated_cost_micros,
-        sum(run.estimated_cost_micros for run in runs),
-    )
+    total_estimated = max(estimated_cost_micros, committed_model_cost_micros(runs))
     return AnalysisCostSummary(
         analysis_id=analysis_id,
         status=status,

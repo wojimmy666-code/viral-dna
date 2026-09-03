@@ -241,7 +241,7 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert manifest_response.status_code == 200
         assert (
             manifest_response.json()["processor_version"]
-            == "ffmpeg-hybrid-candidates-v4-motion-clips"
+            == "ffmpeg-hybrid-candidates-v5-batched-frames"
         )
         assert context_response.status_code == 200
         assert comparison_response.status_code == 200

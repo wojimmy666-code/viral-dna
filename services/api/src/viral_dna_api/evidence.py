@@ -268,19 +268,25 @@ class EvidenceTimelineBuilder:
         artifact_root = get_analysis_artifact_root(analysis_id, record_id)
         await asyncio.to_thread(artifact_root.mkdir, parents=True, exist_ok=True)
 
-        asr_result, asr_run = await self._run_asr(
-            artifact_root=artifact_root,
-            evidence=evidence,
-            include_audio=include_audio,
-        )
         frames = self._ocr_frames(artifact_root, evidence)
-        ocr_observations, ocr_run = await self._run_ocr(
-            frames=frames,
-            include_ocr=include_ocr,
-        )
-        subtitle_cues, subtitle_run = await self._run_subtitles(
-            artifact_root=artifact_root,
-            evidence=evidence,
+        (
+            (asr_result, asr_run),
+            (ocr_observations, ocr_run),
+            (subtitle_cues, subtitle_run),
+        ) = await asyncio.gather(
+            self._run_asr(
+                artifact_root=artifact_root,
+                evidence=evidence,
+                include_audio=include_audio,
+            ),
+            self._run_ocr(
+                frames=frames,
+                include_ocr=include_ocr,
+            ),
+            self._run_subtitles(
+                artifact_root=artifact_root,
+                evidence=evidence,
+            ),
         )
 
         warnings: list[str] = []

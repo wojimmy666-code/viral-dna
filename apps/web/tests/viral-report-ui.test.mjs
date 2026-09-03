@@ -61,6 +61,9 @@ test("report summary prioritizes decisions and moves technical metadata behind d
   assert.doesNotMatch(executive, /重新整理|refresh:\s*true|viral-refresh-button/);
   assert.doesNotMatch(helpers, /viral-insight\/refresh|refresh\s*=\s*false/);
   assert.match(app, /<details className="overview-technical-details">/);
+  assert.match(app, /<OverviewTab\s+analysis=\{analysis\}/s);
+  assert.match(app, /<dt>总耗时<\/dt>/);
+  assert.match(app, /formatAnalysisElapsedTime\(analysis\?\.created_at, analysis\?\.completed_at\)/);
   assert.match(app, /<p>\{report\.shots\.length\} 个镜头 · 分析完成<\/p>/);
   assert.doesNotMatch(app, /内容置信度 \$\{Math\.round\(activeShot\.confidence/);
   assert.doesNotMatch(app, /程序边界 · VLM 已降级|程序候选 \+ VLM 确认|查看边界候选证据|segmentation-evidence/);

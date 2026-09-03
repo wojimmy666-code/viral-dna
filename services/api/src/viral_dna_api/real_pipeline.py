@@ -158,6 +158,7 @@ class HybridAnalysisPipeline:
                 include_audio=analysis.include_audio,
                 progress=media_progress,
                 record_id=analysis.record_id,
+                defer_shot_extraction=analysis.model_plan is not None,
             )
             self._apply_metadata(video, evidence)
             await self.repository.save_video(video)
@@ -174,11 +175,20 @@ class HybridAnalysisPipeline:
                     video=video,
                     evidence=evidence,
                 )
+                async def extraction_progress(current: int, total: int) -> None:
+                    value = min(83, 76 + round(current / max(total, 1) * 7))
+                    await progress(
+                        AnalysisStage.SEGMENTING,
+                        value,
+                        f"正在提取最终分镜素材 {current}/{total}",
+                    )
+
                 evidence = await processor.apply_segmentation(
                     evidence,
                     analysis.id,
                     segmentation_outcome.segmentation,
                     record_id=analysis.record_id,
+                    progress=extraction_progress,
                 )
 
             await progress(AnalysisStage.TRANSCRIBING, 84, "正在运行 ASR/OCR 证据 Provider")
@@ -270,7 +280,7 @@ class HybridAnalysisPipeline:
         context: str = "媒体处理",
     ) -> None:
         analysis.stage = AnalysisStage.FAILED
-        analysis.progress = 100
+        analysis.progress = min(99, analysis.progress)
         analysis.message = f"{context}失败：{message}"
         analysis.error = AnalysisError(code=code, message=message, retryable=retryable)
         analysis.updated_at = utc_now()

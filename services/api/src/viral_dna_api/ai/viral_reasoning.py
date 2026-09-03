@@ -27,6 +27,7 @@ from .billing import (
     PriceCatalog,
     PriceCatalogError,
     calculate_cost_micros,
+    committed_model_cost_micros,
     estimate_text_tokens,
     summarize_model_runs,
 )
@@ -364,9 +365,11 @@ class ViralReasoningService:
                 warnings.append(str(exc))
                 continue
             estimated_cost = calculate_cost_micros(estimated_usage, estimated_price)
+            existing_runs = await self.repository.list_model_runs(analysis.id)
+            committed_cost = committed_model_cost_micros(existing_runs)
             if (
                 analysis.max_cost_micros is not None
-                and analysis.estimated_cost_micros + estimated_cost > analysis.max_cost_micros
+                and committed_cost + estimated_cost > analysis.max_cost_micros
             ):
                 blocked = ModelRun(
                     analysis_id=analysis.id,
@@ -408,7 +411,7 @@ class ViralReasoningService:
             )
             await self.repository.save_price_snapshot(estimated_price)
             await self.repository.save_model_run(run)
-            analysis.estimated_cost_micros += estimated_cost
+            analysis.estimated_cost_micros = committed_cost + estimated_cost
             await self.repository.save_analysis(analysis)
             try:
                 provider = self.router.provider_for(target)
@@ -488,6 +491,7 @@ class ViralReasoningService:
         warnings: list[str],
     ) -> AnalysisReport:
         runs = await self.repository.list_model_runs(analysis.id)
+        analysis.estimated_cost_micros = committed_model_cost_micros(runs)
         summary = summarize_model_runs(
             analysis.id,
             runs,

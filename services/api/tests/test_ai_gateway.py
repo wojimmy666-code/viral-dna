@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from pathlib import Path
 
@@ -49,7 +50,11 @@ class FakeVisionProvider:
     ) -> ProviderResult:
         self.calls += 1
         assert request.task == ModelTask.SHOT_FACTS
-        assert len(request.image_paths) == 3
+        if request.image_paths:
+            assert len(request.image_paths) == 3
+        else:
+            assert request.video_path is None
+            assert "JSON 中文校对器" in request.system_prompt
         facts = response_schema(
             title="人物展示产品",
             subjects=["一名穿浅色上衣的人物", "桌面上的产品"],
@@ -78,7 +83,7 @@ class FakeVisionProvider:
             input_tokens=1000,
             output_tokens=500,
             total_tokens=1500,
-            image_count=3,
+            image_count=len(request.image_paths),
         )
         return ProviderResult(
             data=facts,
@@ -334,6 +339,7 @@ async def test_shot_facts_are_metered_and_cached(
     )
     assert first.facts["shot_001"].confidence == 0.91
     assert first.cost_summary.measured_cost_micros == 6000
+    assert analysis.estimated_cost_micros == 6000
     assert provider.calls == 1
     first_runs = await repository.list_model_runs(analysis.id)
     assert first_runs[0].status == ModelRunStatus.COMPLETED
@@ -354,6 +360,96 @@ async def test_shot_facts_are_metered_and_cached(
         ModelRunStatus.CACHED,
     ]
     assert second.cost_summary.measured_cost_micros == 6000
+
+
+@pytest.mark.asyncio
+async def test_shot_facts_run_with_bounded_parallelism(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video, analysis, evidence, timeline = _build_media_inputs(tmp_path, monkeypatch)
+    shots_dir = tmp_path / "storage" / "analyses" / str(analysis.id) / "shots"
+    base_shot = evidence.shots[0]
+    base_timeline = timeline.shots[0]
+    for index in range(2, 5):
+        urls: list[str] = []
+        for suffix in ("start", "middle", "end"):
+            filename = (
+                f"shot_{index:03d}.jpg"
+                if suffix == "middle"
+                else f"shot_{index:03d}_{suffix}.jpg"
+            )
+            (shots_dir / filename).write_bytes(f"jpeg-{index}-{suffix}".encode())
+            urls.append(f"/api/v1/analyses/{analysis.id}/artifacts/shots/{filename}")
+        start = float((index - 1) * 2)
+        evidence.shots.append(
+            base_shot.model_copy(
+                update={
+                    "shot_id": f"shot_{index:03d}",
+                    "index": index,
+                    "start_seconds": start,
+                    "end_seconds": start + 2,
+                    "content_start_seconds": start + 0.2,
+                    "content_end_seconds": start + 1.8,
+                    "representative_timestamp": start + 1,
+                    "keyframe_url": urls[1],
+                    "evidence_frame_urls": urls,
+                    "evidence_timestamps": [start + 0.4, start + 1, start + 1.6],
+                }
+            )
+        )
+        timeline.shots.append(
+            base_timeline.model_copy(
+                update={
+                    "shot_id": f"shot_{index:03d}",
+                    "start_seconds": start,
+                    "end_seconds": start + 2,
+                }
+            )
+        )
+    evidence.metadata.duration_seconds = 8
+    timeline.duration_seconds = 8
+
+    class ConcurrentProvider(FakeVisionProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        async def generate(self, request, response_schema):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.03)
+                return await super().generate(request, response_schema)
+            finally:
+                self.active -= 1
+
+    repository = InMemoryStore()
+    await repository.add_video(video)
+    await repository.add_analysis(analysis)
+    provider = ConcurrentProvider()
+    service = ShotFactsService(
+        repository,
+        router=ModelRouter({"dashscope": provider}),
+    )
+
+    outcome = await service.analyze(
+        analysis=analysis,
+        video=video,
+        evidence=evidence,
+        timeline=timeline,
+    )
+
+    assert list(outcome.facts) == [
+        "shot_001",
+        "shot_002",
+        "shot_003",
+        "shot_004",
+    ]
+    assert provider.calls == 4
+    assert 2 <= provider.max_active <= 3
+    assert analysis.estimated_cost_micros == outcome.cost_summary.measured_cost_micros
 
 
 @pytest.mark.asyncio
@@ -419,11 +515,15 @@ async def test_english_shot_facts_are_retried_with_a_chinese_correction(
         def __init__(self) -> None:
             self.calls = 0
             self.retry_prompt = ""
+            self.retry_image_count = -1
+            self.retry_video_path = object()
 
         async def generate(self, request, response_schema):
             self.calls += 1
             if self.calls > 1:
                 self.retry_prompt = request.user_prompt
+                self.retry_image_count = len(request.image_paths)
+                self.retry_video_path = request.video_path
                 return await successful_provider.generate(request, response_schema)
             facts = response_schema(
                 title="Girl standing on a rooftop",
@@ -479,10 +579,14 @@ async def test_english_shot_facts_are_retried_with_a_chinese_correction(
 
     assert outcome.facts["shot_001"].title == "人物展示产品"
     assert provider.calls == 2
-    assert "上一次输出未通过中文校验" in provider.retry_prompt
+    assert "待修复 JSON" in provider.retry_prompt
+    assert provider.retry_image_count == 0
+    assert provider.retry_video_path is None
     runs = await repository.list_model_runs(analysis.id)
     assert [run.status for run in runs] == [ModelRunStatus.FAILED, ModelRunStatus.COMPLETED]
     assert runs[0].error_code == "model_language_invalid"
+    assert runs[1].usage.image_count == 0
+    assert runs[1].estimated_cost_micros < runs[0].estimated_cost_micros
 
 
 @pytest.mark.asyncio

@@ -14,10 +14,12 @@ from viral_dna_api.ai.shot_segmentation import (
     apply_model_selection,
 )
 from viral_dna_api.media import (
+    MediaProcessingError,
     MediaProcessor,
     RawSceneScore,
     boundaries_from_candidates,
     boundary_evidence_timestamps,
+    last_safe_frame_timestamp,
     merge_scene_candidates,
     parse_scene_score_metadata,
     shot_motion_evidence_timestamps,
@@ -238,6 +240,91 @@ def test_boundary_evidence_uses_near_and_far_frames_with_safe_clamping() -> None
     )
 
 
+def test_boundary_evidence_clamps_to_last_decodable_frame() -> None:
+    assert boundary_evidence_timestamps(17.533, 18.167, fps=30) == (
+        16.783,
+        17.413,
+        17.653,
+        18.133,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output_payload",
+    [None, b"not-an-image"],
+    ids=["missing", "invalid"],
+)
+async def test_image_command_rejects_missing_or_invalid_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_payload: bytes | None,
+) -> None:
+    output_path = tmp_path / "candidate_018.jpg"
+
+    async def fake_run_command(
+        args: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> tuple[str, str]:
+        del args, timeout_seconds
+        if output_payload is not None:
+            output_path.write_bytes(output_payload)
+        return "", ""
+
+    monkeypatch.setattr(media_module, "_run_command", fake_run_command)
+
+    with pytest.raises(MediaProcessingError, match="candidate_018"):
+        await media_module._run_image_command(
+            ["ffmpeg", str(output_path)],
+            output_path,
+            timeout_seconds=60,
+            context="生成分镜边界证据图 candidate_018",
+        )
+
+    assert not output_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_single_frame_extraction_retries_one_frame_earlier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+
+    async def fake_run_image_command(
+        args: list[str],
+        output_path: Path,
+        *,
+        timeout_seconds: float,
+        context: str,
+    ) -> None:
+        del output_path, timeout_seconds, context
+        attempts.append(args[args.index("-ss") + 1])
+        if len(attempts) == 1:
+            raise MediaProcessingError(
+                "frame_extract_failed",
+                "FFmpeg 未生成有效图片",
+                retryable=True,
+            )
+
+    monkeypatch.setattr(media_module, "_run_image_command", fake_run_image_command)
+
+    resolved = await MediaProcessor()._extract_jpeg_frame(
+        tmp_path / "proxy.mp4",
+        18.135,
+        tmp_path / "frame.jpg",
+        scale_filter=None,
+        quality=2,
+        timeout_seconds=60,
+        context="测试末帧回退",
+        fps=30,
+    )
+
+    assert resolved == pytest.approx(18.102)
+    assert attempts == ["18.135", "18.102"]
+
+
 @pytest.mark.asyncio
 async def test_keyframe_extraction_excludes_transition_from_shot_facts(
     tmp_path: Path,
@@ -255,6 +342,7 @@ async def test_keyframe_extraction_excludes_transition_from_shot_facts(
         return "", ""
 
     monkeypatch.setattr(media_module, "_run_command", fake_run_command)
+    monkeypatch.setattr(media_module, "_image_file_is_valid", lambda _: True)
     candidate = SceneBoundaryCandidate(
         id="candidate_001",
         timestamp_seconds=3.167,
@@ -273,6 +361,8 @@ async def test_keyframe_extraction_excludes_transition_from_shot_facts(
         tmp_path / "shots",
         UUID("00000000-0000-0000-0000-000000000001"),
         boundary_candidates=[candidate],
+        duration_seconds=9.2,
+        fps=30,
     )
 
     assert shots[0].content_end_seconds == pytest.approx(3.047)
@@ -287,14 +377,20 @@ async def test_keyframe_extraction_excludes_transition_from_shot_facts(
     assert shots[1].incoming_transition_end_seconds == pytest.approx(3.917)
     assert shots[1].evidence_timestamps[0] > 3.917
     assert all(value >= 3.917 for value in shots[1].evidence_timestamps)
-    assert len(commands) == 23
+    assert len(commands) == 4
     assert any(command[-1].endswith("shot_001_analysis.mp4") for command in commands)
     assert any(command[-1].endswith("shot_001_motion_09.jpg") for command in commands)
-    assert boundary_evidence_timestamps(0.45, 1.0) == (
+    image_commands = [command for command in commands if "-filter_complex" in command]
+    assert len(image_commands) == 2
+    assert all(
+        "format=yuvj420p" in command[command.index("-filter_complex") + 1]
+        for command in image_commands
+    )
+    assert boundary_evidence_timestamps(0.45, 1.0, fps=30) == (
         0.001,
         0.33,
         0.57,
-        0.999,
+        0.966,
     )
 
 
@@ -312,6 +408,18 @@ def test_motion_evidence_samples_content_and_outgoing_transition() -> None:
     assert timestamps[5] == pytest.approx(2.895)
     assert timestamps[6] > 3.047
     assert timestamps[-1] < 3.917
+
+
+def test_last_shot_motion_evidence_is_clamped_to_last_decodable_frame() -> None:
+    maximum = last_safe_frame_timestamp(18.167, 30)
+    timestamps = shot_motion_evidence_timestamps(
+        17.533,
+        18.167,
+        maximum_seconds=maximum,
+    )
+
+    assert maximum == pytest.approx(18.133)
+    assert timestamps == [17.565, 17.66, 17.787, 17.913, 18.04, 18.133]
 
 
 @pytest.mark.asyncio

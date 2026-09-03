@@ -179,7 +179,7 @@ class RecordService:
                         AnalysisStage.FAILED,
                     }:
                         analysis.stage = AnalysisStage.FAILED
-                        analysis.progress = 100
+                        analysis.progress = min(99, analysis.progress)
                         analysis.message = "服务重启导致分析中断，请手动重新分析"
                         analysis.error = AnalysisError(
                             code="analysis_interrupted",

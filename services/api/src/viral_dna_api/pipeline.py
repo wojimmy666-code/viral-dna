@@ -98,7 +98,7 @@ class SimulatedAnalysisPipeline:
             await self.repository.save_video(video)
         except Exception as exc:  # pragma: no cover - defensive orchestration boundary
             analysis.stage = AnalysisStage.FAILED
-            analysis.progress = 100
+            analysis.progress = min(99, analysis.progress)
             analysis.message = f"分析失败：{exc}"
             analysis.updated_at = utc_now()
             await self.repository.save_analysis(analysis)

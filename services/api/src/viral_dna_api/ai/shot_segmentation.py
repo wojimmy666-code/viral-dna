@@ -32,6 +32,7 @@ from .billing import (
     PriceCatalog,
     PriceCatalogError,
     calculate_cost_micros,
+    committed_model_cost_micros,
     estimate_text_tokens,
     estimate_visual_tokens,
     summarize_model_runs,
@@ -447,9 +448,11 @@ class ShotSegmentationService:
                     warnings.append(str(exc))
                     return await self._outcome(analysis, segmentation, warnings)
                 estimated_cost = calculate_cost_micros(estimated_usage, estimated_price)
+                existing_runs = await self.repository.list_model_runs(analysis.id)
+                committed_cost = committed_model_cost_micros(existing_runs)
                 if (
                     analysis.max_cost_micros is not None
-                    and analysis.estimated_cost_micros + estimated_cost > analysis.max_cost_micros
+                    and committed_cost + estimated_cost > analysis.max_cost_micros
                 ):
                     blocked = ModelRun(
                         analysis_id=analysis.id,
@@ -491,7 +494,7 @@ class ShotSegmentationService:
                 )
                 await self.repository.save_price_snapshot(estimated_price)
                 await self.repository.save_model_run(run)
-                analysis.estimated_cost_micros += estimated_cost
+                analysis.estimated_cost_micros = committed_cost + estimated_cost
                 await self.repository.save_analysis(analysis)
 
                 try:
@@ -637,6 +640,7 @@ class ShotSegmentationService:
         if warnings and not segmentation.verified_by_model:
             segmentation = segmentation.model_copy(update={"fallback_reason": warnings[0][:500]})
         runs = await self.repository.list_model_runs(analysis.id)
+        analysis.estimated_cost_micros = committed_model_cost_micros(runs)
         summary = summarize_model_runs(
             analysis.id,
             runs,

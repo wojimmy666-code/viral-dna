@@ -15,6 +15,8 @@ from math import gcd
 from pathlib import Path
 from uuid import UUID
 
+from PIL import Image
+
 from .models import (
     AnalysisStage,
     MediaEvidence,
@@ -26,7 +28,7 @@ from .models import (
 )
 from .workspace import workspace_manager
 
-PROCESSOR_VERSION = "ffmpeg-hybrid-candidates-v4-motion-clips"
+PROCESSOR_VERSION = "ffmpeg-hybrid-candidates-v5-batched-frames"
 MAX_VIDEO_SECONDS = 2 * 60
 MAX_SHOTS = 120
 MIN_SHOT_SECONDS = 0.45
@@ -40,10 +42,15 @@ TEMPORAL_SAMPLE_FPS = 2
 BOUNDARY_NMS_SECONDS = 0.65
 BOUNDARY_EVIDENCE_NEAR_OFFSET_SECONDS = 0.12
 BOUNDARY_EVIDENCE_FAR_OFFSET_SECONDS = 0.75
+FRAME_SEEK_EPSILON_SECONDS = 0.001
+FRAME_SEEK_FALLBACK_INTERVAL_SECONDS = 0.1
 MAX_CONTEXT_FRAMES = 12
+MIN_ANALYSIS_CLIP_SECONDS = 2.0
+JPEG_FULL_RANGE_FILTER = "format=yuvj420p"
 TEXT_SUBTITLE_CODECS = {"ass", "mov_text", "ssa", "srt", "subrip", "text", "webvtt"}
 
 ProgressCallback = Callable[[AnalysisStage, int, str], Awaitable[None]]
+ShotExtractionProgress = Callable[[int, int], Awaitable[None]]
 
 
 class MediaProcessingError(RuntimeError):
@@ -172,16 +179,37 @@ def boundaries_from_candidates(
     return boundaries
 
 
+def frame_interval_seconds(fps: float | None) -> float:
+    if fps is not None and math.isfinite(fps) and fps > 0:
+        return 1 / fps
+    return FRAME_SEEK_FALLBACK_INTERVAL_SECONDS
+
+
+def last_safe_frame_timestamp(duration_seconds: float, fps: float | None) -> float:
+    maximum = duration_seconds - frame_interval_seconds(fps) - FRAME_SEEK_EPSILON_SECONDS
+    return round(max(0.001, maximum), 3)
+
+
+def clamp_frame_timestamp(
+    timestamp_seconds: float,
+    duration_seconds: float,
+    fps: float | None,
+) -> float:
+    maximum = last_safe_frame_timestamp(duration_seconds, fps)
+    return round(min(maximum, max(0.0, timestamp_seconds)), 3)
+
+
 def boundary_evidence_timestamps(
     timestamp_seconds: float,
     duration_seconds: float,
     *,
+    fps: float | None = None,
     near_offset_seconds: float = BOUNDARY_EVIDENCE_NEAR_OFFSET_SECONDS,
     far_offset_seconds: float = BOUNDARY_EVIDENCE_FAR_OFFSET_SECONDS,
 ) -> tuple[float, float, float, float]:
     """Return a four-frame micro timeline around one candidate boundary."""
 
-    maximum = max(0.001, duration_seconds - 0.001)
+    maximum = last_safe_frame_timestamp(duration_seconds, fps)
 
     def clamp(value: float) -> float:
         return round(min(maximum, max(0.001, value)), 3)
@@ -200,6 +228,7 @@ def shot_motion_evidence_timestamps(
     *,
     transition_start_seconds: float | None = None,
     transition_end_seconds: float | None = None,
+    maximum_seconds: float | None = None,
 ) -> list[float]:
     """Return a dense, ordered timeline for motion and outgoing-transition fallback."""
 
@@ -219,7 +248,11 @@ def shot_motion_evidence_timestamps(
             for fraction in (0.05, 0.5, 0.95)
         )
     ordered: list[float] = []
-    for timestamp in sorted(round(value, 3) for value in timestamps):
+    for value in sorted(timestamps):
+        timestamp = round(
+            min(value, maximum_seconds) if maximum_seconds is not None else value,
+            3,
+        )
         if not ordered or timestamp - ordered[-1] >= 0.025:
             ordered.append(timestamp)
     return ordered[:12]
@@ -298,6 +331,45 @@ async def _run_command(args: list[str], *, timeout_seconds: float) -> tuple[str,
     return stdout_text, stderr_text
 
 
+def _image_file_is_valid(output_path: Path) -> bool:
+    try:
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            return False
+        with Image.open(output_path) as image:
+            image.verify()
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return True
+
+
+async def _run_image_command(
+    args: list[str],
+    output_path: Path,
+    *,
+    timeout_seconds: float,
+    context: str,
+) -> None:
+    await asyncio.to_thread(output_path.unlink, missing_ok=True)
+    try:
+        await _run_command(args, timeout_seconds=timeout_seconds)
+    except MediaProcessingError as exc:
+        raise MediaProcessingError(
+            exc.code,
+            f"{context}失败：{exc}",
+            retryable=exc.retryable,
+        ) from exc
+
+    valid_output = await asyncio.to_thread(_image_file_is_valid, output_path)
+    if valid_output:
+        return
+    await asyncio.to_thread(output_path.unlink, missing_ok=True)
+    raise MediaProcessingError(
+        "frame_extract_failed",
+        f"{context}失败：FFmpeg 未生成有效图片（{output_path.name}）",
+        retryable=True,
+    )
+
+
 def _parse_float(value: object, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -366,6 +438,184 @@ class MediaProcessor:
         self.ffmpeg = _resolve_binary("VIRAL_DNA_FFMPEG_PATH", "ffmpeg")
         self.ffprobe = _resolve_binary("VIRAL_DNA_FFPROBE_PATH", "ffprobe")
         self.scene_threshold = float(os.getenv("VIRAL_DNA_SCENE_THRESHOLD", "0.30"))
+
+    async def _extract_jpeg_frame(
+        self,
+        source_path: Path,
+        timestamp_seconds: float,
+        output_path: Path,
+        *,
+        scale_filter: str | None,
+        quality: int,
+        timeout_seconds: float,
+        context: str,
+        fps: float | None = None,
+    ) -> float:
+        filters = [value for value in (scale_filter, JPEG_FULL_RANGE_FILTER) if value]
+        initial_timestamp = round(max(0.0, timestamp_seconds), 3)
+        retry_timestamp = round(
+            max(0.0, initial_timestamp - frame_interval_seconds(fps)),
+            3,
+        )
+        attempt_timestamps = [initial_timestamp]
+        if retry_timestamp < initial_timestamp:
+            attempt_timestamps.append(retry_timestamp)
+
+        for attempt, timestamp in enumerate(attempt_timestamps):
+            try:
+                await _run_image_command(
+                    [
+                        self.ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostdin",
+                        "-y",
+                        "-ss",
+                        f"{timestamp:.3f}",
+                        "-i",
+                        str(source_path),
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        ",".join(filters),
+                        "-q:v",
+                        str(quality),
+                        str(output_path),
+                    ],
+                    output_path,
+                    timeout_seconds=timeout_seconds,
+                    context=f"{context}（{timestamp:.3f} 秒）",
+                )
+                return timestamp
+            except MediaProcessingError as exc:
+                is_last_attempt = attempt == len(attempt_timestamps) - 1
+                if is_last_attempt or exc.code not in {
+                    "frame_extract_failed",
+                    "media_process_failed",
+                }:
+                    raise
+
+        raise AssertionError("frame extraction attempts unexpectedly exhausted")
+
+    async def _extract_jpeg_frames(
+        self,
+        source_path: Path,
+        requests: list[tuple[float, Path]],
+        *,
+        scale_filter: str | None,
+        quality: int,
+        timeout_seconds: float,
+        context: str,
+        fps: float | None = None,
+    ) -> list[float]:
+        """Extract several exact-time JPEGs in one FFmpeg process.
+
+        Each timestamp remains an independent seek input so variable-frame-rate
+        sources keep the same semantics as ``_extract_jpeg_frame``. The shared
+        process removes most Windows process-start overhead. If a build of
+        FFmpeg cannot produce the multi-output command, fall back to the proven
+        single-frame path instead of failing the analysis.
+        """
+
+        if not requests:
+            return []
+        if len(requests) == 1:
+            timestamp, output_path = requests[0]
+            return [
+                await self._extract_jpeg_frame(
+                    source_path,
+                    timestamp,
+                    output_path,
+                    scale_filter=scale_filter,
+                    quality=quality,
+                    timeout_seconds=timeout_seconds,
+                    context=context,
+                    fps=fps,
+                )
+            ]
+
+        filters = [value for value in (scale_filter, JPEG_FULL_RANGE_FILTER) if value]
+        normalized = [
+            (round(max(0.0, timestamp), 3), output_path)
+            for timestamp, output_path in requests
+        ]
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(output_path.parent.mkdir, parents=True, exist_ok=True)
+                for _, output_path in normalized
+            )
+        )
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(output_path.unlink, missing_ok=True)
+                for _, output_path in normalized
+            )
+        )
+
+        args = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+        ]
+        for timestamp, _ in normalized:
+            args.extend(["-ss", f"{timestamp:.3f}", "-i", str(source_path)])
+        filter_graph = ";".join(
+            f"[{index}:v]{','.join(filters)}[frame_{index}]"
+            for index in range(len(normalized))
+        )
+        args.extend(["-filter_complex", filter_graph])
+        for index, (_, output_path) in enumerate(normalized):
+            args.extend(
+                [
+                    "-map",
+                    f"[frame_{index}]",
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    str(quality),
+                    str(output_path),
+                ]
+            )
+
+        try:
+            await _run_command(args, timeout_seconds=timeout_seconds)
+        except MediaProcessingError:
+            return [
+                await self._extract_jpeg_frame(
+                    source_path,
+                    timestamp,
+                    output_path,
+                    scale_filter=scale_filter,
+                    quality=quality,
+                    timeout_seconds=timeout_seconds,
+                    context=f"{context} {index}",
+                    fps=fps,
+                )
+                for index, (timestamp, output_path) in enumerate(normalized, 1)
+            ]
+
+        resolved: list[float] = []
+        for index, (timestamp, output_path) in enumerate(normalized, 1):
+            if await asyncio.to_thread(_image_file_is_valid, output_path):
+                resolved.append(timestamp)
+                continue
+            resolved.append(
+                await self._extract_jpeg_frame(
+                    source_path,
+                    timestamp,
+                    output_path,
+                    scale_filter=scale_filter,
+                    quality=quality,
+                    timeout_seconds=timeout_seconds,
+                    context=f"{context} {index}",
+                    fps=fps,
+                )
+            )
+        return resolved
 
     async def probe(self, source_path: Path) -> MediaMetadata:
         try:
@@ -552,34 +802,15 @@ class MediaProcessor:
                 "关键帧时间不能小于 0",
             )
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        await _run_command(
-            [
-                self.ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-y",
-                "-i",
-                str(source_path),
-                "-ss",
-                f"{timestamp_seconds:.3f}",
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                str(output_path),
-            ],
+        await self._extract_jpeg_frame(
+            source_path,
+            timestamp_seconds,
+            output_path,
+            scale_filter=None,
+            quality=2,
             timeout_seconds=120,
+            context="提取关键帧",
         )
-        valid_output = await asyncio.to_thread(
-            lambda: output_path.is_file() and output_path.stat().st_size > 0
-        )
-        if not valid_output:
-            raise MediaProcessingError(
-                "frame_extract_failed",
-                "没有从源视频提取到关键帧",
-            )
 
     async def extract_video_clip(
         self,
@@ -833,8 +1064,17 @@ class MediaProcessor:
         analysis_id: UUID,
         *,
         boundary_candidates: list[SceneBoundaryCandidate] | None = None,
+        duration_seconds: float | None = None,
+        fps: float | None = None,
+        progress: ShotExtractionProgress | None = None,
     ) -> list[ShotEvidence]:
         shots: list[ShotEvidence] = []
+        media_duration = (
+            duration_seconds
+            if duration_seconds is not None
+            else (boundaries[-1] if boundaries else 0.001)
+        )
+        maximum_frame_timestamp = last_safe_frame_timestamp(media_duration, fps)
         candidates_by_timestamp = {
             round(candidate.timestamp_seconds, 3): candidate
             for candidate in boundary_candidates or []
@@ -882,7 +1122,11 @@ class MediaProcessor:
             if content_end - content_start < 0.05:
                 content_start = start
                 content_end = end
-            representative = round(content_start + (content_end - content_start) / 2, 3)
+            representative = clamp_frame_timestamp(
+                content_start + (content_end - content_start) / 2,
+                media_duration,
+                fps,
+            )
             content_duration = content_end - content_start
             offset = min(
                 0.18,
@@ -890,41 +1134,26 @@ class MediaProcessor:
                 content_duration / 3,
             )
             samples = (
-                ("start", round(content_start + offset, 3)),
+                (
+                    "start",
+                    clamp_frame_timestamp(content_start + offset, media_duration, fps),
+                ),
                 ("middle", representative),
-                ("end", round(content_end - offset, 3)),
+                (
+                    "end",
+                    clamp_frame_timestamp(content_end - offset, media_duration, fps),
+                ),
             )
-            frame_urls: list[str] = []
+            sample_requests: list[tuple[float, Path]] = []
+            sample_filenames: list[str] = []
             for label, timestamp in samples:
                 filename = (
                     f"shot_{index:03d}.jpg"
                     if label == "middle"
                     else f"shot_{index:03d}_{label}.jpg"
                 )
-                output_path = shots_dir / filename
-                await _run_command(
-                    [
-                        self.ffmpeg,
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-nostdin",
-                        "-y",
-                        "-ss",
-                        f"{timestamp:.3f}",
-                        "-i",
-                        str(proxy_path),
-                        "-frames:v",
-                        "1",
-                        "-vf",
-                        "scale=w='min(640,iw)':h=-2",
-                        "-q:v",
-                        "2",
-                        str(output_path),
-                    ],
-                    timeout_seconds=60,
-                )
-                frame_urls.append(artifact_url(analysis_id, f"shots/{filename}"))
+                sample_filenames.append(filename)
+                sample_requests.append((timestamp, shots_dir / filename))
 
             analysis_clip_start = content_start
             analysis_clip_end = max(
@@ -936,11 +1165,48 @@ class MediaProcessor:
                 content_end,
                 transition_start_seconds=outgoing_transition_start,
                 transition_end_seconds=outgoing_transition_end,
+                maximum_seconds=maximum_frame_timestamp,
             )
-            motion_frame_urls: list[str] = []
+            motion_filenames: list[str] = []
             for motion_index, timestamp in enumerate(motion_timestamps, 1):
                 filename = f"shot_{index:03d}_motion_{motion_index:02d}.jpg"
-                output_path = shots_dir / filename
+                motion_filenames.append(filename)
+                sample_requests.append((timestamp, shots_dir / filename))
+
+            resolved_timestamps = await self._extract_jpeg_frames(
+                proxy_path,
+                sample_requests,
+                scale_filter="scale=w='min(640,iw)':h=-2",
+                quality=2,
+                timeout_seconds=120,
+                context=f"批量生成分镜 {index} 的证据帧",
+                fps=fps,
+            )
+            sample_count = len(samples)
+            resolved_samples = list(
+                zip(
+                    (label for label, _ in samples),
+                    resolved_timestamps[:sample_count],
+                    strict=True,
+                )
+            )
+            representative = next(
+                timestamp for label, timestamp in resolved_samples if label == "middle"
+            )
+            frame_urls = [
+                artifact_url(analysis_id, f"shots/{filename}")
+                for filename in sample_filenames
+            ]
+            motion_timestamps = resolved_timestamps[sample_count:]
+            motion_frame_urls = [
+                artifact_url(analysis_id, f"shots/{filename}")
+                for filename in motion_filenames
+            ]
+
+            analysis_clip_filename = f"shot_{index:03d}_analysis.mp4"
+            analysis_clip_path = shots_dir / analysis_clip_filename
+            analysis_clip_url: str | None = None
+            if analysis_clip_end - analysis_clip_start >= MIN_ANALYSIS_CLIP_SECONDS:
                 await _run_command(
                     [
                         self.ffmpeg,
@@ -950,54 +1216,32 @@ class MediaProcessor:
                         "-nostdin",
                         "-y",
                         "-ss",
-                        f"{timestamp:.3f}",
+                        f"{analysis_clip_start:.3f}",
                         "-i",
                         str(proxy_path),
-                        "-frames:v",
-                        "1",
+                        "-t",
+                        f"{analysis_clip_end - analysis_clip_start:.3f}",
+                        "-an",
                         "-vf",
                         "scale=w='min(640,iw)':h=-2",
-                        "-q:v",
-                        "2",
-                        str(output_path),
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-crf",
+                        "28",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        str(analysis_clip_path),
                     ],
-                    timeout_seconds=60,
+                    timeout_seconds=120,
                 )
-                motion_frame_urls.append(artifact_url(analysis_id, f"shots/{filename}"))
-
-            analysis_clip_filename = f"shot_{index:03d}_analysis.mp4"
-            analysis_clip_path = shots_dir / analysis_clip_filename
-            await _run_command(
-                [
-                    self.ffmpeg,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-y",
-                    "-ss",
-                    f"{analysis_clip_start:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-t",
-                    f"{analysis_clip_end - analysis_clip_start:.3f}",
-                    "-an",
-                    "-vf",
-                    "scale=w='min(640,iw)':h=-2",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "28",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-movflags",
-                    "+faststart",
-                    str(analysis_clip_path),
-                ],
-                timeout_seconds=120,
-            )
+                analysis_clip_url = artifact_url(
+                    analysis_id,
+                    f"shots/{analysis_clip_filename}",
+                )
 
             keyframe_url = artifact_url(analysis_id, f"shots/shot_{index:03d}.jpg")
             boundary_candidate = candidates_by_timestamp.get(round(start, 3))
@@ -1053,16 +1297,13 @@ class MediaProcessor:
                         if outgoing_transition_end is not None
                         else None
                     ),
-                    analysis_clip_url=artifact_url(
-                        analysis_id,
-                        f"shots/{analysis_clip_filename}",
-                    ),
+                    analysis_clip_url=analysis_clip_url,
                     analysis_clip_start_seconds=round(analysis_clip_start, 3),
                     analysis_clip_end_seconds=round(analysis_clip_end, 3),
                     representative_timestamp=representative,
                     keyframe_url=keyframe_url,
                     evidence_frame_urls=frame_urls,
-                    evidence_timestamps=[timestamp for _, timestamp in samples],
+                    evidence_timestamps=[timestamp for _, timestamp in resolved_samples],
                     motion_frame_urls=motion_frame_urls,
                     motion_timestamps=motion_timestamps,
                     detection_method=(
@@ -1076,6 +1317,8 @@ class MediaProcessor:
                     semantic_group=semantic_group,
                 )
             )
+            if progress is not None:
+                await progress(index, max(0, len(boundaries) - 1))
         return shots
 
     async def extract_boundary_evidence(
@@ -1085,75 +1328,97 @@ class MediaProcessor:
         segmentation_dir: Path,
         analysis_id: UUID,
         duration_seconds: float,
+        *,
+        fps: float | None = None,
     ) -> list[SceneBoundaryCandidate]:
         enriched: list[SceneBoundaryCandidate] = []
         for candidate in candidates:
-            far_before, near_before, near_after, far_after = boundary_evidence_timestamps(
-                candidate.timestamp_seconds,
-                duration_seconds,
+            timestamps = list(
+                boundary_evidence_timestamps(
+                    candidate.timestamp_seconds,
+                    duration_seconds,
+                    fps=fps,
+                )
             )
             filename = f"{candidate.id}.jpg"
             output_path = segmentation_dir / filename
-            await _run_command(
-                [
-                    self.ffmpeg,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-y",
-                    "-ss",
-                    f"{far_before:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-ss",
-                    f"{near_before:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-ss",
-                    f"{near_after:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-ss",
-                    f"{far_after:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-filter_complex",
-                    (
-                        "[0:v]scale=240:300:force_original_aspect_ratio=decrease,"
-                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[far_before];"
-                        "[1:v]scale=240:300:force_original_aspect_ratio=decrease,"
-                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[near_before];"
-                        "[2:v]scale=240:300:force_original_aspect_ratio=decrease,"
-                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[near_after];"
-                        "[3:v]scale=240:300:force_original_aspect_ratio=decrease,"
-                        "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[far_after];"
-                        "[far_before][near_before][near_after][far_after]"
-                        "hstack=inputs=4,"
-                        "drawbox=x=479:y=0:w=2:h=ih:color=white:t=fill[comparison]"
-                    ),
-                    "-map",
-                    "[comparison]",
-                    "-frames:v",
-                    "1",
-                    "-q:v",
-                    "3",
-                    str(output_path),
-                ],
-                timeout_seconds=60,
-            )
+            frame_interval = frame_interval_seconds(fps)
+            for attempt in range(2):
+                far_before, near_before, near_after, far_after = timestamps
+                context = (
+                    f"生成分镜边界证据图 {candidate.id}"
+                    f"（采样时间 {', '.join(f'{value:.3f}' for value in timestamps)} 秒）"
+                )
+                try:
+                    await _run_image_command(
+                        [
+                            self.ffmpeg,
+                            "-hide_banner",
+                            "-loglevel",
+                            "error",
+                            "-nostdin",
+                            "-y",
+                            "-ss",
+                            f"{far_before:.3f}",
+                            "-i",
+                            str(proxy_path),
+                            "-ss",
+                            f"{near_before:.3f}",
+                            "-i",
+                            str(proxy_path),
+                            "-ss",
+                            f"{near_after:.3f}",
+                            "-i",
+                            str(proxy_path),
+                            "-ss",
+                            f"{far_after:.3f}",
+                            "-i",
+                            str(proxy_path),
+                            "-filter_complex",
+                            (
+                                "[0:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                                "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[far_before];"
+                                "[1:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                                "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[near_before];"
+                                "[2:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                                "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[near_after];"
+                                "[3:v]scale=240:300:force_original_aspect_ratio=decrease,"
+                                "pad=240:300:(ow-iw)/2:(oh-ih)/2:color=black[far_after];"
+                                "[far_before][near_before][near_after][far_after]"
+                                "hstack=inputs=4,"
+                                "drawbox=x=479:y=0:w=2:h=ih:color=white:t=fill,"
+                                f"{JPEG_FULL_RANGE_FILTER}[comparison]"
+                            ),
+                            "-map",
+                            "[comparison]",
+                            "-frames:v",
+                            "1",
+                            "-q:v",
+                            "3",
+                            str(output_path),
+                        ],
+                        output_path,
+                        timeout_seconds=60,
+                        context=context,
+                    )
+                    break
+                except MediaProcessingError as exc:
+                    if attempt > 0 or exc.code not in {
+                        "frame_extract_failed",
+                        "media_process_failed",
+                    }:
+                        raise
+                    timestamps[-1] = round(
+                        max(timestamps[-2], timestamps[-1] - frame_interval),
+                        3,
+                    )
             url = artifact_url(analysis_id, f"segmentation/{filename}")
             enriched.append(
                 candidate.model_copy(
                     update={
                         "comparison_image_url": url,
                         "evidence_frame_urls": [url],
-                        "evidence_timestamps": [
-                            far_before,
-                            near_before,
-                            near_after,
-                            far_after,
-                        ],
+                        "evidence_timestamps": timestamps,
                     }
                 )
             )
@@ -1165,38 +1430,36 @@ class MediaProcessor:
         segmentation_dir: Path,
         analysis_id: UUID,
         duration_seconds: float,
+        *,
+        fps: float | None = None,
     ) -> tuple[str, list[float]]:
         count = min(MAX_CONTEXT_FRAMES, max(2, math.ceil(duration_seconds / 1.5)))
-        timestamps = [round(duration_seconds * (index + 0.5) / count, 3) for index in range(count)]
-        for index, timestamp in enumerate(timestamps, 1):
-            output_path = segmentation_dir / f"context_{index:03d}.jpg"
-            await _run_command(
-                [
-                    self.ffmpeg,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-y",
-                    "-ss",
-                    f"{timestamp:.3f}",
-                    "-i",
-                    str(proxy_path),
-                    "-frames:v",
-                    "1",
-                    "-vf",
-                    "scale=w='min(480,iw)':h=-2",
-                    "-q:v",
-                    "3",
-                    str(output_path),
-                ],
-                timeout_seconds=60,
+        timestamps = [
+            clamp_frame_timestamp(
+                duration_seconds * (index + 0.5) / count,
+                duration_seconds,
+                fps,
             )
+            for index in range(count)
+        ]
+        frame_requests = [
+            (timestamp, segmentation_dir / f"context_{index:03d}.jpg")
+            for index, timestamp in enumerate(timestamps, 1)
+        ]
+        resolved_timestamps = await self._extract_jpeg_frames(
+            proxy_path,
+            frame_requests,
+            scale_filter="scale=w='min(480,iw)':h=-2",
+            quality=3,
+            timeout_seconds=120,
+            context="批量生成分镜上下文帧",
+            fps=fps,
+        )
 
         columns = min(4, count)
         rows = max(1, math.ceil(count / columns))
         context_path = segmentation_dir / "context-sheet.jpg"
-        await _run_command(
+        await _run_image_command(
             [
                 self.ffmpeg,
                 "-hide_banner",
@@ -1214,15 +1477,18 @@ class MediaProcessor:
                 (
                     "scale=240:240:force_original_aspect_ratio=decrease,"
                     "pad=240:240:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    f"tile={columns}x{rows}:nb_frames={count}:padding=8:margin=8:color=white"
+                    f"tile={columns}x{rows}:nb_frames={count}:padding=8:margin=8:color=white,"
+                    f"{JPEG_FULL_RANGE_FILTER}"
                 ),
                 "-frames:v",
                 "1",
                 str(context_path),
             ],
+            context_path,
             timeout_seconds=120,
+            context="生成分镜上下文总览图",
         )
-        return artifact_url(analysis_id, "segmentation/context-sheet.jpg"), timestamps
+        return artifact_url(analysis_id, "segmentation/context-sheet.jpg"), resolved_timestamps
 
     async def create_contact_sheet(self, shots_dir: Path, output_path: Path, count: int) -> None:
         tile_count = min(count, 20)
@@ -1231,9 +1497,10 @@ class MediaProcessor:
         filter_graph = (
             "scale=320:180:force_original_aspect_ratio=decrease,"
             "pad=320:180:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"tile={columns}x{rows}:nb_frames={tile_count}:padding=8:margin=8:color=white"
+            f"tile={columns}x{rows}:nb_frames={tile_count}:padding=8:margin=8:color=white,"
+            f"{JPEG_FULL_RANGE_FILTER}"
         )
-        await _run_command(
+        await _run_image_command(
             [
                 self.ffmpeg,
                 "-hide_banner",
@@ -1253,7 +1520,9 @@ class MediaProcessor:
                 "1",
                 str(output_path),
             ],
+            output_path,
             timeout_seconds=120,
+            context="生成分镜关键帧总览图",
         )
 
     async def apply_segmentation(
@@ -1263,6 +1532,7 @@ class MediaProcessor:
         segmentation: SegmentationMetadata,
         *,
         record_id: UUID | None = None,
+        progress: ShotExtractionProgress | None = None,
     ) -> MediaEvidence:
         artifact_root = get_analysis_artifact_root(analysis_id, record_id)
         proxy_path = artifact_root / "proxy.mp4"
@@ -1274,6 +1544,9 @@ class MediaProcessor:
             shots_dir,
             analysis_id,
             boundary_candidates=segmentation.candidates,
+            duration_seconds=evidence.metadata.duration_seconds,
+            fps=evidence.metadata.fps,
+            progress=progress,
         )
         contact_sheet_path = artifact_root / "contact-sheet.jpg"
         await self.create_contact_sheet(shots_dir, contact_sheet_path, len(shots))
@@ -1281,6 +1554,7 @@ class MediaProcessor:
             update={
                 "shots": shots,
                 "segmentation": segmentation,
+                "contact_sheet_url": artifact_url(analysis_id, "contact-sheet.jpg"),
             }
         )
         manifest_path = artifact_root / "manifest.json"
@@ -1300,6 +1574,7 @@ class MediaProcessor:
         include_audio: bool,
         progress: ProgressCallback,
         record_id: UUID | None = None,
+        defer_shot_extraction: bool = False,
     ) -> MediaEvidence:
         artifact_root = get_analysis_artifact_root(analysis_id, record_id)
         shots_dir = artifact_root / "shots"
@@ -1351,12 +1626,14 @@ class MediaProcessor:
             segmentation_dir,
             analysis_id,
             metadata.duration_seconds,
+            fps=metadata.fps,
         )
         context_sheet_url, context_timestamps = await self.create_segmentation_context(
             proxy_path,
             segmentation_dir,
             analysis_id,
             metadata.duration_seconds,
+            fps=metadata.fps,
         )
         boundaries = boundaries_from_candidates(candidates, metadata.duration_seconds)
         segmentation = SegmentationMetadata(
@@ -1373,17 +1650,24 @@ class MediaProcessor:
             final_shot_count=max(0, len(boundaries) - 1),
             fallback_reason="等待 VLM 语义确认，当前采用硬切边界",
         )
-        await progress(AnalysisStage.SEGMENTING, 66, "正在提取逐镜头代表关键帧")
-        shots = await self.extract_keyframes(
-            proxy_path,
-            boundaries,
-            shots_dir,
-            analysis_id,
-            boundary_candidates=candidates,
-        )
-
-        contact_sheet_path = artifact_root / "contact-sheet.jpg"
-        await self.create_contact_sheet(shots_dir, contact_sheet_path, len(shots))
+        shots: list[ShotEvidence] = []
+        contact_sheet_url: str | None = None
+        if defer_shot_extraction:
+            await progress(AnalysisStage.SEGMENTING, 66, "分镜候选证据已准备")
+        else:
+            await progress(AnalysisStage.SEGMENTING, 66, "正在提取逐镜头代表关键帧")
+            shots = await self.extract_keyframes(
+                proxy_path,
+                boundaries,
+                shots_dir,
+                analysis_id,
+                boundary_candidates=candidates,
+                duration_seconds=metadata.duration_seconds,
+                fps=metadata.fps,
+            )
+            contact_sheet_path = artifact_root / "contact-sheet.jpg"
+            await self.create_contact_sheet(shots_dir, contact_sheet_path, len(shots))
+            contact_sheet_url = artifact_url(analysis_id, "contact-sheet.jpg")
         evidence = MediaEvidence(
             processor_version=PROCESSOR_VERSION,
             metadata=metadata,
@@ -1391,7 +1675,7 @@ class MediaProcessor:
             audio_url=audio_url,
             subtitle_url=subtitle_url,
             subtitle_extraction_message=subtitle_message,
-            contact_sheet_url=artifact_url(analysis_id, "contact-sheet.jpg"),
+            contact_sheet_url=contact_sheet_url,
             manifest_url=artifact_url(analysis_id, "manifest.json"),
             shots=shots,
             segmentation=segmentation,

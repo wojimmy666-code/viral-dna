@@ -48,6 +48,7 @@ from .billing import (
     PriceCatalog,
     PriceCatalogError,
     calculate_cost_micros,
+    committed_model_cost_micros,
     estimate_text_tokens,
     estimate_visual_tokens,
     summarize_model_runs,
@@ -58,8 +59,17 @@ from .router import ModelRouter
 ProgressCallback = Callable[[int, int, str], Awaitable[None]]
 SHOT_FACTS_PROMPT_PATH = Path(__file__).with_name("prompts") / "shot_facts_v3.md"
 DEFAULT_OUTPUT_TOKEN_ESTIMATE = 3600
+LANGUAGE_REPAIR_OUTPUT_TOKEN_ESTIMATE = 2200
 MIN_NATIVE_VIDEO_SECONDS = 2.0
 MAX_INLINE_VIDEO_BYTES = 7_000_000
+LANGUAGE_REPAIR_SYSTEM_PROMPT = f"""
+你是 JSON 中文校对器。只修复给定 JSON 的语言，不重新观察或推断画面。
+必须保留原有字段、数组结构、数值、时间和布尔值，并输出完整 JSON 对象。
+{LANGUAGE_POLICY_MESSAGE}
+把 Static、Locked-off、None、Unknown 等描述改成准确的简体中文。
+若英文只是画面中实际出现的文字，必须按“英文标识：\"原文\"”的格式保留；
+除此之外不得输出未标注的英文单词。不要解释，不要使用 Markdown。
+""".strip()
 
 
 class ModelRunRepository(Protocol):
@@ -295,6 +305,15 @@ def _user_prompt(
     )
 
 
+def _language_repair_prompt(raw_content: str) -> str:
+    payload = raw_content.strip()[:24_000]
+    return (
+        "修复下面这份已通过结构校验、但未通过中文规则的镜头事实 JSON。"
+        "不得新增画面事实，不得改变时间、置信度或动作含义。\n\n"
+        f"待修复 JSON：\n{payload}"
+    )
+
+
 def _normalize_visual_beats(
     shot: ShotEvidence,
     facts: ShotVisualFacts,
@@ -525,7 +544,17 @@ class ShotFactsService:
         self.router = router or ModelRouter(providers)
         self.price_catalog = price_catalog or PriceCatalog()
         self.max_attempts = max(1, int(os.getenv("VIRAL_DNA_MODEL_MAX_ATTEMPTS", "2")))
+        try:
+            configured_concurrency = int(
+                os.getenv("VIRAL_DNA_SHOT_FACTS_CONCURRENCY", "3")
+            )
+        except ValueError:
+            configured_concurrency = 3
+        self.concurrency = min(6, max(1, configured_concurrency))
         self.system_prompt = SHOT_FACTS_PROMPT_PATH.read_text("utf-8").strip()
+        self._budget_condition = asyncio.Condition()
+        self._in_flight = 0
+        self._stop_reason: str | None = None
 
     async def analyze(
         self,
@@ -535,6 +564,79 @@ class ShotFactsService:
         evidence: MediaEvidence,
         timeline: EvidenceTimeline,
         progress: ProgressCallback | None = None,
+    ) -> ShotFactsOutcome:
+        self._stop_reason = None
+        self._in_flight = 0
+        if analysis.model_plan is None:
+            return await self._outcome(analysis, {}, [])
+        targets = analysis.model_plan.targets_for(ModelTask.SHOT_FACTS)
+        if not targets:
+            return await self._outcome(analysis, {}, ["模型计划没有 shot_facts 路由"])
+        if analysis.model_plan.pricing_version != self.price_catalog.catalog_version:
+            return await self._outcome(
+                analysis,
+                {},
+                ["模型计划冻结的价格版本与当前价格目录不一致，已在调用前停止"],
+            )
+        if len(evidence.shots) <= 1 or self.concurrency == 1:
+            return await self._analyze_serial(
+                analysis=analysis,
+                video=video,
+                evidence=evidence,
+                timeline=timeline,
+                progress=progress,
+            )
+
+        timeline_by_shot = {item.shot_id: item for item in timeline.shots}
+        semaphore = asyncio.Semaphore(self.concurrency)
+        progress_lock = asyncio.Lock()
+        completed = 0
+
+        async def analyze_one(shot: ShotEvidence) -> ShotFactsOutcome:
+            nonlocal completed
+            async with semaphore:
+                shot_timeline = timeline_by_shot.get(shot.shot_id)
+                if shot_timeline is None:
+                    result = ShotFactsOutcome(
+                        facts={},
+                        warnings=[f"{shot.shot_id} 缺少对齐后的证据时间线"],
+                        cost_summary=AnalysisCostSummary(analysis_id=analysis.id),
+                    )
+                else:
+                    result = await self._analyze_serial(
+                        analysis=analysis,
+                        video=video,
+                        evidence=evidence.model_copy(update={"shots": [shot]}),
+                        timeline=timeline.model_copy(update={"shots": [shot_timeline]}),
+                        finalize=False,
+                    )
+            async with progress_lock:
+                completed += 1
+                if progress:
+                    await progress(
+                        completed,
+                        len(evidence.shots),
+                        f"正在并行理解镜头，已完成 {completed}/{len(evidence.shots)}",
+                    )
+            return result
+
+        outcomes = await asyncio.gather(*(analyze_one(shot) for shot in evidence.shots))
+        facts: dict[str, ShotVisualFacts] = {}
+        warnings: list[str] = []
+        for outcome in outcomes:
+            facts.update(outcome.facts)
+            warnings.extend(outcome.warnings)
+        return await self._outcome(analysis, facts, list(dict.fromkeys(warnings)))
+
+    async def _analyze_serial(
+        self,
+        *,
+        analysis: AnalysisJob,
+        video: Video,
+        evidence: MediaEvidence,
+        timeline: EvidenceTimeline,
+        progress: ProgressCallback | None = None,
+        finalize: bool = True,
     ) -> ShotFactsOutcome:
         if analysis.model_plan is None:
             return await self._outcome(analysis, {}, [])
@@ -592,8 +694,8 @@ class ShotFactsService:
             shot_result: ShotVisualFacts | None = None
             previous_run_id: UUID | None = None
             attempt_number = 0
-            language_retry_required = False
             for target in targets:
+                language_repair_payload: str | None = None
                 fingerprint = await _request_fingerprint(
                     video=video,
                     shot=shot,
@@ -643,26 +745,43 @@ class ShotFactsService:
 
                 for _ in range(self.max_attempts):
                     attempt_number += 1
-                    attempt_user_prompt = user_prompt
-                    if language_retry_required:
-                        attempt_user_prompt += (
-                            "\n\n上一次输出未通过中文校验。"
-                            f"{LANGUAGE_POLICY_MESSAGE}"
-                            "不要输出 None、Unknown、Static、Locked-off 等英文描述；"
-                            "请将运镜和动作术语完整改写为简体中文后重新输出整个 JSON。"
-                        )
+                    repairing_language = language_repair_payload is not None
+                    request_system_prompt = (
+                        LANGUAGE_REPAIR_SYSTEM_PROMPT
+                        if repairing_language
+                        else self.system_prompt
+                    )
+                    attempt_user_prompt = (
+                        _language_repair_prompt(language_repair_payload)
+                        if language_repair_payload is not None
+                        else user_prompt
+                    )
+                    request_image_paths = () if repairing_language else image_paths
+                    request_image_labels = () if repairing_language else image_labels
+                    request_video_path = None if repairing_language else video_path
+                    request_video_duration = 0.0 if repairing_language else video_duration
+                    request_video_fps = 0.0 if repairing_language else video_fps
+                    request_visual_frame_count = 0 if repairing_language else visual_frame_count
                     estimated_usage = ModelUsage(
                         input_tokens=(
-                            estimate_text_tokens(self.system_prompt + attempt_user_prompt)
+                            estimate_text_tokens(request_system_prompt + attempt_user_prompt)
                             + estimate_visual_tokens(
-                                image_count=visual_frame_count,
+                                image_count=request_visual_frame_count,
                                 width=estimated_frame_width,
                                 height=estimated_frame_height,
                             )
                         ),
-                        output_tokens=DEFAULT_OUTPUT_TOKEN_ESTIMATE,
-                        image_count=0 if video_path is not None else len(image_paths),
-                        video_seconds=video_duration,
+                        output_tokens=(
+                            LANGUAGE_REPAIR_OUTPUT_TOKEN_ESTIMATE
+                            if repairing_language
+                            else DEFAULT_OUTPUT_TOKEN_ESTIMATE
+                        ),
+                        image_count=(
+                            0
+                            if request_video_path is not None
+                            else len(request_image_paths)
+                        ),
+                        video_seconds=request_video_duration,
                     )
                     estimated_usage.total_tokens = (
                         estimated_usage.input_tokens + estimated_usage.output_tokens
@@ -678,36 +797,6 @@ class ShotFactsService:
                         budget_exhausted = True
                         break
                     estimated_cost = calculate_cost_micros(estimated_usage, estimated_price)
-                    if (
-                        analysis.max_cost_micros is not None
-                        and analysis.estimated_cost_micros + estimated_cost
-                        > analysis.max_cost_micros
-                    ):
-                        blocked = ModelRun(
-                            analysis_id=analysis.id,
-                            video_id=video.id,
-                            task=ModelTask.SHOT_FACTS,
-                            shot_id=shot.shot_id,
-                            attempt=attempt_number,
-                            retry_of_run_id=previous_run_id,
-                            provider=target.provider,
-                            requested_model=target.model,
-                            prompt_version=target.prompt_version,
-                            schema_version=target.schema_version,
-                            request_fingerprint=fingerprint,
-                            status=ModelRunStatus.BLOCKED,
-                            price_snapshot_id=estimated_price.id,
-                            estimated_cost_micros=estimated_cost,
-                            error_code="budget_exceeded",
-                            error_message="下一次模型调用将超过任务成本上限",
-                            completed_at=_utc_now(),
-                        )
-                        await self.repository.save_price_snapshot(estimated_price)
-                        await self.repository.save_model_run(blocked)
-                        warnings.append("模型分析已在发起调用前被成本上限阻止")
-                        budget_exhausted = True
-                        break
-
                     run = ModelRun(
                         analysis_id=analysis.id,
                         video_id=video.id,
@@ -724,10 +813,46 @@ class ShotFactsService:
                         price_snapshot_id=estimated_price.id,
                         estimated_cost_micros=estimated_cost,
                     )
-                    await self.repository.save_price_snapshot(estimated_price)
-                    await self.repository.save_model_run(run)
-                    analysis.estimated_cost_micros += estimated_cost
-                    await self.repository.save_analysis(analysis)
+                    async with self._budget_condition:
+                        while True:
+                            if self._stop_reason is not None:
+                                warnings.append(self._stop_reason)
+                                budget_exhausted = True
+                                break
+                            existing_runs = await self.repository.list_model_runs(analysis.id)
+                            committed_cost = committed_model_cost_micros(existing_runs)
+                            exceeds_budget = (
+                                analysis.max_cost_micros is not None
+                                and committed_cost + estimated_cost
+                                > analysis.max_cost_micros
+                            )
+                            if exceeds_budget and self._in_flight > 0:
+                                await self._budget_condition.wait()
+                                continue
+                            if exceeds_budget:
+                                run.status = ModelRunStatus.BLOCKED
+                                run.error_code = "budget_exceeded"
+                                run.error_message = "下一次模型调用将超过任务成本上限"
+                                run.completed_at = _utc_now()
+                                await self.repository.save_price_snapshot(estimated_price)
+                                await self.repository.save_model_run(run)
+                                self._stop_reason = "模型分析已在发起调用前被成本上限阻止"
+                                warnings.append(self._stop_reason)
+                                budget_exhausted = True
+                                self._budget_condition.notify_all()
+                                break
+
+                            await self.repository.save_price_snapshot(estimated_price)
+                            await self.repository.save_model_run(run)
+                            self._in_flight += 1
+                            analysis.estimated_cost_micros = committed_cost + estimated_cost
+                            analysis.measured_cost_micros = sum(
+                                item.measured_cost_micros for item in existing_runs
+                            )
+                            await self.repository.save_analysis(analysis)
+                            break
+                    if budget_exhausted:
+                        break
 
                     try:
                         provider = self.router.provider_for(target)
@@ -735,13 +860,13 @@ class ShotFactsService:
                             ModelRequest(
                                 task=ModelTask.SHOT_FACTS,
                                 target=target,
-                                system_prompt=self.system_prompt,
+                                system_prompt=request_system_prompt,
                                 user_prompt=attempt_user_prompt,
-                                image_paths=image_paths,
-                                image_labels=image_labels,
-                                video_path=video_path,
-                                video_fps=video_fps or 4.0,
-                                video_duration_seconds=video_duration,
+                                image_paths=request_image_paths,
+                                image_labels=request_image_labels,
+                                video_path=request_video_path,
+                                video_fps=request_video_fps or 4.0,
+                                video_duration_seconds=request_video_duration,
                             ),
                             ShotVisualFacts,
                         )
@@ -792,14 +917,14 @@ class ShotFactsService:
                         run.raw_response_ref = artifact_ref
                         run.result_payload = normalized_data.model_dump(mode="json")
                         run.completed_at = _utc_now()
-                        await self.repository.save_model_run(run)
-                        analysis.measured_cost_micros += measured_cost
-                        await self.repository.save_analysis(analysis)
+                        await self._finish_model_run(analysis, run)
                         shot_result = normalized_data
                         break
                     except ModelProviderError as exc:
                         if exc.code == "model_language_invalid":
-                            language_retry_required = True
+                            language_repair_payload = (
+                                exc.raw_content or simplified_data.model_dump_json()
+                            )
                         run.status = ModelRunStatus.FAILED
                         run.provider_request_id = exc.provider_request_id
                         run.resolved_model = exc.resolved_model
@@ -850,13 +975,11 @@ class ShotFactsService:
                                 error_message=run.error_message,
                                 raw_content=exc.raw_content,
                             )
-                        await self.repository.save_model_run(run)
-                        if run.measured_cost_micros:
-                            analysis.measured_cost_micros += run.measured_cost_micros
-                            await self.repository.save_analysis(analysis)
+                        await self._finish_model_run(analysis, run)
                         previous_run_id = run.id
                         if isinstance(exc, ModelProviderUnavailable):
                             warnings.append(str(exc))
+                            await self._stop_pending_calls(str(exc))
                             budget_exhausted = True
                             break
                         if not exc.retryable:
@@ -868,7 +991,7 @@ class ShotFactsService:
                         run.error_code = "model_call_failed"
                         run.error_message = _safe_error_message(exc)
                         run.completed_at = _utc_now()
-                        await self.repository.save_model_run(run)
+                        await self._finish_model_run(analysis, run)
                         previous_run_id = run.id
                         break
                 if shot_result is not None or budget_exhausted:
@@ -883,7 +1006,31 @@ class ShotFactsService:
                 reason = shot_result.multiple_scenes_reason or "关键帧存在跨场景迹象"
                 warnings.append(f"{shot.shot_id} 仍可能包含多个语义场景：{reason}")
 
-        return await self._outcome(analysis, facts, list(dict.fromkeys(warnings)))
+        deduplicated_warnings = list(dict.fromkeys(warnings))
+        if not finalize:
+            return ShotFactsOutcome(
+                facts=facts,
+                warnings=deduplicated_warnings,
+                cost_summary=AnalysisCostSummary(analysis_id=analysis.id),
+            )
+        return await self._outcome(analysis, facts, deduplicated_warnings)
+
+    async def _finish_model_run(self, analysis: AnalysisJob, run: ModelRun) -> None:
+        async with self._budget_condition:
+            await self.repository.save_model_run(run)
+            self._in_flight = max(0, self._in_flight - 1)
+            runs = await self.repository.list_model_runs(analysis.id)
+            analysis.estimated_cost_micros = committed_model_cost_micros(runs)
+            analysis.measured_cost_micros = sum(
+                item.measured_cost_micros for item in runs
+            )
+            await self.repository.save_analysis(analysis)
+            self._budget_condition.notify_all()
+
+    async def _stop_pending_calls(self, reason: str) -> None:
+        async with self._budget_condition:
+            self._stop_reason = reason
+            self._budget_condition.notify_all()
 
     async def _outcome(
         self,
@@ -892,6 +1039,7 @@ class ShotFactsService:
         warnings: list[str],
     ) -> ShotFactsOutcome:
         runs = await self.repository.list_model_runs(analysis.id)
+        analysis.estimated_cost_micros = committed_model_cost_micros(runs)
         summary = summarize_model_runs(
             analysis.id,
             runs,

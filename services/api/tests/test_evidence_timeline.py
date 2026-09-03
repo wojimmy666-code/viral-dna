@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -135,6 +136,53 @@ class FakeOCRProvider:
                 text="越界文字",
             ),
         ]
+
+
+@pytest.mark.asyncio
+async def test_asr_and_ocr_start_in_parallel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis_id = uuid4()
+    storage_root = tmp_path / "storage"
+    artifact_root = storage_root / "analyses" / str(analysis_id)
+    shots_dir = artifact_root / "shots"
+    shots_dir.mkdir(parents=True)
+    (artifact_root / "audio.wav").write_bytes(b"wav")
+    (shots_dir / "shot_001.jpg").write_bytes(b"jpg")
+    (shots_dir / "shot_002.jpg").write_bytes(b"jpg")
+    monkeypatch.setenv("VIRAL_DNA_STORAGE_ROOT", str(storage_root))
+    both_started = asyncio.Event()
+    started: set[str] = set()
+
+    async def rendezvous(kind: str) -> None:
+        started.add(kind)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+
+    class ParallelASR(FakeASRProvider):
+        async def transcribe(self, audio_path: Path) -> ASRProviderResult:
+            await rendezvous("asr")
+            return await super().transcribe(audio_path)
+
+    class ParallelOCR(FakeOCRProvider):
+        async def recognize(self, frames: list[OCRFrame]) -> list[OCRObservation]:
+            await rendezvous("ocr")
+            return await super().recognize(frames)
+
+    timeline = await EvidenceTimelineBuilder(
+        asr_provider=ParallelASR(),
+        ocr_provider=ParallelOCR(),
+    ).build(
+        analysis_id=analysis_id,
+        evidence=build_evidence(analysis_id),
+        include_audio=True,
+        include_ocr=True,
+    )
+
+    assert started == {"asr", "ocr"}
+    assert [run.status for run in timeline.provider_runs[:2]] == ["completed", "completed"]
 
 
 @pytest.mark.asyncio

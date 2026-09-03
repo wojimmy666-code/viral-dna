@@ -407,6 +407,22 @@ function formatDurationBadge(seconds) {
     : `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
 }
 
+function formatAnalysisElapsedTime(createdAt, completedAt) {
+  if (!createdAt || !completedAt) return "—";
+  const started = new Date(createdAt).getTime();
+  const completed = new Date(completedAt).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) {
+    return "—";
+  }
+  const totalSeconds = Math.round((completed - started) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分 ${seconds} 秒`;
+  if (minutes > 0) return `${minutes} 分 ${seconds} 秒`;
+  return `${seconds} 秒`;
+}
+
 function formatCost(micros = 0) {
   const value = Number(micros || 0) / 1_000_000;
   return `¥${value.toFixed(value > 0 ? 4 : 2)}`;
@@ -2572,6 +2588,7 @@ export function App() {
                         onOpenReplication={() => setActiveReportTab("replicate")}
                       />
                       <OverviewTab
+                        analysis={analysis}
                         report={report}
                         filePreview={filePreview}
                         videoRef={videoRef}
@@ -5328,7 +5345,7 @@ function VideoPlayer({
   );
 }
 
-function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
+function OverviewTab({ analysis, report, filePreview, videoRef, onOpenShots }) {
   const overview = report.overview;
   const evidence = report.media_evidence;
   const timeline = report.evidence_timeline;
@@ -5435,6 +5452,7 @@ function OverviewTab({ report, filePreview, videoRef, onOpenShots }) {
               <div><dt>编码与帧率</dt><dd>{metadata?.video_codec?.toUpperCase() || "—"} · {metadata?.fps?.toFixed(2) || "—"} FPS</dd></div>
               <div><dt>模型调用</dt><dd>{modelCost?.run_count || 0} 次</dd></div>
               <div><dt>实测成本</dt><dd>{formatCost(modelCost?.measured_cost_micros)}</dd></div>
+              <div><dt>总耗时</dt><dd>{formatAnalysisElapsedTime(analysis?.created_at, analysis?.completed_at)}</dd></div>
             </dl>
             <div className="audience-card">
             {isMediaEvidence ? <>
