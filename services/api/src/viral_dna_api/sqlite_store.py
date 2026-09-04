@@ -47,8 +47,32 @@ from .models import (
     VideoClipPreparation,
     VideoProviderTask,
 )
+from .platform_skills.contracts import AccountSkillFavorite, SkillVersionSnapshot
+from .production_seeds.contracts import ProductionSeed
+from .projects.contracts import Project
 from .quality.contracts import ContinuityReport
 from .schema import WORKSPACE_SCHEMA_VERSION
+from .skill_workflow.contracts import (
+    Artifact,
+    ArtifactDependency,
+    AssetUsage,
+    AudioAsset,
+    BrandSnapshot,
+    ClaimEvidence,
+    CreativeBriefRevision,
+    CreativeTreatmentRevision,
+    DeliveryManifest,
+    GateDecision,
+    LookTest,
+    MixRevision,
+    OutlineRevision,
+    RunContractRevision,
+    ShotManifestRevision,
+    SkillRun,
+    SkillStepRun,
+    StyleBibleRevision,
+    TimelineV3Revision,
+)
 from .storage_errors import IncompatibleShotPlanSchemaError
 from .storage_objects import ObjectReplica, StorageObject
 from .video_enhancement.domain import (
@@ -217,6 +241,67 @@ _MEDIA_STAGING_INDEXES = (
     ("idx_media_access_leases_expires_at", "media_access_leases", "expires_at"),
 )
 
+_PROJECT_V14_TABLES = frozenset(
+    {
+        "projects",
+        "skill_version_snapshots",
+        "account_skill_favorites",
+        "brand_snapshots",
+        "creative_brief_revisions",
+        "asset_usages",
+        "claim_evidence",
+        "run_contract_revisions",
+    }
+)
+
+_PROJECT_V15_TABLES = frozenset(
+    {
+        "creative_treatment_revisions",
+        "style_bible_revisions",
+        "look_tests",
+        "outline_revisions",
+        "shot_manifest_revisions",
+        "skill_runs",
+        "skill_step_runs",
+        "gate_decisions",
+        "skill_artifacts",
+        "artifact_dependencies",
+        "production_seeds",
+    }
+)
+
+_PROJECT_V16_TABLES = frozenset(
+    {
+        "timeline_v3_revisions",
+        "audio_assets",
+        "mix_revisions",
+        "delivery_manifests",
+    }
+)
+
+_SKILL_WORKFLOW_INDEXES = (
+    ("idx_projects_kind", "projects", "kind"),
+    ("idx_projects_lifecycle", "projects", "lifecycle"),
+    ("idx_skill_snapshots_project_id", "skill_version_snapshots", "project_id"),
+    ("idx_brand_snapshots_project_id", "brand_snapshots", "project_id"),
+    ("idx_brief_revisions_project_id", "creative_brief_revisions", "project_id"),
+    ("idx_asset_usages_project_id", "asset_usages", "project_id"),
+    ("idx_claim_evidence_project_id", "claim_evidence", "project_id"),
+    ("idx_run_contracts_project_id", "run_contract_revisions", "project_id"),
+    ("idx_treatments_project_id", "creative_treatment_revisions", "project_id"),
+    ("idx_style_bibles_project_id", "style_bible_revisions", "project_id"),
+    ("idx_look_tests_project_id", "look_tests", "project_id"),
+    ("idx_outlines_project_id", "outline_revisions", "project_id"),
+    ("idx_shot_manifests_project_id", "shot_manifest_revisions", "project_id"),
+    ("idx_skill_runs_project_id", "skill_runs", "project_id"),
+    ("idx_skill_step_runs_run_id", "skill_step_runs", "skill_run_id"),
+    ("idx_gate_decisions_run_id", "gate_decisions", "skill_run_id"),
+    ("idx_skill_artifacts_project_id", "skill_artifacts", "project_id"),
+    ("idx_artifact_dependencies_artifact_id", "artifact_dependencies", "artifact_id"),
+    ("idx_production_seeds_project_id", "production_seeds", "owner_project_id"),
+    ("idx_delivery_manifests_project_id", "delivery_manifests", "project_id"),
+)
+
 
 class SQLiteSchemaError(RuntimeError):
     """Raised when the durable database schema cannot be migrated safely."""
@@ -237,6 +322,9 @@ class SQLiteStore:
         | _VIDEO_ENHANCEMENT_JOB_TABLES
         | _GENERATED_ARTIFACT_TABLES
         | _MEDIA_STAGING_TABLES
+        | _PROJECT_V14_TABLES
+        | _PROJECT_V15_TABLES
+        | _PROJECT_V16_TABLES
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -339,6 +427,21 @@ class SQLiteStore:
                 self._create_video_enhancement_job_indexes(connection)
                 if 13 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (13)")
+
+                self._create_json_tables(connection, _PROJECT_V14_TABLES)
+                self._create_skill_workflow_indexes(connection)
+                if 14 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (14)")
+
+                self._create_json_tables(connection, _PROJECT_V15_TABLES)
+                self._create_skill_workflow_indexes(connection)
+                if 15 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (15)")
+
+                self._create_json_tables(connection, _PROJECT_V16_TABLES)
+                self._create_skill_workflow_indexes(connection)
+                if 16 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (16)")
             except Exception:
                 connection.rollback()
                 raise
@@ -436,6 +539,22 @@ class SQLiteStore:
     @staticmethod
     def _create_media_staging_indexes(connection: sqlite3.Connection) -> None:
         for index_name, table, payload_field in _MEDIA_STAGING_INDEXES:
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
+                f"ON {table} (json_extract(payload, '$.{payload_field}'))"
+            )
+
+    @staticmethod
+    def _create_skill_workflow_indexes(connection: sqlite3.Connection) -> None:
+        existing_tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for index_name, table, payload_field in _SKILL_WORKFLOW_INDEXES:
+            if table not in existing_tables:
+                continue
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {index_name} "  # noqa: S608
                 f"ON {table} (json_extract(payload, '$.{payload_field}'))"
@@ -1633,3 +1752,327 @@ class SQLiteStore:
             (item for item in items if item.analysis_id == analysis_id),
             key=lambda item: item.created_at,
         )
+
+    async def _list_models(self, table: str, model_type: type[ModelT]) -> list[ModelT]:
+        payloads = await asyncio.to_thread(self._read_all, table)
+        return [model_type.model_validate_json(payload) for payload in payloads]
+
+    async def save_project(self, project: Project) -> Project:
+        return await self._save("projects", project.id, project)
+
+    async def get_project(self, project_id: UUID) -> Project | None:
+        return await self._get("projects", project_id, Project)
+
+    async def list_projects(self) -> list[Project]:
+        return await self._list_models("projects", Project)
+
+    async def delete_project(self, project_id: UUID) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._upsert_many,
+                [],
+                [
+                    ("projects", str(project_id)),
+                    ("skill_version_snapshots", str(project_id)),
+                ],
+            )
+
+    async def save_project_with_skill_snapshot(
+        self,
+        project: Project,
+        snapshot: SkillVersionSnapshot,
+    ) -> tuple[Project, SkillVersionSnapshot]:
+        async with self._lock:
+            existing_project = await asyncio.to_thread(self._read, "projects", str(project.id))
+            existing_snapshot = await asyncio.to_thread(
+                self._read, "skill_version_snapshots", str(project.id)
+            )
+            if existing_project is not None or existing_snapshot is not None:
+                raise ValueError("Project already exists")
+            await asyncio.to_thread(
+                self._upsert_many,
+                [
+                    ("projects", str(project.id), self._serialize(project)),
+                    (
+                        "skill_version_snapshots",
+                        str(snapshot.project_id),
+                        self._serialize(snapshot),
+                    ),
+                ],
+            )
+        return project, snapshot
+
+    async def save_skill_version_snapshot(
+        self,
+        snapshot: SkillVersionSnapshot,
+    ) -> SkillVersionSnapshot:
+        current = await self.get_skill_version_snapshot(snapshot.project_id)
+        if current is not None and current != snapshot:
+            raise ValueError("SkillVersionSnapshot is immutable")
+        return await self._save("skill_version_snapshots", snapshot.project_id, snapshot)
+
+    async def get_skill_version_snapshot(
+        self,
+        project_id: UUID,
+    ) -> SkillVersionSnapshot | None:
+        return await self._get("skill_version_snapshots", project_id, SkillVersionSnapshot)
+
+    async def save_skill_favorite(
+        self,
+        favorite: AccountSkillFavorite,
+    ) -> AccountSkillFavorite:
+        existing = await self.list_skill_favorites(favorite.account_id)
+        match = next((item for item in existing if item.skill_id == favorite.skill_id), None)
+        if match is not None:
+            return match
+        return await self._save("account_skill_favorites", favorite.id, favorite)
+
+    async def list_skill_favorites(self, account_id: UUID) -> list[AccountSkillFavorite]:
+        items = await self._list_models("account_skill_favorites", AccountSkillFavorite)
+        return [item for item in items if item.account_id == account_id]
+
+    async def delete_skill_favorite(self, account_id: UUID, skill_id: str) -> None:
+        items = await self.list_skill_favorites(account_id)
+        deletions = [
+            ("account_skill_favorites", str(item.id))
+            for item in items
+            if item.skill_id == skill_id
+        ]
+        if deletions:
+            async with self._lock:
+                await asyncio.to_thread(self._upsert_many, [], deletions)
+
+    async def _list_project_models(
+        self,
+        table: str,
+        model_type: type[ModelT],
+        project_id: UUID,
+    ) -> list[ModelT]:
+        items = await self._list_models(table, model_type)
+        return sorted(
+            (item for item in items if item.project_id == project_id),
+            key=lambda item: getattr(item, "created_at", getattr(item, "updated_at", datetime.min)),
+        )
+
+    async def save_brand_snapshot(self, item: BrandSnapshot) -> BrandSnapshot:
+        return await self._save("brand_snapshots", item.id, item)
+
+    async def get_brand_snapshot(self, item_id: UUID) -> BrandSnapshot | None:
+        return await self._get("brand_snapshots", item_id, BrandSnapshot)
+
+    async def list_brand_snapshots(self, project_id: UUID) -> list[BrandSnapshot]:
+        return await self._list_project_models("brand_snapshots", BrandSnapshot, project_id)
+
+    async def save_creative_brief_revision(
+        self, item: CreativeBriefRevision
+    ) -> CreativeBriefRevision:
+        return await self._save("creative_brief_revisions", item.id, item)
+
+    async def list_creative_brief_revisions(
+        self, project_id: UUID
+    ) -> list[CreativeBriefRevision]:
+        return await self._list_project_models(
+            "creative_brief_revisions", CreativeBriefRevision, project_id
+        )
+
+    async def _replace_project_models(
+        self,
+        table: str,
+        project_id: UUID,
+        items: list[ModelT],
+        model_type: type[ModelT],
+    ) -> list[ModelT]:
+        existing = await self._list_project_models(table, model_type, project_id)
+        async with self._lock:
+            await asyncio.to_thread(
+                self._upsert_many,
+                [(table, str(item.id), self._serialize(item)) for item in items],
+                [(table, str(item.id)) for item in existing],
+            )
+        return items
+
+    async def replace_asset_usages(
+        self, project_id: UUID, items: list[AssetUsage]
+    ) -> list[AssetUsage]:
+        return await self._replace_project_models(
+            "asset_usages", project_id, items, AssetUsage
+        )
+
+    async def list_asset_usages(self, project_id: UUID) -> list[AssetUsage]:
+        return await self._list_project_models("asset_usages", AssetUsage, project_id)
+
+    async def replace_claim_evidence(
+        self, project_id: UUID, items: list[ClaimEvidence]
+    ) -> list[ClaimEvidence]:
+        return await self._replace_project_models(
+            "claim_evidence", project_id, items, ClaimEvidence
+        )
+
+    async def list_claim_evidence(self, project_id: UUID) -> list[ClaimEvidence]:
+        return await self._list_project_models("claim_evidence", ClaimEvidence, project_id)
+
+    async def save_run_contract_revision(
+        self, item: RunContractRevision
+    ) -> RunContractRevision:
+        return await self._save("run_contract_revisions", item.id, item)
+
+    async def get_run_contract_revision(self, item_id: UUID) -> RunContractRevision | None:
+        return await self._get("run_contract_revisions", item_id, RunContractRevision)
+
+    async def list_run_contract_revisions(
+        self, project_id: UUID
+    ) -> list[RunContractRevision]:
+        return await self._list_project_models(
+            "run_contract_revisions", RunContractRevision, project_id
+        )
+
+    async def save_creative_treatment_revision(
+        self, item: CreativeTreatmentRevision
+    ) -> CreativeTreatmentRevision:
+        return await self._save("creative_treatment_revisions", item.id, item)
+
+    async def list_creative_treatment_revisions(
+        self, project_id: UUID
+    ) -> list[CreativeTreatmentRevision]:
+        return await self._list_project_models(
+            "creative_treatment_revisions", CreativeTreatmentRevision, project_id
+        )
+
+    async def save_style_bible_revision(
+        self, item: StyleBibleRevision
+    ) -> StyleBibleRevision:
+        return await self._save("style_bible_revisions", item.id, item)
+
+    async def get_style_bible_revision(self, item_id: UUID) -> StyleBibleRevision | None:
+        return await self._get("style_bible_revisions", item_id, StyleBibleRevision)
+
+    async def list_style_bible_revisions(
+        self, project_id: UUID
+    ) -> list[StyleBibleRevision]:
+        return await self._list_project_models(
+            "style_bible_revisions", StyleBibleRevision, project_id
+        )
+
+    async def save_look_test(self, item: LookTest) -> LookTest:
+        return await self._save("look_tests", item.id, item)
+
+    async def list_look_tests(self, project_id: UUID) -> list[LookTest]:
+        return await self._list_project_models("look_tests", LookTest, project_id)
+
+    async def save_outline_revision(self, item: OutlineRevision) -> OutlineRevision:
+        return await self._save("outline_revisions", item.id, item)
+
+    async def list_outline_revisions(self, project_id: UUID) -> list[OutlineRevision]:
+        return await self._list_project_models("outline_revisions", OutlineRevision, project_id)
+
+    async def save_shot_manifest_revision(
+        self, item: ShotManifestRevision
+    ) -> ShotManifestRevision:
+        return await self._save("shot_manifest_revisions", item.id, item)
+
+    async def list_shot_manifest_revisions(
+        self, project_id: UUID
+    ) -> list[ShotManifestRevision]:
+        return await self._list_project_models(
+            "shot_manifest_revisions", ShotManifestRevision, project_id
+        )
+
+    async def save_skill_run(self, item: SkillRun) -> SkillRun:
+        return await self._save("skill_runs", item.id, item)
+
+    async def get_skill_run(self, item_id: UUID) -> SkillRun | None:
+        return await self._get("skill_runs", item_id, SkillRun)
+
+    async def list_skill_runs(self, project_id: UUID) -> list[SkillRun]:
+        return await self._list_project_models("skill_runs", SkillRun, project_id)
+
+    async def save_skill_step_run(self, item: SkillStepRun) -> SkillStepRun:
+        return await self._save("skill_step_runs", item.id, item)
+
+    async def get_skill_step_run(self, item_id: UUID) -> SkillStepRun | None:
+        return await self._get("skill_step_runs", item_id, SkillStepRun)
+
+    async def list_skill_step_runs(self, skill_run_id: UUID) -> list[SkillStepRun]:
+        items = await self._list_models("skill_step_runs", SkillStepRun)
+        return sorted(
+            (item for item in items if item.skill_run_id == skill_run_id),
+            key=lambda item: (
+                item.started_at or item.completed_at or datetime.min.replace(tzinfo=UTC)
+            ),
+        )
+
+    async def save_gate_decision(self, item: GateDecision) -> GateDecision:
+        return await self._save("gate_decisions", item.id, item)
+
+    async def list_gate_decisions(self, skill_run_id: UUID) -> list[GateDecision]:
+        items = await self._list_models("gate_decisions", GateDecision)
+        return sorted(
+            (item for item in items if item.skill_run_id == skill_run_id),
+            key=lambda item: item.created_at,
+        )
+
+    async def save_skill_artifact(self, item: Artifact) -> Artifact:
+        return await self._save("skill_artifacts", item.id, item)
+
+    async def get_skill_artifact(self, item_id: UUID) -> Artifact | None:
+        return await self._get("skill_artifacts", item_id, Artifact)
+
+    async def list_skill_artifacts(self, project_id: UUID) -> list[Artifact]:
+        return await self._list_project_models("skill_artifacts", Artifact, project_id)
+
+    async def save_artifact_dependency(
+        self, item: ArtifactDependency
+    ) -> ArtifactDependency:
+        return await self._save("artifact_dependencies", item.id, item)
+
+    async def list_artifact_dependencies(
+        self, artifact_id: UUID | None = None
+    ) -> list[ArtifactDependency]:
+        items = await self._list_models("artifact_dependencies", ArtifactDependency)
+        if artifact_id is not None:
+            items = [item for item in items if item.artifact_id == artifact_id]
+        return items
+
+    async def save_production_seed(self, item: ProductionSeed) -> ProductionSeed:
+        current = await self.get_production_seed(item.id)
+        if current is not None and current != item:
+            raise ValueError("ProductionSeed is immutable")
+        return await self._save("production_seeds", item.id, item)
+
+    async def get_production_seed(self, item_id: UUID) -> ProductionSeed | None:
+        return await self._get("production_seeds", item_id, ProductionSeed)
+
+    async def list_production_seeds(self, project_id: UUID) -> list[ProductionSeed]:
+        items = await self._list_models("production_seeds", ProductionSeed)
+        return [item for item in items if item.owner_project_id == project_id]
+
+    async def save_delivery_manifest(self, item: DeliveryManifest) -> DeliveryManifest:
+        return await self._save("delivery_manifests", item.id, item)
+
+    async def list_delivery_manifests(self, project_id: UUID) -> list[DeliveryManifest]:
+        return await self._list_project_models(
+            "delivery_manifests", DeliveryManifest, project_id
+        )
+
+    async def save_timeline_v3_revision(self, item: TimelineV3Revision) -> TimelineV3Revision:
+        return await self._save("timeline_v3_revisions", item.id, item)
+
+    async def get_timeline_v3_revision(self, item_id: UUID) -> TimelineV3Revision | None:
+        return await self._get("timeline_v3_revisions", item_id, TimelineV3Revision)
+
+    async def list_timeline_v3_revisions(self, project_id: UUID) -> list[TimelineV3Revision]:
+        return await self._list_project_models(
+            "timeline_v3_revisions", TimelineV3Revision, project_id
+        )
+
+    async def save_audio_asset(self, item: AudioAsset) -> AudioAsset:
+        return await self._save("audio_assets", item.id, item)
+
+    async def list_audio_assets(self, project_id: UUID) -> list[AudioAsset]:
+        return await self._list_project_models("audio_assets", AudioAsset, project_id)
+
+    async def save_mix_revision(self, item: MixRevision) -> MixRevision:
+        return await self._save("mix_revisions", item.id, item)
+
+    async def list_mix_revisions(self, project_id: UUID) -> list[MixRevision]:
+        return await self._list_project_models("mix_revisions", MixRevision, project_id)

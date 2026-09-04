@@ -46,7 +46,31 @@ from .models import (
     VideoProviderTask,
     VideoStatus,
 )
+from .platform_skills.contracts import AccountSkillFavorite, SkillVersionSnapshot
+from .production_seeds.contracts import ProductionSeed
+from .projects.contracts import Project
 from .quality.contracts import ContinuityReport
+from .skill_workflow.contracts import (
+    Artifact,
+    ArtifactDependency,
+    AssetUsage,
+    AudioAsset,
+    BrandSnapshot,
+    ClaimEvidence,
+    CreativeBriefRevision,
+    CreativeTreatmentRevision,
+    DeliveryManifest,
+    GateDecision,
+    LookTest,
+    MixRevision,
+    OutlineRevision,
+    RunContractRevision,
+    ShotManifestRevision,
+    SkillRun,
+    SkillStepRun,
+    StyleBibleRevision,
+    TimelineV3Revision,
+)
 from .storage_objects import ObjectReplica, StorageObject
 from .video_enhancement.domain import (
     ACTIVE_VIDEO_ENHANCEMENT_STATUSES,
@@ -100,6 +124,29 @@ class InMemoryStore:
         self.generated_artifacts: dict[UUID, GeneratedArtifact] = {}
         self.storage_object_references: dict[UUID, StorageObjectReference] = {}
         self.asset_provenance: dict[UUID, AssetProvenance] = {}
+        self.projects: dict[UUID, Project] = {}
+        self.skill_version_snapshots: dict[UUID, SkillVersionSnapshot] = {}
+        self.account_skill_favorites: dict[UUID, AccountSkillFavorite] = {}
+        self.brand_snapshots: dict[UUID, BrandSnapshot] = {}
+        self.creative_brief_revisions: dict[UUID, CreativeBriefRevision] = {}
+        self.asset_usages: dict[UUID, AssetUsage] = {}
+        self.claim_evidence: dict[UUID, ClaimEvidence] = {}
+        self.run_contract_revisions: dict[UUID, RunContractRevision] = {}
+        self.creative_treatment_revisions: dict[UUID, CreativeTreatmentRevision] = {}
+        self.style_bible_revisions: dict[UUID, StyleBibleRevision] = {}
+        self.look_tests: dict[UUID, LookTest] = {}
+        self.outline_revisions: dict[UUID, OutlineRevision] = {}
+        self.shot_manifest_revisions: dict[UUID, ShotManifestRevision] = {}
+        self.skill_runs: dict[UUID, SkillRun] = {}
+        self.skill_step_runs: dict[UUID, SkillStepRun] = {}
+        self.gate_decisions: dict[UUID, GateDecision] = {}
+        self.skill_artifacts: dict[UUID, Artifact] = {}
+        self.artifact_dependencies: dict[UUID, ArtifactDependency] = {}
+        self.production_seeds: dict[UUID, ProductionSeed] = {}
+        self.delivery_manifests: dict[UUID, DeliveryManifest] = {}
+        self.timeline_v3_revisions: dict[UUID, TimelineV3Revision] = {}
+        self.audio_assets: dict[UUID, AudioAsset] = {}
+        self.mix_revisions: dict[UUID, MixRevision] = {}
 
     async def add_video(self, video: Video) -> Video:
         async with self._lock:
@@ -979,6 +1026,292 @@ class InMemoryStore:
             ),
             key=lambda item: item.created_at,
         )
+
+    async def save_project(self, project: Project) -> Project:
+        async with self._lock:
+            self.projects[project.id] = project
+        return project
+
+    async def get_project(self, project_id: UUID) -> Project | None:
+        return self.projects.get(project_id)
+
+    async def list_projects(self) -> list[Project]:
+        return list(self.projects.values())
+
+    async def delete_project(self, project_id: UUID) -> None:
+        async with self._lock:
+            self.projects.pop(project_id, None)
+            self.skill_version_snapshots.pop(project_id, None)
+
+    async def save_project_with_skill_snapshot(
+        self,
+        project: Project,
+        snapshot: SkillVersionSnapshot,
+    ) -> tuple[Project, SkillVersionSnapshot]:
+        async with self._lock:
+            if project.id in self.projects or project.id in self.skill_version_snapshots:
+                raise ValueError("Project already exists")
+            self.projects[project.id] = project
+            self.skill_version_snapshots[project.id] = snapshot
+        return project, snapshot
+
+    async def save_skill_version_snapshot(
+        self,
+        snapshot: SkillVersionSnapshot,
+    ) -> SkillVersionSnapshot:
+        async with self._lock:
+            current = self.skill_version_snapshots.get(snapshot.project_id)
+            if current is not None and current != snapshot:
+                raise ValueError("SkillVersionSnapshot is immutable")
+            self.skill_version_snapshots[snapshot.project_id] = snapshot
+        return snapshot
+
+    async def get_skill_version_snapshot(
+        self,
+        project_id: UUID,
+    ) -> SkillVersionSnapshot | None:
+        return self.skill_version_snapshots.get(project_id)
+
+    async def save_skill_favorite(
+        self,
+        favorite: AccountSkillFavorite,
+    ) -> AccountSkillFavorite:
+        async with self._lock:
+            existing = next(
+                (
+                    item
+                    for item in self.account_skill_favorites.values()
+                    if item.account_id == favorite.account_id and item.skill_id == favorite.skill_id
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing
+            self.account_skill_favorites[favorite.id] = favorite
+        return favorite
+
+    async def list_skill_favorites(self, account_id: UUID) -> list[AccountSkillFavorite]:
+        return [
+            item for item in self.account_skill_favorites.values() if item.account_id == account_id
+        ]
+
+    async def delete_skill_favorite(self, account_id: UUID, skill_id: str) -> None:
+        async with self._lock:
+            self.account_skill_favorites = {
+                key: item
+                for key, item in self.account_skill_favorites.items()
+                if not (item.account_id == account_id and item.skill_id == skill_id)
+            }
+
+    async def _save_workflow(self, collection: str, item):
+        async with self._lock:
+            getattr(self, collection)[item.id] = item
+        return item
+
+    async def _get_workflow(self, collection: str, item_id: UUID):
+        return getattr(self, collection).get(item_id)
+
+    async def _list_workflow(self, collection: str, field: str, value: UUID):
+        return sorted(
+            (item for item in getattr(self, collection).values() if getattr(item, field) == value),
+            key=lambda item: getattr(item, "created_at", getattr(item, "updated_at", _utc_now())),
+        )
+
+    async def save_brand_snapshot(self, item: BrandSnapshot) -> BrandSnapshot:
+        return await self._save_workflow("brand_snapshots", item)
+
+    async def get_brand_snapshot(self, item_id: UUID) -> BrandSnapshot | None:
+        return await self._get_workflow("brand_snapshots", item_id)
+
+    async def list_brand_snapshots(self, project_id: UUID) -> list[BrandSnapshot]:
+        return await self._list_workflow("brand_snapshots", "project_id", project_id)
+
+    async def save_creative_brief_revision(
+        self, item: CreativeBriefRevision
+    ) -> CreativeBriefRevision:
+        return await self._save_workflow("creative_brief_revisions", item)
+
+    async def list_creative_brief_revisions(
+        self, project_id: UUID
+    ) -> list[CreativeBriefRevision]:
+        return await self._list_workflow("creative_brief_revisions", "project_id", project_id)
+
+    async def replace_asset_usages(
+        self, project_id: UUID, items: list[AssetUsage]
+    ) -> list[AssetUsage]:
+        async with self._lock:
+            self.asset_usages = {
+                key: item
+                for key, item in self.asset_usages.items()
+                if item.project_id != project_id
+            }
+            self.asset_usages.update({item.id: item for item in items})
+        return items
+
+    async def list_asset_usages(self, project_id: UUID) -> list[AssetUsage]:
+        return await self._list_workflow("asset_usages", "project_id", project_id)
+
+    async def replace_claim_evidence(
+        self, project_id: UUID, items: list[ClaimEvidence]
+    ) -> list[ClaimEvidence]:
+        async with self._lock:
+            self.claim_evidence = {
+                key: item
+                for key, item in self.claim_evidence.items()
+                if item.project_id != project_id
+            }
+            self.claim_evidence.update({item.id: item for item in items})
+        return items
+
+    async def list_claim_evidence(self, project_id: UUID) -> list[ClaimEvidence]:
+        return await self._list_workflow("claim_evidence", "project_id", project_id)
+
+    async def save_run_contract_revision(
+        self, item: RunContractRevision
+    ) -> RunContractRevision:
+        return await self._save_workflow("run_contract_revisions", item)
+
+    async def get_run_contract_revision(self, item_id: UUID) -> RunContractRevision | None:
+        return await self._get_workflow("run_contract_revisions", item_id)
+
+    async def list_run_contract_revisions(
+        self, project_id: UUID
+    ) -> list[RunContractRevision]:
+        return await self._list_workflow("run_contract_revisions", "project_id", project_id)
+
+    async def save_creative_treatment_revision(
+        self, item: CreativeTreatmentRevision
+    ) -> CreativeTreatmentRevision:
+        return await self._save_workflow("creative_treatment_revisions", item)
+
+    async def list_creative_treatment_revisions(
+        self, project_id: UUID
+    ) -> list[CreativeTreatmentRevision]:
+        return await self._list_workflow("creative_treatment_revisions", "project_id", project_id)
+
+    async def save_style_bible_revision(
+        self, item: StyleBibleRevision
+    ) -> StyleBibleRevision:
+        return await self._save_workflow("style_bible_revisions", item)
+
+    async def get_style_bible_revision(self, item_id: UUID) -> StyleBibleRevision | None:
+        return await self._get_workflow("style_bible_revisions", item_id)
+
+    async def list_style_bible_revisions(
+        self, project_id: UUID
+    ) -> list[StyleBibleRevision]:
+        return await self._list_workflow("style_bible_revisions", "project_id", project_id)
+
+    async def save_look_test(self, item: LookTest) -> LookTest:
+        return await self._save_workflow("look_tests", item)
+
+    async def list_look_tests(self, project_id: UUID) -> list[LookTest]:
+        return await self._list_workflow("look_tests", "project_id", project_id)
+
+    async def save_outline_revision(self, item: OutlineRevision) -> OutlineRevision:
+        return await self._save_workflow("outline_revisions", item)
+
+    async def list_outline_revisions(self, project_id: UUID) -> list[OutlineRevision]:
+        return await self._list_workflow("outline_revisions", "project_id", project_id)
+
+    async def save_shot_manifest_revision(
+        self, item: ShotManifestRevision
+    ) -> ShotManifestRevision:
+        return await self._save_workflow("shot_manifest_revisions", item)
+
+    async def list_shot_manifest_revisions(
+        self, project_id: UUID
+    ) -> list[ShotManifestRevision]:
+        return await self._list_workflow("shot_manifest_revisions", "project_id", project_id)
+
+    async def save_skill_run(self, item: SkillRun) -> SkillRun:
+        return await self._save_workflow("skill_runs", item)
+
+    async def get_skill_run(self, item_id: UUID) -> SkillRun | None:
+        return await self._get_workflow("skill_runs", item_id)
+
+    async def list_skill_runs(self, project_id: UUID) -> list[SkillRun]:
+        return await self._list_workflow("skill_runs", "project_id", project_id)
+
+    async def save_skill_step_run(self, item: SkillStepRun) -> SkillStepRun:
+        return await self._save_workflow("skill_step_runs", item)
+
+    async def get_skill_step_run(self, item_id: UUID) -> SkillStepRun | None:
+        return await self._get_workflow("skill_step_runs", item_id)
+
+    async def list_skill_step_runs(self, skill_run_id: UUID) -> list[SkillStepRun]:
+        return await self._list_workflow("skill_step_runs", "skill_run_id", skill_run_id)
+
+    async def save_gate_decision(self, item: GateDecision) -> GateDecision:
+        return await self._save_workflow("gate_decisions", item)
+
+    async def list_gate_decisions(self, skill_run_id: UUID) -> list[GateDecision]:
+        return await self._list_workflow("gate_decisions", "skill_run_id", skill_run_id)
+
+    async def save_skill_artifact(self, item: Artifact) -> Artifact:
+        return await self._save_workflow("skill_artifacts", item)
+
+    async def get_skill_artifact(self, item_id: UUID) -> Artifact | None:
+        return await self._get_workflow("skill_artifacts", item_id)
+
+    async def list_skill_artifacts(self, project_id: UUID) -> list[Artifact]:
+        return await self._list_workflow("skill_artifacts", "project_id", project_id)
+
+    async def save_artifact_dependency(
+        self, item: ArtifactDependency
+    ) -> ArtifactDependency:
+        return await self._save_workflow("artifact_dependencies", item)
+
+    async def list_artifact_dependencies(
+        self, artifact_id: UUID | None = None
+    ) -> list[ArtifactDependency]:
+        items = list(self.artifact_dependencies.values())
+        if artifact_id is not None:
+            items = [item for item in items if item.artifact_id == artifact_id]
+        return items
+
+    async def save_production_seed(self, item: ProductionSeed) -> ProductionSeed:
+        async with self._lock:
+            current = self.production_seeds.get(item.id)
+            if current is not None and current != item:
+                raise ValueError("ProductionSeed is immutable")
+            self.production_seeds[item.id] = item
+        return item
+
+    async def get_production_seed(self, item_id: UUID) -> ProductionSeed | None:
+        return self.production_seeds.get(item_id)
+
+    async def list_production_seeds(self, project_id: UUID) -> list[ProductionSeed]:
+        return [
+            item for item in self.production_seeds.values() if item.owner_project_id == project_id
+        ]
+
+    async def save_delivery_manifest(self, item: DeliveryManifest) -> DeliveryManifest:
+        return await self._save_workflow("delivery_manifests", item)
+
+    async def list_delivery_manifests(self, project_id: UUID) -> list[DeliveryManifest]:
+        return await self._list_workflow("delivery_manifests", "project_id", project_id)
+
+    async def save_timeline_v3_revision(self, item: TimelineV3Revision) -> TimelineV3Revision:
+        return await self._save_workflow("timeline_v3_revisions", item)
+
+    async def get_timeline_v3_revision(self, item_id: UUID) -> TimelineV3Revision | None:
+        return await self._get_workflow("timeline_v3_revisions", item_id)
+
+    async def list_timeline_v3_revisions(self, project_id: UUID) -> list[TimelineV3Revision]:
+        return await self._list_workflow("timeline_v3_revisions", "project_id", project_id)
+
+    async def save_audio_asset(self, item: AudioAsset) -> AudioAsset:
+        return await self._save_workflow("audio_assets", item)
+
+    async def list_audio_assets(self, project_id: UUID) -> list[AudioAsset]:
+        return await self._list_workflow("audio_assets", "project_id", project_id)
+
+    async def save_mix_revision(self, item: MixRevision) -> MixRevision:
+        return await self._save_workflow("mix_revisions", item)
+
+    async def list_mix_revisions(self, project_id: UUID) -> list[MixRevision]:
+        return await self._list_workflow("mix_revisions", "project_id", project_id)
 
 
 class WorkspaceStore:

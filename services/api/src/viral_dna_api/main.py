@@ -198,12 +198,18 @@ from .platform_connections import (
     create_platform_connection_service,
 )
 from .platform_connections.cookies import MAX_COOKIE_FILE_BYTES
+from .platform_skills import (
+    PlatformSkillCatalogService,
+    create_platform_skill_admin_router,
+    create_platform_skill_router,
+)
 from .production import (
     MAX_REFERENCE_IMAGE_BYTES,
     ProductionService,
     ProductionServiceError,
 )
 from .project_assets import ProjectAssetService
+from .projects import ProjectService, create_project_router
 from .prompt_engine.routes import create_prompt_draft_router
 from .prompt_engine.service import PromptDraftService
 from .public_media import PublicMediaStager, create_public_media_router
@@ -211,6 +217,11 @@ from .quality.continuity_service import ContinuityService
 from .quality.routes import create_continuity_router
 from .real_pipeline import HybridAnalysisPipeline
 from .records import RecordService, resolve_video_path, write_source_metadata
+from .skill_workflow import (
+    SkillWorkflowService,
+    create_skill_workflow_admin_router,
+    create_skill_workflow_router,
+)
 from .storage_objects import StorageManager
 from .store import store
 from .thumbnails import thumbnail_etag, thumbnail_service
@@ -276,7 +287,9 @@ async def lifespan(_app: FastAPI):
     await notification_service.initialize()
     await project_asset_service.bootstrap_legacy_references()
     await record_service.bootstrap(recover_interrupted=True)
+    await project_service.bootstrap_analysis_projects()
     await production_service.recover_generation_runs()
+    await skill_workflow_service.recover()
     await depth_control_job_service.recover()
     await video_enhancement_service.recover()
     media_staging_service.start_cleanup()
@@ -320,6 +333,14 @@ image_generation_gateway = ImageGenerationGateway(
 )
 public_media_stager = PublicMediaStager(workspace_manager)
 account_context_service = create_account_context_service(workspace_manager)
+platform_skill_catalog_service = PlatformSkillCatalogService(
+    default_account_catalog_path().parent / "platform-skills.json"
+)
+project_service = ProjectService(
+    store,
+    platform_skill_catalog_service,
+    account_context_service,
+)
 user_preferences_service = UserPreferencesService(account_context_service)
 category_profile_service = CategoryProfileService(account_context_service)
 platform_connection_service = create_platform_connection_service(account_context_service)
@@ -430,6 +451,16 @@ timeline_export_service = TimelineExportService(
     notification_publisher=notification_service,
     on_export_succeeded=production_service.mark_export_completed,
 )
+skill_workflow_service = SkillWorkflowService(
+    store,
+    project_service,
+    account_context_service,
+    category_profiles=category_profile_service,
+    image_gateway=image_generation_gateway,
+    production_service=production_service,
+    timeline_reader=timeline_service,
+    export_reader=timeline_export_service,
+)
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 app.include_router(
     create_generated_asset_promotion_router(generated_asset_promotion_service),
@@ -495,6 +526,26 @@ app.include_router(create_category_profile_router(category_profile_service), pre
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)
+app.include_router(
+    create_platform_skill_router(
+        platform_skill_catalog_service,
+        store,
+        account_context_service,
+    ),
+    prefix=API_PREFIX,
+)
+app.include_router(
+    create_platform_skill_admin_router(platform_skill_catalog_service),
+    prefix=API_PREFIX,
+    dependencies=[Depends(require_platform_admin)],
+)
+app.include_router(create_project_router(project_service), prefix=API_PREFIX)
+app.include_router(create_skill_workflow_router(skill_workflow_service), prefix=API_PREFIX)
+app.include_router(
+    create_skill_workflow_admin_router(skill_workflow_service),
+    prefix=API_PREFIX,
+    dependencies=[Depends(require_platform_admin)],
+)
 
 
 @app.get("/health", response_model=HealthResponse)

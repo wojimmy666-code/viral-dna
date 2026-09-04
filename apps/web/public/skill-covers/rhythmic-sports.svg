@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">节奏运动短片</title>
+  <desc id="desc">跑道上的运动员与节奏切分线</desc>
+  <rect width="960" height="540" fill="#1e2022"/>
+  <path d="M0 540 294 0h220L280 540ZM386 540 631 0h94L576 540ZM662 540 796 0h164v540Z" fill="#303337"/>
+  <path d="M738 0 492 540M858 0 690 540" stroke="#d7ff3f" stroke-width="7" opacity=".8"/>
+  <circle cx="430" cy="172" r="48" fill="#d8ad91"/>
+  <path d="m394 212 74-6 72 122-58 25-42-62-37 83-68-20Z" fill="#f2f1f5"/>
+  <path d="m475 345 86 57-24 47-112-54ZM367 354l-93 105-46-28 91-136Z" fill="#5b4df5"/>
+  <path d="m516 325 116-57 19 39-111 77ZM403 242 291 279l-15-42 119-45Z" fill="#d8ad91"/>
+  <text x="52" y="69" fill="#ffffff" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="32" font-weight="600">节奏运动短片</text>
+  <text x="54" y="105" fill="#d7ff3f" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="18">RHYTHMIC SPORTS SHORT</text>
+</svg>

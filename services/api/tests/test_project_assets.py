@@ -99,9 +99,12 @@ async def test_legacy_reference_migration_is_idempotent_and_zero_copy(
     assert len(repository.storage_objects) == 2
     content_replicas = await repository.list_object_replicas(asset.content_object_id)
     thumbnail_replicas = await repository.list_object_replicas(asset.thumbnail_object_id)
-    assert content_replicas[0].object_key == content_relative
-    assert thumbnail_replicas[0].object_key == thumbnail_relative
-    assert not (workspace.root / "objects").exists()
+    content_object_path = workspace.resolve(content_replicas[0].object_key)
+    thumbnail_object_path = workspace.resolve(thumbnail_replicas[0].object_key)
+    assert content_replicas[0].object_key.startswith("objects/")
+    assert thumbnail_replicas[0].object_key.startswith("objects/")
+    assert content_object_path.samefile(content_path)
+    assert thumbnail_object_path.samefile(thumbnail_path)
 
     object_count = len(repository.storage_objects)
     await service.link_asset(second_project, asset.id)
@@ -130,7 +133,7 @@ async def test_legacy_reference_migration_is_idempotent_and_zero_copy(
     assert projected.folder_id == folder.id
     assert projected.folder_name == "人物目录"
     assert (await repository.list_object_replicas(asset.content_object_id))[0].object_key == (
-        content_relative
+        content_replicas[0].object_key
     )
 
     snapshot = await service.snapshot_reference(first_project.id, renamed)

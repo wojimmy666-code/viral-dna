@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">自媒体分步讲解</title>
+  <desc id="desc">明亮演播空间中的讲解者与步骤卡片</desc>
+  <rect width="960" height="540" fill="#eeeef5"/>
+  <rect x="520" y="58" width="352" height="424" rx="20" fill="#ffffff" stroke="#dcdde6" stroke-width="3"/>
+  <circle cx="320" cy="207" r="78" fill="#dbb59a"/>
+  <path d="M232 182c20-78 156-95 175 22-35-24-61-66-175-22Z" fill="#25232d"/>
+  <path d="M184 472c9-151 80-202 137-202s132 54 145 202Z" fill="#5b4df5"/>
+  <rect x="558" y="104" width="276" height="84" rx="12" fill="#f0efff"/>
+  <rect x="558" y="228" width="276" height="84" rx="12" fill="#f6f7fb"/>
+  <rect x="558" y="352" width="276" height="84" rx="12" fill="#f6f7fb"/>
+  <circle cx="590" cy="146" r="16" fill="#5b4df5"/>
+  <circle cx="590" cy="270" r="16" fill="#b7b4c2"/>
+  <circle cx="590" cy="394" r="16" fill="#b7b4c2"/>
+  <path d="M625 135h164M625 157h112M625 259h164M625 281h132M625 383h164M625 405h96" stroke="#777582" stroke-width="8" stroke-linecap="round"/>
+  <text x="54" y="68" fill="#25232d" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="32" font-weight="600">自媒体分步讲解</text>
+  <text x="56" y="104" fill="#6b6b76" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="18">CREATOR EXPLAINER</text>
+</svg>

@@ -50,7 +50,7 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
   }, [profiles, query]);
 
   function choose(profile) {
-    onChange(profile.id);
+    onChange(profile.id, profile);
     setOpen(false);
     setQuery("");
   }
@@ -63,7 +63,7 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
         <div className="category-picker-state error"><WarningCircle size={19} />{error}<button className="text-button compact" onClick={load} type="button">重试</button></div>
       ) : profiles.length === 0 ? (
         <div className="category-picker-empty">
-          <span><Tag size={20} /><span><strong>还没有可用的品类档案</strong><small>先建立品牌与品类约束，再生成三套方案。</small></span></span>
+          <span><Tag size={20} /><span><strong>还没有可用的品类档案</strong><small>先建立品牌与品类约束，再开始创作。</small></span></span>
           <button className="primary-button" onClick={onManage} type="button"><Plus size={17} />新建品类档案</button>
         </div>
       ) : (

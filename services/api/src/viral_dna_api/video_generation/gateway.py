@@ -852,6 +852,21 @@ class VideoGenerationGateway:
                 "video_unknown_cost_confirmation_required",
                 "当前视频模型无法预估成本，请确认未知成本后重试",
             )
+        if (
+            project.budget_limit_micros is not None
+            and identity.cost_estimate_known
+            and project.actual_cost_micros + identity.estimated_cost_micros
+            > project.budget_limit_micros
+        ):
+            remaining = max(0, project.budget_limit_micros - project.actual_cost_micros)
+            raise VideoGenerationGatewayError(
+                409,
+                "production_budget_exceeded",
+                (
+                    f"本次预计成本 ¥{identity.estimated_cost_micros / 1_000_000:.2f}，"
+                    f"方案剩余预算 ¥{remaining / 1_000_000:.2f}"
+                ),
+            )
 
         run_id = run_id or uuid4()
         run_root = (

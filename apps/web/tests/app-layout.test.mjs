@@ -12,6 +12,7 @@ const appStyles = readFileSync(new URL("../src/styles.css", import.meta.url), "u
 test("keeps the primary sidebar focused on active first-phase workflows", () => {
   assert.match(appSource, /\{ id: "new-analysis", label: "新建项目", icon: Plus \}/);
   assert.match(appSource, /\{ id: "history", label: "项目", icon: Briefcase \}/);
+  assert.match(appSource, /\{ id: "skills", label: "Skill 广场", icon: Compass \}/);
   assert.match(appSource, /\{ id: "assets", label: "资产库", icon: FolderOpen \}/);
   assert.match(appSource, /\{ id: "categories", label: "品类库", icon: Tag \}/);
   assert.doesNotMatch(appSource, /\{ id: "workspace", label: "工作台"/);
@@ -42,6 +43,9 @@ test("renders new analysis and record workspaces through separate page branches"
   assert.match(appSource, /<NewAnalysisPage>/);
   assert.match(appSource, /appRoute\.name === "record-workspace"/);
   assert.match(appSource, /<RecordWorkspacePage>/);
+  assert.match(appSource, /appRoute\.name === "skill-plaza"/);
+  assert.match(appSource, /appRoute\.name === "skill-workspace"/);
+  assert.match(appSource, /<SkillProjectWorkspace/);
   assert.doesNotMatch(appSource, /WorkbenchHomePage/);
   assert.doesNotMatch(appSource, /!recordDetailMode\s*&&\s*\(\s*<ImportPanel/);
 });

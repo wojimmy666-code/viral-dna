@@ -199,6 +199,326 @@
   margin: 0;
 }
 
+.platform-skill-admin > header > div p {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-skill-import {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(240px, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.platform-skill-import label,
+.platform-skill-editor label {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.platform-skill-import label > span,
+.platform-skill-editor label > span {
+  font-size: var(--type-label-size);
+  font-weight: var(--type-weight-semibold);
+}
+
+.platform-skill-import input,
+.platform-skill-editor input,
+.platform-skill-editor textarea {
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+}
+
+.platform-skill-validation,
+.platform-skill-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) var(--space-6) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--status-info-border);
+  border-radius: var(--radius-control);
+  background: var(--status-info-bg);
+  color: var(--status-info-text);
+}
+
+.platform-skill-validation.is-valid {
+  border-color: var(--status-success-border);
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+}
+
+.platform-skill-validation.is-invalid {
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-text);
+}
+
+.platform-skill-groups {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-6);
+}
+
+.platform-skill-operations {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-5) var(--space-6) 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-subtle);
+}
+
+.platform-skill-operations-heading,
+.platform-skill-operations-totals {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.platform-skill-operations-heading p,
+.platform-skill-operations-table small {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-skill-operations-totals span {
+  display: grid;
+  min-width: 64px;
+  gap: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-skill-operations-totals strong {
+  color: var(--text-primary);
+  font-size: var(--type-subheading-size);
+}
+
+.platform-skill-operations-table {
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+}
+
+.platform-skill-operations-table > div {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.4fr) repeat(4, minmax(90px, 0.6fr));
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-default);
+}
+
+.platform-skill-operations-table > div:first-child {
+  border-top: 0;
+}
+
+.platform-skill-operations-table > div > span:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.platform-skill-operations-table .is-heading {
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
+}
+
+.platform-skill-operations-empty {
+  margin: 0;
+  padding: var(--space-5);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.platform-skill-groups > article {
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+}
+
+.platform-skill-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-subtle);
+}
+
+.platform-skill-group-heading > div,
+.platform-skill-version-list > div > span {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.platform-skill-group-heading span,
+.platform-skill-version-list small {
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-skill-status {
+  width: fit-content;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+  font-weight: var(--type-weight-semibold);
+  white-space: nowrap;
+}
+
+.platform-skill-status.is-published {
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+}
+
+.platform-skill-status.is-blocked {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-text);
+}
+
+.platform-skill-version-list > div {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-default);
+}
+
+.platform-skill-version-list > div:first-child {
+  border-top: 0;
+}
+
+.platform-skill-version-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+.platform-skill-version-actions button {
+  min-height: var(--control-height-compact);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-panel);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.platform-skill-version-actions button:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.platform-skill-version-actions button.danger {
+  color: var(--status-danger-text);
+}
+
+.platform-skill-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal-backdrop);
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: rgba(37, 35, 45, 0.48);
+}
+
+.platform-skill-editor {
+  width: min(920px, 100%);
+  max-height: calc(100vh - 48px);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  overflow: auto;
+  border-radius: var(--radius-overlay);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-overlay);
+}
+
+.platform-skill-editor > header,
+.platform-skill-editor > footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.platform-skill-editor header h2,
+.platform-skill-editor header p {
+  margin: 0;
+}
+
+.platform-skill-editor header p {
+  margin-top: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-skill-editor header > button {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.platform-skill-editor textarea {
+  min-height: 420px;
+  resize: vertical;
+  font-family: var(--font-family-mono);
+  font-size: var(--type-caption-size);
+  line-height: var(--type-leading-editor);
+}
+
+.platform-skill-editor > footer {
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  .platform-skill-import,
+  .platform-skill-version-list > div {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-skill-operations-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .platform-skill-operations-table {
+    overflow-x: auto;
+  }
+
+  .platform-skill-operations-table > div {
+    min-width: 680px;
+  }
+
+  .platform-skill-version-actions {
+    justify-content: flex-start;
+  }
+}
+
 .admin-settings-section header span,
 .admin-provider-list article > span {
   background: var(--surface-canvas);
@@ -364,6 +684,14 @@
   .admin-settings-grid { grid-template-columns: 1fr; }
   .admin-wide-field { grid-column: auto; }
   .platform-admin-actions { padding-top: 14px; }
+  .platform-skill-operations {
+    margin-inline: var(--space-4);
+    padding: var(--space-3);
+  }
+  .platform-skill-operations-totals {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

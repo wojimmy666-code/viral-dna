@@ -6,17 +6,40 @@ import {
   projectLifecyclePath,
   recordWorkspacePath,
   resolveAppRoute,
+  skillProjectWorkspacePath,
 } from "../src/app-routing.js";
 
 test("maps first-phase navigation to independent page URLs", () => {
   assert.equal(pathForNav("new-analysis"), "/projects/new");
   assert.equal(pathForNav("history"), "/projects");
+  assert.equal(pathForNav("skills"), "/skills");
   assert.equal(pathForNav("assets"), "/assets");
   assert.equal(pathForNav("categories"), "/category-profiles");
   assert.equal(pathForNav("platform-connections"), "/settings/platform-connections");
   assert.equal(pathForNav("settings"), "/settings/profile");
   assert.equal(pathForNav("admin"), "/admin/providers");
   assert.equal(pathForNav("unknown"), "/projects");
+});
+
+test("resolves platform Skill discovery, start and project workspace routes", () => {
+  assert.equal(resolveAppRoute("/skills").name, "skill-plaza");
+  assert.deepEqual(resolveAppRoute("/skills/cinematic-product-story"), {
+    name: "skill-detail",
+    activeNav: "skills",
+    recordId: "",
+    skillSlug: "cinematic-product-story",
+  });
+  assert.equal(
+    resolveAppRoute("/skills/cinematic-product-story/start").name,
+    "skill-start",
+  );
+  assert.deepEqual(resolveAppRoute("/projects/project-1/skill"), {
+    name: "skill-workspace",
+    activeNav: "project-detail",
+    recordId: "project-1",
+    skillSlug: "",
+  });
+  assert.equal(skillProjectWorkspacePath("项目 1"), "/projects/%E9%A1%B9%E7%9B%AE%201/skill");
 });
 
 test("maps project lifecycle navigation to canonical URLs", () => {
@@ -46,6 +69,7 @@ test("keeps user settings and platform administration on separate route trees", 
     recordId: "",
     adminSection: "media",
   });
+  assert.equal(resolveAppRoute("/admin/skills").adminSection, "skills");
 });
 test("resolves new projects and project details as different pages", () => {
   assert.deepEqual(resolveAppRoute("/projects/new"), {

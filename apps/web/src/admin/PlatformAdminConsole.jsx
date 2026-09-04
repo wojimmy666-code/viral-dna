@@ -6,15 +6,18 @@ import {
   Key,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkle,
 } from "@phosphor-icons/react";
 import { DepthGenerationSettings } from "../depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "../media-staging/MediaStagingSettingsPanel.jsx";
 import { SettingsActions } from "../ui/settings/SettingsPrimitives.jsx";
+import { PlatformSkillAdmin } from "./PlatformSkillAdmin.jsx";
 import "./platform-admin.css";
 
 const ADMIN_SECTIONS = [
   { id: "providers", label: "服务商与凭据", Icon: Key },
   { id: "models", label: "模型与默认值", Icon: SlidersHorizontal },
+  { id: "skills", label: "平台 Skill", Icon: Sparkle },
   { id: "media", label: "媒体与对象存储", Icon: CloudArrowUp },
   { id: "runtime", label: "运行环境", Icon: Cpu },
 ];
@@ -365,6 +368,8 @@ export function PlatformAdminConsole({
             />
           </section>
         )}
+
+        {section === "skills" && <PlatformSkillAdmin request={request} />}
 
         {section === "runtime" && (
           <section className="admin-settings-section admin-component-section">

@@ -21,6 +21,7 @@ import {
   CheckCircle,
   CircleNotch,
   ClockCounterClockwise,
+  Compass,
   Copy,
   DownloadSimple,
   DotsThree,
@@ -60,6 +61,12 @@ import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
 import {
+  SkillDetail,
+  SkillPlaza,
+  SkillProjectWorkspace,
+  SkillStartWizard,
+} from "./skill-workflow/SkillExperience.jsx";
+import {
   DEFAULT_TEXT_MODEL_ALIAS,
   TEXT_MODEL_PURPOSES,
   effectiveTextModelLabel,
@@ -85,6 +92,7 @@ import {
   projectLifecyclePath,
   recordWorkspacePath,
   resolveAppRoute,
+  skillProjectWorkspacePath,
 } from "./app-routing.js";
 import { inferVideoOrientation } from "./video-layout.js";
 import {
@@ -339,6 +347,7 @@ const stageLabels = {
 const navItems = [
   { id: "new-analysis", label: "新建项目", icon: Plus },
   { id: "history", label: "项目", icon: Briefcase },
+  { id: "skills", label: "Skill 广场", icon: Compass },
   { id: "assets", label: "资产库", icon: FolderOpen },
   { id: "categories", label: "品类库", icon: Tag },
 ];
@@ -1149,7 +1158,7 @@ export function App() {
     });
     try {
       const [recordPayload, folderPayload] = await Promise.all([
-        apiRequest(`/records?${params.toString()}`),
+        apiRequest(`/projects?${params.toString()}`),
         apiRequest("/folders"),
       ]);
       if (requestId !== historyRequestIdRef.current) return;
@@ -1414,7 +1423,7 @@ export function App() {
 
   async function updateHistoryRecord(recordId, update, successMessage) {
     try {
-      await apiRequest(`/records/${recordId}`, {
+      await apiRequest(`/projects/${recordId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(update),
@@ -1434,6 +1443,12 @@ export function App() {
 
   async function openHistoryRecord(recordId) {
     setHistoryError("");
+    const project = records.find((item) => item.id === recordId);
+    if (project?.kind === "skill") {
+      navigate(skillProjectWorkspacePath(project.id));
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return project;
+    }
     try {
       const detail = await loadRecordWorkspace(recordId);
       if (!detail) return null;
@@ -1448,6 +1463,11 @@ export function App() {
   }
 
   async function openHistoryProductions(recordId) {
+    const project = records.find((item) => item.id === recordId);
+    if (project?.kind === "skill") {
+      navigate(skillProjectWorkspacePath(project.id));
+      return project;
+    }
     const detail = await openHistoryRecord(recordId);
     if (!detail) return null;
     setRecordWorkspaceMode("production");
@@ -1466,17 +1486,31 @@ export function App() {
     setHistoryActionBusy(true);
     setHistoryError("");
     try {
-      const result = action === "purge"
-        ? await apiRequest("/records/batch", {
+      let result;
+      if (action === "purge") {
+        const selected = records.filter((item) => ids.includes(item.id));
+        const analysisIds = selected.filter((item) => item.kind !== "skill").map((item) => item.id);
+        const skillIds = selected.filter((item) => item.kind === "skill").map((item) => item.id);
+        const results = await Promise.all([
+          analysisIds.length ? apiRequest("/records/batch", {
             method: "DELETE",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ record_ids: ids }),
-          })
-        : await apiRequest("/records/batch/lifecycle", {
-            method: "PATCH",
+            body: JSON.stringify({ record_ids: analysisIds }),
+          }) : null,
+          skillIds.length ? apiRequest("/projects/batch", {
+            method: "DELETE",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ record_ids: ids, action }),
-          });
+            body: JSON.stringify({ project_ids: skillIds }),
+          }) : null,
+        ]);
+        result = { affected_count: results.reduce((sum, item) => sum + Number(item?.affected_count || 0), 0) };
+      } else {
+        result = await apiRequest("/projects/batch/lifecycle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_ids: ids, action }),
+        });
+      }
       await refreshHistory({ quiet: true });
       if (action === "purge") {
         loadWorkspace().catch(() => undefined);
@@ -2321,7 +2355,8 @@ export function App() {
   }
 
   const recordDetailMode = appRoute.name === "record-workspace";
-  const sidebarActiveNav = recordDetailMode ? "history" : activeNav;
+  const skillProjectMode = appRoute.name === "skill-workspace";
+  const sidebarActiveNav = recordDetailMode || skillProjectMode ? "history" : activeNav;
   const recordBreadcrumbItems = buildRecordBreadcrumb(
     recordWorkspaceMode,
     activeProductionProjectName,
@@ -2419,8 +2454,8 @@ export function App() {
 
       <div className="app-body">
         <Topbar
-          assetMode={["assets", "categories", "platform-connections"].includes(activeNav)}
-          focusMode={recordDetailMode}
+          assetMode={["skills", "assets", "categories", "platform-connections"].includes(activeNav)}
+          focusMode={recordDetailMode || skillProjectMode}
           hideCreate
           notificationOpen={notificationOpen}
           notificationUnreadCount={notificationUnreadCount}
@@ -2435,8 +2470,12 @@ export function App() {
 
         <div
           className={
-            activeNav === "platform-connections"
+            skillProjectMode
+              ? "skill-layout"
+            : activeNav === "platform-connections"
               ? "platform-connections-layout"
+              : activeNav === "skills"
+                ? "skill-layout"
               : activeNav === "history"
               ? "history-layout"
               : activeNav === "assets"
@@ -2457,6 +2496,27 @@ export function App() {
               onRefresh={() => loadPlatformConnections()}
               request={apiRequest}
             />
+          ) : activeNav === "skills" ? (
+            appRoute.name === "skill-detail" ? (
+              <SkillDetail
+                navigate={navigate}
+                request={apiRequest}
+                skillSlug={appRoute.skillSlug}
+              />
+            ) : appRoute.name === "skill-start" ? (
+              <SkillStartWizard
+                navigate={navigate}
+                onNotice={showNotice}
+                request={apiRequest}
+                skillSlug={appRoute.skillSlug}
+              />
+            ) : appRoute.name === "skill-plaza" ? (
+              <SkillPlaza
+                navigate={navigate}
+                onNotice={showNotice}
+                request={apiRequest}
+              />
+            ) : null
           ) : activeNav === "history" ? (
             <HistoryPage
               records={records}
@@ -2534,6 +2594,17 @@ export function App() {
                 onStart={startAnalysis}
               />
             </NewAnalysisPage>
+          ) : appRoute.name === "skill-workspace" ? (
+            <SkillProjectWorkspace
+              imageGenerationSettings={effectiveImageSettings}
+              navigate={navigate}
+              onNotice={showNotice}
+              onOpenModelSettings={openModelSettings}
+              projectId={appRoute.recordId}
+              request={apiRequest}
+              resolveUrl={resolveArtifactUrl}
+              videoGenerationSettings={effectiveVideoSettings}
+            />
           ) : appRoute.name === "record-workspace" ? (
             <RecordWorkspacePage>
               {!recordMatchesRoute || recordRouteLoading ? (
@@ -3079,7 +3150,9 @@ function HistoryPage({
                         <span>
                           <strong>{record.name}</strong>
                           <small>
-                            {duration ? `时长 ${duration}` : "时长未知"}
+                            {record.kind === "skill"
+                              ? `${record.skill_name || "Skill"} · ${record.active_stage || "creative_brief"}`
+                              : duration ? `时长 ${duration}` : "时长未知"}
                             <span className="record-production-mobile">{productionCount} 个方案</span>
                           </small>
                           {record.status === "failed" && <span className="record-status-accessible">分析失败</span>}

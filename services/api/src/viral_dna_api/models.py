@@ -150,6 +150,11 @@ class ProductionProjectLifecycle(StrEnum):
     ALL = "all"
 
 
+class ProductionOriginType(StrEnum):
+    ANALYSIS = "analysis"
+    SKILL_RUN = "skill_run"
+
+
 class ProductionStep(StrEnum):
     PROJECT_SETUP = "project_setup"
     REFERENCE_ASSETS = "reference_assets"
@@ -179,6 +184,7 @@ class ShotSourceKind(StrEnum):
     VIDEO_RANGE = "video_range"
     DUPLICATE = "duplicate"
     BLANK = "blank"
+    SKILL_GENERATED = "skill_generated"
 
 
 class ShotOutputMode(StrEnum):
@@ -1881,10 +1887,16 @@ class ReplacementVersion(BaseModel):
 class ProductionProject(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     record_id: UUID
-    video_id: UUID
-    base_analysis_id: UUID
+    owner_project_id: UUID | None = None
+    origin_type: ProductionOriginType = ProductionOriginType.ANALYSIS
+    origin_id: UUID | None = None
+    production_seed_id: UUID | None = None
+    style_bible_revision_id: UUID | None = None
+    timing_fps: int = Field(default=30, ge=1, le=120)
+    video_id: UUID | None = None
+    base_analysis_id: UUID | None = None
     prompt_source_analysis_id: UUID | None = None
-    source_prompt_package_id: UUID
+    source_prompt_package_id: UUID | None = None
     source_project_id: UUID | None = None
     source_revision_id: UUID | None = None
     name: str = Field(min_length=1, max_length=120)
@@ -1913,6 +1925,29 @@ class ProductionProject(BaseModel):
         if width <= 0 or height <= 0:
             raise ValueError("输出画面比例必须大于零")
         return f"{width}:{height}"
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> ProductionProject:
+        if self.owner_project_id is None:
+            self.owner_project_id = self.record_id
+        analysis_fields = (
+            self.video_id,
+            self.base_analysis_id,
+            self.source_prompt_package_id,
+        )
+        if self.origin_type == ProductionOriginType.ANALYSIS:
+            if any(item is None for item in analysis_fields):
+                raise ValueError("分析来源创作方案必须绑定视频、分析和提示词包")
+            if self.origin_id is None:
+                self.origin_id = self.base_analysis_id
+        else:
+            if any(item is not None for item in analysis_fields) or self.prompt_source_analysis_id:
+                raise ValueError("Skill 创作方案不得伪造分析来源字段")
+            if self.origin_id is None or self.production_seed_id is None:
+                raise ValueError("Skill 创作方案必须绑定运行与 ProductionSeed")
+            if self.style_bible_revision_id is None:
+                raise ValueError("Skill 创作方案必须绑定 Style Bible")
+        return self
 
 
 class ProductionRevision(BaseModel):
@@ -2057,6 +2092,7 @@ class ShotVisualBeat(BaseModel):
         "duplicate",
         "blank",
         "legacy",
+        "skill",
     ] = "analysis"
     image_prompt: str = Field(default="", max_length=8000)
     image_prompt_mentions: list[PromptAssetMention] = Field(
@@ -2131,6 +2167,18 @@ class ShotPlan(BaseModel):
     revision_id: UUID
     source_shot_id: str = Field(min_length=1, max_length=120)
     index: int = Field(ge=1)
+    stable_shot_key: str | None = Field(
+        default=None,
+        pattern=r"^shot_[a-z0-9]{8,64}$",
+    )
+    order: int | None = Field(default=None, ge=1)
+    timing_fps: int = Field(default=30, ge=1, le=120)
+    start_frame: int | None = Field(default=None, ge=0)
+    duration_frames: int | None = Field(default=None, gt=0)
+    source_start_frame: int | None = Field(default=None, ge=0)
+    source_duration_frames: int | None = Field(default=None, gt=0)
+    handle_in_frames: int = Field(default=0, ge=0, le=600)
+    handle_out_frames: int = Field(default=0, ge=0, le=600)
     lifecycle_status: ShotLifecycleStatus = ShotLifecycleStatus.ACTIVE
     source_kind: ShotSourceKind = ShotSourceKind.ANALYSIS
     output_mode: ShotOutputMode = ShotOutputMode.IMAGE_TO_VIDEO
@@ -2143,6 +2191,7 @@ class ShotPlan(BaseModel):
         "video_selection",
         "duplicate",
         "blank",
+        "skill",
     ] = "analysis"
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
@@ -2164,6 +2213,13 @@ class ShotPlan(BaseModel):
         max_length=40,
     )
     video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
+    exact_overlay_instructions: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    bound_image_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     managed_asset_bindings: list[ProviderManagedAssetBinding] = Field(
         default_factory=list,
         max_length=20,
@@ -2279,6 +2335,23 @@ class ShotPlan(BaseModel):
     def validate_timeline(self) -> ShotPlan:
         if self.end_seconds <= self.start_seconds:
             raise ValueError("分镜结束时间必须晚于开始时间")
+        if self.stable_shot_key is None:
+            stable_digest = uuid5(
+                NAMESPACE_URL,
+                f"viral-dna:project:{self.project_id}:shot:{self.source_shot_id}",
+            ).hex[:20]
+            self.stable_shot_key = f"shot_{stable_digest}"
+        if self.order is None:
+            self.order = self.index
+        if self.start_frame is None:
+            self.start_frame = round(self.start_seconds * self.timing_fps)
+        if self.duration_frames is None:
+            self.duration_frames = max(1, round(self.duration_seconds * self.timing_fps))
+        if self.source_kind != ShotSourceKind.SKILL_GENERATED:
+            if self.source_start_frame is None:
+                self.source_start_frame = self.start_frame
+            if self.source_duration_frames is None:
+                self.source_duration_frames = self.duration_frames
         if (
             self.source_keyframe_timestamp_seconds is not None
             and not self.start_seconds <= self.source_keyframe_timestamp_seconds <= self.end_seconds
@@ -3151,6 +3224,7 @@ class ChangeImpactResponse(BaseModel):
 
 class ImageGenerationCreate(BaseModel):
     expected_revision_id: UUID
+    expected_shot_revision_id: UUID | None = None
     visual_beat_id: UUID | None = None
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT
@@ -3167,6 +3241,7 @@ class ImageGenerationCreate(BaseModel):
 
 class VideoGenerationCreate(BaseModel):
     expected_revision_id: UUID
+    expected_shot_revision_id: UUID | None = None
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_mode: VideoGenerationInputMode = VideoGenerationInputMode.MULTI_IMAGE_TO_VIDEO
     input_plan: VideoGenerationInputPlan = Field(
@@ -3672,11 +3747,12 @@ class EditingHandoffManifest(BaseModel):
     schema_version: Literal["viral-dna-editing-handoff/v2"] = "viral-dna-editing-handoff/v2"
     project_id: UUID
     revision_id: UUID
-    source_analysis_id: UUID
+    source_analysis_id: UUID | None = None
     source_audio_url: str | None = None
     audio_strategy: Literal["continuous_source_track", "per_shot", "muted"]
     timeline_duration_seconds: float = Field(gt=0)
     clips: list[EditingHandoffClip] = Field(min_length=1)
+    exact_overlays: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
     generated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -3879,6 +3955,7 @@ class ProductionTimeline(BaseModel):
         default_factory=TimelineBackgroundAudioTrack
     )
     subtitle_cues: list[TimelineSubtitleCue] = Field(default_factory=list)
+    exact_overlays: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
     validation_messages: list[str] = Field(default_factory=list)
     warning_messages: list[str] = Field(default_factory=list)
     last_preview_job_id: UUID | None = None

@@ -91,5 +91,6 @@ export function platformLabel(platform) {
 
 export function sourceTypeLabel(sourceType) {
   if (sourceType === "upload") return "本地文件";
+  if (sourceType === "skill") return "Skill 工作流";
   return PLATFORM_BY_ID.get(sourceType)?.label || sourceType || "未知来源";
 }

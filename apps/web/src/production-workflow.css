@@ -5014,6 +5014,11 @@
   background: #f8f7ff;
 }
 
+.production-export-option-row button.active:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
 .production-export-option-row strong,
 .production-export-quality strong,
 .production-export-option-column strong {

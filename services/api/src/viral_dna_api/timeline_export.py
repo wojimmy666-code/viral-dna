@@ -224,6 +224,7 @@ class TimelineExportService:
         self.repository = repository
         self.workspace = workspace
         self.timeline_provider = timeline_provider
+        self.media_resolver = media_resolver
         self.media_processor = media_processor or MediaProcessor()
         self.renderer = renderer or TimelinePreviewRenderer(
             media_resolver,
@@ -454,6 +455,12 @@ class TimelineExportService:
                 is_cancelled=lambda: job.id in self._cancellations,
                 profile=profile,
             )
+            output_path = await self._apply_exact_overlays(
+                timeline,
+                output_path,
+                profile,
+                job.id,
+            )
             self._require_not_cancelled(job.id)
             job = job.model_copy(update={"progress_percent": 90})
             await asyncio.to_thread(self._write_job, project, job)
@@ -548,6 +555,222 @@ class TimelineExportService:
             self._cancellations.discard(job.id)
             await asyncio.to_thread(self._write_job, project, job)
             await self._publish_notification(project, job)
+
+    async def _apply_exact_overlays(
+        self,
+        timeline: ProductionTimeline,
+        source: Path,
+        profile: TimelineRenderProfile,
+        job_id: UUID,
+    ) -> Path:
+        """Apply exact assets after generative rendering with deterministic FFmpeg overlays."""
+
+        if not timeline.exact_overlays:
+            return source
+        resolver = getattr(self.media_resolver, "resolve_reference_content", None)
+        if not callable(resolver):
+            raise TimelineRenderError(
+                "exact_overlay_manual_post_required",
+                "当前导出器无法读取 exact 素材，不能标记为可公开交付",
+            )
+        resolved: list[tuple[dict[str, object], Path]] = []
+        for instruction in timeline.exact_overlays:
+            if instruction.get("tracking_mode", "static") != "static":
+                raise TimelineRenderError(
+                    "exact_overlay_manual_post_required",
+                    "当前仅支持静态 exact 叠加；跟踪或透视素材必须转人工后期",
+                )
+            if (
+                instruction.get("scale_mode", "contain") != "contain"
+                or instruction.get("blend_mode", "normal") != "normal"
+            ):
+                raise TimelineRenderError(
+                    "exact_overlay_manual_post_required",
+                    "当前仅支持等比包含和普通混合的 exact 叠加；其他方式必须转人工后期",
+                )
+            raw_asset_id = instruction.get("asset_id")
+            if not raw_asset_id:
+                raise TimelineRenderError(
+                    "exact_overlay_asset_missing",
+                    "exact 叠加指令缺少可追溯资产，不能继续导出",
+                )
+            try:
+                asset_id = UUID(str(raw_asset_id))
+                path, media_type = await resolver(asset_id, thumbnail=False)
+            except Exception as exc:
+                raise TimelineRenderError(
+                    "exact_overlay_asset_missing",
+                    "exact 素材不存在或不可读取，不能继续导出",
+                ) from exc
+            if not str(media_type).startswith("image/") or not await asyncio.to_thread(
+                path.is_file
+            ):
+                raise TimelineRenderError(
+                    "exact_overlay_asset_invalid",
+                    "exact 素材必须是可读取的图片",
+                )
+            expected_sha256 = str(instruction.get("asset_sha256") or "")
+            if expected_sha256:
+                actual_sha256 = await asyncio.to_thread(self._sha256_file, path)
+                if actual_sha256 != expected_sha256:
+                    raise TimelineRenderError(
+                        "exact_overlay_digest_mismatch",
+                        "exact 素材内容已变化，不能继续导出",
+                    )
+            resolved.append((instruction, path))
+
+        self._require_not_cancelled(job_id)
+        output = source.with_name("final-with-exact-overlays.mp4")
+        command = [
+            self.media_processor.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(source),
+        ]
+        for _, path in resolved:
+            command.extend(["-loop", "1", "-i", str(path)])
+
+        filters: list[str] = []
+        current = "0:v"
+        for index, (instruction, _) in enumerate(resolved, start=1):
+            start_frame, end_frame = self._exact_overlay_window(timeline, instruction)
+            max_width = max(2, round(profile.width * 0.2) // 2 * 2)
+            max_height = max(2, round(profile.height * 0.16) // 2 * 2)
+            overlay_label = f"exact{index}"
+            output_label = f"with_exact{index}"
+            filters.append(
+                f"[{index}:v]scale={max_width}:{max_height}:"
+                f"force_original_aspect_ratio=decrease,format=rgba[{overlay_label}]"
+            )
+            x, y = self._exact_overlay_position(
+                str(instruction.get("placement") or "bottom_right"),
+                profile.width,
+                profile.height,
+            )
+            filters.append(
+                f"[{current}][{overlay_label}]overlay=x={x}:y={y}:"
+                f"enable='between(n,{start_frame},{end_frame - 1})':"
+                f"eof_action=pass[{output_label}]"
+            )
+            current = output_label
+        command.extend(
+            [
+                "-filter_complex",
+                ";".join(filters),
+                "-map",
+                f"[{current}]",
+                "-map",
+                "0:a?",
+                "-map",
+                "0:s?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                profile.video_preset,
+                "-crf",
+                str(profile.video_crf),
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                "-c:s",
+                "copy",
+                "-t",
+                f"{timeline.duration_seconds:.6f}",
+                str(output),
+            ]
+        )
+        creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=creation_flags,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=profile.timeout_seconds,
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            output.unlink(missing_ok=True)
+            raise TimelineRenderError(
+                "exact_overlay_timeout",
+                "exact 素材确定性合成超时",
+            ) from exc
+        if process.returncode != 0 or not await asyncio.to_thread(output.is_file):
+            detail = stderr.decode("utf-8", errors="replace").strip()[-800:]
+            output.unlink(missing_ok=True)
+            raise TimelineRenderError(
+                "exact_overlay_failed",
+                f"exact 素材确定性合成失败：{detail or 'FFmpeg 未返回详细信息'}",
+            )
+        self._require_not_cancelled(job_id)
+        await asyncio.to_thread(os.replace, output, source)
+        return source
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _exact_overlay_window(
+        timeline: ProductionTimeline,
+        instruction: dict[str, object],
+    ) -> tuple[int, int]:
+        total_frames = max(1, round(timeline.duration_seconds * timeline.fps))
+        raw_shot_id = instruction.get("shot_plan_id")
+        if raw_shot_id:
+            clip = next(
+                (
+                    item
+                    for item in timeline.clips
+                    if str(item.shot_plan_id) == str(raw_shot_id) and item.enabled
+                ),
+                None,
+            )
+            if clip is not None:
+                start = max(0, round(clip.timeline_start_seconds * timeline.fps))
+                end = min(
+                    total_frames,
+                    max(start + 1, round(clip.timeline_end_seconds * timeline.fps)),
+                )
+                return start, end
+        start = max(0, int(instruction.get("start_frame") or 0))
+        end = min(total_frames, int(instruction.get("end_frame") or total_frames))
+        return start, max(start + 1, end)
+
+    @staticmethod
+    def _exact_overlay_position(
+        placement: str,
+        width: int,
+        height: int,
+    ) -> tuple[str, str]:
+        margin_x = max(12, round(width * 0.04))
+        margin_y = max(12, round(height * 0.04))
+        positions = {
+            "top_left": (str(margin_x), str(margin_y)),
+            "top_right": (f"W-w-{margin_x}", str(margin_y)),
+            "bottom_left": (str(margin_x), f"H-h-{margin_y}"),
+            "bottom_right": (f"W-w-{margin_x}", f"H-h-{margin_y}"),
+            "center": ("(W-w)/2", "(H-h)/2"),
+        }
+        if placement not in positions:
+            raise TimelineRenderError(
+                "exact_overlay_manual_post_required",
+                f"不支持的 exact 叠加位置：{placement}",
+            )
+        return positions[placement]
 
     async def _extract_cover(self, source: Path, output: Path, job_id: UUID) -> Path:
         self._require_not_cancelled(job_id)
@@ -725,6 +948,28 @@ class TimelineExportService:
                     self.workspace.relative(subtitle_path) if subtitle_path else None
                 ),
                 "cover": self.workspace.relative(cover_path),
+            },
+            "exact_overlays": {
+                "render_mode": "deterministic_ffmpeg",
+                "count": len(timeline.exact_overlays),
+                "asset_ids": sorted(
+                    {
+                        str(item["asset_id"])
+                        for item in timeline.exact_overlays
+                        if item.get("asset_id")
+                    }
+                ),
+                "items": [
+                    {
+                        "asset_id": str(item.get("asset_id")),
+                        "asset_sha256": item.get("asset_sha256"),
+                        "shot_plan_id": item.get("shot_plan_id"),
+                        "start_frame": item.get("start_frame"),
+                        "end_frame": item.get("end_frame"),
+                        "placement": item.get("placement"),
+                    }
+                    for item in timeline.exact_overlays
+                ],
             },
             "validation": summary.model_dump(mode="json"),
         }

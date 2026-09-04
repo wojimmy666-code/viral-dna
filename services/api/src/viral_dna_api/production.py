@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from threading import Event
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import unquote
 from uuid import UUID, uuid4
 
@@ -77,6 +77,7 @@ from .models import (
     ProductionBranchCreate,
     ProductionChangeKind,
     ProductionGateStatus,
+    ProductionOriginType,
     ProductionProject,
     ProductionProjectCreate,
     ProductionProjectDetail,
@@ -154,6 +155,12 @@ from .production_media import (
     map_timed_text,
     playback_alignment,
 )
+from .production_seeds import AnalysisProductionSeedBuilder, ProductionSeed
+from .production_seeds.contracts import (
+    ProductionSeedOrigin,
+    ProductionSeedReference,
+    frame_to_seconds,
+)
 from .prompt_engine.compiler import sanitize_still_image_prompt
 from .quality.continuity_service import ContinuityService
 from .storage_errors import IncompatibleShotPlanSchemaError
@@ -192,6 +199,23 @@ _DEFAULT_ROLE_BY_REFERENCE_TYPE = {
     ReferenceAssetType.STYLE: ReferenceRole.STYLE,
     ReferenceAssetType.PROP: ReferenceRole.LAYOUT,
 }
+
+
+def _reference_type_for_seed(reference: ProductionSeedReference) -> ReferenceAssetType:
+    role = reference.role.lower()
+    if any(token in role for token in ("presenter", "person", "character", "athlete", "talent")):
+        return ReferenceAssetType.PERSON
+    if "wardrobe" in role or "clothing" in role:
+        return ReferenceAssetType.WARDROBE
+    if "scene" in role or "environment" in role or "location" in role:
+        return ReferenceAssetType.SCENE
+    if reference.fidelity == "style_only" or "style" in role:
+        return ReferenceAssetType.STYLE
+    if reference.fidelity == "exact" or any(
+        token in role for token in ("logo", "mark", "badge", "legal", "ui")
+    ):
+        return ReferenceAssetType.PROP
+    return ReferenceAssetType.PRODUCT
 
 _DURATION_ALIGNMENT_WARNING_PREFIX = "裁剪后时长与原分镜差异过大"
 _OPTIONAL_PREPARATION_STEPS = {
@@ -322,6 +346,14 @@ class ProductionRepository(Protocol):
         self,
         analysis_id: UUID,
     ) -> AnalysisReport | None: ...
+
+    async def save_production_seed(self, seed: ProductionSeed) -> ProductionSeed: ...
+
+    async def get_production_seed(self, seed_id: UUID) -> ProductionSeed | None: ...
+
+    async def get_skill_run(self, run_id: UUID) -> Any | None: ...
+
+    async def get_run_contract_revision(self, revision_id: UUID) -> Any | None: ...
 
     async def save_production_bundle(
         self,
@@ -638,9 +670,7 @@ def _sync_image_prompt_reference_tokens(
             updated = updated.replace(previous_token, next_token)
 
     missing_tokens = [
-        f"@{mention.label}"
-        for mention in next_mentions
-        if f"@{mention.label}" not in updated
+        f"@{mention.label}" for mention in next_mentions if f"@{mention.label}" not in updated
     ]
     if missing_tokens:
         body = updated.lstrip()
@@ -744,13 +774,11 @@ def _still_image_prompt_view(plan: ShotPlan) -> ShotPlan:
     """Expose legacy plans with image-only prompts without mutating stored revisions."""
 
     beats = [
-        item.model_copy(
-            update={"image_prompt": sanitize_still_image_prompt(item.image_prompt)}
-        )
+        item.model_copy(update={"image_prompt": sanitize_still_image_prompt(item.image_prompt)})
         for item in plan.visual_beats
     ]
-    primary_prompt = beats[0].image_prompt if beats else sanitize_still_image_prompt(
-        plan.image_prompt
+    primary_prompt = (
+        beats[0].image_prompt if beats else sanitize_still_image_prompt(plan.image_prompt)
     )
     return plan.model_copy(
         update={
@@ -1501,58 +1529,161 @@ class ProductionService:
             payload.output_width,
             payload.output_height,
         )
-        default_name = f"{record.name} 复刻方案"
-        project = ProductionProject(
-            record_id=record.id,
-            video_id=video.id,
-            base_analysis_id=analysis.id,
-            prompt_source_analysis_id=analysis.id,
-            source_prompt_package_id=report.prompt_package.id,
-            name=_simplified_text(
-                payload.name or default_name,
-                field_name="创作方案名称",
-                max_length=120,
-            ),
+        seed = AnalysisProductionSeedBuilder().build(
+            owner_project_id=record.id,
+            record_name=record.name,
+            video=video,
+            report=report,
             output_aspect_ratio=ratio,
             output_width=width,
             output_height=height,
+        )
+        return await self.create_project_from_seed(
+            seed,
+            analysis_report=report,
+            name_override=payload.name,
             budget_limit_micros=payload.budget_limit_micros,
         )
-        self.workspace.initialize_production(record.id, project.id)
-        revision_id = uuid4()
-        shot_plans = self._initial_shot_plans(
-            project,
-            report,
-            revision_id,
+
+    async def create_project_from_seed(
+        self,
+        seed: ProductionSeed,
+        *,
+        analysis_report: AnalysisReport | None = None,
+        name_override: str | None = None,
+        budget_limit_micros: int | None = None,
+    ) -> ProductionProjectDetail:
+        """Create both analysis and Skill productions from one immutable contract."""
+
+        if seed.origin_type == ProductionSeedOrigin.ANALYSIS:
+            if (
+                analysis_report is None
+                or analysis_report.analysis_id != seed.source_analysis_id
+                or analysis_report.video_id != seed.source_video_id
+            ):
+                raise _fail(409, "analysis_report_missing", "ProductionSeed 缺少匹配的分析报告")
+            origin_type = ProductionOriginType.ANALYSIS
+        else:
+            if analysis_report is not None:
+                raise _fail(422, "skill_seed_analysis_forbidden", "Skill Seed 不接受分析报告")
+            origin_type = ProductionOriginType.SKILL_RUN
+        project = ProductionProject(
+            record_id=seed.owner_project_id,
+            owner_project_id=seed.owner_project_id,
+            origin_type=origin_type,
+            origin_id=seed.origin_id,
+            production_seed_id=seed.id,
+            style_bible_revision_id=seed.style_bible_revision_id,
+            timing_fps=seed.fps,
+            video_id=seed.source_video_id,
+            base_analysis_id=seed.source_analysis_id,
+            prompt_source_analysis_id=seed.source_analysis_id,
+            source_prompt_package_id=seed.source_prompt_package_id,
+            name=_simplified_text(
+                name_override or seed.name,
+                field_name="创作方案名称",
+                max_length=120,
+            ),
+            output_aspect_ratio=seed.output_aspect_ratio,
+            output_width=seed.output_width,
+            output_height=seed.output_height,
+            budget_limit_micros=budget_limit_micros,
         )
-        shot_plans = await self._materialize_visual_beat_source_frames(
-            project,
-            shot_plans,
-            report,
-            revision_id,
-            plan_ids={item.id for item in shot_plans if len(item.visual_beats) > 1},
+        await self.repository.save_production_seed(seed)
+        self.workspace.initialize_production(project.record_id, project.id)
+        revision_id = uuid4()
+        linked_references: list[ReferenceAsset] = []
+        reference_by_usage_id: dict[UUID, ReferenceAsset] = {}
+        if seed.origin_type == ProductionSeedOrigin.SKILL_RUN and seed.reference_assets:
+            image_references = [
+                item for item in seed.reference_assets if item.media_kind == "image"
+            ]
+            if image_references and self.project_assets is None:
+                raise _fail(
+                    503,
+                    "project_asset_bridge_unavailable",
+                    "Skill 素材无法进入创作方案，请检查项目资产服务",
+                )
+            for reference in image_references:
+                if reference.asset_id is None:
+                    raise _fail(409, "skill_asset_missing", "Skill 素材缺少全局资产标识")
+                assert self.project_assets is not None
+                linked = await self.project_assets.link_asset(
+                    project,
+                    reference.asset_id,
+                    _reference_type_for_seed(reference),
+                )
+                if reference.sha256 is not None and linked.sha256 != reference.sha256:
+                    raise _fail(
+                        409,
+                        "skill_asset_digest_mismatch",
+                        f"Skill 素材 {reference.name} 已变化，请重新创建项目快照",
+                    )
+                linked_references.append(linked)
+                reference_by_usage_id[reference.id] = linked
+        if analysis_report is not None:
+            plans = self._initial_shot_plans(project, analysis_report, revision_id)
+            seed_by_order = {item.order: item for item in seed.shots}
+            plans = [
+                plan.model_copy(
+                    update={
+                        "stable_shot_key": seed_by_order[plan.index].stable_shot_key,
+                        "order": seed_by_order[plan.index].order,
+                        "timing_fps": seed.fps,
+                        "start_frame": seed_by_order[plan.index].start_frame,
+                        "duration_frames": seed_by_order[plan.index].duration_frames,
+                        "source_start_frame": seed_by_order[plan.index].source_start_frame,
+                        "source_duration_frames": seed_by_order[plan.index].source_duration_frames,
+                    }
+                )
+                for plan in plans
+                if plan.index in seed_by_order
+            ]
+            plans = await self._materialize_visual_beat_source_frames(
+                project,
+                plans,
+                analysis_report,
+                revision_id,
+                plan_ids={item.id for item in plans if len(item.visual_beats) > 1},
+            )
+        else:
+            plans = self._shot_plans_from_seed(
+                project,
+                seed,
+                revision_id,
+                reference_by_usage_id,
+            )
+        reference_bindings = self._reference_bindings_from_seed(
+            seed,
+            plans,
+            reference_by_usage_id,
         )
         project, revision = await self._prepare_revision(
             project,
             ProductionChangeKind.PROJECT_CREATED,
-            "创建创作方案并冻结基础分析",
+            (
+                "创建创作方案并冻结基础分析"
+                if analysis_report is not None
+                else "从已批准的 Skill 分镜创建创作方案"
+            ),
             revision_id=revision_id,
-            report=report,
-            reference_assets=[],
-            shot_plans=shot_plans,
-            reference_bindings=[],
+            report=analysis_report,
+            reference_assets=linked_references,
+            shot_plans=plans,
+            reference_bindings=reference_bindings,
         )
         await self.repository.save_production_bundle(
             project,
             revision,
-            shot_plans=shot_plans,
+            shot_plans=plans,
+            reference_bindings=reference_bindings,
         )
         return ProductionProjectDetail(
             project=project,
             current_revision=_revision_response(revision),
             revision_count=1,
-            reference_count=0,
-            shot_count=len(shot_plans),
+            reference_count=len(linked_references),
+            shot_count=len(plans),
         )
 
     async def list_projects(
@@ -3520,9 +3651,7 @@ class ProductionService:
                     next_beats = [
                         beat.model_copy(
                             update={
-                                "image_prompt": sanitize_still_image_prompt(
-                                    field.latest_value
-                                ),
+                                "image_prompt": sanitize_still_image_prompt(field.latest_value),
                                 "updated_at": now,
                             }
                         )
@@ -4030,9 +4159,7 @@ class ProductionService:
             if references_changed:
                 plans = await self.repository.list_shot_plans(project.id)
                 all_bindings = await self._all_bindings(plans)
-                current_bindings = [
-                    item for item in all_bindings if item.shot_plan_id == plan.id
-                ]
+                current_bindings = [item for item in all_bindings if item.shot_plan_id == plan.id]
                 binding_inputs = (
                     list(payload.reference_bindings or [])
                     if "reference_bindings" in requested_fields
@@ -4050,8 +4177,7 @@ class ProductionService:
 
                 if "reference_bindings" in requested_fields:
                     assets = {
-                        item.id: item
-                        for item in await self._list_reference_assets(project.id)
+                        item.id: item for item in await self._list_reference_assets(project.id)
                     }
                     selected_ids: set[UUID] = set()
                     binding_mentions: list[PromptAssetMention] = []
@@ -4682,13 +4808,11 @@ class ProductionService:
 
             impacted_approved = any(
                 (
-                    plans_by_id[item.shot_plan_id].image_status
-                    == WorkflowItemStatus.APPROVED
+                    plans_by_id[item.shot_plan_id].image_status == WorkflowItemStatus.APPROVED
                     and self._image_fields_changed(item)
                 )
                 or (
-                    plans_by_id[item.shot_plan_id].video_status
-                    == WorkflowItemStatus.APPROVED
+                    plans_by_id[item.shot_plan_id].video_status == WorkflowItemStatus.APPROVED
                     and self._video_fields_changed(item)
                 )
                 for item in payload.updates
@@ -5268,11 +5392,13 @@ class ProductionService:
                 targets = [
                     plan
                     for plan in targets
-                    if plan.image_status in {
+                    if plan.image_status
+                    in {
                         WorkflowItemStatus.DRAFT,
                         WorkflowItemStatus.READY,
                     }
-                    and plan.video_status in {
+                    and plan.video_status
+                    in {
                         WorkflowItemStatus.DRAFT,
                         WorkflowItemStatus.READY,
                     }
@@ -5282,8 +5408,7 @@ class ProductionService:
             targets = [plan for plan in targets if plan.output_mode != payload.output_mode]
 
             has_downstream_impact = any(
-                self._image_choice_has_downstream_impact(project, plan)
-                for plan in targets
+                self._image_choice_has_downstream_impact(project, plan) for plan in targets
             )
             if has_downstream_impact and not payload.confirm_downstream_stale:
                 raise _fail(
@@ -5561,8 +5686,7 @@ class ProductionService:
             ):
                 raise _fail(422, "video_depth_control_unsupported", "当前模型不支持深度视频控制")
             if not any(
-                item.enabled and item.usable_for_generation
-                for item in plan.depth_control_assets
+                item.enabled and item.usable_for_generation for item in plan.depth_control_assets
             ):
                 raise _fail(409, "depth_control_required", "请先生成并启用一个可用的深度控制视频")
 
@@ -5577,7 +5701,9 @@ class ProductionService:
         plan = await self._require_shot(shot_plan_id)
         self._ensure_shot_active(plan)
         project = await self._require_project(plan.project_id)
-        self._require_expected_revision(project, payload.expected_revision_id)
+        self._require_generation_revision(project, plan, payload)
+        payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
+        await self._validate_skill_video_contract(project, payload)
         allowed_video_steps = {
             ProductionStep.SHOT_VIDEOS,
             ProductionStep.EDITING,
@@ -5808,7 +5934,9 @@ class ProductionService:
         plan = await self._require_shot(shot_plan_id)
         self._ensure_shot_active(plan)
         project = await self._require_project(plan.project_id)
-        self._require_expected_revision(project, payload.expected_revision_id)
+        self._require_generation_revision(project, plan, payload)
+        payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
+        await self._validate_skill_image_contract(project, payload)
         beat = _visual_beat(plan, payload.visual_beat_id)
         if payload.visual_beat_id != beat.id:
             payload = payload.model_copy(update={"visual_beat_id": beat.id})
@@ -5827,8 +5955,7 @@ class ProductionService:
                 state=identity_policy,
                 input_mode=payload.input_mode,
                 source_present=bool(
-                    gateway_plan.source_keyframe_url
-                    or gateway_plan.source_keyframe_relative_path
+                    gateway_plan.source_keyframe_url or gateway_plan.source_keyframe_relative_path
                 ),
             )
         except IdentityPolicyViolation as exc:
@@ -6237,10 +6364,7 @@ class ProductionService:
                 )
                 updated_plan = _sync_shot_visual_beats(
                     plan,
-                    [
-                        updated_beat if item.id == beat.id else item
-                        for item in plan.visual_beats
-                    ],
+                    [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
                     revision_id=revision_id,
                 )
             else:
@@ -6367,7 +6491,7 @@ class ProductionService:
             plan = await self._require_shot(shot_plan_id)
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
-            self._require_expected_revision(project, payload.expected_revision_id)
+            self._require_generation_revision(project, plan, payload)
             beat = _visual_beat(
                 plan,
                 payload.visual_beat_id or queued_run.visual_beat_id,
@@ -6393,13 +6517,20 @@ class ProductionService:
                 if not asset.rights_confirmed:
                     raise _fail(409, "reference_rights_required", "分镜参考资产尚未完成权利确认")
             source_path = (
-                self._resolve_source_keyframe(project, gateway_plan)
-                if uses_images
-                else None
+                self._resolve_source_keyframe(project, gateway_plan) if uses_images else None
             )
+            generation_project = project
+            skill_contract = await self._skill_run_contract(project)
+            if skill_contract is not None:
+                generation_project = project.model_copy(
+                    update={
+                        "output_width": skill_contract.image_width,
+                        "output_height": skill_contract.image_height,
+                    }
+                )
             try:
                 run, candidates = await self.image_gateway.generate(
-                    project,
+                    generation_project,
                     gateway_plan,
                     payload.expected_revision_id,
                     bindings,
@@ -6522,7 +6653,7 @@ class ProductionService:
             plan = await self._require_shot(shot_plan_id)
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
-            self._require_expected_revision(project, payload.expected_revision_id)
+            self._require_generation_revision(project, plan, payload)
             if project.active_step not in {
                 ProductionStep.SHOT_VIDEOS,
                 ProductionStep.EDITING,
@@ -7206,10 +7337,7 @@ class ProductionService:
                 )
             if candidate.status == GenerationCandidateStatus.REJECTED or (
                 candidate.status == GenerationCandidateStatus.ARCHIVED
-                and (
-                    run.kind != GenerationKind.IMAGE
-                    or is_user_deleted_candidate(candidate)
-                )
+                and (run.kind != GenerationKind.IMAGE or is_user_deleted_candidate(candidate))
             ):
                 raise _fail(409, "candidate_unavailable", "该候选已退回或归档")
             beat = (
@@ -7390,10 +7518,7 @@ class ProductionService:
                 and candidate.status != GenerationCandidateStatus.SELECTED
             ):
                 raise _fail(409, "candidate_selection_required", "请先选择候选，再执行审批")
-            if (
-                candidate.status == GenerationCandidateStatus.REJECTED
-                and not direct_video_approval
-            ):
+            if candidate.status == GenerationCandidateStatus.REJECTED and not direct_video_approval:
                 raise _fail(409, "candidate_unavailable", "已退回候选不能审批")
             if candidate.status == GenerationCandidateStatus.ARCHIVED and (
                 not (direct_image_approval or direct_video_approval)
@@ -7656,8 +7781,7 @@ class ProductionService:
             )
             if (
                 run.kind == GenerationKind.VIDEO
-                and plan.approved_video_candidate_id
-                != updated_plan.approved_video_candidate_id
+                and plan.approved_video_candidate_id != updated_plan.approved_video_candidate_id
             ):
                 await self.continuity.invalidate_for_shot(
                     project.id,
@@ -8227,10 +8351,18 @@ class ProductionService:
         project: ProductionProject,
         revision_id: UUID,
     ) -> EditingHandoffManifest:
-        report = await self.repository.get_report_by_analysis(project.base_analysis_id)
-        if report is None:
-            raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
-        source_audio_url = report.media_evidence.audio_url if report.media_evidence else None
+        report = None
+        if project.origin_type == ProductionOriginType.ANALYSIS:
+            if project.base_analysis_id is None:
+                raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+            report = await self.repository.get_report_by_analysis(project.base_analysis_id)
+            if report is None:
+                raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+        source_audio_url = (
+            report.media_evidence.audio_url
+            if report is not None and report.media_evidence
+            else None
+        )
         plans = sorted(
             (
                 item
@@ -8312,7 +8444,7 @@ class ProductionService:
                     if candidate.source_range is not None
                     else round(plan.end_seconds, 3)
                 )
-                evidence = report.evidence_timeline
+                evidence = report.evidence_timeline if report is not None else None
                 transcript_cues = (
                     map_timed_text(
                         evidence.transcript_segments,
@@ -8419,6 +8551,17 @@ class ProductionService:
             audio_strategy=audio_strategy,
             timeline_duration_seconds=round(timeline_cursor, 3),
             clips=clips,
+            exact_overlays=[
+                {
+                    **instruction,
+                    "shot_plan_id": str(plan.id),
+                    "stable_shot_key": plan.stable_shot_key,
+                    "shot_start_frame": plan.start_frame,
+                    "shot_duration_frames": plan.duration_frames,
+                }
+                for plan in plans
+                for instruction in plan.exact_overlay_instructions
+            ],
         )
 
     async def advance(
@@ -9047,6 +9190,169 @@ class ProductionService:
                 generation_candidates=list(candidate_updates_by_id.values()),
             )
         return next_project, next_plans
+
+    @staticmethod
+    def _shot_plans_from_seed(
+        project: ProductionProject,
+        seed: ProductionSeed,
+        revision_id: UUID,
+        reference_by_usage_id: dict[UUID, ReferenceAsset] | None = None,
+    ) -> list[ShotPlan]:
+        reference_by_usage_id = reference_by_usage_id or {}
+        plans: list[ShotPlan] = []
+        for item in sorted(seed.shots, key=lambda shot: shot.order):
+            source_references = [
+                reference_by_usage_id[usage_id]
+                for usage_id in item.image_asset_usage_ids
+                if usage_id in reference_by_usage_id
+            ]
+            identity_references = [
+                reference
+                for reference in source_references
+                if reference.type == ReferenceAssetType.PERSON
+            ]
+            if len(identity_references) > 1:
+                selected = identity_references[(item.order - 1) % len(identity_references)]
+                source_references = [
+                    reference
+                    for reference in source_references
+                    if reference.type != ReferenceAssetType.PERSON or reference.id == selected.id
+                ]
+            primary_reference = next(
+                (
+                    reference
+                    for reference in source_references
+                    if reference.type == ReferenceAssetType.PERSON
+                ),
+                source_references[0] if source_references else None,
+            )
+            mentions = [
+                PromptAssetMention(
+                    reference_asset_id=reference.id,
+                    label=reference.name,
+                )
+                for reference in source_references
+            ]
+            exact_overlays: list[dict[str, Any]] = []
+            for overlay in item.exact_overlays:
+                material = overlay.model_dump(mode="json")
+                reference = reference_by_usage_id.get(overlay.asset_usage_id)
+                if reference is None:
+                    raise _fail(
+                        409,
+                        "exact_overlay_asset_missing",
+                        "确定性叠加素材未进入创作方案，不能继续生成",
+                    )
+                material.update(
+                    {
+                        "asset_id": str(reference.id),
+                        "asset_name": reference.name,
+                        "asset_sha256": reference.sha256,
+                    }
+                )
+                exact_overlays.append(material)
+            start_seconds = frame_to_seconds(item.start_frame, seed.fps)
+            duration_seconds = frame_to_seconds(item.duration_frames, seed.fps)
+            end_seconds = frame_to_seconds(item.start_frame + item.duration_frames, seed.fps)
+            visual_beat = ShotVisualBeat(
+                index=1,
+                title="画面 1",
+                start_ratio=0,
+                end_ratio=1,
+                source_origin="skill",
+                image_prompt=item.image_prompt,
+                image_prompt_mentions=mentions,
+                image_negative_constraints=item.image_negative_constraints,
+                image_status=WorkflowItemStatus.READY,
+                transition_to_next_type="cut",
+                transition_to_next_duration_seconds=0,
+            )
+            plans.append(
+                ShotPlan(
+                    project_id=project.id,
+                    revision_id=revision_id,
+                    source_shot_id=item.stable_shot_key,
+                    stable_shot_key=item.stable_shot_key,
+                    index=item.order,
+                    order=item.order,
+                    timing_fps=seed.fps,
+                    start_frame=item.start_frame,
+                    duration_frames=item.duration_frames,
+                    source_start_frame=None,
+                    source_duration_frames=None,
+                    handle_in_frames=item.handle_in_frames,
+                    handle_out_frames=item.handle_out_frames,
+                    source_kind=ShotSourceKind.SKILL_GENERATED,
+                    source_keyframe_url=(
+                        f"/api/v1/references/{primary_reference.id}/content"
+                        if primary_reference is not None
+                        else None
+                    ),
+                    source_keyframe_relative_path=(
+                        primary_reference.relative_path
+                        if primary_reference is not None
+                        else None
+                    ),
+                    source_keyframe_origin="skill",
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    duration_seconds=duration_seconds,
+                    image_prompt=item.image_prompt,
+                    image_prompt_mentions=mentions,
+                    image_negative_constraints=item.image_negative_constraints,
+                    video_prompt=item.video_prompt,
+                    video_negative_constraints=item.video_negative_constraints,
+                    exact_overlay_instructions=exact_overlays,
+                    image_status=WorkflowItemStatus.READY,
+                    visual_beats=[visual_beat],
+                )
+            )
+        return plans
+
+    @staticmethod
+    def _reference_bindings_from_seed(
+        seed: ProductionSeed,
+        plans: list[ShotPlan],
+        reference_by_usage_id: dict[UUID, ReferenceAsset],
+    ) -> list[ReferenceBinding]:
+        if not reference_by_usage_id:
+            return []
+        shot_by_key = {item.stable_shot_key: item for item in seed.shots}
+        bindings: list[ReferenceBinding] = []
+        for plan in plans:
+            shot = shot_by_key.get(plan.stable_shot_key)
+            if shot is None:
+                continue
+            references = [
+                reference_by_usage_id[usage_id]
+                for usage_id in shot.image_asset_usage_ids
+                if usage_id in reference_by_usage_id
+            ]
+            identity_references = [
+                reference
+                for reference in references
+                if reference.type == ReferenceAssetType.PERSON
+            ]
+            selected_identity_id = (
+                identity_references[(shot.order - 1) % len(identity_references)].id
+                if identity_references
+                else None
+            )
+            for reference in references:
+                if (
+                    reference.type == ReferenceAssetType.PERSON
+                    and reference.id != selected_identity_id
+                ):
+                    continue
+                bindings.append(
+                    ReferenceBinding(
+                        shot_plan_id=plan.id,
+                        reference_asset_id=reference.id,
+                        role=_DEFAULT_ROLE_BY_REFERENCE_TYPE[reference.type],
+                        notes="由 Skill 素材用途账本冻结绑定",
+                    )
+                )
+        return bindings
 
     def _initial_shot_plans(
         self,
@@ -10038,11 +10344,7 @@ class ProductionService:
                     )
             elif kind == VideoPromptReferenceKind.REFERENCE_VIDEO:
                 binding = video_bindings.get(reference_id)
-                if (
-                    binding is None
-                    or binding.media_type.value != "video"
-                    or not binding.enabled
-                ):
+                if binding is None or binding.media_type.value != "video" or not binding.enabled:
                     raise _fail(
                         422,
                         "video_prompt_reference_video_not_bound",
@@ -10519,9 +10821,7 @@ class ProductionService:
     ) -> bool:
         if plan.approved_video_candidate_id is None:
             return False
-        candidate = await self.repository.get_generation_candidate(
-            plan.approved_video_candidate_id
-        )
+        candidate = await self.repository.get_generation_candidate(plan.approved_video_candidate_id)
         if candidate is None:
             return False
         run = await self.repository.get_generation_run(candidate.generation_run_id)
@@ -11033,6 +11333,67 @@ class ProductionService:
             raise _fail(404, "production_not_found", "创作方案不存在")
         return _normalize_optional_preparation_project(project)
 
+    async def _skill_run_contract(self, project: ProductionProject) -> Any | None:
+        if project.origin_type != ProductionOriginType.SKILL_RUN or project.origin_id is None:
+            return None
+        run = await self.repository.get_skill_run(project.origin_id)
+        if run is None:
+            raise _fail(409, "skill_run_missing", "Skill 创作方案缺少运行快照")
+        contract = await self.repository.get_run_contract_revision(run.run_contract_revision_id)
+        if contract is None:
+            raise _fail(409, "run_contract_missing", "Skill 创作方案缺少生成契约")
+        return contract
+
+    async def _validate_skill_image_contract(
+        self,
+        project: ProductionProject,
+        payload: ImageGenerationCreate,
+    ) -> None:
+        contract = await self._skill_run_contract(project)
+        if contract is None:
+            return
+        if payload.model_alias != contract.image_model_id:
+            raise _fail(
+                409,
+                "run_contract_model_mismatch",
+                "图片模型与项目生成契约不一致；更换模型前必须由用户更新并确认契约",
+            )
+        expected_count = contract.candidate_count_by_stage.get("shot_image", 1)
+        if payload.candidate_count != expected_count:
+            raise _fail(409, "run_contract_candidate_count_mismatch", "图片候选数与生成契约不一致")
+        if payload.allow_unknown_cost:
+            raise _fail(409, "unknown_cost_forbidden", "Skill 项目不允许绕过未知成本检查")
+
+    async def _validate_skill_video_contract(
+        self,
+        project: ProductionProject,
+        payload: VideoGenerationCreate,
+    ) -> None:
+        contract = await self._skill_run_contract(project)
+        if contract is None:
+            return
+        if payload.model_alias != contract.video_model_id:
+            raise _fail(
+                409,
+                "run_contract_model_mismatch",
+                "视频模型与项目生成契约不一致；更换模型前必须由用户更新并确认契约",
+            )
+        expected_resolution = contract.video_resolution_label
+        if payload.resolution != expected_resolution:
+            raise _fail(409, "run_contract_resolution_mismatch", "视频分辨率与生成契约不一致")
+        expected_count = contract.candidate_count_by_stage.get("shot_video", 1)
+        if payload.candidate_count != expected_count:
+            raise _fail(409, "run_contract_candidate_count_mismatch", "视频候选数与生成契约不一致")
+        expected_audio = (
+            VideoGenerationAudioStrategy.GENERATE_NATIVE
+            if contract.generate_video_audio
+            else VideoGenerationAudioStrategy.MUTED
+        )
+        if payload.audio_strategy != expected_audio:
+            raise _fail(409, "run_contract_audio_mismatch", "视频音频策略与生成契约不一致")
+        if payload.allow_unknown_cost:
+            raise _fail(409, "unknown_cost_forbidden", "Skill 项目不允许绕过未知成本检查")
+
     async def _require_revision(
         self,
         project: ProductionProject,
@@ -11079,6 +11440,21 @@ class ProductionService:
     ) -> None:
         if project.current_revision_id != expected_revision_id:
             raise _fail(409, "revision_conflict", "创作方案已更新，请刷新后重试")
+
+    @staticmethod
+    def _require_generation_revision(
+        project: ProductionProject,
+        plan: ShotPlan,
+        payload: ImageGenerationCreate | VideoGenerationCreate,
+    ) -> None:
+        if project.current_revision_id == payload.expected_revision_id:
+            return
+        if (
+            payload.expected_shot_revision_id is not None
+            and plan.revision_id == payload.expected_shot_revision_id
+        ):
+            return
+        raise _fail(409, "revision_conflict", "分镜输入已更新，请刷新后重试")
 
     async def _prepare_revision(
         self,
@@ -11145,12 +11521,23 @@ class ProductionService:
         reference_bindings: list[ReferenceBinding] | None,
         video_clip_preparations: list[VideoClipPreparation] | None,
     ) -> dict[str, object]:
-        if report is None:
-            report = await self.repository.get_report_by_analysis(
-                project.prompt_source_analysis_id or project.base_analysis_id
-            )
-        if report is None or report.video_id != project.video_id:
-            raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+        seed: ProductionSeed | None = None
+        if project.origin_type == ProductionOriginType.ANALYSIS:
+            analysis_id = project.prompt_source_analysis_id or project.base_analysis_id
+            if report is None and analysis_id is not None:
+                report = await self.repository.get_report_by_analysis(analysis_id)
+            if report is None or report.video_id != project.video_id:
+                raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+        else:
+            if project.production_seed_id is None:
+                raise _fail(409, "production_seed_missing", "Skill 创作方案缺少 ProductionSeed")
+            seed = await self.repository.get_production_seed(project.production_seed_id)
+            if seed is None or seed.owner_project_id != project.owner_project_id:
+                raise _fail(
+                    409,
+                    "production_seed_missing",
+                    "Skill 创作方案的 ProductionSeed 不存在",
+                )
         assets = (
             list(reference_assets)
             if reference_assets is not None
@@ -11184,14 +11571,19 @@ class ProductionService:
             "schema_version": PRODUCTION_SNAPSHOT_SCHEMA,
             "revision": _revision_response(revision).model_dump(mode="json"),
             "project": project.model_dump(mode="json"),
-            "source_analysis": {
-                "analysis_id": str(report.analysis_id),
-                "generated_at": report.generated_at.isoformat(),
-                "overview": report.overview.model_dump(mode="json"),
-                "entities": [item.model_dump(mode="json") for item in report.entities],
-                "prompt_package": report.prompt_package.model_dump(mode="json"),
-                "shots": [item.model_dump(mode="json") for item in report.shots],
-            },
+            "source_analysis": (
+                {
+                    "analysis_id": str(report.analysis_id),
+                    "generated_at": report.generated_at.isoformat(),
+                    "overview": report.overview.model_dump(mode="json"),
+                    "entities": [item.model_dump(mode="json") for item in report.entities],
+                    "prompt_package": report.prompt_package.model_dump(mode="json"),
+                    "shots": [item.model_dump(mode="json") for item in report.shots],
+                }
+                if report is not None
+                else None
+            ),
+            "production_seed": seed.model_dump(mode="json") if seed is not None else None,
             "references": reference_snapshots,
             "shot_plans": [
                 {

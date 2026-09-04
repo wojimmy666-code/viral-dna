@@ -55,7 +55,13 @@ function optionLabel(options, value) {
   return options.find((item) => item.value === value)?.label || value;
 }
 
+function normalizeLockedResolution(value) {
+  const normalized = String(value || "").toLowerCase();
+  return ["720p", "1080p"].includes(normalized) ? normalized : "project";
+}
+
 export function ProductionExportWorkspace({
+  lockedResolution = null,
   project,
   request,
   resolveUrl,
@@ -68,13 +74,21 @@ export function ProductionExportWorkspace({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [resolution, setResolution] = useState("1080p");
+  const [resolution, setResolution] = useState(() => (
+    lockedResolution ? normalizeLockedResolution(lockedResolution) : "1080p"
+  ));
   const [subtitleMode, setSubtitleMode] = useState("burned");
   const [quality, setQuality] = useState("high");
 
   const activeJob = jobs.find((item) => ACTIVE_STATUSES.has(item.status)) || null;
   const successfulJobs = jobs.filter((item) => item.status === "succeeded");
   const latestSuccess = successfulJobs[0] || null;
+  const resolutionOptions = lockedResolution
+    ? RESOLUTION_OPTIONS.filter((item) => item.value === normalizeLockedResolution(lockedResolution))
+    : RESOLUTION_OPTIONS;
+  useEffect(() => {
+    if (lockedResolution) setResolution(normalizeLockedResolution(lockedResolution));
+  }, [lockedResolution]);
   useEffect(() => {
     let disposed = false;
     async function load() {
@@ -217,10 +231,10 @@ export function ProductionExportWorkspace({
           </div>
 
           <fieldset className="production-export-option-group">
-            <legend>清晰度</legend>
+            <legend>{lockedResolution ? "清晰度（项目锁定）" : "清晰度"}</legend>
             <div className="production-export-option-row">
-              {RESOLUTION_OPTIONS.map((option) => (
-                <button className={resolution === option.value ? "active" : ""} key={option.value} onClick={() => setResolution(option.value)} type="button">
+              {resolutionOptions.map((option) => (
+                <button className={resolution === option.value ? "active" : ""} disabled={Boolean(lockedResolution)} key={option.value} onClick={() => setResolution(option.value)} type="button">
                   <strong>{option.label}</strong><small>{option.description}</small>
                 </button>
               ))}

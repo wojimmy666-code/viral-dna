@@ -1,6 +1,7 @@
 const NAV_PATHS = Object.freeze({
   "new-analysis": "/projects/new",
   history: "/projects",
+  skills: "/skills",
   assets: "/assets",
   categories: "/category-profiles",
   "platform-connections": "/settings/platform-connections",
@@ -29,6 +30,13 @@ export function recordWorkspacePath(recordId) {
     : NAV_PATHS.history;
 }
 
+export function skillProjectWorkspacePath(projectId) {
+  const normalizedId = String(projectId || "").trim();
+  return normalizedId
+    ? `/projects/${encodeURIComponent(normalizedId)}/skill`
+    : NAV_PATHS.skills;
+}
+
 export function resolveAppRoute(pathname) {
   const normalized = normalizePathname(pathname);
   if (normalized === "/projects/new") {
@@ -42,6 +50,36 @@ export function resolveAppRoute(pathname) {
   }
   if (normalized === NAV_PATHS.history) {
     return { name: "history", activeNav: "history", recordId: "", lifecycle: "active" };
+  }
+  if (normalized === NAV_PATHS.skills) {
+    return { name: "skill-plaza", activeNav: "skills", recordId: "", skillSlug: "" };
+  }
+  const skillStartMatch = normalized.match(/^\/skills\/([^/]+)\/start$/);
+  if (skillStartMatch) {
+    return {
+      name: "skill-start",
+      activeNav: "skills",
+      recordId: "",
+      skillSlug: decodeURIComponent(skillStartMatch[1]),
+    };
+  }
+  const skillDetailMatch = normalized.match(/^\/skills\/([^/]+)$/);
+  if (skillDetailMatch) {
+    return {
+      name: "skill-detail",
+      activeNav: "skills",
+      recordId: "",
+      skillSlug: decodeURIComponent(skillDetailMatch[1]),
+    };
+  }
+  const skillProjectMatch = normalized.match(/^\/projects\/([^/]+)\/skill$/);
+  if (skillProjectMatch) {
+    return {
+      name: "skill-workspace",
+      activeNav: "project-detail",
+      recordId: decodeURIComponent(skillProjectMatch[1]),
+      skillSlug: "",
+    };
   }
   const recordMatch = normalized.match(/^\/projects\/([^/]+)$/);
   if (recordMatch) {
@@ -102,7 +140,7 @@ export function resolveAppRoute(pathname) {
       settingsSection: "profile",
     };
   }
-  const adminMatch = normalized.match(/^\/admin\/(providers|models|media|runtime)$/);
+  const adminMatch = normalized.match(/^\/admin\/(providers|models|media|runtime|skills)$/);
   if (adminMatch || normalized === "/admin") {
     return {
       name: "platform-admin",

@@ -22,7 +22,11 @@ from viral_dna_api.models import (
     TimelineRenderStatus,
     VideoClipAudioMode,
 )
-from viral_dna_api.timeline_export import TimelineExportService, export_dimensions
+from viral_dna_api.timeline_export import (
+    TimelineExportService,
+    TimelineRenderError,
+    export_dimensions,
+)
 from viral_dna_api.workspace import WorkspaceManager
 
 
@@ -156,6 +160,30 @@ def test_export_dimensions_preserve_aspect_and_even_pixels() -> None:
     assert export_dimensions(1920, 1080, TimelineExportResolution.P1080) == (1920, 1080)
     assert export_dimensions(1080, 1350, TimelineExportResolution.P1080) == (1080, 1350)
     assert export_dimensions(1081, 1921, TimelineExportResolution.PROJECT) == (1080, 1920)
+
+
+def test_exact_overlay_window_follows_the_current_clip_and_rejects_unknown_placement() -> None:
+    timeline = build_timeline(uuid4())
+    clip = timeline.clips[0]
+    assert TimelineExportService._exact_overlay_window(
+        timeline,
+        {
+            "shot_plan_id": str(clip.shot_plan_id),
+            "start_frame": 5,
+            "end_frame": 10,
+        },
+    ) == (0, 60)
+    assert TimelineExportService._exact_overlay_window(
+        timeline,
+        {"start_frame": 5, "end_frame": 10},
+    ) == (5, 10)
+    assert TimelineExportService._exact_overlay_position("bottom_right", 1920, 1080) == (
+        "W-w-77",
+        "H-h-43",
+    )
+    with pytest.raises(TimelineRenderError) as unsupported:
+        TimelineExportService._exact_overlay_position("follow_subject", 1920, 1080)
+    assert unsupported.value.code == "exact_overlay_manual_post_required"
 
 
 @pytest.mark.asyncio

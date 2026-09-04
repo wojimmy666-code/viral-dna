@@ -181,12 +181,37 @@ def test_sqlite_migrates_legacy_database_without_losing_existing_rows(
         "approval_events",
         "continuity_reports",
         "shot_video_generation_drafts",
+        "projects",
+        "skill_version_snapshots",
+        "brand_snapshots",
+        "creative_brief_revisions",
+        "asset_usages",
+        "claim_evidence",
+        "run_contract_revisions",
+        "creative_treatment_revisions",
+        "style_bible_revisions",
+        "look_tests",
+        "outline_revisions",
+        "shot_manifest_revisions",
+        "skill_runs",
+        "skill_step_runs",
+        "gate_decisions",
+        "skill_artifacts",
+        "artifact_dependencies",
+        "production_seeds",
+        "timeline_v3_revisions",
+        "audio_assets",
+        "mix_revisions",
+        "delivery_manifests",
     }.issubset(tables)
     assert "idx_production_projects_record_id" in indexes
     assert "idx_generation_runs_shot_plan_id" in indexes
     assert "idx_video_clip_preparations_project_id" in indexes
     assert "idx_continuity_reports_project_id" in indexes
     assert "idx_shot_video_generation_drafts_project_id" in indexes
+    assert "idx_projects_kind" in indexes
+    assert "idx_skill_runs_project_id" in indexes
+    assert "idx_delivery_manifests_project_id" in indexes
     assert legacy_payload == ('{"legacy":true}',)
 
 

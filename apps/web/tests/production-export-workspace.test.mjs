@@ -37,6 +37,15 @@ test("binds final renders to an immutable timeline revision and exposes presets"
   assert.match(exportSource, /timeline\/final-renders/);
 });
 
+test("locks Skill exports to the resolution frozen in the run contract", () => {
+  assert.match(workflowSource, /lockedExportResolution = null/);
+  assert.match(workflowSource, /lockedResolution=\{lockedExportResolution\}/);
+  assert.match(exportSource, /lockedResolution = null/);
+  assert.match(exportSource, /normalizeLockedResolution\(lockedResolution\)/);
+  assert.match(exportSource, /disabled=\{Boolean\(lockedResolution\)\}/);
+  assert.match(exportSource, /清晰度（项目锁定）/);
+});
+
 test("shows compact progress and downloadable render history", () => {
   assert.match(exportSource, /export-jobs\/\$\{activeJob\.id\}/);
   assert.match(exportSource, /export-jobs\/\$\{job\.id\}\/download/);

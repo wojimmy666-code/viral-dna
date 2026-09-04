@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+  <title id="title">电影感产品故事</title>
+  <desc id="desc">深色摄影棚中的银色产品与定向光束</desc>
+  <rect width="960" height="540" fill="#17171d"/>
+  <path d="M0 430 960 284v256H0Z" fill="#24242c"/>
+  <path d="m655 0-98 0-210 540h184Z" fill="#eeeafd" opacity=".13"/>
+  <ellipse cx="505" cy="424" rx="225" ry="44" fill="#0d0d12" opacity=".7"/>
+  <rect x="364" y="152" width="270" height="266" rx="22" fill="#d7d5dd"/>
+  <rect x="389" y="177" width="220" height="216" rx="12" fill="#f3f2f6"/>
+  <rect x="428" y="219" width="142" height="116" rx="8" fill="#25232d"/>
+  <path d="M446 247h105M446 272h78M446 307h92" stroke="#d9d5ff" stroke-width="7" stroke-linecap="round"/>
+  <text x="56" y="76" fill="#ffffff" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="32" font-weight="600">电影感产品故事</text>
+  <text x="58" y="112" fill="#c8c7d0" font-family="Segoe UI,Microsoft YaHei,sans-serif" font-size="18">CINEMATIC PRODUCT STORY</text>
+</svg>

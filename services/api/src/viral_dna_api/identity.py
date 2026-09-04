@@ -42,6 +42,9 @@ PLATFORM_ADMIN_PERMISSIONS = [
     "platform.settings.read",
     "platform.settings.write",
     "platform.billing.read",
+    "platform.skills.read",
+    "platform.skills.write",
+    "platform.skills.publish",
 ]
 
 

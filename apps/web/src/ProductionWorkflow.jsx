@@ -737,7 +737,7 @@ function ProductionList({
             {inRecycleBin ? <ArrowLeft size={16} /> : <Trash size={16} />}
             {inRecycleBin ? "返回创作方案" : `回收站${trashedCount ? `（${trashedCount}）` : ""}`}
           </button>
-          {!inRecycleBin && (
+          {!inRecycleBin && onCreate && (
             <button className="primary-button compact" onClick={onCreate} type="button">
               <Plus size={16} weight="bold" />
               创建方案
@@ -773,7 +773,7 @@ function ProductionList({
                 : "基础镜头、实体和提示词会冻结到首个版本，之后可以安全修改和回退。"}
             </p>
           </div>
-          {!inRecycleBin && (
+          {!inRecycleBin && onCreate && (
             <button className="primary-button compact" onClick={onCreate} type="button">
               创建创作方案
             </button>
@@ -1581,6 +1581,7 @@ function BranchDialog({ revision, name, setName, busy, error, onClose, onSubmit 
 }
 
 export function ProductionHub({
+  allowProjectCreation = true,
   recordId,
   analysisId,
   sourceTitle,
@@ -1597,6 +1598,7 @@ export function ProductionHub({
   videoGenerationSettingsError = "",
   videoGenerationSettingsStatus = "ready",
   listSignal = 0,
+  lockedExportResolution = null,
   navigationTarget = null,
   onNavigationChange,
   onNotificationsChanged,
@@ -3658,7 +3660,7 @@ export function ProductionHub({
           error={lifecycleError}
           lifecycle={projectLifecycle}
           loading={lifecycleLoading}
-          onCreate={openCreate}
+          onCreate={allowProjectCreation ? openCreate : null}
           onLifecycleChange={changeProjectLifecycle}
           onOpen={openProject}
           onPurge={(project) => openProjectLifecycleAction(project, "purge")}
@@ -3667,7 +3669,7 @@ export function ProductionHub({
           projects={lifecycleProjects}
           trashedCount={trashedProjects.length}
         />
-        {createOpen && (
+        {allowProjectCreation && createOpen && (
           <CreateProjectDialog
             busy={busy}
             draft={createDraft}
@@ -3882,6 +3884,7 @@ export function ProductionHub({
             )}
             {activeSection === "export" && (
               <ProductionExportWorkspace
+                lockedResolution={lockedExportResolution}
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}
                 onProjectChanged={async () => {
@@ -3898,7 +3901,7 @@ export function ProductionHub({
         </>
       )}
 
-      {createOpen && <CreateProjectDialog busy={busy} draft={createDraft} error={actionError} onClose={() => setCreateOpen(false)} onSubmit={submitCreate} setDraft={setCreateDraft} />}
+      {allowProjectCreation && createOpen && <CreateProjectDialog busy={busy} draft={createDraft} error={actionError} onClose={() => setCreateOpen(false)} onSubmit={submitCreate} setDraft={setCreateDraft} />}
       {referenceMode && <ReferenceAssetDialog busy={busy} draft={referenceDraft} error={actionError} file={referenceFile} mode={referenceMode} onClose={() => setReferenceMode(null)} onSubmit={submitReference} previewUrl={referencePreviewUrl} setDraft={setReferenceDraft} setFile={selectReferenceFile} />}
       {archiveAsset && <ArchiveDialog asset={archiveAsset} busy={busy} error={actionError} onClose={() => setArchiveAsset(null)} onConfirm={confirmArchive} />}
       {assetPickerOpen && (

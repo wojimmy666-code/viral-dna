@@ -747,6 +747,7 @@ class TimelineService:
                 "clips": next_clips,
                 "audio_track": audio_track,
                 "subtitle_cues": next_cues,
+                "exact_overlays": handoff.exact_overlays,
                 "last_preview_job_id": None,
                 "last_export_job_id": None,
                 "updated_at": utc_now(),
@@ -802,6 +803,7 @@ class TimelineService:
                 timeline_end_seconds=handoff.timeline_duration_seconds,
             ),
             subtitle_cues=subtitles,
+            exact_overlays=handoff.exact_overlays,
         )
         timeline = self._recompute_timeline(timeline)
         validation = self.validate_timeline(timeline)
