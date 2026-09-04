@@ -25,6 +25,18 @@ def test_seed_catalog_and_published_version_immutability(tmp_path) -> None:
             "creator-explainer",
             "rhythmic-sports-short",
         }
+        cinematic = next(
+            item for item in catalog.items if item.slug == "cinematic-product-story"
+        )
+        spec = cinematic.current_version.manifest.spec
+        assert cinematic.current_version.manifest.api_version == "viraldna.video-skill/v2"
+        assert spec.narrative.shot_count.min == 15
+        assert spec.narrative.shot_count.max == 18
+        assert len(spec.narrative.shot_archetypes) == 17
+        assert spec.editing.allowed_transitions == ["hard_cut"]
+        assert spec.audio["editing_music"]["bpm"] == 124
+        assert spec.quality.minimum_prompt_score == 85
+        assert spec.canonical_cases[0].shot_count == 17
 
         source = catalog.items[0].current_version.manifest
         next_manifest = source.model_copy(

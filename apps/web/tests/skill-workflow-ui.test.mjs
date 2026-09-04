@@ -234,3 +234,22 @@ test("keeps Look Test generation observable, incremental and cancellable", () =>
   assert.match(wizardSource, /status === "succeeded" && candidates\.length === 0/);
   assert.match(wizardSource, /上一轮没有生成有效图片，请重新生成/);
 });
+
+test("makes storyboard authoring observable, recoverable and model-auditable", () => {
+  assert.match(wizardSource, /<StoryboardProgress/);
+  assert.match(wizardSource, /storyboard\/cancel/);
+  assert.match(wizardSource, /heartbeatLabel\(step\?\.last_heartbeat_at, clockNow\)/);
+  assert.match(wizardSource, /文案模型 \{manifest\.authoring_model/);
+  assert.match(wizardSource, /大纲与分镜已开始生成/);
+});
+
+test("reviews structured directing fields and auto-saves storyboard edits", () => {
+  assert.match(wizardSource, /<ContinuitySummary manifest=\{manifest\}/);
+  assert.match(wizardSource, /creative_spec/);
+  assert.match(wizardSource, /prompt_quality/);
+  assert.match(wizardSource, /AI 优化此镜头/);
+  assert.match(wizardSource, /修改会自动保存/);
+  assert.match(wizardSource, /<AutosaveStatus/);
+  assert.match(wizardSource, /setTimeout\(\(\) => \{\s*void saveStoryboard\(\);\s*\}, 900\)/);
+  assert.doesNotMatch(wizardSource, />保存大纲与分镜</);
+});

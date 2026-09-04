@@ -13,6 +13,9 @@ from viral_dna_api.skill_workflow.contracts import (
     AssetUsageInput,
     BrandSnapshotCreate,
     CreativeBriefInput,
+    ExecutionStatus,
+    GateActorType,
+    GateDecision,
     GateDecisionRequest,
     RunContractInput,
     SkillGate,
@@ -264,7 +267,48 @@ def test_preflight_enforces_skill_inputs_and_manual_gate() -> None:
         assert "品牌视觉风格：Restrained editorial lighting" in workspace.style_bible.positive_lock
         assert "Unsupported absolute claims" in workspace.style_bible.negative_lock
         assert workspace.style_bible.texture["category_scenes"] == ["Creator desk"]
+        assert workspace.style_bible.typography["render_mode"] == "deterministic_overlay"
+        assert workspace.style_bible.typography["default_fonts"]["zh_display"]
+        assert workspace.style_bible.sound["editing_music"]["bpm"] == 124
+        assert workspace.style_bible.editing["allowed_transitions"] == ["hard_cut"]
         assert workspace.look_test is not None
+
+        await store.save_gate_decision(
+            GateDecision(
+                project_id=project.id,
+                skill_run_id=run.run.id,
+                gate=SkillGate.STYLE_APPROVED,
+                decision="approve",
+                actor_type=GateActorType.USER,
+                actor_id=account.account.id,
+                related_revision_ids=[workspace.style_bible.id, workspace.look_test.id],
+            )
+        )
+        compiling = await service.compile_storyboard(run.run.id)
+        compile_step = next(
+            item for item in compiling.steps if item.operation == "compile_storyboard"
+        )
+        assert compile_step.execution_status in {
+            ExecutionStatus.RUNNING,
+            ExecutionStatus.SUCCEEDED,
+        }
+        storyboard_task = service._storyboard_tasks.get(run.run.id)
+        if storyboard_task is not None:
+            await storyboard_task
+        storyboard_workspace = await service.workspace(project.id)
+        assert storyboard_workspace.shot_manifest is not None
+        assert len(storyboard_workspace.shot_manifest.shots) == 15
+        assert all(
+            item.prompt_quality.passed
+            for item in storyboard_workspace.shot_manifest.shots
+        )
+        assert storyboard_workspace.shot_manifest.authoring_model
+        completed_steps = await store.list_skill_step_runs(run.run.id)
+        completed_compile = next(
+            item for item in completed_steps if item.operation == "compile_storyboard"
+        )
+        assert completed_compile.execution_status == ExecutionStatus.SUCCEEDED
+        assert completed_compile.progress == 100
 
         next_brief_payload = current_brief.model_dump(
             mode="python",

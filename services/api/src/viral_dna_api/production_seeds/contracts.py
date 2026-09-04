@@ -133,6 +133,7 @@ class ProductionSeedAudioIntent(BaseModel):
     music_strategy: Literal["none", "select", "generate"] = "none"
     narration_strategy: Literal["none", "recorded", "generated"] = "none"
     sfx_enabled: bool = False
+    creative_direction: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProductionSeedSubtitleIntent(BaseModel):

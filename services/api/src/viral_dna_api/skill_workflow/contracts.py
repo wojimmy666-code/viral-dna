@@ -369,6 +369,8 @@ class StyleBibleRevision(BaseModel):
     motion: dict[str, Any] = Field(default_factory=dict)
     texture: dict[str, Any] = Field(default_factory=dict)
     rhythm: dict[str, Any] = Field(default_factory=dict)
+    sound: dict[str, Any] = Field(default_factory=dict)
+    editing: dict[str, Any] = Field(default_factory=dict)
     product_identity_lock: list[str] = Field(default_factory=list, max_length=50)
     character_identity_lock: list[str] = Field(default_factory=list, max_length=50)
     positive_lock: list[str] = Field(default_factory=list, max_length=50)
@@ -433,6 +435,12 @@ class OutlineBeat(BaseModel):
     purpose: str = Field(min_length=1, max_length=1000)
     target_duration_frames: int = Field(gt=0)
     message: str = Field(default="", max_length=2000)
+    audience_takeaway: str = Field(default="", max_length=2000)
+    content_units: list[str] = Field(default_factory=list, max_length=30)
+    suggested_shot_count: int = Field(default=1, ge=1, le=100)
+    rhythm: str = Field(default="", max_length=1000)
+    transition_strategy: str = Field(default="", max_length=1000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
 
 
 class OutlineRevision(BaseModel):
@@ -445,12 +453,69 @@ class OutlineRevision(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ShotActionPhase(BaseModel):
+    order: int = Field(ge=1, le=20)
+    label: str = Field(default="动作阶段", min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1600)
+
+
+class ShotCameraPlan(BaseModel):
+    lens_mm: int = Field(default=50, ge=8, le=1200)
+    framing: str = Field(default="中近景", min_length=1, max_length=300)
+    position: str = Field(default="稳定机位", min_length=1, max_length=500)
+    motion: str = Field(default="固定机位", min_length=1, max_length=1000)
+    motion_extent: str = Field(default="", max_length=500)
+    focus: str = Field(default="主体保持清晰", min_length=1, max_length=800)
+
+
+class ShotSoundPlan(BaseModel):
+    synchronous_foley: list[str] = Field(default_factory=list, max_length=20)
+    ambience: str = Field(default="", max_length=1000)
+    music_cue: str = Field(default="", max_length=1000)
+    forbidden: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ShotTransitionPlan(BaseModel):
+    kind: str = Field(default="hard_cut", min_length=1, max_length=80)
+    cut_in: str = Field(default="", max_length=1000)
+    cut_out: str = Field(default="", max_length=1000)
+    continuity_note: str = Field(default="", max_length=1000)
+
+
+class ShotCreativeSpec(BaseModel):
+    archetype_key: str = Field(default="product_hero", min_length=1, max_length=80)
+    title: str = Field(min_length=1, max_length=160)
+    narrative_purpose: str = Field(min_length=1, max_length=1000)
+    scene: str = Field(min_length=1, max_length=2000)
+    subject: str = Field(min_length=1, max_length=2000)
+    initial_state: str = Field(min_length=1, max_length=1600)
+    action_phases: list[ShotActionPhase] = Field(min_length=1, max_length=20)
+    end_state: str = Field(min_length=1, max_length=1600)
+    camera: ShotCameraPlan = Field(default_factory=ShotCameraPlan)
+    lighting: str = Field(min_length=1, max_length=1600)
+    color_and_texture: str = Field(min_length=1, max_length=1600)
+    sound: ShotSoundPlan = Field(default_factory=ShotSoundPlan)
+    transition: ShotTransitionPlan = Field(default_factory=ShotTransitionPlan)
+    continuity_locks: list[str] = Field(default_factory=list, max_length=50)
+    failure_constraints: list[str] = Field(default_factory=list, max_length=50)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+
+
+class PromptQualityReport(BaseModel):
+    score: int = Field(default=0, ge=0, le=100)
+    passed: bool = False
+    issues: list[str] = Field(default_factory=list, max_length=50)
+    checks: dict[str, bool] = Field(default_factory=dict)
+    rewrite_attempts: int = Field(default=0, ge=0, le=5)
+
+
 class ShotManifestShot(BaseModel):
     stable_shot_key: str = Field(pattern=r"^shot_[a-z0-9]{8,64}$")
     order: int = Field(ge=1)
     narrative_role: str = Field(min_length=1, max_length=80)
     start_frame: int = Field(ge=0)
     duration_frames: int = Field(gt=0)
+    generation_duration_seconds: int = Field(default=4, ge=1, le=30)
     handle_in_frames: int = Field(default=0, ge=0, le=600)
     handle_out_frames: int = Field(default=0, ge=0, le=600)
     description: str = Field(min_length=1, max_length=4000)
@@ -466,6 +531,9 @@ class ShotManifestShot(BaseModel):
     caption_intent: str = Field(default="", max_length=2000)
     output_mode: Literal["image_to_video"] = "image_to_video"
     required_model_capabilities: list[str] = Field(default_factory=list, max_length=30)
+    creative_spec: ShotCreativeSpec | None = None
+    prompt_quality: PromptQualityReport = Field(default_factory=PromptQualityReport)
+    locked_fields: list[str] = Field(default_factory=list, max_length=30)
     input_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
@@ -477,6 +545,12 @@ class ShotManifestRevision(BaseModel):
     style_bible_revision_id: UUID
     fps: int = Field(ge=1, le=120)
     shots: list[ShotManifestShot] = Field(min_length=1, max_length=500)
+    continuity_bible: dict[str, Any] = Field(default_factory=dict)
+    edit_plan: dict[str, Any] = Field(default_factory=dict)
+    project_negative_constraints: list[str] = Field(default_factory=list, max_length=100)
+    authoring_provider: str | None = Field(default=None, max_length=120)
+    authoring_model: str | None = Field(default=None, max_length=200)
+    authoring_request_id: str | None = Field(default=None, max_length=240)
     input_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=utc_now)
@@ -501,6 +575,19 @@ class ShotManifestUpdate(BaseModel):
     style_bible_revision_id: UUID
     fps: int = Field(ge=1, le=120)
     shots: list[ShotManifestShot] = Field(min_length=1, max_length=500)
+    continuity_bible: dict[str, Any] = Field(default_factory=dict)
+    edit_plan: dict[str, Any] = Field(default_factory=dict)
+    project_negative_constraints: list[str] = Field(default_factory=list, max_length=100)
+
+
+class ShotPromptRewriteRequest(BaseModel):
+    parts: list[Literal["description", "image_prompt", "video_prompt"]] = Field(
+        default_factory=lambda: ["image_prompt", "video_prompt"],
+        min_length=1,
+        max_length=3,
+    )
+    instruction: str = Field(default="", max_length=2000)
+    locked_fields: list[str] = Field(default_factory=list, max_length=30)
 
 
 class LookTestSelection(BaseModel):
@@ -553,6 +640,11 @@ class SkillStepRun(BaseModel):
     provider: str | None = Field(default=None, max_length=120)
     model: str | None = Field(default=None, max_length=200)
     request_id: str | None = Field(default=None, max_length=240)
+    input_tokens: int = Field(default=0, ge=0)
+    cached_input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    reasoning_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
     estimated_cost_micros: int = Field(default=0, ge=0)
     actual_cost_micros: int = Field(default=0, ge=0)
     started_at: datetime | None = None

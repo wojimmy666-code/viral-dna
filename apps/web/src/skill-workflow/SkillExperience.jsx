@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowsClockwise,
+  Camera,
   Check,
   CheckCircle,
   CircleNotch,
@@ -9,20 +11,24 @@ import {
   FilmStrip,
   Heart,
   ImageSquare,
+  Lock,
   MagicWand,
   MagnifyingGlass,
   MusicNotes,
+  SpeakerHigh,
   ShieldCheck,
   Sparkle,
   Star,
   TextT,
   VideoCamera,
   WarningCircle,
+  XCircle,
 } from "@phosphor-icons/react";
 import { ProductionHub } from "../ProductionWorkflow.jsx";
 import { CategoryProfilePicker } from "../category-profiles/index.js";
 import {
   InlineMessage,
+  AutosaveStatus,
   PageHeader,
   PageShell,
   SectionHeader,
@@ -949,6 +955,147 @@ function LookTestWorkspace({
   );
 }
 
+function StoryboardProgress({ clockNow, onCancel, onRetry, step }) {
+  const running = step?.execution_status === "running";
+  const failed = step?.execution_status === "failed";
+  const cancelled = step?.execution_status === "cancelled";
+  const progress = Math.max(0, Math.min(100, Number(step?.progress || 0)));
+  const phase = progress < 18
+    ? "整理品牌、品类和素材事实"
+    : progress < 55
+      ? "导演模型规划大纲与镜头"
+      : progress < 90
+        ? "编译逐镜头图片与视频提示词"
+        : "检查连续性与提示词质量";
+  return (
+    <section className={`skill-storyboard-progress ${failed ? "is-error" : ""}`} aria-live="polite">
+      <div className="skill-storyboard-progress-heading">
+        <div>
+          {running ? <CircleNotch className="spin" size={18} /> : failed ? <WarningCircle size={18} /> : <XCircle size={18} />}
+          <strong>{running ? phase : failed ? "大纲与分镜生成失败" : "大纲与分镜生成已停止"}</strong>
+        </div>
+        <span>{progress}%</span>
+      </div>
+      <div className="skill-storyboard-progress-track"><span style={{ width: `${progress}%` }} /></div>
+      <div className="skill-storyboard-progress-meta">
+        <span>{step?.model || "正在确定文案模型"}</span>
+        <span>{heartbeatLabel(step?.last_heartbeat_at, clockNow)}</span>
+      </div>
+      {(failed || cancelled) && step?.error_message && <p>{step.error_message}</p>}
+      <div className="skill-storyboard-progress-actions">
+        {running && <button className="secondary-button compact" onClick={onCancel} type="button">停止生成</button>}
+        {(failed || cancelled) && step?.retryable !== false && <button className="primary-button compact" onClick={onRetry} type="button">继续生成</button>}
+      </div>
+    </section>
+  );
+}
+
+function ContinuitySummary({ manifest }) {
+  const continuity = manifest?.continuity_bible || {};
+  const labels = {
+    world: "世界与空间",
+    product: "产品身份",
+    character: "人物",
+    palette: "主色",
+    lighting: "光线",
+    cinematography: "摄影",
+    texture: "质感",
+    sound: "声音",
+    typography: "字体与图形",
+  };
+  const items = Object.entries(continuity).filter(([, value]) => value);
+  if (!items.length) return null;
+  return (
+    <section className="skill-continuity-summary">
+      <SectionHeader description="这些规则会按镜头需要完整展开，保证独立生成时仍属于同一支影片。" title="全片连续性基准" />
+      <dl>
+        {items.map(([key, value]) => <div key={key}><dt>{labels[key] || key}</dt><dd>{String(value)}</dd></div>)}
+      </dl>
+    </section>
+  );
+}
+
+function StoryboardReview({ busy, manifest, outline, onEdit, onRewrite, rewritingShotKey }) {
+  const editPlan = manifest?.edit_plan || {};
+  const fps = Number(manifest?.fps || 24);
+  return (
+    <div className="skill-storyboard-review">
+      <div className="skill-storyboard-toolbar">
+        <div>
+          <strong>{manifest.shots.length} 个分镜</strong>
+          <span>{editPlan.transition === "hard_cut" ? "全片硬切" : editPlan.transition || "按镜头设计转场"} · 文案模型 {manifest.authoring_model || "本地导演编译器"}</span>
+        </div>
+        <button className="secondary-button compact" disabled={busy} onClick={onEdit} type="button">编辑大纲与提示词</button>
+      </div>
+      <ContinuitySummary manifest={manifest} />
+      {Object.keys(editPlan).length > 0 && <section className="skill-edit-recipe">
+        <SectionHeader description="生成长度与成片保留长度分开管理。" title="剪辑节奏" />
+        <dl>
+          <div><dt>成片</dt><dd>{Number(editPlan.target_duration_seconds || 0).toFixed(2)} 秒</dd></div>
+          <div><dt>细节 / 环境</dt><dd>{Math.round(Number(editPlan.detail_ratio || 0) * 100)}% / {Math.round(Number(editPlan.environment_ratio || 0) * 100)}%</dd></div>
+          <div><dt>配乐节拍</dt><dd>{editPlan.music_bpm || "—"} BPM</dd></div>
+          <div><dt>转场</dt><dd>{editPlan.transition === "hard_cut" ? "直接硬切" : editPlan.transition || "—"}</dd></div>
+        </dl>
+      </section>}
+      <section className="skill-outline-review">
+        <SectionHeader description="每个段落都明确观众收获、镜头数量和声音衔接。" title="导演大纲" />
+        <ol>
+          {(outline?.beats || []).map((beat) => (
+            <li key={beat.stable_beat_key}>
+              <span>{String(beat.order).padStart(2, "0")}</span>
+              <div><strong>{beat.title}</strong><p>{beat.purpose}</p><small>{beat.suggested_shot_count} 个镜头 · {(beat.target_duration_frames / fps).toFixed(2)} 秒 · {beat.rhythm}</small></div>
+              <p>{beat.audience_takeaway || beat.message}</p>
+            </li>
+          ))}
+        </ol>
+      </section>
+      <section className="skill-shot-manifest">
+        <SectionHeader description="每个镜头包含可检查的导演设计，以及独立完整的图片与视频提示词。" title="结构化分镜" />
+        {manifest.shots.map((shot) => {
+          const spec = shot.creative_spec || {};
+          const camera = spec.camera || {};
+          const sound = spec.sound || {};
+          const transition = spec.transition || {};
+          return (
+            <article key={shot.stable_shot_key}>
+              <header>
+                <span>{String(shot.order).padStart(2, "0")}</span>
+                <div><strong>{spec.title || shot.narrative_role}</strong><small>{shot.narrative_role}</small></div>
+                <div className="skill-shot-timing"><span>成片 {(shot.duration_frames / fps).toFixed(2)} 秒</span><span>生成 {shot.generation_duration_seconds} 秒</span></div>
+                {Object.keys(shot.prompt_quality?.checks || {}).length > 0 && <StatusBadge tone={shot.prompt_quality?.passed ? "success" : "warning"}>提示词 {shot.prompt_quality?.score || 0} 分</StatusBadge>}
+              </header>
+              <p>{spec.narrative_purpose || shot.description}</p>
+              <div className="skill-shot-facts">
+                <span><Camera size={15} />{camera.lens_mm ? `${camera.lens_mm}mm · ` : ""}{camera.framing || "景别待确认"} · {camera.motion || "机位待确认"}</span>
+                <span><SpeakerHigh size={15} />{(sound.synchronous_foley || []).join("、") || "拟音待确认"}</span>
+                <span><ArrowRight size={15} />{transition.cut_out || "动作完成点切出"}</span>
+              </div>
+              <details>
+                <summary>查看导演设计与完整提示词</summary>
+                <div className="skill-shot-detail-grid">
+                  <section><strong>动作设计</strong><p>{spec.initial_state}</p><ol>{(spec.action_phases || []).map((phase) => <li key={phase.order}>{phase.description}</li>)}</ol><p>{spec.end_state}</p></section>
+                  <section><strong>图片提示词</strong><p>{shot.image_prompt}</p></section>
+                  <section><strong>视频提示词</strong><p>{shot.video_prompt}</p></section>
+                  <section><strong>镜头负面约束</strong><p>{(shot.video_negative_constraints || []).join("；")}</p></section>
+                </div>
+              </details>
+              <div className="skill-shot-actions">
+                <button className="text-button" disabled={busy || rewritingShotKey === shot.stable_shot_key} onClick={() => onRewrite(shot)} type="button">
+                  {rewritingShotKey === shot.stable_shot_key ? <CircleNotch className="spin" size={15} /> : <ArrowsClockwise size={15} />}AI 优化此镜头
+                </button>
+                {(shot.locked_fields || []).length > 0 && <span><Lock size={14} />已锁定 {shot.locked_fields.length} 项</span>}
+              </div>
+            </article>
+          );
+        })}
+      </section>
+      {(manifest.project_negative_constraints || []).length > 0 && (
+        <details className="skill-project-negative"><summary>全片负面约束</summary><p>{manifest.project_negative_constraints.join("；")}</p></details>
+      )}
+    </div>
+  );
+}
+
 export function SkillProjectWorkspace({
   imageGenerationSettings,
   navigate,
@@ -981,7 +1128,15 @@ export function SkillProjectWorkspace({
   const [storyboardEditing, setStoryboardEditing] = useState(false);
   const [outlineDraft, setOutlineDraft] = useState([]);
   const [shotDraft, setShotDraft] = useState([]);
+  const [storyboardSaveState, setStoryboardSaveState] = useState("saved");
+  const [rewritingShotKey, setRewritingShotKey] = useState("");
   const [clockNow, setClockNow] = useState(Date.now());
+  const storyboardEditRevision = useRef(0);
+  const outlineDraftRef = useRef([]);
+  const shotDraftRef = useRef([]);
+  const storyboardSaveTimer = useRef(null);
+  const storyboardSaveInFlight = useRef(false);
+  const storyboardSaveQueued = useRef(false);
 
   async function load() {
     const nextProject = await request(`/projects/${projectId}`);
@@ -1010,9 +1165,17 @@ export function SkillProjectWorkspace({
     setProductions(nextProductions || []);
     setProductionTimeline(nextTimeline);
     setExportJobs(nextExportJobs);
-    setOutlineDraft((nextWorkspace.outline?.beats || []).map((item) => ({ ...item })));
-    setShotDraft((nextWorkspace.shot_manifest?.shots || []).map((item) => ({ ...item })));
+    if (!storyboardEditing) {
+      const nextOutlineDraft = (nextWorkspace.outline?.beats || []).map((item) => ({ ...item }));
+      const nextShotDraft = (nextWorkspace.shot_manifest?.shots || []).map((item) => ({ ...item }));
+      outlineDraftRef.current = nextOutlineDraft;
+      shotDraftRef.current = nextShotDraft;
+      setOutlineDraft(nextOutlineDraft);
+      setShotDraft(nextShotDraft);
+      setStoryboardSaveState("saved");
+    }
     setSelectedStage((current) => current || nextWorkspace.run?.run?.current_stage || "creative_brief");
+    return nextWorkspace;
   }
 
   useEffect(() => {
@@ -1028,9 +1191,14 @@ export function SkillProjectWorkspace({
   }, [projectId, refreshToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lookTestRunning = workspace?.look_test?.execution_status === "running";
+  const storyboardStep = [...(workspace?.run?.steps || [])]
+    .filter((item) => item.operation === "compile_storyboard")
+    .sort((left, right) => Number(right.attempt || 0) - Number(left.attempt || 0))[0] || null;
+  const storyboardRunning = storyboardStep?.execution_status === "running";
+  const longTaskRunning = lookTestRunning || storyboardRunning;
 
   useEffect(() => {
-    if (!lookTestRunning) return undefined;
+    if (!longTaskRunning) return undefined;
     let active = true;
     let refreshing = false;
     const refreshProgress = async () => {
@@ -1040,6 +1208,14 @@ export function SkillProjectWorkspace({
         const nextWorkspace = await request(`/projects/${projectId}/skill-workspace`);
         if (!active) return;
         setWorkspace(nextWorkspace);
+        if (!storyboardEditing && nextWorkspace.shot_manifest) {
+          const nextOutlineDraft = (nextWorkspace.outline?.beats || []).map((item) => ({ ...item }));
+          const nextShotDraft = (nextWorkspace.shot_manifest?.shots || []).map((item) => ({ ...item }));
+          outlineDraftRef.current = nextOutlineDraft;
+          shotDraftRef.current = nextShotDraft;
+          setOutlineDraft(nextOutlineDraft);
+          setShotDraft(nextShotDraft);
+        }
         const runId = nextWorkspace.run?.run?.id;
         if (runId) {
           const metrics = await request(`/skill-runs/${runId}/metrics`).catch(() => null);
@@ -1058,7 +1234,7 @@ export function SkillProjectWorkspace({
       window.clearInterval(progressTimer);
       window.clearInterval(clockTimer);
     };
-  }, [lookTestRunning, projectId, request]);
+  }, [longTaskRunning, projectId, request, storyboardEditing]);
 
   async function perform(action, successMessage) {
     setBusy(true);
@@ -1104,37 +1280,66 @@ export function SkillProjectWorkspace({
   }
 
   async function compileStoryboard() {
-    await perform(() => request(`/skill-runs/${workspace.run.run.id}/storyboard/compile`, { method: "POST" }), "大纲与分镜已生成");
+    await perform(() => request(`/skill-runs/${workspace.run.run.id}/storyboard/compile`, { method: "POST" }), "大纲与分镜已开始生成");
   }
 
-  function resetStoryboardDraft() {
-    setOutlineDraft((workspace.outline?.beats || []).map((item) => ({ ...item })));
-    setShotDraft((workspace.shot_manifest?.shots || []).map((item) => ({ ...item })));
-    setStoryboardEditing(false);
-    setError("");
+  async function cancelStoryboard() {
+    await perform(
+      () => request(`/skill-runs/${workspace.run.run.id}/storyboard/cancel`, { method: "POST" }),
+      "已停止大纲与分镜生成",
+    );
+  }
+
+  function scheduleStoryboardSave() {
+    storyboardEditRevision.current += 1;
+    setStoryboardSaveState("dirty");
+    window.clearTimeout(storyboardSaveTimer.current);
+    storyboardSaveTimer.current = window.setTimeout(() => {
+      void saveStoryboard();
+    }, 900);
   }
 
   function updateOutlineBeat(index, key, value) {
-    setOutlineDraft((current) => current.map((item, itemIndex) => (
+    const next = outlineDraftRef.current.map((item, itemIndex) => (
       itemIndex === index ? { ...item, [key]: value } : item
-    )));
+    ));
+    outlineDraftRef.current = next;
+    setOutlineDraft(next);
+    scheduleStoryboardSave();
   }
 
   function updateShot(index, key, value) {
-    setShotDraft((current) => current.map((item, itemIndex) => (
+    const next = shotDraftRef.current.map((item, itemIndex) => (
       itemIndex === index ? { ...item, [key]: value } : item
-    )));
+    ));
+    shotDraftRef.current = next;
+    setShotDraft(next);
+    scheduleStoryboardSave();
+  }
+
+  function toggleShotLock(index, lockKey) {
+    const shot = shotDraftRef.current[index];
+    const locked = new Set(shot?.locked_fields || []);
+    if (locked.has(lockKey)) locked.delete(lockKey);
+    else locked.add(lockKey);
+    updateShot(index, "locked_fields", [...locked]);
   }
 
   async function saveStoryboard() {
+    window.clearTimeout(storyboardSaveTimer.current);
+    if (storyboardSaveInFlight.current) {
+      storyboardSaveQueued.current = true;
+      return false;
+    }
+    const saveRevision = storyboardEditRevision.current;
     const targetFrames = Number(workspace.brief?.target_duration_frames || 0);
-    const normalizedOutline = outlineDraft.map((item, index) => ({
+    const normalizedOutline = outlineDraftRef.current.map((item, index) => ({
       ...item,
       order: index + 1,
       target_duration_frames: Number(item.target_duration_frames),
     }));
     let cursor = 0;
-    const normalizedShots = shotDraft.map((item, index) => {
+    const normalizedShots = shotDraftRef.current.map((item, index) => {
       const durationFrames = Number(item.duration_frames);
       const next = {
         ...item,
@@ -1147,21 +1352,26 @@ export function SkillProjectWorkspace({
     });
     if (!normalizedOutline.length || normalizedOutline.some((item) => !item.title?.trim() || !item.purpose?.trim() || !(item.target_duration_frames > 0))) {
       setError("大纲标题、目的和帧数必须完整");
-      return;
+      setStoryboardSaveState("error");
+      return false;
     }
     if (normalizedOutline.reduce((total, item) => total + item.target_duration_frames, 0) !== targetFrames) {
       setError(`大纲总帧数必须保持为 ${targetFrames}`);
-      return;
+      setStoryboardSaveState("error");
+      return false;
     }
     if (!normalizedShots.length || normalizedShots.some((item) => !item.description?.trim() || !item.image_prompt?.trim() || !item.video_prompt?.trim() || !(item.duration_frames > 0))) {
       setError("每个分镜的画面说明、图片提示词、视频提示词和帧数都必须完整");
-      return;
+      setStoryboardSaveState("error");
+      return false;
     }
     if (cursor !== targetFrames) {
       setError(`分镜总帧数必须保持为 ${targetFrames}`);
-      return;
+      setStoryboardSaveState("error");
+      return false;
     }
-    setBusy(true);
+    storyboardSaveInFlight.current = true;
+    setStoryboardSaveState("saving");
     setError("");
     try {
       const outline = await request(`/projects/${projectId}/outline`, {
@@ -1169,7 +1379,7 @@ export function SkillProjectWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ beats: normalizedOutline }),
       });
-      await request(`/projects/${projectId}/shot-manifest`, {
+      const manifest = await request(`/projects/${projectId}/shot-manifest`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1177,18 +1387,69 @@ export function SkillProjectWorkspace({
           style_bible_revision_id: workspace.style_bible.id,
           fps: workspace.shot_manifest.fps,
           shots: normalizedShots,
+          continuity_bible: workspace.shot_manifest.continuity_bible || {},
+          edit_plan: workspace.shot_manifest.edit_plan || {},
+          project_negative_constraints: workspace.shot_manifest.project_negative_constraints || [],
         }),
       });
-      await load();
-      setStoryboardEditing(false);
-      onNotice?.("大纲与分镜修改已保存，G2 及后续旧批准已失效");
+      setWorkspace((current) => ({ ...current, outline, shot_manifest: manifest }));
+      if (storyboardEditRevision.current === saveRevision) {
+        outlineDraftRef.current = normalizedOutline;
+        shotDraftRef.current = normalizedShots;
+        setOutlineDraft(normalizedOutline);
+        setShotDraft(normalizedShots);
+        setStoryboardSaveState("saved");
+      } else {
+        setStoryboardSaveState("dirty");
+      }
+      return true;
     } catch (requestError) {
-      await load().catch(() => undefined);
       setError(requestError.message);
+      setStoryboardSaveState("error");
+      return false;
     } finally {
-      setBusy(false);
+      storyboardSaveInFlight.current = false;
+      if (storyboardSaveQueued.current || storyboardEditRevision.current !== saveRevision) {
+        storyboardSaveQueued.current = false;
+        storyboardSaveTimer.current = window.setTimeout(() => void saveStoryboard(), 50);
+      }
     }
   }
+
+  async function finishStoryboardEditing() {
+    if (storyboardSaveState === "saving") return;
+    const saved = storyboardSaveState === "saved" ? true : await saveStoryboard();
+    if (saved) {
+      setStoryboardEditing(false);
+      onNotice?.("大纲与分镜已自动保存");
+    }
+  }
+
+  async function rewriteStoryboardShot(shot) {
+    setRewritingShotKey(shot.stable_shot_key);
+    setError("");
+    try {
+      const manifest = await request(`/skill-runs/${workspace.run.run.id}/storyboard/shots/${shot.stable_shot_key}/rewrite`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction: "提高镜头叙事清晰度、动作可生成性和提示词完整度，同时保持全片视觉连续性。",
+          locked_fields: shot.locked_fields || [],
+        }),
+      });
+      const nextShots = (manifest.shots || []).map((item) => ({ ...item }));
+      shotDraftRef.current = nextShots;
+      setShotDraft(nextShots);
+      setWorkspace((current) => ({ ...current, shot_manifest: manifest }));
+      onNotice?.(`分镜 ${shot.order} 已优化`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setRewritingShotKey("");
+    }
+  }
+
+  useEffect(() => () => window.clearTimeout(storyboardSaveTimer.current), []);
 
   async function createPictureLock() {
     const productionId = workspace.production_project_id;
@@ -1364,11 +1625,32 @@ export function SkillProjectWorkspace({
 
             {stage.id === "storyboard_design" && (
               <div className="skill-stage-actions-stack">
-                {!workspace.shot_manifest && <button className="primary-button" disabled={busy} onClick={compileStoryboard} type="button">生成大纲与分镜</button>}
-                {workspace.shot_manifest && !storyboardEditing && <><div className="skill-storyboard-toolbar"><span>大纲和提示词均可在批准前调整，稳定分镜 ID 不会改变。</span><button className="secondary-button compact" disabled={busy} onClick={() => setStoryboardEditing(true)} type="button">编辑大纲与提示词</button></div><div className="skill-shot-manifest"><SectionHeader description={`${workspace.shot_manifest.shots.length} 个分镜 · 图片提示词与视频提示词分离`} title="分镜清单" />{workspace.shot_manifest.shots.map((shot) => <article key={shot.stable_shot_key}><header><span>{String(shot.order).padStart(2, "0")}</span><strong>{shot.narrative_role}</strong><small>{shot.duration_frames} 帧</small></header><p>{shot.description}</p><details><summary>查看提示词</summary><div><strong>图片提示词</strong><p>{shot.image_prompt}</p><strong>视频提示词</strong><p>{shot.video_prompt}</p></div></details></article>)}</div></>}
+                {!workspace.shot_manifest && ["running", "failed", "cancelled"].includes(storyboardStep?.execution_status) && (
+                  <StoryboardProgress clockNow={clockNow} onCancel={cancelStoryboard} onRetry={compileStoryboard} step={storyboardStep} />
+                )}
+                {!workspace.shot_manifest && !["running", "failed", "cancelled"].includes(storyboardStep?.execution_status) && (
+                  <button className="primary-button" disabled={busy} onClick={compileStoryboard} type="button">生成大纲与分镜</button>
+                )}
+                {workspace.shot_manifest && !storyboardEditing && (
+                  <StoryboardReview
+                    busy={busy}
+                    manifest={workspace.shot_manifest}
+                    onEdit={() => {
+                      setStoryboardSaveState("saved");
+                      setStoryboardEditing(true);
+                    }}
+                    onRewrite={rewriteStoryboardShot}
+                    outline={workspace.outline}
+                    rewritingShotKey={rewritingShotKey}
+                  />
+                )}
                 {workspace.shot_manifest && storyboardEditing && (
                   <div className="skill-storyboard-editor">
-                    <SectionHeader description={`总时长必须保持 ${workspace.brief.target_duration_frames} 帧；保存后旧的 G2–G7 批准会失效。`} title="编辑大纲" />
+                    <div className="skill-storyboard-editor-toolbar">
+                      <div><strong>编辑大纲与分镜</strong><span>修改会自动保存</span></div>
+                      <div><AutosaveStatus onRetry={() => void saveStoryboard()} state={storyboardSaveState} /><button className="secondary-button compact" disabled={storyboardSaveState === "saving"} onClick={() => void finishStoryboardEditing()} type="button">完成编辑</button></div>
+                    </div>
+                    <SectionHeader description={`总时长保持 ${workspace.brief.target_duration_frames} 帧。大纲负责叙事节奏，分镜负责可执行画面。`} title="导演大纲" />
                     <div className="skill-outline-editor-list">
                       {outlineDraft.map((beat, index) => (
                         <article key={beat.stable_beat_key}>
@@ -1376,22 +1658,29 @@ export function SkillProjectWorkspace({
                           <label><span>段落标题</span><input onChange={(event) => updateOutlineBeat(index, "title", event.target.value)} value={beat.title} /></label>
                           <label><span>叙事目的</span><textarea onChange={(event) => updateOutlineBeat(index, "purpose", event.target.value)} rows={2} value={beat.purpose} /></label>
                           <label><span>核心信息</span><textarea onChange={(event) => updateOutlineBeat(index, "message", event.target.value)} rows={2} value={beat.message} /></label>
+                          <label><span>观众收获</span><textarea onChange={(event) => updateOutlineBeat(index, "audience_takeaway", event.target.value)} rows={2} value={beat.audience_takeaway || ""} /></label>
+                          <label><span>节奏</span><input onChange={(event) => updateOutlineBeat(index, "rhythm", event.target.value)} value={beat.rhythm || ""} /></label>
                           <label className="is-compact"><span>帧数</span><input min="1" onChange={(event) => updateOutlineBeat(index, "target_duration_frames", event.target.value)} type="number" value={beat.target_duration_frames} /></label>
                         </article>
                       ))}
                     </div>
-                    <SectionHeader description="图片提示词描述静态画面；视频提示词只描述从已采纳图片开始的动作、运镜和时间变化。" title="编辑分镜" />
+                    <SectionHeader description="图片提示词锁定首帧；视频提示词完整描述首帧绑定、动作节拍、运镜、同步声音和硬约束。" title="结构化分镜" />
                     <div className="skill-shot-editor-list">
                       {shotDraft.map((shot, index) => (
                         <article key={shot.stable_shot_key}>
-                          <header><span>{String(index + 1).padStart(2, "0")}</span><strong>{shot.narrative_role}</strong><label><span>帧数</span><input min="1" onChange={(event) => updateShot(index, "duration_frames", event.target.value)} type="number" value={shot.duration_frames} /></label></header>
+                          <header><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{shot.creative_spec?.title || shot.narrative_role}</strong><small>{shot.narrative_role}</small></div><label><span>成片帧数</span><input min="1" onChange={(event) => updateShot(index, "duration_frames", event.target.value)} type="number" value={shot.duration_frames} /></label><label><span>生成秒数</span><input min="1" onChange={(event) => updateShot(index, "generation_duration_seconds", Number(event.target.value))} step="1" type="number" value={shot.generation_duration_seconds || ""} /></label></header>
+                          <div className="skill-shot-locks" aria-label={`分镜 ${index + 1} 字段锁定`}>
+                            {[["subject", "主体"], ["camera", "机位"], ["lighting", "光线"], ["continuity_locks", "连续性"]].map(([key, label]) => {
+                              const selected = (shot.locked_fields || []).includes(key);
+                              return <button aria-pressed={selected} className={selected ? "is-locked" : ""} key={key} onClick={() => toggleShotLock(index, key)} type="button"><Lock size={13} weight={selected ? "fill" : "regular"} />{label}</button>;
+                            })}
+                          </div>
                           <label><span>画面说明</span><textarea onChange={(event) => updateShot(index, "description", event.target.value)} rows={3} value={shot.description} /></label>
-                          <label><span>图片提示词</span><textarea onChange={(event) => updateShot(index, "image_prompt", event.target.value)} rows={5} value={shot.image_prompt} /></label>
-                          <label><span>视频提示词</span><textarea onChange={(event) => updateShot(index, "video_prompt", event.target.value)} rows={5} value={shot.video_prompt} /></label>
+                          <label><span>图片提示词</span><textarea onChange={(event) => updateShot(index, "image_prompt", event.target.value)} rows={9} value={shot.image_prompt} /></label>
+                          <label><span>视频提示词</span><textarea onChange={(event) => updateShot(index, "video_prompt", event.target.value)} rows={13} value={shot.video_prompt} /></label>
                         </article>
                       ))}
                     </div>
-                    <div className="skill-storyboard-editor-actions"><button className="secondary-button" disabled={busy} onClick={resetStoryboardDraft} type="button">取消</button><button className="primary-button" disabled={busy} onClick={saveStoryboard} type="button">{busy && <CircleNotch className="spin" size={16} />}保存大纲与分镜</button></div>
                   </div>
                 )}
                 {workspace.shot_manifest && !storyboardEditing && !currentGateApproved && <GateAction busy={busy} gate={stage.gate} label="确认大纲、时长和全部分镜提示词" onDecide={decideGate} relatedRevisionIds={[workspace.outline.id, workspace.shot_manifest.id]} />}

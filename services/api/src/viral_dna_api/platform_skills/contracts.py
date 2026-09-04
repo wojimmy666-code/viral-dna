@@ -157,9 +157,67 @@ class SkillCountRange(StrictModel):
         return self
 
 
+class SkillFloatRange(StrictModel):
+    min: float = Field(ge=0, le=600)
+    max: float = Field(ge=0, le=600)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> SkillFloatRange:
+        if self.max < self.min:
+            raise ValueError("范围最大值不能小于最小值")
+        return self
+
+
+class SkillCharacterRange(StrictModel):
+    min: int = Field(ge=1, le=10000)
+    max: int = Field(ge=1, le=10000)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> SkillCharacterRange:
+        if self.max < self.min:
+            raise ValueError("字符范围最大值不能小于最小值")
+        return self
+
+
+class SkillShotDensity(StrictModel):
+    style: Literal["low", "medium", "high", "high_density_montage"] = "medium"
+    average_edit_duration_seconds: SkillFloatRange = Field(
+        default_factory=lambda: SkillFloatRange(min=1.5, max=3.0)
+    )
+    detail_ratio: float = Field(default=0.6, ge=0, le=1)
+    environment_ratio: float = Field(default=0.4, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_coverage(self) -> SkillShotDensity:
+        if abs(self.detail_ratio + self.environment_ratio - 1) > 0.02:
+            raise ValueError("细节镜头与环境镜头占比之和必须约等于 1")
+        return self
+
+
+class SkillShotArchetype(StrictModel):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    title: str = Field(min_length=1, max_length=120)
+    purpose: str = Field(min_length=1, max_length=500)
+    coverage: Literal["detail", "environment", "product", "brand"] = "detail"
+    preferred_lenses_mm: list[int] = Field(default_factory=list, max_length=8)
+    preferred_framing: list[str] = Field(default_factory=list, max_length=10)
+    preferred_motion: list[str] = Field(default_factory=list, max_length=10)
+    generation_duration_seconds: int = Field(default=4, ge=1, le=30)
+    edit_duration_seconds: SkillFloatRange = Field(
+        default_factory=lambda: SkillFloatRange(min=0.8, max=1.4)
+    )
+    action_pattern: list[str] = Field(default_factory=list, max_length=12)
+    sound_pattern: list[str] = Field(default_factory=list, max_length=12)
+    failure_constraints: list[str] = Field(default_factory=list, max_length=30)
+    required_fact_kinds: list[str] = Field(default_factory=list, max_length=20)
+    fallback_key: str | None = Field(default=None, max_length=64)
+
+
 class SkillNarrativeSpec(StrictModel):
     outline_pattern: list[SkillOutlineBeat] = Field(min_length=1, max_length=20)
     shot_count: SkillCountRange
+    shot_density: SkillShotDensity = Field(default_factory=SkillShotDensity)
+    shot_archetypes: list[SkillShotArchetype] = Field(default_factory=list, max_length=40)
 
     @model_validator(mode="after")
     def validate_ratios(self) -> SkillNarrativeSpec:
@@ -182,10 +240,69 @@ class SkillStyleSpec(StrictModel):
 
 
 class SkillPromptRules(StrictModel):
-    template_language: Literal["viraldna-template/v1"] = "viraldna-template/v1"
+    template_language: Literal["viraldna-template/v1", "viraldna-template/v2"] = (
+        "viraldna-template/v1"
+    )
     allowed_variables: list[str] = Field(default_factory=list, max_length=50)
     image_sections: list[str] = Field(min_length=1, max_length=20)
     video_sections: list[str] = Field(min_length=1, max_length=20)
+    language: str = Field(default="zh-CN", min_length=2, max_length=20)
+    image_target_characters: SkillCharacterRange = Field(
+        default_factory=lambda: SkillCharacterRange(min=180, max=800)
+    )
+    video_target_characters: SkillCharacterRange = Field(
+        default_factory=lambda: SkillCharacterRange(min=300, max=1200)
+    )
+    independent_prompt_per_shot: bool = True
+    repeat_relevant_continuity_locks: bool = True
+    model_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class SkillEditingSpec(StrictModel):
+    allowed_transitions: list[str] = Field(default_factory=lambda: ["hard_cut"], max_length=20)
+    forbidden_transitions: list[str] = Field(default_factory=list, max_length=30)
+    cut_rules: list[str] = Field(default_factory=list, max_length=30)
+    opening_rhythm: str = Field(default="", max_length=500)
+    middle_rhythm: str = Field(default="", max_length=500)
+    ending_rhythm: str = Field(default="", max_length=500)
+
+
+class SkillTypographySpec(StrictModel):
+    generated_text_policy: Literal["forbidden", "discouraged", "allowed"] = "forbidden"
+    render_mode: Literal["deterministic_overlay", "generated"] = "deterministic_overlay"
+    default_fonts: dict[str, str] = Field(default_factory=dict)
+    hierarchy: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    placement: dict[str, Any] = Field(default_factory=dict)
+    allowed_motion: list[str] = Field(default_factory=list, max_length=20)
+    forbidden_motion: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SkillGroundingSpec(StrictModel):
+    source_priority: list[str] = Field(default_factory=list, max_length=20)
+    forbidden_inventions: list[str] = Field(default_factory=list, max_length=30)
+    missing_fact_policy: Literal["skip", "substitute", "block"] = "substitute"
+    max_assets_per_shot: int = Field(default=3, ge=1, le=20)
+
+
+class SkillQualitySpec(StrictModel):
+    hard_rules: list[str] = Field(default_factory=list, max_length=50)
+    minimum_prompt_score: int = Field(default=80, ge=0, le=100)
+    maximum_rewrite_attempts: int = Field(default=2, ge=0, le=5)
+    required_video_sections: list[str] = Field(default_factory=list, max_length=20)
+    required_image_sections: list[str] = Field(default_factory=list, max_length=20)
+    reject_vague_camera_language: bool = True
+
+
+class SkillCanonicalCase(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,79}$")
+    title: str = Field(min_length=1, max_length=160)
+    purpose: str = Field(min_length=1, max_length=500)
+    target_duration_seconds: float = Field(gt=0, le=600)
+    shot_count: int = Field(ge=1, le=100)
+    style_metrics: dict[str, Any] = Field(default_factory=dict)
+    sequence: list[str] = Field(default_factory=list, max_length=100)
+    representative_shots: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
+    forbidden_copy_terms: list[str] = Field(default_factory=list, max_length=50)
 
 
 class SkillLookTestSpec(StrictModel):
@@ -254,7 +371,11 @@ class SkillSpec(StrictModel):
     generation_policy: SkillGenerationPolicy
     audio: dict[str, Any] = Field(default_factory=dict)
     captions: dict[str, Any] = Field(default_factory=dict)
-    quality: dict[str, Any] = Field(default_factory=dict)
+    editing: SkillEditingSpec = Field(default_factory=SkillEditingSpec)
+    typography_system: SkillTypographySpec = Field(default_factory=SkillTypographySpec)
+    grounding: SkillGroundingSpec = Field(default_factory=SkillGroundingSpec)
+    quality: SkillQualitySpec = Field(default_factory=SkillQualitySpec)
+    canonical_cases: list[SkillCanonicalCase] = Field(default_factory=list, max_length=20)
     delivery: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -289,7 +410,7 @@ def _scan_forbidden(value: Any, path: str = "manifest") -> list[str]:
 
 
 class SkillManifest(StrictModel):
-    api_version: Literal["viraldna.video-skill/v1"]
+    api_version: Literal["viraldna.video-skill/v1", "viraldna.video-skill/v2"]
     kind: Literal["VideoSkill"]
     metadata: SkillMetadata
     resources: list[SkillResource] = Field(default_factory=list, max_length=100)

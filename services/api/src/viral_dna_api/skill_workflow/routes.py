@@ -39,6 +39,7 @@ from .contracts import (
     RunContractRevision,
     ShotManifestRevision,
     ShotManifestUpdate,
+    ShotPromptRewriteRequest,
     SkillGate,
     SkillOperationsSummary,
     SkillProjectWorkspace,
@@ -235,10 +236,35 @@ def create_skill_workflow_router(service: SkillWorkflowService) -> APIRouter:
     @router.post(
         "/skill-runs/{run_id}/storyboard/compile",
         response_model=SkillRunDetail,
+        status_code=status.HTTP_202_ACCEPTED,
     )
     async def compile_storyboard(run_id: UUID) -> SkillRunDetail:
         try:
             return await service.compile_storyboard(run_id)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
+
+    @router.post(
+        "/skill-runs/{run_id}/storyboard/cancel",
+        response_model=SkillRunDetail,
+    )
+    async def cancel_storyboard(run_id: UUID) -> SkillRunDetail:
+        try:
+            return await service.cancel_storyboard(run_id)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
+
+    @router.post(
+        "/skill-runs/{run_id}/storyboard/shots/{shot_key}/rewrite",
+        response_model=ShotManifestRevision,
+    )
+    async def rewrite_storyboard_shot(
+        run_id: UUID,
+        shot_key: str,
+        payload: ShotPromptRewriteRequest,
+    ) -> ShotManifestRevision:
+        try:
+            return await service.rewrite_storyboard_shot(run_id, shot_key, payload)
         except SkillWorkflowServiceError as exc:
             _raise_http(exc)
 

@@ -99,6 +99,7 @@ from .contracts import (
     ShotManifestRevision,
     ShotManifestShot,
     ShotManifestUpdate,
+    ShotPromptRewriteRequest,
     SkillGate,
     SkillOperationMetrics,
     SkillOperationsSummary,
@@ -119,6 +120,16 @@ from .contracts import (
     ValidationStatus,
     content_digest,
     utc_now,
+)
+from .storyboard_authoring import (
+    ReferenceStyleStoryboardAuthor,
+    StoryboardAuthor,
+    StoryboardAuthoringContext,
+    StoryboardAuthoringError,
+    assess_prompts,
+    compile_image_prompt,
+    compile_video_prompt,
+    creative_spec_from_authored,
 )
 
 
@@ -410,7 +421,7 @@ def _allocate_frames(total: int, ratios: list[float]) -> list[int]:
 
 
 class SkillWorkflowService:
-    COMPILER_VERSION = "viraldna.skill-compiler/v1"
+    COMPILER_VERSION = "viraldna.skill-compiler/v2"
     LOOK_TEST_CONCURRENCY = 2
     LOOK_TEST_HEARTBEAT_SECONDS = 5
     LOOK_TEST_HARD_TIMEOUT_SECONDS = 600
@@ -426,6 +437,7 @@ class SkillWorkflowService:
         production_service: ProductionSeedConsumer | None = None,
         timeline_reader: ProductionTimelineReader | None = None,
         export_reader: ProductionExportReader | None = None,
+        storyboard_author: StoryboardAuthor | None = None,
     ) -> None:
         self.repository = repository
         self.projects = projects
@@ -435,9 +447,11 @@ class SkillWorkflowService:
         self.production_service = production_service
         self.timeline_reader = timeline_reader
         self.export_reader = export_reader
+        self.storyboard_author = storyboard_author or ReferenceStyleStoryboardAuthor()
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._look_test_tasks: dict[UUID, asyncio.Task[LookTest]] = {}
         self._look_test_cancel_events: dict[UUID, dict[str, Event]] = {}
+        self._storyboard_tasks: dict[UUID, asyncio.Task[None]] = {}
 
     def _lock(self, project_id: UUID) -> asyncio.Lock:
         return self._locks.setdefault(project_id, asyncio.Lock())
@@ -458,6 +472,8 @@ class SkillWorkflowService:
         mixes = await self.repository.list_mix_revisions(project.id)
         deliveries = await self.repository.list_delivery_manifests(project.id)
         run = max(runs, key=lambda item: item.updated_at, default=None)
+        if run is not None:
+            await self._recover_interrupted_storyboard(run)
         look_test = max(look_tests, key=lambda item: item.updated_at, default=None)
         if run is not None and look_test is not None:
             look_test = await self._repair_empty_succeeded_look_test(run, look_test)
@@ -1063,7 +1079,11 @@ class SkillWorkflowService:
                 "事实声明只使用已批准证据",
                 "exact 素材留给确定性合成",
             ],
-            "sound_direction": str(spec.audio.get("direction", "全片声音保持一致")),
+            "sound_direction": (
+                f"{spec.audio.get('editing_music', {}).get('style', '克制配乐')}，"
+                f"约 {spec.audio.get('editing_music', {}).get('bpm', 0)} BPM；"
+                "逐镜头同步拟音，连续低电平环境声床"
+            ),
             "call_to_action": brief.call_to_action,
             "risks": ["生成画面需人工审核品牌和人物一致性"],
             "source_input_hash": step.input_hash,
@@ -1083,16 +1103,24 @@ class SkillWorkflowService:
                 item.snapshot_sha256 for item in await self.repository.list_asset_usages(project.id)
             ],
             "palette": spec.style.palette_policy,
-            "typography": spec.style.typography,
+            "typography": {
+                **spec.style.typography,
+                **spec.typography_system.model_dump(mode="python"),
+            },
             "lighting": spec.style.lighting,
             "composition": spec.style.composition,
             "camera": spec.style.camera,
-            "motion": {"policy": spec.style.camera.get("motion", [])},
+            "motion": {
+                "policy": spec.style.camera.get("allowed_motion", []),
+                "avoid": spec.style.camera.get("avoid_motion", []),
+            },
             "texture": {
                 "keywords": visual_keywords,
                 "category_scenes": profile_scenes,
             },
             "rhythm": spec.style.rhythm,
+            "sound": spec.audio,
+            "editing": spec.editing.model_dump(mode="python"),
             "product_identity_lock": ["产品外形、包装结构和品牌识别不得漂移"],
             "character_identity_lock": ["同一角色的可识别身份必须跨镜头一致"],
             "positive_lock": positive_locks,
@@ -1104,6 +1132,7 @@ class SkillWorkflowService:
                 "图片提示词不包含时间动作过程",
                 "视频提示词绑定已采用图片摘要",
                 "系统校验不等同于人工批准",
+                *spec.quality.hard_rules,
             ],
             "input_hash": step.input_hash,
             "created_at": utc_now(),
@@ -1996,7 +2025,8 @@ class SkillWorkflowService:
         brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
         bible = _latest(await self.repository.list_style_bible_revisions(project.id))
         snapshot = await self._require_snapshot(project.id)
-        if brief is None or bible is None:
+        contract = await self.repository.get_run_contract_revision(run.run_contract_revision_id)
+        if brief is None or bible is None or contract is None:
             raise _fail(409, "storyboard_inputs_missing", "请先完成简报和风格确认")
         gates = await self.repository.list_gate_decisions(run.id)
         if not self._gate_is_approved(gates, SkillGate.STYLE_APPROVED):
@@ -2005,9 +2035,14 @@ class SkillWorkflowService:
             {
                 "brief": brief.input_hash,
                 "style": bible.content_hash,
+                "skill": snapshot.content_digest,
+                "run_contract": contract.input_hash,
                 "compiler": self.COMPILER_VERSION,
             }
         )
+        active = self._storyboard_tasks.get(run.id)
+        if active is not None and not active.done():
+            return await self.run_detail(run.id)
         step, reused = await self._begin_step(
             run,
             SkillWorkflowStage.STORYBOARD_DESIGN,
@@ -2017,73 +2052,210 @@ class SkillWorkflowService:
         if reused:
             return await self.run_detail(run.id)
         started = time.perf_counter()
-        patterns = snapshot.manifest.spec.narrative.outline_pattern
-        beat_frames = _allocate_frames(
-            brief.target_duration_frames,
-            [item.target_duration_ratio for item in patterns],
-        )
-        outline_beats = [
-            OutlineBeat(
-                stable_beat_key=_stable_token("beat", project.id, brief.id, item.key),
-                order=index,
-                title=item.key.replace("_", " ").title(),
-                purpose=item.purpose,
-                target_duration_frames=beat_frames[index - 1],
-                message=(
-                    brief.required_messages[min(index - 1, len(brief.required_messages) - 1)]
-                    if brief.required_messages
-                    else brief.objective
-                ),
+        task = asyncio.create_task(
+            self._run_storyboard_compilation(
+                run,
+                project,
+                brief,
+                bible,
+                snapshot,
+                contract,
+                step,
+                input_hash=input_hash,
+                started=started,
             )
-            for index, item in enumerate(patterns, start=1)
-        ]
-        outline_payload = {
-            "id": uuid4(),
-            "project_id": project.id,
-            "revision_number": len(await self.repository.list_outline_revisions(project.id)) + 1,
-            "beats": outline_beats,
-            "input_hash": input_hash,
-            "created_at": utc_now(),
-        }
-        outline_payload["content_hash"] = content_digest(outline_payload)
-        outline = OutlineRevision.model_validate(outline_payload)
-        await self.repository.save_outline_revision(outline)
-        target_count = min(
-            snapshot.manifest.spec.narrative.shot_count.max,
-            max(
-                snapshot.manifest.spec.narrative.shot_count.min,
-                len(outline_beats),
-                round(brief.target_duration_seconds / 3),
-            ),
         )
-        shots_per_beat = [1] * len(outline_beats)
-        for index in range(target_count - len(outline_beats)):
-            shots_per_beat[index % len(shots_per_beat)] += 1
-        usages = await self.repository.list_asset_usages(project.id)
-        role_specs = {item.role: item for item in snapshot.manifest.spec.intake.asset_roles}
-        image_usages = [
-            item
-            for item in usages
-            if item.fidelity != Fidelity.EXACT and "image" in role_specs.get(item.role).media_types
-        ]
-        video_usages = [item for item in usages if "video" in role_specs.get(item.role).media_types]
-        exact_usages = [item for item in usages if item.fidelity == Fidelity.EXACT]
-        shots: list[ShotManifestShot] = []
-        cursor = 0
-        order = 1
-        for beat, shot_count in zip(outline_beats, shots_per_beat, strict=True):
-            durations = _allocate_frames(beat.target_duration_frames, [1.0] * shot_count)
-            for local_index, duration in enumerate(durations, start=1):
-                shot_key = _stable_token(
-                    "shot",
-                    project.id,
-                    outline.id,
-                    beat.stable_beat_key,
-                    local_index,
+        self._storyboard_tasks[run.id] = task
+        task.add_done_callback(lambda _: self._storyboard_tasks.pop(run.id, None))
+        return await self.run_detail(run.id)
+
+    async def _run_storyboard_compilation(
+        self,
+        run: SkillRun,
+        project: Project,
+        brief: CreativeBriefRevision,
+        bible: StyleBibleRevision,
+        snapshot: SkillVersionSnapshot,
+        contract: RunContractRevision,
+        step: SkillStepRun,
+        *,
+        input_hash: str,
+        started: float,
+    ) -> None:
+        try:
+            step = await self._update_storyboard_step(step, 8)
+            usages = await self.repository.list_asset_usages(project.id)
+            claims = await self.repository.list_claim_evidence(project.id)
+            allowed_evidence_refs = {
+                *(str(item.id) for item in usages),
+                *(str(item.id) for item in claims if item.status == ClaimStatus.APPROVED),
+            }
+            context = StoryboardAuthoringContext(
+                manifest=snapshot.manifest,
+                brand=await self.repository.get_brand_snapshot(brief.brand_snapshot_id),
+                brief=brief,
+                style_bible=bible,
+                run_contract=contract,
+                asset_facts=[
+                    {
+                        "id": str(item.id),
+                        "asset_id": str(item.asset_id),
+                        "role": item.role,
+                        "fidelity": item.fidelity.value,
+                        "rights_status": item.rights_status.value,
+                    }
+                    for item in usages
+                ],
+                approved_claims=[
+                    item.model_dump(mode="json")
+                    for item in claims
+                    if item.status == ClaimStatus.APPROVED
+                ],
+            )
+            if context.brand is None:
+                raise StoryboardAuthoringError("brand_snapshot_missing", "品牌快照不存在")
+            step = await self._update_storyboard_step(step, 18)
+            authored, step = await self._author_storyboard_with_heartbeat(
+                context,
+                step,
+            )
+            step = await self._update_storyboard_step(
+                step,
+                55,
+                provider=authored.provider,
+                model=authored.model,
+                request_id=authored.request_id,
+                provider_ms=authored.provider_ms,
+                input_tokens=authored.usage.input_tokens if authored.usage else 0,
+                cached_input_tokens=(
+                    authored.usage.cached_input_tokens if authored.usage else 0
+                ),
+                output_tokens=authored.usage.output_tokens if authored.usage else 0,
+                reasoning_tokens=authored.usage.reasoning_tokens if authored.usage else 0,
+                total_tokens=authored.usage.total_tokens if authored.usage else 0,
+                actual_cost_micros=authored.actual_cost_micros,
+            )
+            shot_weights: list[float] = []
+            archetypes = {
+                item.key: item for item in snapshot.manifest.spec.narrative.shot_archetypes
+            }
+            for item in authored.storyboard.shots:
+                archetype = archetypes.get(item.archetype_key)
+                duration = archetype.edit_duration_seconds if archetype else None
+                shot_weights.append((duration.min + duration.max) / 2 if duration else 1.0)
+            shot_frames = _allocate_frames(brief.target_duration_frames, shot_weights)
+            frames_by_beat: dict[str, int] = {}
+            for item, duration in zip(authored.storyboard.shots, shot_frames, strict=True):
+                frames_by_beat[item.beat_key] = frames_by_beat.get(item.beat_key, 0) + duration
+            outline_beats = [
+                OutlineBeat(
+                    stable_beat_key=_stable_token("beat", project.id, item.key),
+                    order=index,
+                    title=item.title,
+                    purpose=item.purpose,
+                    target_duration_frames=frames_by_beat.get(item.key, 1),
+                    message=item.audience_takeaway,
+                    audience_takeaway=item.audience_takeaway,
+                    content_units=item.content_units,
+                    suggested_shot_count=item.suggested_shot_count,
+                    rhythm=item.rhythm,
+                    transition_strategy=item.transition_strategy,
+                    evidence_refs=[
+                        item
+                        for item in item.evidence_refs
+                        if item in allowed_evidence_refs
+                    ],
                 )
-                static_description = (
-                    f"{beat.purpose}；主体与场景呈现“{beat.message}”，"
-                    f"遵循 {'、'.join(bible.positive_lock)}。"
+                for index, item in enumerate(authored.storyboard.beats, start=1)
+                if frames_by_beat.get(item.key, 0) > 0
+            ]
+            outline_payload = {
+                "id": uuid4(),
+                "project_id": project.id,
+                "revision_number": len(await self.repository.list_outline_revisions(project.id))
+                + 1,
+                "beats": outline_beats,
+                "input_hash": input_hash,
+                "created_at": utc_now(),
+            }
+            outline_payload["content_hash"] = content_digest(outline_payload)
+            outline = OutlineRevision.model_validate(outline_payload)
+            await self.repository.save_outline_revision(outline)
+            step = await self._update_storyboard_step(step, 65)
+
+            role_specs = {item.role: item for item in snapshot.manifest.spec.intake.asset_roles}
+            image_usages = [
+                item
+                for item in usages
+                if item.fidelity != Fidelity.EXACT
+                and "image" in getattr(role_specs.get(item.role), "media_types", [])
+            ]
+            video_usages = [
+                item
+                for item in usages
+                if "video" in getattr(role_specs.get(item.role), "media_types", [])
+            ]
+            exact_usages = [item for item in usages if item.fidelity == Fidelity.EXACT]
+            max_assets = snapshot.manifest.spec.grounding.max_assets_per_shot
+            forbidden_copy_terms = [
+                term
+                for case in snapshot.manifest.spec.canonical_cases
+                for term in case.forbidden_copy_terms
+            ]
+            minimum_score = snapshot.manifest.spec.quality.minimum_prompt_score
+            image_character_range = (
+                snapshot.manifest.spec.prompt_rules.image_target_characters.min,
+                snapshot.manifest.spec.prompt_rules.image_target_characters.max,
+            )
+            video_character_range = (
+                snapshot.manifest.spec.prompt_rules.video_target_characters.min,
+                snapshot.manifest.spec.prompt_rules.video_target_characters.max,
+            )
+            prompt_allowed_context = " ".join(
+                [
+                    context.brand.name,
+                    context.brand.description,
+                    str(context.brand.visual_identity.get("category_name") or ""),
+                    context.brief.objective,
+                ]
+            )
+            allowed_durations = contract.video_duration_capabilities_seconds
+            shots: list[ShotManifestShot] = []
+            cursor = 0
+            beat_key_map = {
+                authored_beat.key: outline_beat.stable_beat_key
+                for authored_beat, outline_beat in zip(
+                    [
+                        item
+                        for item in authored.storyboard.beats
+                        if frames_by_beat.get(item.key, 0) > 0
+                    ],
+                    outline_beats,
+                    strict=True,
+                )
+            }
+            total_shots = len(authored.storyboard.shots)
+            for index, (authored_shot, duration) in enumerate(
+                zip(authored.storyboard.shots, shot_frames, strict=True),
+                start=1,
+            ):
+                shot_key = _stable_token("shot", project.id, index)
+                generation_duration = min(
+                    allowed_durations,
+                    key=lambda value: (
+                        abs(value - authored_shot.generation_duration_seconds),
+                        value,
+                    ),
+                )
+                creative_spec = creative_spec_from_authored(authored_shot)
+                creative_spec = creative_spec.model_copy(
+                    update={
+                        "evidence_refs": [
+                            item
+                            for item in creative_spec.evidence_refs
+                            if item in allowed_evidence_refs
+                        ]
+                    }
                 )
                 assigned_exact = [
                     item
@@ -2091,13 +2263,13 @@ class SkillWorkflowService:
                     if (
                         shot_key in item.required_in_shot_keys
                         if item.required_in_shot_keys
-                        else order == target_count
+                        else index >= total_shots - 1
                     )
                 ]
                 exact_overlays = [
                     {
                         "asset_usage_id": item.id,
-                        "placement": ("bottom_right" if index % 2 == 0 else "bottom_left"),
+                        "placement": "bottom_right" if overlay_index % 2 == 0 else "bottom_left",
                         "scale_mode": "contain",
                         "start_frame": cursor,
                         "end_frame": cursor + duration,
@@ -2107,107 +2279,515 @@ class SkillWorkflowService:
                         "safe_area": "title_safe",
                         "required_review": True,
                     }
-                    for index, item in enumerate(assigned_exact)
+                    for overlay_index, item in enumerate(assigned_exact)
                 ]
-                shot_image_usage_ids = [
-                    item.id
+                required_images = [
+                    item
                     for item in image_usages
-                    if not item.required_in_shot_keys or shot_key in item.required_in_shot_keys
+                    if item.required_in_shot_keys and shot_key in item.required_in_shot_keys
                 ]
-                shot_video_usage_ids = [
-                    item.id
+                rotating_images = [
+                    item
+                    for offset, item in enumerate(image_usages)
+                    if not item.required_in_shot_keys
+                    and offset % max(1, total_shots) in {index - 1, (index - 2) % total_shots}
+                ]
+                selected_images: list[AssetUsage] = []
+                selected_image_ids: set[UUID] = set()
+                for item in [*required_images, *rotating_images]:
+                    if item.id in selected_image_ids:
+                        continue
+                    selected_images.append(item)
+                    selected_image_ids.add(item.id)
+                    if len(selected_images) >= max_assets:
+                        break
+                selected_videos = [
+                    item
                     for item in video_usages
                     if not item.required_in_shot_keys or shot_key in item.required_in_shot_keys
-                ]
-                exact_reservation = (
-                    "\n【确定性叠加预留】为后期 exact 素材保留安全留白；"
-                    "不要生成、临摹或重绘 Logo、包装文字、认证标识。"
-                    if exact_overlays
-                    else ""
+                ][:max_assets]
+                image_prompt = compile_image_prompt(
+                    creative_spec,
+                    brand_name=context.brand.name,
+                    exact_asset_reserved=bool(exact_overlays),
                 )
-                image_prompt = (
-                    f"【主体与场景】{static_description}\n"
-                    f"【构图与光线】{bible.composition}；{bible.lighting}\n"
-                    f"【色彩与质感】{bible.palette}；{bible.texture}"
-                    f"{exact_reservation}"
+                video_prompt = compile_video_prompt(
+                    creative_spec,
+                    order=index,
+                    generation_duration_seconds=generation_duration,
+                    aspect_ratio=brief.output_aspect_ratio,
+                    fps=contract.video_fps,
                 )
-                video_prompt = (
-                    f"以上一阶段采用图片为唯一首帧视觉依据。镜头 {order}：{beat.purpose}。"
-                    f"动作在 {duration / brief.fps:.2f} 秒内完整发展；"
-                    f"运镜遵循 {bible.camera}，节奏遵循 {bible.rhythm}。"
+                quality = assess_prompts(
+                    image_prompt,
+                    video_prompt,
+                    minimum_score=minimum_score,
+                    forbidden_copy_terms=forbidden_copy_terms,
+                    allowed_context=prompt_allowed_context,
+                    required_image_sections=(
+                        snapshot.manifest.spec.quality.required_image_sections
+                    ),
+                    required_video_sections=(
+                        snapshot.manifest.spec.quality.required_video_sections
+                    ),
+                    image_character_range=image_character_range,
+                    video_character_range=video_character_range,
                 )
-                shot_input = content_digest(
-                    {
-                        "outline": outline.content_hash,
-                        "style": bible.content_hash,
-                        "shot_key": shot_key,
-                        "image_prompt": image_prompt,
-                        "video_prompt": video_prompt,
-                        "image_asset_usage_ids": shot_image_usage_ids,
-                        "video_reference_usage_ids": shot_video_usage_ids,
-                        "exact_overlays": exact_overlays,
+                rewrite_attempt = 0
+                while (
+                    not quality.passed
+                    and rewrite_attempt < snapshot.manifest.spec.quality.maximum_rewrite_attempts
+                ):
+                    rewrite_attempt += 1
+                    rewritten = await self.storyboard_author.rewrite_shot(
+                        context,
+                        creative_spec,
+                        instruction=(
+                            "修复以下质量问题，并保持产品事实、镜头职责和连续性不变："
+                            + "、".join(quality.issues)
+                        ),
+                        locked_fields=["archetype_key", "title", "narrative_purpose"],
+                    )
+                    rewritten_usage = rewritten.usage
+                    step = await self._update_storyboard_step(
+                        step,
+                        step.progress,
+                        provider_ms=step.provider_ms + rewritten.provider_ms,
+                        input_tokens=(
+                            step.input_tokens
+                            + (rewritten_usage.input_tokens if rewritten_usage else 0)
+                        ),
+                        cached_input_tokens=(
+                            step.cached_input_tokens
+                            + (
+                                rewritten_usage.cached_input_tokens
+                                if rewritten_usage
+                                else 0
+                            )
+                        ),
+                        output_tokens=(
+                            step.output_tokens
+                            + (rewritten_usage.output_tokens if rewritten_usage else 0)
+                        ),
+                        reasoning_tokens=(
+                            step.reasoning_tokens
+                            + (rewritten_usage.reasoning_tokens if rewritten_usage else 0)
+                        ),
+                        total_tokens=(
+                            step.total_tokens
+                            + (rewritten_usage.total_tokens if rewritten_usage else 0)
+                        ),
+                        actual_cost_micros=(
+                            step.actual_cost_micros + rewritten.actual_cost_micros
+                        ),
+                    )
+                    creative_spec = creative_spec_from_authored(rewritten.storyboard.shots[0])
+                    image_prompt = compile_image_prompt(
+                        creative_spec,
+                        brand_name=context.brand.name,
+                        exact_asset_reserved=bool(exact_overlays),
+                    )
+                    video_prompt = compile_video_prompt(
+                        creative_spec,
+                        order=index,
+                        generation_duration_seconds=generation_duration,
+                        aspect_ratio=brief.output_aspect_ratio,
+                        fps=contract.video_fps,
+                    )
+                    quality = assess_prompts(
+                        image_prompt,
+                        video_prompt,
+                        minimum_score=minimum_score,
+                        forbidden_copy_terms=forbidden_copy_terms,
+                        allowed_context=prompt_allowed_context,
+                        required_image_sections=(
+                            snapshot.manifest.spec.quality.required_image_sections
+                        ),
+                        required_video_sections=(
+                            snapshot.manifest.spec.quality.required_video_sections
+                        ),
+                        image_character_range=image_character_range,
+                        video_character_range=video_character_range,
+                    ).model_copy(update={"rewrite_attempts": rewrite_attempt})
+                if not quality.passed:
+                    raise StoryboardAuthoringError(
+                        "prompt_quality_failed",
+                        f"分镜 {index} 提示词质量未达标：{'、'.join(quality.issues)}",
+                        retryable=True,
+                    )
+                shot_material = {
+                    "stable_shot_key": shot_key,
+                    "order": index,
+                    "narrative_role": authored_shot.title,
+                    "start_frame": cursor,
+                    "duration_frames": duration,
+                    "generation_duration_seconds": generation_duration,
+                    "handle_in_frames": min(6, cursor),
+                    "handle_out_frames": min(
+                        6, max(0, brief.target_duration_frames - cursor - duration)
+                    ),
+                    "description": f"{authored_shot.title}｜{authored_shot.narrative_purpose}",
+                    "image_prompt": image_prompt,
+                    "image_negative_constraints": list(
+                        dict.fromkeys([*bible.negative_lock, *creative_spec.failure_constraints])
+                    )[:40],
+                    "video_prompt": video_prompt,
+                    "video_negative_constraints": list(
+                        dict.fromkeys([*bible.negative_lock, *creative_spec.failure_constraints])
+                    )[:40],
+                    "image_asset_usage_ids": [item.id for item in selected_images],
+                    "video_reference_usage_ids": [item.id for item in selected_videos],
+                    "exact_overlays": exact_overlays,
+                    "continuity_group_ids": ["global", beat_key_map[authored_shot.beat_key]],
+                    "dialogue_or_voiceover": "",
+                    "caption_intent": "",
+                    "creative_spec": creative_spec,
+                    "prompt_quality": quality,
+                }
+                shot_material["input_hash"] = content_digest(shot_material)
+                shots.append(ShotManifestShot.model_validate(shot_material))
+                cursor += duration
+                step = await self._update_storyboard_step(
+                    step,
+                    65 + round(index / total_shots * 25),
+                )
+            manifest_payload = {
+                "id": uuid4(),
+                "project_id": project.id,
+                "revision_number": len(
+                    await self.repository.list_shot_manifest_revisions(project.id)
+                )
+                + 1,
+                "outline_revision_id": outline.id,
+                "style_bible_revision_id": bible.id,
+                "fps": brief.fps,
+                "shots": shots,
+                "continuity_bible": authored.storyboard.continuity_bible,
+                "edit_plan": authored.storyboard.edit_plan,
+                "project_negative_constraints": authored.storyboard.project_negative_constraints,
+                "authoring_provider": authored.provider,
+                "authoring_model": authored.model,
+                "authoring_request_id": authored.request_id,
+                "input_hash": content_digest(
+                    {"outline": outline.content_hash, "style": bible.content_hash}
+                ),
+                "created_at": utc_now(),
+            }
+            manifest_payload["content_hash"] = content_digest(manifest_payload)
+            manifest = ShotManifestRevision.model_validate(manifest_payload)
+            await self.repository.save_shot_manifest_revision(manifest)
+            artifact = await self._save_structured_artifact(
+                project.id,
+                step.id,
+                "shot_manifest",
+                manifest.model_dump(mode="json"),
+                step.input_hash,
+                manifest.revision_number,
+            )
+            await self._save_dependencies(
+                artifact,
+                [
+                    ("style_bible", str(bible.id), bible.content_hash),
+                    ("outline", str(outline.id), outline.content_hash),
+                ],
+            )
+            await self._finish_step(
+                step,
+                [artifact.id],
+                started=started,
+                provider_ms=step.provider_ms,
+                provider=authored.provider,
+                model=authored.model,
+                request_id=authored.request_id,
+                actual_cost_micros=step.actual_cost_micros,
+            )
+            await self.projects.bind_skill_run(project.id, stage=ProjectStage.STORYBOARD_DESIGN)
+        except asyncio.CancelledError:
+            await self.repository.save_skill_step_run(
+                step.model_copy(
+                    update={
+                        "execution_status": ExecutionStatus.CANCELLED,
+                        "error_code": "storyboard_cancelled",
+                        "error_message": "大纲与分镜生成已停止，可重新开始",
+                        "retryable": True,
+                        "completed_at": utc_now(),
+                        "last_heartbeat_at": utc_now(),
                     }
                 )
-                shots.append(
-                    ShotManifestShot(
-                        stable_shot_key=shot_key,
-                        order=order,
-                        narrative_role=beat.title,
-                        start_frame=cursor,
-                        duration_frames=duration,
-                        handle_in_frames=min(6, cursor),
-                        handle_out_frames=6,
-                        description=static_description,
-                        image_prompt=image_prompt,
-                        image_negative_constraints=bible.negative_lock,
-                        video_prompt=video_prompt,
-                        video_negative_constraints=bible.negative_lock,
-                        image_asset_usage_ids=shot_image_usage_ids,
-                        video_reference_usage_ids=shot_video_usage_ids,
-                        exact_overlays=exact_overlays,
-                        continuity_group_ids=[beat.stable_beat_key],
-                        dialogue_or_voiceover=beat.message,
-                        caption_intent=beat.message,
-                        input_hash=shot_input,
-                    )
-                )
-                cursor += duration
-                order += 1
-        manifest_payload = {
-            "id": uuid4(),
-            "project_id": project.id,
-            "revision_number": len(await self.repository.list_shot_manifest_revisions(project.id))
-            + 1,
-            "outline_revision_id": outline.id,
-            "style_bible_revision_id": bible.id,
-            "fps": brief.fps,
-            "shots": shots,
-            "input_hash": content_digest(
-                {"outline": outline.content_hash, "style": bible.content_hash}
-            ),
-            "created_at": utc_now(),
-        }
-        manifest_payload["content_hash"] = content_digest(manifest_payload)
-        manifest = ShotManifestRevision.model_validate(manifest_payload)
-        await self.repository.save_shot_manifest_revision(manifest)
-        artifact = await self._save_structured_artifact(
-            project.id,
-            step.id,
-            "shot_manifest",
-            manifest.model_dump(mode="json"),
-            step.input_hash,
-            manifest.revision_number,
+            )
+        except StoryboardAuthoringError as exc:
+            await self._fail_step(
+                step,
+                exc.code,
+                str(exc),
+                retryable=exc.retryable,
+                started=started,
+            )
+        except Exception as exc:
+            await self._fail_step(
+                step,
+                "storyboard_compile_failed",
+                str(exc),
+                retryable=True,
+                started=started,
+            )
+
+    async def _author_storyboard_with_heartbeat(
+        self,
+        context: StoryboardAuthoringContext,
+        step: SkillStepRun,
+    ) -> tuple[Any, SkillStepRun]:
+        """Keep task progress fresh while a text provider is producing one large JSON result."""
+        author_task = asyncio.create_task(self.storyboard_author.author(context))
+        pulse = 18
+        try:
+            while True:
+                done, _ = await asyncio.wait({author_task}, timeout=5)
+                if done:
+                    return author_task.result(), step
+                pulse = min(52, pulse + 1)
+                step = await self._update_storyboard_step(step, pulse)
+        except asyncio.CancelledError:
+            author_task.cancel()
+            try:
+                await author_task
+            except asyncio.CancelledError:
+                pass
+            raise
+
+    async def _update_storyboard_step(
+        self,
+        step: SkillStepRun,
+        progress: int,
+        **updates: Any,
+    ) -> SkillStepRun:
+        return await self.repository.save_skill_step_run(
+            step.model_copy(
+                update={
+                    "progress": max(step.progress, min(99, progress)),
+                    "last_heartbeat_at": utc_now(),
+                    **updates,
+                }
+            )
         )
-        await self._save_dependencies(
-            artifact,
-            [
-                ("style_bible", str(bible.id), bible.content_hash),
-                ("outline", str(outline.id), outline.content_hash),
+
+    async def cancel_storyboard(self, run_id: UUID) -> SkillRunDetail:
+        run, _ = await self._require_run(run_id)
+        task = self._storyboard_tasks.get(run.id)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return await self.run_detail(run.id)
+
+    async def _recover_interrupted_storyboard(self, run: SkillRun) -> None:
+        active = self._storyboard_tasks.get(run.id)
+        if active is not None and not active.done():
+            return
+        steps = await self.repository.list_skill_step_runs(run.id)
+        running = next(
+            (
+                item
+                for item in reversed(steps)
+                if item.operation == "compile_storyboard"
+                and item.execution_status == ExecutionStatus.RUNNING
+            ),
+            None,
+        )
+        if running is None:
+            return
+        await self.repository.save_skill_step_run(
+            running.model_copy(
+                update={
+                    "execution_status": ExecutionStatus.FAILED,
+                    "error_code": "storyboard_worker_interrupted",
+                    "error_message": "服务重启中断了大纲与分镜生成，请继续生成",
+                    "retryable": True,
+                    "completed_at": utc_now(),
+                    "last_heartbeat_at": utc_now(),
+                }
+            )
+        )
+
+    async def rewrite_storyboard_shot(
+        self,
+        run_id: UUID,
+        shot_key: str,
+        payload: ShotPromptRewriteRequest,
+    ) -> ShotManifestRevision:
+        run, project = await self._require_run(run_id)
+        await self._assert_budget(run)
+        brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
+        bible = _latest(await self.repository.list_style_bible_revisions(project.id))
+        manifest = _latest(await self.repository.list_shot_manifest_revisions(project.id))
+        snapshot = await self._require_snapshot(project.id)
+        contract = await self.repository.get_run_contract_revision(run.run_contract_revision_id)
+        if brief is None or bible is None or manifest is None or contract is None:
+            raise _fail(409, "storyboard_inputs_missing", "镜头重写缺少当前大纲、风格或生成契约")
+        current = next(
+            (item for item in manifest.shots if item.stable_shot_key == shot_key),
+            None,
+        )
+        if current is None:
+            raise _fail(404, "storyboard_shot_not_found", "分镜不存在")
+        if current.creative_spec is None:
+            raise _fail(409, "shot_creative_spec_missing", "该分镜缺少结构化导演设计")
+        brand = await self.repository.get_brand_snapshot(brief.brand_snapshot_id)
+        if brand is None:
+            raise _fail(409, "brand_snapshot_missing", "品牌快照不存在")
+        usages = await self.repository.list_asset_usages(project.id)
+        claims = await self.repository.list_claim_evidence(project.id)
+        context = StoryboardAuthoringContext(
+            manifest=snapshot.manifest,
+            brand=brand,
+            brief=brief,
+            style_bible=bible,
+            run_contract=contract,
+            asset_facts=[
+                {
+                    "id": str(item.id),
+                    "asset_id": str(item.asset_id),
+                    "role": item.role,
+                    "fidelity": item.fidelity.value,
+                    "rights_status": item.rights_status.value,
+                }
+                for item in usages
+            ],
+            approved_claims=[
+                item.model_dump(mode="json")
+                for item in claims
+                if item.status == ClaimStatus.APPROVED
             ],
         )
-        await self._finish_step(step, [artifact.id], started=started)
-        await self.projects.bind_skill_run(project.id, stage=ProjectStage.STORYBOARD_DESIGN)
-        return await self.run_detail(run.id)
+        try:
+            authored = await self.storyboard_author.rewrite_shot(
+                context,
+                current.creative_spec,
+                instruction=payload.instruction,
+                locked_fields=payload.locked_fields,
+            )
+        except StoryboardAuthoringError as exc:
+            raise _fail(502, exc.code, str(exc), retryable=exc.retryable) from exc
+        authored_shot = authored.storyboard.shots[0]
+        next_spec = creative_spec_from_authored(authored_shot)
+        allowed_evidence_refs = {
+            *(str(item.id) for item in usages),
+            *(str(item.id) for item in claims if item.status == ClaimStatus.APPROVED),
+        }
+        next_spec = next_spec.model_copy(
+            update={
+                "evidence_refs": [
+                    item
+                    for item in next_spec.evidence_refs
+                    if item in allowed_evidence_refs
+                ]
+            }
+        )
+        effective_locked_fields = list(
+            dict.fromkeys([*current.locked_fields, *payload.locked_fields])
+        )
+        locked_updates = {
+            field: getattr(current.creative_spec, field)
+            for field in effective_locked_fields
+            if field in type(current.creative_spec).model_fields
+        }
+        if locked_updates:
+            next_spec = next_spec.model_copy(update=locked_updates)
+        image_prompt = (
+            compile_image_prompt(
+                next_spec,
+                brand_name=brand.name,
+                exact_asset_reserved=bool(current.exact_overlays),
+            )
+            if "image_prompt" in payload.parts
+            else current.image_prompt
+        )
+        video_prompt = (
+            compile_video_prompt(
+                next_spec,
+                order=current.order,
+                generation_duration_seconds=current.generation_duration_seconds,
+                aspect_ratio=brief.output_aspect_ratio,
+                fps=contract.video_fps,
+            )
+            if "video_prompt" in payload.parts
+            else current.video_prompt
+        )
+        forbidden_copy_terms = [
+            term
+            for case in snapshot.manifest.spec.canonical_cases
+            for term in case.forbidden_copy_terms
+        ]
+        quality = assess_prompts(
+            image_prompt,
+            video_prompt,
+            minimum_score=snapshot.manifest.spec.quality.minimum_prompt_score,
+            forbidden_copy_terms=forbidden_copy_terms,
+            allowed_context=" ".join(
+                [
+                    brand.name,
+                    brand.description,
+                    str(brand.visual_identity.get("category_name") or ""),
+                    brief.objective,
+                ]
+            ),
+            required_image_sections=snapshot.manifest.spec.quality.required_image_sections,
+            required_video_sections=snapshot.manifest.spec.quality.required_video_sections,
+            image_character_range=(
+                snapshot.manifest.spec.prompt_rules.image_target_characters.min,
+                snapshot.manifest.spec.prompt_rules.image_target_characters.max,
+            ),
+            video_character_range=(
+                snapshot.manifest.spec.prompt_rules.video_target_characters.min,
+                snapshot.manifest.spec.prompt_rules.video_target_characters.max,
+            ),
+        )
+        if not quality.passed:
+            raise _fail(
+                422,
+                "prompt_quality_failed",
+                f"重写结果未达到 Skill 质量门槛：{'、'.join(quality.issues)}",
+                retryable=True,
+            )
+        next_shots: list[ShotManifestShot] = []
+        for item in manifest.shots:
+            if item.stable_shot_key != shot_key:
+                next_shots.append(item)
+                continue
+            material = item.model_dump(mode="python", exclude={"input_hash"})
+            material.update(
+                {
+                    "description": (
+                        f"{authored_shot.title}｜{authored_shot.narrative_purpose}"
+                        if "description" in payload.parts
+                        else item.description
+                    ),
+                    "image_prompt": image_prompt,
+                    "video_prompt": video_prompt,
+                    "creative_spec": next_spec,
+                    "prompt_quality": quality,
+                    "locked_fields": effective_locked_fields,
+                }
+            )
+            material["input_hash"] = content_digest(material)
+            next_shots.append(ShotManifestShot.model_validate(material))
+        outline = _latest(await self.repository.list_outline_revisions(project.id))
+        if outline is None:
+            raise _fail(409, "outline_required", "当前大纲不存在")
+        return await self.put_shot_manifest(
+            project.id,
+            ShotManifestUpdate(
+                outline_revision_id=outline.id,
+                style_bible_revision_id=bible.id,
+                fps=manifest.fps,
+                shots=next_shots,
+                continuity_bible=manifest.continuity_bible,
+                edit_plan=manifest.edit_plan,
+                project_negative_constraints=manifest.project_negative_constraints,
+            ),
+        )
 
     async def put_outline(self, project_id: UUID, payload: OutlineUpdate) -> OutlineRevision:
         project = await self._require_skill_project(project_id)
@@ -2300,6 +2880,15 @@ class SkillWorkflowService:
             "input_hash": content_digest(payload),
             "created_at": utc_now(),
         }
+        if current:
+            material["continuity_bible"] = payload.continuity_bible or current[-1].continuity_bible
+            material["edit_plan"] = payload.edit_plan or current[-1].edit_plan
+            material["project_negative_constraints"] = (
+                payload.project_negative_constraints or current[-1].project_negative_constraints
+            )
+            material["authoring_provider"] = current[-1].authoring_provider
+            material["authoring_model"] = current[-1].authoring_model
+            material["authoring_request_id"] = current[-1].authoring_request_id
         material["content_hash"] = content_digest(material)
         item = ShotManifestRevision.model_validate(material)
         await self.repository.save_shot_manifest_revision(item)
@@ -3442,7 +4031,14 @@ class SkillWorkflowService:
             ProductionSeedShot(
                 **shot.model_dump(
                     mode="python",
-                    exclude={"exact_overlays", "video_reference_usage_ids"},
+                    exclude={
+                        "exact_overlays",
+                        "video_reference_usage_ids",
+                        "generation_duration_seconds",
+                        "creative_spec",
+                        "prompt_quality",
+                        "locked_fields",
+                    },
                 ),
                 exact_overlays=shot.exact_overlays,
                 video_reference_usage_ids=shot.video_reference_usage_ids,
@@ -3465,6 +4061,7 @@ class SkillWorkflowService:
                 clip_audio_strategy=contract.audio_source_strategy,
                 music_strategy=contract.music_strategy,
                 narration_strategy=contract.narration_strategy,
+                creative_direction=snapshot.manifest.spec.audio,
             ),
             subtitle_intent=ProductionSeedSubtitleIntent(
                 enabled=contract.subtitle_strategy != "none",
@@ -3474,6 +4071,7 @@ class SkillWorkflowService:
                     if contract.subtitle_strategy == "final_speech"
                     else contract.subtitle_strategy
                 ),
+                style=bible.typography,
             ),
         )
         await self.repository.save_production_seed(seed)

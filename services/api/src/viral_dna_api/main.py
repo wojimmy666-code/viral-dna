@@ -218,6 +218,7 @@ from .quality.routes import create_continuity_router
 from .real_pipeline import HybridAnalysisPipeline
 from .records import RecordService, resolve_video_path, write_source_metadata
 from .skill_workflow import (
+    ModelStoryboardAuthor,
     SkillWorkflowService,
     create_skill_workflow_admin_router,
     create_skill_workflow_router,
@@ -460,6 +461,7 @@ skill_workflow_service = SkillWorkflowService(
     production_service=production_service,
     timeline_reader=timeline_service,
     export_reader=timeline_export_service,
+    storyboard_author=ModelStoryboardAuthor(preferences=user_preferences_service),
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 app.include_router(

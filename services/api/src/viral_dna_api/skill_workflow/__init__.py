@@ -16,6 +16,7 @@ from .contracts import (
 )
 from .routes import create_skill_workflow_admin_router, create_skill_workflow_router
 from .service import SkillWorkflowService, SkillWorkflowServiceError
+from .storyboard_authoring import ModelStoryboardAuthor, ReferenceStyleStoryboardAuthor
 
 __all__ = [
     "Artifact",
@@ -33,6 +34,8 @@ __all__ = [
     "SkillStepRun",
     "SkillWorkflowService",
     "SkillWorkflowServiceError",
+    "ModelStoryboardAuthor",
+    "ReferenceStyleStoryboardAuthor",
     "StyleBibleRevision",
     "create_skill_workflow_admin_router",
     "create_skill_workflow_router",
