@@ -236,6 +236,7 @@ export function ShotVideoWorkspace({
   flushVideoDraft,
   gate,
   initialCandidateId = "",
+  onPreviewCandidate,
   onAdvance,
   onApprove,
   onArchiveCandidates,
@@ -711,11 +712,11 @@ export function ShotVideoWorkspace({
     ? "按实际用量结算"
     : `¥${(estimatedCostMicros / 1_000_000).toFixed(2)}`;
   useEffect(() => {
-    setDisplayedCandidateId(
+    setDisplayedCandidateId((current) => (
       initialCandidateId && candidates.some((item) => item.id === initialCandidateId)
         ? initialCandidateId
-        : null,
-    );
+        : candidates.some((item) => item.id === current) ? current : null
+    ));
     setDurationAdjustmentMessage("");
   }, [initialCandidateId, latestRun?.id, plan?.id]);
 
@@ -906,7 +907,7 @@ export function ShotVideoWorkspace({
     <section className={`shot-video-workspace${sourceVideoMode ? " source-video-passthrough" : ""}`}>
       <header className="shot-video-stage-header">
         <div>
-          <h3>分段视频工作台</h3>
+          <h3>分镜视频</h3>
           <p>按需组合提示词、图片、资产、参考视频或深度控制，逐分镜生成和审核视频候选。</p>
         </div>
         <div className="shot-video-gate">
@@ -915,11 +916,11 @@ export function ShotVideoWorkspace({
           </span>
           <button
             className="primary-button compact"
-            disabled={busy || advanced || !gate?.allowed}
+            disabled={busy || (!advanced && !gate?.allowed)}
             onClick={onAdvance}
             type="button"
           >
-            {advanced ? "已进入视频剪辑" : "进入视频剪辑"}
+            {advanced ? "继续到视频剪辑" : "确认视频，进入视频剪辑"}
             <ArrowRight size={16} />
           </button>
         </div>
@@ -1027,7 +1028,10 @@ export function ShotVideoWorkspace({
             candidateGroups={candidateGroups}
             displayedCandidate={displayedCandidate}
             onArchiveCandidates={onArchiveCandidates}
-            onPreviewCandidate={setDisplayedCandidateId}
+            onPreviewCandidate={(candidateId) => {
+              setDisplayedCandidateId(candidateId);
+              onPreviewCandidate?.(candidateId);
+            }}
             onRestoreCandidates={onRestoreCandidates}
             onNotice={onNotice}
             plan={plan}
@@ -1076,7 +1080,7 @@ export function ShotVideoWorkspace({
                   onChange={(change) => setVideoDraft((current) => (
                     reconcileVideoDraftReferences(current, change, referenceFrames)
                   ))}
-                  onCreateDepth={() => {
+                  onCreateDepth={sourceVideoUrl ? () => {
                     setVideoDraft((current) => ({
                       ...current,
                       inputSources: Array.from(new Set([
@@ -1085,7 +1089,7 @@ export function ShotVideoWorkspace({
                       ])),
                     }));
                     setDepthSettingsOpen(true);
-                  }}
+                  } : undefined}
                   onOpenManagedAssets={() => openManagedAssetPicker()}
                   onRestoreAutomaticReferences={() => setVideoDraft((current) => (
                     reconcileVideoDraftReferences(current, {
@@ -1099,7 +1103,7 @@ export function ShotVideoWorkspace({
                   shotPlanId={plan.id}
                   videoReferenceBindings={plan?.video_reference_bindings || []}
                 />
-                {usesDepthControl && (
+                {usesDepthControl && sourceVideoUrl && (
                   <details
                     className="shot-video-depth-input-details"
                     onToggle={(event) => setDepthSettingsOpen(event.currentTarget.open)}

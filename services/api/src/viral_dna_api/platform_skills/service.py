@@ -716,11 +716,11 @@ def _default_manifest(
                 "palette_policy": {"source": "brand_then_reference"},
                 "composition": {
                     "principles": [
-                        "one dominant subject per shot",
-                        "reserve safe area for deterministic typography",
+                        "每个镜头只有一个视觉主体",
+                        "为后期准确叠加文字预留安全区域",
                     ]
                 },
-                "lighting": {"principles": ["controlled motivated lighting"]},
+                "lighting": {"principles": ["光线受控且具有合理光源"]},
                 "camera": {
                     "allowed_motion": camera_motion,
                     "avoid_motion": ["random_handheld", "unmotivated_whip_pan"],
@@ -731,13 +731,13 @@ def _default_manifest(
                     "max_lines": 2,
                 },
                 "positive_lock": [
-                    "preserve subject identity and material detail",
-                    "keep one coherent visual language",
+                    "保持主体身份与材质细节一致",
+                    "全片保持统一的视觉语言",
                 ],
                 "negative_lock": [
-                    "no invented certifications or claims",
-                    "no generated logo or unreadable packaging text",
-                    "no unexplained identity changes",
+                    "不得编造认证或宣传声明",
+                    "不得生成标志或不可辨认的包装文字",
+                    "不得无故改变主体身份",
                 ],
             },
             "prompt_rules": {

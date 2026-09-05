@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { productionNavigation } from "../src/creation-workspace/workspace-ui.js";
 
 const workspaceSource = readFileSync(
   new URL("../src/video-editor/VideoEditorWorkspace.jsx", import.meta.url),
@@ -31,7 +32,7 @@ test("opens the editing step only after workflow advancement", () => {
   );
   assert.match(workflowSource, /<VideoEditorWorkspace/);
   assert.match(workflowSource, /setActiveSection\("editing"\)/);
-  assert.match(workflowSource, /step\.id === "export" && project\.active_step === "editing"/);
+  assert.equal(productionNavigation({ active_step: "editing" }).find((step) => step.id === "export").enabled, true);
 });
 
 test("persists controlled edits with optimistic timeline revisions", () => {

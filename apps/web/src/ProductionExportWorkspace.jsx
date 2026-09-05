@@ -62,6 +62,8 @@ function normalizeLockedResolution(value) {
 
 export function ProductionExportWorkspace({
   lockedResolution = null,
+  expectedTimelineRevisionId,
+  onArtifactsChanged,
   project,
   request,
   resolveUrl,
@@ -71,6 +73,7 @@ export function ProductionExportWorkspace({
 }) {
   const [timeline, setTimeline] = useState(null);
   const [jobs, setJobs] = useState([]);
+  useEffect(() => { onArtifactsChanged?.(jobs); }, [jobs, onArtifactsChanged]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -156,11 +159,16 @@ export function ProductionExportWorkspace({
     setBusy(true);
     setError("");
     try {
+      const currentTimeline = await request(`/productions/${project.id}/timeline`);
+      if (expectedTimelineRevisionId !== undefined && currentTimeline.revision_id !== expectedTimelineRevisionId) {
+        throw new Error("时间线已修改，请返回视频剪辑确认画面、声音和字幕后再导出");
+      }
+      setTimeline(currentTimeline);
       const job = await request(`/productions/${project.id}/timeline/final-renders`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          expected_revision_id: timeline.revision_id,
+          expected_revision_id: currentTimeline.revision_id,
           resolution,
           subtitle_mode: subtitleMode,
           quality,

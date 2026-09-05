@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import {
   ArrowsOut,
   ArrowClockwise,
@@ -572,7 +572,7 @@ function TimelinePreviewPlayer({
   );
 }
 
-function ClipInspector({ clip, clips, onChange, onMove }) {
+function ClipInspector({ clip, clips, hasSourceAudio, onChange, onMove }) {
   if (!clip) {
     return <div className="timeline-inspector-empty">选择一个片段后调整裁剪、节奏和转场。</div>;
   }
@@ -624,7 +624,7 @@ function ClipInspector({ clip, clips, onChange, onMove }) {
       <label className="timeline-field">
         <span>片段声音</span>
         <select value={clip.audio_mode} onChange={(event) => onChange({ audio_mode: event.target.value })}>
-          <option value="source">沿用原分镜音频</option>
+          {hasSourceAudio && <option value="source">沿用原分镜音频</option>}
           <option disabled={!clip.candidate_audio_available} value="candidate">
             {clip.candidate_audio_available ? "使用候选新音频" : "候选没有新音频"}
           </option>
@@ -683,6 +683,7 @@ function AudioInspector({
   busy,
   duration,
   hasCandidateAudio,
+  hasSourceAudio,
   onBackgroundChange,
   onChange,
   onDeleteBackground,
@@ -698,18 +699,18 @@ function AudioInspector({
             strategy: event.target.checked && audio.strategy === "muted"
               ? "per_shot"
               : audio.strategy,
-          })} disabled={!audio.source_audio_url && !hasCandidateAudio} type="checkbox" />
+          })} disabled={!hasSourceAudio && !hasCandidateAudio} type="checkbox" />
           <span>{audio.enabled ? "已启用" : "已静音"}</span>
         </label>
       </div>
       <label className="timeline-field">
         <span>主音轨策略</span>
-        <select disabled={!audio.source_audio_url && !hasCandidateAudio} value={audio.enabled ? audio.strategy : "muted"} onChange={(event) => onChange({ strategy: event.target.value, enabled: event.target.value !== "muted" })}>
-          {audio.source_audio_url && !hasCandidateAudio && <option value="continuous_source_track">连续原音轨</option>}
-          {(audio.source_audio_url || hasCandidateAudio) && <option value="per_shot">按分镜声音来源</option>}
+        <select disabled={!hasSourceAudio && !hasCandidateAudio} value={audio.enabled ? audio.strategy : "muted"} onChange={(event) => onChange({ strategy: event.target.value, enabled: event.target.value !== "muted" })}>
+          {hasSourceAudio && !hasCandidateAudio && <option value="continuous_source_track">连续原音轨</option>}
+          {(hasSourceAudio || hasCandidateAudio) && <option value="per_shot">按分镜声音来源</option>}
           <option value="muted">全局静音</option>
         </select>
-        <em>{audio.source_audio_url || hasCandidateAudio ? "每个分镜可独立选择原音频、候选新音频或静音。" : "当前没有可用的分镜音频。"}</em>
+        <em>{hasSourceAudio ? "每个分镜可独立选择原音频、候选新音频或静音。" : hasCandidateAudio ? "每个分镜可选择候选新音频或静音。" : "当前没有可用的分镜音频。"}</em>
       </label>
       <label className="timeline-field">
         <span>全局音量 · {Math.round(audio.volume * 100)}%</span>
@@ -858,6 +859,9 @@ function SubtitleInspector({ cues, onAdd, onChange, onDelete, onSelect, selected
 }
 
 export function VideoEditorWorkspace({
+  workspaceRef = null,
+  initialInspectorTab = "clip",
+  onTimelineChanged,
   project,
   request,
   resolveUrl,
@@ -874,6 +878,11 @@ export function VideoEditorWorkspace({
   const [playheadSeconds, setPlayheadSeconds] = useState(0);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [inspectorTab, setInspectorTab] = useState("clip");
+  useEffect(() => { setInspectorTab(initialInspectorTab); }, [initialInspectorTab]);
+  const onTimelineChangedRef = useRef(onTimelineChanged);
+  onTimelineChangedRef.current = onTimelineChanged;
+  useEffect(() => { if (timeline) onTimelineChangedRef.current?.(timeline); }, [timeline]);
+  useImperativeHandle(workspaceRef, () => ({ flush: flushTimelineSave }));
   const [historyOpen, setHistoryOpen] = useState(false);
   const [renderJob, setRenderJob] = useState(null);
   const [undoStack, setUndoStack] = useState([]);
@@ -1495,6 +1504,7 @@ export function VideoEditorWorkspace({
             <ClipInspector
               clip={selectedClip}
               clips={timeline.clips}
+              hasSourceAudio={Boolean(project.video_id && timeline.audio_track.source_audio_url)}
               onChange={updateClip}
               onMove={moveSelectedClip}
             />
@@ -1505,6 +1515,7 @@ export function VideoEditorWorkspace({
               background={timeline.background_audio_track}
               busy={busy}
               duration={timeline.duration_seconds}
+              hasSourceAudio={Boolean(project.video_id && timeline.audio_track.source_audio_url)}
               hasCandidateAudio={timeline.clips.some(
                 (clip) => clip.enabled && clip.candidate_audio_available,
               )}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,6 +29,7 @@ from .contracts import (
     ShotTransitionPlan,
     StyleBibleRevision,
 )
+from .storyboard_prompts import chinese_term, style_text
 
 SYSTEM_PROMPT_PATH = (
     Path(__file__).resolve().parents[1] / "ai" / "prompts" / "skill_storyboard_v2.md"
@@ -40,7 +42,7 @@ class AuthoredBeat(BaseModel):
     purpose: str = Field(min_length=1, max_length=1000)
     audience_takeaway: str = Field(min_length=1, max_length=2000)
     content_units: list[str] = Field(min_length=1, max_length=30)
-    suggested_shot_count: int = Field(ge=1, le=100)
+    suggested_shot_count: int = Field(ge=1)
     rhythm: str = Field(min_length=1, max_length=1000)
     transition_strategy: str = Field(min_length=1, max_length=1000)
     evidence_refs: list[str] = Field(default_factory=list, max_length=100)
@@ -67,6 +69,8 @@ class AuthoredShot(BaseModel):
     synchronous_foley: list[str] = Field(min_length=1, max_length=20)
     ambience: str = Field(min_length=1, max_length=1000)
     music_cue: str = Field(default="", max_length=1000)
+    forbidden_sounds: list[str] = Field(default_factory=list, max_length=20)
+    transition_kind: str = Field(default="hard_cut", min_length=1, max_length=80)
     cut_in: str = Field(default="", max_length=1000)
     cut_out: str = Field(min_length=1, max_length=1000)
     continuity_note: str = Field(default="", max_length=1000)
@@ -77,8 +81,9 @@ class AuthoredShot(BaseModel):
 
 
 class AuthoredStoryboard(BaseModel):
+    creative_approach: str = Field(default="", max_length=300)
     beats: list[AuthoredBeat] = Field(min_length=1, max_length=30)
-    shots: list[AuthoredShot] = Field(min_length=1, max_length=100)
+    shots: list[AuthoredShot] = Field(min_length=1)
     continuity_bible: dict[str, Any] = Field(default_factory=dict)
     edit_plan: dict[str, Any] = Field(default_factory=dict)
     project_negative_constraints: list[str] = Field(min_length=1, max_length=100)
@@ -101,10 +106,12 @@ class StoryboardAuthoringContext:
     run_contract: RunContractRevision
     asset_facts: list[dict[str, Any]]
     approved_claims: list[dict[str, Any]]
+    on_model_started: Callable[[str, str], Awaitable[None]] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class StoryboardAuthoringResult:
+class StoryboardAuthoringResult(BaseModel):
+    model_config = {"frozen": True}
+
     storyboard: AuthoredStoryboard
     provider: str
     model: str
@@ -112,13 +119,22 @@ class StoryboardAuthoringResult:
     provider_ms: int = 0
     usage: ModelUsage | None = None
     actual_cost_micros: int = 0
+    raw_content: str = ""
 
 
 class StoryboardAuthoringError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        provider_error: ModelProviderError | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.provider_error = provider_error
 
 
 class StoryboardAuthor(Protocol):
@@ -136,10 +152,6 @@ class StoryboardAuthor(Protocol):
 
 def _clean(value: object) -> str:
     return " ".join(str(value or "").split()).strip()
-
-
-def _clamp(value: int, minimum: int, maximum: int) -> int:
-    return max(minimum, min(maximum, value))
 
 
 def _measured_cost(provider: str, model: str, usage: ModelUsage) -> int:
@@ -163,7 +175,8 @@ def _shot_count(context: StoryboardAuthoringContext) -> int:
         density = narrative.shot_density.average_edit_duration_seconds
         average = max(0.25, (density.min + density.max) / 2)
         scaled = round(context.brief.target_duration_seconds / average)
-    return _clamp(scaled, narrative.shot_count.min, narrative.shot_count.max)
+    # A pacing suggestion, never a constraint on returned or manually edited shots.
+    return max(1, scaled)
 
 
 def _fit_archetypes(
@@ -229,13 +242,15 @@ class ReferenceStyleStoryboardAuthor:
     """Offline, deterministic author that keeps the Skill's style contract intact."""
 
     async def author(self, context: StoryboardAuthoringContext) -> StoryboardAuthoringResult:
+        if context.on_model_started:
+            await context.on_model_started("local_rule_compiler", "viraldna-skill-director-v2")
         spec = context.manifest.spec
         count = _shot_count(context)
         archetypes = _fit_archetypes(spec.narrative.shot_archetypes, count)
         category = _clean(context.brand.visual_identity.get("category_name")) or "实体产品"
         scenes = context.brand.visual_identity.get("scenes") or []
         scene_hint = "、".join(_clean(item) for item in scenes if _clean(item))
-        environment = f"项目素材实际呈现的{category}制造、工艺或检验环境" + (
+        environment = f"项目素材实际呈现的{category}相关场景" + (
             f"，优先采用{scene_hint}" if scene_hint else ""
         )
         product = f"{context.brand.name} 的{category}产品"
@@ -260,7 +275,7 @@ class ReferenceStyleStoryboardAuthor:
                     "craft_proof": "制造与装配证明",
                     "test_proof": "检测与品质证明",
                     "brand_resolution": "产品与品牌收束",
-                }.get(item.key, item.key.replace("_", " ").title()),
+                }.get(item.key, chinese_term(item.key)),
                 purpose=item.purpose,
                 audience_takeaway=(
                     core_message
@@ -286,18 +301,16 @@ class ReferenceStyleStoryboardAuthor:
             )
             for item in patterns
         ]
-        lighting = (
-            "3200–3600K暖色侧逆光，极轻薄雾，约8:1低调光比；"
-            "暗部保留细节，高光柔和不过曝"
-        )
-        color_texture = (
-            "炭黑、暖琥珀、灰橄榄和奶油白低饱和基底，品牌色克制点缀；"
-            "轻微黑柔和细腻35mm胶片颗粒"
+        lighting = style_text(spec.style.lighting) or "沿用项目素材中的合理光源与明暗关系"
+        color_texture = "；".join(
+            filter(
+                None, [style_text(spec.style.palette_policy), "、".join(spec.style.visual_keywords)]
+            )
         )
         common_locks = [
             f"{product}的外形、比例、材料和品牌识别与项目素材一致",
             "空间、人物、服装、设备年代与光线方向跨镜头稳定",
-            "ARRI Alexa 35 / Cooke S4质感与自然运动模糊一致",
+            style_text(spec.style.camera.get("camera_character")) or "摄影质感与项目风格一致",
         ]
         shots: list[AuthoredShot] = []
         for index, archetype in enumerate(archetypes):
@@ -343,7 +356,18 @@ class ReferenceStyleStoryboardAuthor:
                     color_and_texture=color_texture,
                     synchronous_foley=archetype.sound_pattern or ["与主体动作匹配的近场拟音"],
                     ambience="统一的低电平真实工作环境底噪跨镜头连续，不抢主体动作",
-                    music_cue="成片阶段以约124 BPM低频极简工业音乐对齐关键动作落点",
+                    music_cue=style_text(spec.audio.get("editing_music"))
+                    or "配乐在剪辑阶段根据项目设置处理",
+                    forbidden_sounds=[
+                        label
+                        for key, label in (
+                            ("dialogue", "对白"),
+                            ("narration", "旁白"),
+                            ("shot_music", "镜头内配乐"),
+                        )
+                        if spec.audio.get(key) == "forbidden"
+                    ],
+                    transition_kind=(spec.editing.allowed_transitions or ["hard_cut"])[0],
                     cut_in="承接上一镜头的运动方向或环境声床",
                     cut_out="在主要动作完成并停稳、同步拟音落点出现时硬切",
                     continuity_note="保持与前后镜头相同的产品几何、空间、人物、色彩和摄影机质感",
@@ -357,23 +381,22 @@ class ReferenceStyleStoryboardAuthor:
                 )
             )
         storyboard = AuthoredStoryboard(
+            creative_approach=(
+                "；".join(item.purpose.rstrip("。；") for item in patterns)[:149] + "。"
+            ),
             beats=beats,
             shots=shots,
             continuity_bible={
                 "world": environment,
                 "product": f"{product}以项目素材为唯一身份、结构、材质和比例依据",
                 "character": (
-                    "只使用项目素材可确认的人物；"
-                    "同一人物的年龄、面孔、工装和手套跨镜头一致"
+                    "只使用项目素材可确认的人物；同一人物的年龄、面孔、工装和手套跨镜头一致"
                 ),
-                "palette": "炭黑、暖琥珀、灰橄榄、奶油白为低饱和基底，品牌色仅作克制点缀",
+                "palette": style_text(spec.style.palette_policy),
                 "lighting": lighting,
-                "cinematography": (
-                    "ARRI Alexa 35 / Cooke S4质感，24fps、180度快门，"
-                    "微距和近景为主，运镜稳定克制"
-                ),
+                "cinematography": style_text(spec.style.camera),
                 "texture": color_texture,
-                "sound": "近场动作拟音叠加连续低电平环境底噪；无旁白、对白、自动配乐和警报声",
+                "sound": style_text(spec.audio),
                 "typography": "画面生成阶段禁止新增文字；Logo、包装和字体在后期确定性叠加",
             },
             edit_plan={
@@ -382,7 +405,7 @@ class ReferenceStyleStoryboardAuthor:
                 "transition": "hard_cut",
                 "detail_ratio": spec.narrative.shot_density.detail_ratio,
                 "environment_ratio": spec.narrative.shot_density.environment_ratio,
-                "music_bpm": spec.audio.get("editing_music", {}).get("bpm", 124),
+                "music_bpm": spec.audio.get("editing_music", {}).get("bpm"),
                 "cut_rules": spec.editing.cut_rules,
             },
             project_negative_constraints=list(spec.style.negative_lock),
@@ -390,7 +413,7 @@ class ReferenceStyleStoryboardAuthor:
         return StoryboardAuthoringResult(
             storyboard=storyboard,
             provider="local_rule_compiler",
-            model="viraldna-industrial-director-v2",
+            model="viraldna-skill-director-v2",
         )
 
     async def rewrite_shot(
@@ -414,8 +437,7 @@ class ReferenceStyleStoryboardAuthor:
             replacement = replacement.model_copy(
                 update={
                     "narrative_purpose": (
-                        f"{replacement.narrative_purpose}；"
-                        f"人工调整要求：{instruction.strip()}"
+                        f"{replacement.narrative_purpose}；人工调整要求：{instruction.strip()}"
                     ),
                 }
             )
@@ -472,7 +494,10 @@ class ModelStoryboardAuthor:
             "skill": context.manifest.spec.model_dump(mode="json"),
             "assets": context.asset_facts,
             "approved_claims": context.approved_claims,
-            "target_shot_count": _shot_count(context),
+            "suggested_shot_count": _shot_count(context),
+            "shot_count_policy": (
+                "镜头数量仅供节奏参考；按实际叙事自由增减，至少一个，不设数量上限。"
+            ),
         }
         schema = json.dumps(AuthoredStoryboard.model_json_schema(), ensure_ascii=False)
         user_prompt = (
@@ -481,7 +506,10 @@ class ModelStoryboardAuthor:
             f"输出必须严格符合 JSON Schema：\n{schema}"
         )
         failures: list[str] = []
+        last_error: ModelProviderError | None = None
         for target in targets:
+            if context.on_model_started:
+                await context.on_model_started(target.provider, target.model)
             try:
                 result = await self.router.provider_for(target).generate(
                     ModelRequest(
@@ -493,22 +521,22 @@ class ModelStoryboardAuthor:
                     AuthoredStoryboard,
                 )
             except ModelProviderError as exc:
+                last_error = exc
                 failures.append(f"{target.model}：{exc}")
                 if not exc.retryable:
                     break
                 continue
-            expected = _shot_count(context)
-            if len(result.data.shots) != expected:
-                failures.append(
-                    f"{target.model}：返回 {len(result.data.shots)} 个镜头，要求 {expected} 个"
+            if not result.data.shots:
+                raise StoryboardAuthoringError(
+                    "storyboard_empty", "模型未返回任何镜头，请重新生成", retryable=True
                 )
-                continue
             return StoryboardAuthoringResult(
                 storyboard=result.data,
                 provider=target.provider,
                 model=result.resolved_model,
                 request_id=result.provider_request_id,
                 provider_ms=result.latency_ms,
+                raw_content=result.raw_content,
                 usage=result.usage,
                 actual_cost_micros=_measured_cost(
                     target.provider,
@@ -516,10 +544,25 @@ class ModelStoryboardAuthor:
                     result.usage,
                 ),
             )
+        code = last_error.code if last_error else "storyboard_model_failed"
+        explanation = {
+            "model_timeout": "文案模型请求超时，未收到完整分镜结果",
+            "model_network_error": "无法连接文案模型服务，请检查连接后重试",
+            "model_schema_invalid": "模型返回的大纲或镜头格式不完整，请重新生成",
+            "model_response_invalid": "模型服务返回了无法读取的响应，请重试",
+        }.get(code, "文案模型生成失败")
+        if last_error and last_error.raw_content:
+            try:
+                raw = json.loads(last_error.raw_content)
+                if isinstance(raw, dict) and raw.get("shots") == []:
+                    code, explanation = "storyboard_empty", "模型未返回任何镜头，请重新生成"
+            except (ValueError, TypeError):
+                pass
         raise StoryboardAuthoringError(
-            "storyboard_model_failed",
-            failures[-1] if failures else "大纲与分镜模型没有返回有效结果",
-            retryable=True,
+            code,
+            f"{explanation}。{failures[-1]}"[:2000] if failures else explanation,
+            retryable=last_error.retryable if last_error else True,
+            provider_error=last_error,
         )
 
     async def rewrite_shot(
@@ -624,10 +667,10 @@ def creative_spec_from_authored(shot: AuthoredShot) -> ShotCreativeSpec:
             synchronous_foley=shot.synchronous_foley,
             ambience=shot.ambience,
             music_cue=shot.music_cue,
-            forbidden=["自动配乐", "旁白", "对白", "警报声"],
+            forbidden=shot.forbidden_sounds,
         ),
         transition=ShotTransitionPlan(
-            kind="hard_cut",
+            kind=shot.transition_kind,
             cut_in=shot.cut_in,
             cut_out=shot.cut_out,
             continuity_note=shot.continuity_note,
@@ -654,8 +697,8 @@ def compile_image_prompt(
     return (
         f"【参考约束】以当前镜头绑定的{brand_name}产品、材料和场景素材作为主体身份、结构、比例与表面细节依据，不重新设计产品。\n"
         f"【主体与场景】{spec.subject}。{spec.scene}。静态画面定格在：{spec.initial_state}。只呈现一个明确视觉重点。\n"
-        f"【构图与镜头】{spec.camera.lens_mm}mm镜头，{spec.camera.framing}；{spec.camera.position}。{spec.camera.focus}。画面保留真实空间尺度和前后层次。\n"
-        f"【光线与色彩】{spec.lighting}。{spec.color_and_texture}。保持高端写实工业纪录广告质感，不做电商棚拍或科幻渲染。\n"
+        f"【构图与镜头】{spec.camera.lens_mm}mm镜头，{chinese_term(spec.camera.framing)}；{spec.camera.position}。{spec.camera.focus}。空间尺度与前后层次符合项目风格。\n"
+        f"【光线与色彩】{spec.lighting}。{spec.color_and_texture}。\n"
         f"【连续性锁定】{locks}。本提示词只描述动作开始前的一张静态分镜图，不包含运镜、时间过程或转场。\n"
         f"【确定性图形】{exact}\n"
         f"【严格约束】{constraints}；主体几何、材质、数量、朝向和构图关系必须稳定。"
@@ -677,17 +720,20 @@ def compile_video_prompt(
     constraints = "；".join(spec.failure_constraints)
     return (
         f"【首帧约束】以当前上传并已采用的第{order:02d}张分镜图作为唯一首帧、主体、场景、构图和明暗关系约束，生成一个{generation_duration_seconds}秒、{aspect_ratio}、{fps}fps的单一连续镜头；不得重新设计首帧中的产品、人物、设备或空间。\n\n"
-        f"【统一视觉锁定】{locks}。{spec.lighting}。{spec.color_and_texture}。全片保持同一台电影摄影机、同一色彩管理和真实物理尺度。\n\n"
-        f"【本镜头】{spec.camera.lens_mm}mm镜头，{spec.camera.framing}；"
+        f"【统一视觉锁定】{locks}。{spec.lighting}。{spec.color_and_texture}。"
+        "全片摄影质感与色彩管理遵循当前 Skill 的风格。\n\n"
+        f"【本镜头】{spec.camera.lens_mm}mm镜头，{chinese_term(spec.camera.framing)}；"
         f"{spec.camera.position}。起始状态：{spec.initial_state}。"
         f"动作仅完成一次：{phases}。结束状态：{spec.end_state}。"
-        f"摄影机{spec.camera.motion}，"
+        f"摄影机{chinese_term(spec.camera.motion)}，"
         f"{spec.camera.motion_extent or '运动幅度极小且稳定'}；"
-        f"{spec.camera.focus}。运动慢、稳、重，结尾停稳，"
-        f"方便{spec.transition.kind}。\n\n"
-        f"【同步音效】{foley}；{spec.sound.ambience}。声音近、干净、克制且符合真实空间；不要{forbidden_audio}。\n\n"
+        f"{spec.camera.focus}。在指定结束状态形成明确的剪辑落点，"
+        f"方便{chinese_term(spec.transition.kind)}。\n\n"
+        f"【同步音效】{foley}；{spec.sound.ambience}。"
+        "声音必须与可见动作及环境匹配，不得无故出现新的声源；"
+        f"禁止内容：{forbidden_audio or '未在本镜头指定的额外声音'}。\n\n"
         f"【剪辑落点】{spec.transition.cut_out}。{spec.transition.continuity_note}。\n\n"
-        f"【严格约束】一镜到底，不得自动切镜或突然换景；{constraints}；不要数字变焦、夸张慢动作、速度坡度、青橙调色、字幕、Logo、水印或任何新增文字。"
+        f"【严格约束】一镜到底，不得自动切镜或突然换景；{constraints}；不得生成字幕、Logo、水印或任何新增文字。"
     )
 
 

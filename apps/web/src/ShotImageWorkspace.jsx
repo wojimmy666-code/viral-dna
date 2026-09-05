@@ -232,7 +232,7 @@ function KeyframePicker({
   );
 }
 
-function ShotCreateDialog({ currentPlan, busy, onClose, onCreate }) {
+function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo }) {
   const [mode, setMode] = useState("duplicate");
   const start = Number(currentPlan?.end_seconds || 0);
   const [startSeconds, setStartSeconds] = useState(start.toFixed(2));
@@ -278,10 +278,10 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate }) {
             <input checked={mode === "duplicate"} onChange={() => setMode("duplicate")} type="radio" />
             <Copy size={19} /><span><strong>复制当前分镜</strong><small>复制提示词、关键帧和资产绑定，不复制生成结果。</small></span>
           </label>
-          <label className={mode === "video_range" ? "active" : ""}>
+          {hasSourceVideo && <label className={mode === "video_range" ? "active" : ""}>
             <input checked={mode === "video_range"} onChange={() => setMode("video_range")} type="radio" />
             <VideoCamera size={19} /><span><strong>从源视频选段</strong><small>指定时间范围并提取新的关键帧。</small></span>
-          </label>
+          </label>}
           <label className={mode === "blank" ? "active" : ""}>
             <input checked={mode === "blank"} onChange={() => setMode("blank")} type="radio" />
             <Plus size={19} /><span><strong>空白分镜</strong><small>适合纯文生图，默认时长 3 秒。</small></span>
@@ -310,6 +310,8 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate }) {
 }
 
 export function ShotImageWorkspace({
+  initialCandidateId = "",
+  onPreviewCandidate,
   shots,
   shotDetail,
   selectedShotId,
@@ -539,6 +541,10 @@ export function ShotImageWorkspace({
   const approvedCandidateEntry = allImageCandidateEntries.find(
     (entry) => entry.candidate.id === plan?.approved_image_candidate_id,
   ) || null;
+  const hasSourceVideo = Boolean(sourceVideoUrl);
+  const hasSourcePreview = hasSourceVideo && Boolean(plan?.source_keyframe_url);
+  const approvedImage = approvedCandidateEntry?.candidate || null;
+  const hasComparison = hasSourcePreview || Boolean(approvedImage);
   const approvedIsSource = Boolean(
     plan?.image_status === "approved"
     && approvedCandidateEntry?.run?.execution_mode === "source_frame",
@@ -635,28 +641,31 @@ export function ShotImageWorkspace({
       : "";
   useEffect(() => {
     const preferred = (
-      candidates.find((item) => item.id === plan?.approved_image_candidate_id)
+      candidates.find((item) => item.id === initialCandidateId)
+      || candidates.find((item) => item.id === displayedCandidateId)
+      || candidates.find((item) => item.id === plan?.approved_image_candidate_id)
       || candidates.find((item) => item.status === "selected")
       || candidates[0]
       || null
     );
     setDisplayedCandidateId(preferred?.id || null);
-    setVisualChoice(
-      approvedIsSource
+    setVisualChoice((current) => (
+      preferred?.id && preferred.id === initialCandidateId ? "candidate" : approvedIsSource
         ? "source"
         : preferred && (
           preferred.status === "selected"
           || preferred.id === plan?.approved_image_candidate_id
         )
           ? "candidate"
-          : "source",
-    );
+          : preferred?.id === displayedCandidateId ? current : hasSourcePreview ? "source" : "candidate"
+    ));
     setMentionMenu(null);
   }, [
     plan?.id,
     plan?.approved_image_candidate_id,
     approvedIsSource,
     candidateIdentity,
+    initialCandidateId,
   ]);
 
   useEffect(() => {
@@ -815,6 +824,7 @@ export function ShotImageWorkspace({
   function chooseSource() {
     if (!plan?.source_keyframe_url) return;
     setVisualChoice("source");
+    onPreviewCandidate?.("");
   }
 
   function moveVisualBeat(visualBeatId, offset) {
@@ -830,6 +840,7 @@ export function ShotImageWorkspace({
   function chooseCandidate(candidate) {
     if (!candidate) return;
     setDisplayedCandidateId(candidate.id);
+    onPreviewCandidate?.(candidate.id);
     setVisualChoice("candidate");
     if (
       plan?.image_status !== "approved"
@@ -1026,20 +1037,20 @@ export function ShotImageWorkspace({
     <section className="shot-image-workspace" data-output-mode={outputMode}>
       <header className="shot-workspace-header">
         <div>
-          <h3>分镜图片工作台</h3>
+          <h3>分镜图片</h3>
           <p>
-            在左侧勾选“保留”可直接使用原视频片段；未勾选的分镜在这里选择原图或生成新图。
+            {hasSourceVideo ? "选择原图或生成新图，也可保留原视频片段。" : "逐分镜生成图片，选择满意的结果用于视频生成。"}
           </p>
         </div>
         <div className="shot-gate-summary">
           <span>{gate?.approved_shot_count || 0} / {gate?.required_shot_count || shots.length} 已确认</span>
           <button
             className="primary-button compact"
-            disabled={busy || advanced || !gate?.allowed}
+            disabled={busy || (!advanced && !gate?.allowed)}
             onClick={onAdvance}
             type="button"
           >
-            {advanced ? "已进入分段视频" : "进入分段视频"}
+            {advanced ? "继续到分镜视频" : "确认图片，进入分镜视频"}
             <ArrowRight size={15} />
           </button>
         </div>
@@ -1122,7 +1133,7 @@ export function ShotImageWorkspace({
                       </small>
                     </span>
                   </button>
-                  <label
+                  {hasSourceVideo && shot.source_kind !== "blank" && <label
                     aria-busy={Boolean(pendingOutputMode)}
                     className={`shot-navigation-keep ${pendingOutputMode ? "pending" : ""}`}
                     draggable={false}
@@ -1141,7 +1152,7 @@ export function ShotImageWorkspace({
                       type="checkbox"
                     />
                     <span>保留</span>
-                  </label>
+                  </label>}
                   <div className="shot-navigation-actions">
                     <button aria-label="上移分镜" disabled={busy || itemIndex === 0} onClick={() => moveShot(shot.id, -1)} title="上移" type="button"><ArrowUp size={13} /></button>
                     <button aria-label="下移分镜" disabled={busy || itemIndex === activeShots.length - 1} onClick={() => moveShot(shot.id, 1)} title="下移" type="button"><ArrowDown size={13} /></button>
@@ -1315,19 +1326,19 @@ export function ShotImageWorkspace({
                 </div>
               )}
               <div
-                className={`shot-compare-grid shot-compare-${previewLayout.orientation}`}
+                className={`shot-compare-grid shot-compare-${previewLayout.orientation}${hasComparison ? "" : " shot-compare-single"}`}
                 style={previewCanvasStyle}
               >
-                <figure
+                {hasComparison && <figure
                   className={visualChoice === "source" ? "selected" : ""}
-                  onClick={chooseSource}
-                  onKeyDown={(event) => activateChoiceFromKeyboard(event, chooseSource)}
+                  onClick={() => hasSourcePreview ? chooseSource() : chooseCandidate(approvedImage)}
+                  onKeyDown={(event) => activateChoiceFromKeyboard(event, () => hasSourcePreview ? chooseSource() : chooseCandidate(approvedImage))}
                   role="button"
                   tabIndex={0}
                 >
                   <figcaption>
                     <div>
-                      <strong>当前关键帧</strong>
+                      <strong>{hasSourcePreview ? "当前关键帧" : "已采用图片"}</strong>
                     </div>
                     {(approvedIsSource || visualChoice === "source") && (
                       <span>{approvedIsSource ? "已采用" : "已选择"}</span>
@@ -1335,12 +1346,12 @@ export function ShotImageWorkspace({
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
-                      alt={"分镜 " + plan.index + " 原始关键帧"}
-                      emptyLabel="原始关键帧不可用"
-                      src={resolveUrl(plan.source_keyframe_url)}
+                      alt={`分镜 ${plan.index} ${hasSourcePreview ? "原始关键帧" : "已采用图片"}`}
+                      emptyLabel="图片暂不可用"
+                      src={resolveUrl(hasSourcePreview ? plan.source_keyframe_url : approvedImage?.content_url)}
                     />
                   </div>
-                  <div className="shot-source-actions">
+                  {hasSourceVideo && <div className="shot-source-actions">
                     <button
                       disabled={busy || !sourceVideoUrl}
                       onClick={(event) => {
@@ -1352,8 +1363,8 @@ export function ShotImageWorkspace({
                       <VideoCamera size={15} />
                       从视频重选
                     </button>
-                  </div>
-                </figure>
+                  </div>}
+                </figure>}
                 <figure
                   className={visualChoice === "candidate" ? "selected" : ""}
                   onClick={() => chooseCandidate(displayedCandidate)}
@@ -1625,7 +1636,7 @@ export function ShotImageWorkspace({
             <fieldset className="shot-reference-field">
               <legend>参考资产绑定</legend>
               {assets.length === 0 ? (
-                <p>还没有参考资产，可先在上一步上传。</p>
+                <p>还没有参考资产，可通过页头的“参考资产”添加。</p>
               ) : (
                 <div className="shot-reference-list">
                   {assets.map((asset) => {
@@ -1706,6 +1717,7 @@ export function ShotImageWorkspace({
       {shotCreateOpen && plan && (
         <ShotCreateDialog
           busy={busy}
+          hasSourceVideo={hasSourceVideo}
           currentPlan={plan}
           onClose={() => setShotCreateOpen(false)}
           onCreate={onCreateShot}

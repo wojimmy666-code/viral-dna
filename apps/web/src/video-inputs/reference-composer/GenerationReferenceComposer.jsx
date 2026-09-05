@@ -191,10 +191,10 @@ export function GenerationReferenceComposer({
         anchorRef={anchorRef}
         model={model}
         onClose={() => setPickerOpen(false)}
-        onCreateDepth={() => {
+        onCreateDepth={onCreateDepth ? () => {
           setPickerOpen(false);
           onCreateDepth?.();
-        }}
+        } : undefined}
         onOpenManagedAssets={() => {
           setPickerOpen(false);
           onOpenManagedAssets?.();

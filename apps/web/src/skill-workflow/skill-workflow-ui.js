@@ -1,3 +1,5 @@
+import { CREATION_STEPS, mainCreationStep } from "../creation-workspace/workspace-ui.js";
+
 export const SKILL_WORKFLOW_STAGES = Object.freeze([
   { id: "creative_brief", label: "创作简报", gate: "brief_approved", gateLabel: "批准简报" },
   { id: "style_confirmation", label: "风格确认", gate: "style_approved", gateLabel: "批准风格" },
@@ -8,6 +10,52 @@ export const SKILL_WORKFLOW_STAGES = Object.freeze([
   { id: "audio_caption", label: "配乐与字幕", gate: "audio_caption_approved", gateLabel: "批准声音与字幕" },
   { id: "export", label: "导出交付", gate: "delivery_approved", gateLabel: "批准交付" },
 ]);
+
+export function skillCreationNavigation(workspace) {
+  const approved = (id) => stageState(workspace, SKILL_WORKFLOW_STAGES.find((item) => item.id === id)).approved;
+  const states = {
+    project_setup: { complete: ["creative_brief", "style_confirmation", "storyboard_design"].every(approved) },
+    shot_images: { complete: approved("shot_images") },
+    shot_videos: { complete: approved("shot_videos") },
+    editing: { complete: approved("editing") && approved("audio_caption") },
+    export: { complete: approved("export") },
+  };
+  const current = mainCreationStep(workspace?.run?.run?.current_stage);
+  return CREATION_STEPS.map((step) => {
+    const enabled = skillSectionEnabled(workspace, step.id);
+    const complete = enabled && states[step.id].complete;
+    return { ...step, enabled, complete, status: complete ? "已完成" : enabled && current === step.id ? "待确认" : "" };
+  });
+}
+
+export function skillSectionEnabled(workspace, section) {
+  if (section === "reference_assets" || section === "project_setup") return true;
+  if (section === "revisions") return Boolean(workspace?.production_project_id);
+  const index = SKILL_WORKFLOW_STAGES.findIndex((item) => item.id === section);
+  if (index < 0) return false;
+  if (index >= 3 && !workspace?.production_project_id) return false;
+  return SKILL_WORKFLOW_STAGES.slice(0, index).every((stage) => stageState(workspace, stage).approved);
+}
+
+export function resolveSkillSection(workspace, section) {
+  const nextPreparation = SKILL_WORKFLOW_STAGES.slice(0, 3).find((stage) => !stageState(workspace, stage).approved)?.id || "storyboard_design";
+  if (section === "project_setup") return nextPreparation;
+  if (skillSectionEnabled(workspace, section)) return section;
+  return SKILL_WORKFLOW_STAGES.find((stage) => skillSectionEnabled(workspace, stage.id) && !stageState(workspace, stage).approved)?.id || "export";
+}
+
+export function skillImageGenerationSettings(settings, contract) {
+  return {
+    ...settings,
+    execution_mode: "remote_api",
+    allow_local_tool: false,
+    local_tool_id: null,
+    local_executable_path: null,
+    default_candidate_count: contract.candidate_count_by_stage?.shot_image || 1,
+    remote_model_alias: contract.image_model_id,
+    models: (settings?.models || []).filter((item) => item.alias === contract.image_model_id),
+  };
+}
 
 export const EXECUTION_LABELS = Object.freeze({
   pending: "等待中",
@@ -46,6 +94,20 @@ export function resolutionForRatio(ratio, longEdge = 1024) {
     return `${longEdge}x${Math.max(256, Math.round((longEdge * height) / width / 8) * 8)}`;
   }
   return `${Math.max(256, Math.round((longEdge * width) / height / 8) * 8)}x${longEdge}`;
+}
+
+export function lookTestLayoutStyle(contract, candidateCount) {
+  const width = Number(contract?.image_width);
+  const height = Number(contract?.image_height);
+  const ratio = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? width / height
+    : 16 / 9;
+  const columns = Math.max(1, Math.min(4, Math.floor(Number(candidateCount) || 1)));
+  return {
+    "--skill-look-ratio": ratio,
+    "--skill-look-columns": columns,
+    "--skill-look-compact-columns": Math.min(2, columns),
+  };
 }
 
 export function resolutionLabelShortEdge(label) {

@@ -297,7 +297,9 @@ def test_preflight_enforces_skill_inputs_and_manual_gate() -> None:
             await storyboard_task
         storyboard_workspace = await service.workspace(project.id)
         assert storyboard_workspace.shot_manifest is not None
-        assert len(storyboard_workspace.shot_manifest.shots) == 15
+        # 15 seconds at the reference pacing suggests 14 shots; the Skill's old
+        # minimum of 15 must not force a filler shot or reject this result.
+        assert len(storyboard_workspace.shot_manifest.shots) == 14
         assert all(
             item.prompt_quality.passed
             for item in storyboard_workspace.shot_manifest.shots

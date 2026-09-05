@@ -437,7 +437,7 @@ class OutlineBeat(BaseModel):
     message: str = Field(default="", max_length=2000)
     audience_takeaway: str = Field(default="", max_length=2000)
     content_units: list[str] = Field(default_factory=list, max_length=30)
-    suggested_shot_count: int = Field(default=1, ge=1, le=100)
+    suggested_shot_count: int = Field(default=1, ge=1)
     rhythm: str = Field(default="", max_length=1000)
     transition_strategy: str = Field(default="", max_length=1000)
     evidence_refs: list[str] = Field(default_factory=list, max_length=100)
@@ -515,13 +515,16 @@ class ShotManifestShot(BaseModel):
     narrative_role: str = Field(min_length=1, max_length=80)
     start_frame: int = Field(ge=0)
     duration_frames: int = Field(gt=0)
+    timing_weight_frames: int | None = Field(default=None, gt=0)
     generation_duration_seconds: int = Field(default=4, ge=1, le=30)
     handle_in_frames: int = Field(default=0, ge=0, le=600)
     handle_out_frames: int = Field(default=0, ge=0, le=600)
     description: str = Field(min_length=1, max_length=4000)
-    image_prompt: str = Field(min_length=1, max_length=8000)
+    image_prompt: str = Field(default="", max_length=8000)
+    image_prompt_body: str | None = Field(default=None, max_length=8000)
     image_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
-    video_prompt: str = Field(min_length=1, max_length=8000)
+    video_prompt: str = Field(default="", max_length=8000)
+    video_prompt_body: str | None = Field(default=None, max_length=8000)
     video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     image_asset_usage_ids: list[UUID] = Field(default_factory=list, max_length=50)
     video_reference_usage_ids: list[UUID] = Field(default_factory=list, max_length=50)
@@ -544,7 +547,10 @@ class ShotManifestRevision(BaseModel):
     outline_revision_id: UUID
     style_bible_revision_id: UUID
     fps: int = Field(ge=1, le=120)
-    shots: list[ShotManifestShot] = Field(min_length=1, max_length=500)
+    shots: list[ShotManifestShot] = Field(default_factory=list)
+    creative_approach: str = Field(default="", max_length=1000)
+    common_image_prompt: str = Field(default="", max_length=8000)
+    common_video_prompt: str = Field(default="", max_length=8000)
     continuity_bible: dict[str, Any] = Field(default_factory=dict)
     edit_plan: dict[str, Any] = Field(default_factory=dict)
     project_negative_constraints: list[str] = Field(default_factory=list, max_length=100)
@@ -570,11 +576,22 @@ class OutlineUpdate(BaseModel):
     beats: list[OutlineBeat] = Field(min_length=1, max_length=30)
 
 
+class StoryboardPromptDraftShot(BaseModel):
+    stable_shot_key: str = Field(pattern=r"^shot_[a-z0-9]{8,64}$")
+    image_prompt_body: str = Field(default="", max_length=8000)
+    video_prompt_body: str = Field(default="", max_length=8000)
+
+
+class StoryboardPromptDraftUpdate(BaseModel):
+    expected_revision_id: UUID
+    shots: list[StoryboardPromptDraftShot] = Field(default_factory=list)
+
+
 class ShotManifestUpdate(BaseModel):
     outline_revision_id: UUID
     style_bible_revision_id: UUID
     fps: int = Field(ge=1, le=120)
-    shots: list[ShotManifestShot] = Field(min_length=1, max_length=500)
+    shots: list[ShotManifestShot] = Field(min_length=1)
     continuity_bible: dict[str, Any] = Field(default_factory=dict)
     edit_plan: dict[str, Any] = Field(default_factory=dict)
     project_negative_constraints: list[str] = Field(default_factory=list, max_length=100)
@@ -654,6 +671,11 @@ class SkillStepRun(BaseModel):
     error_message: str | None = Field(default=None, max_length=2000)
     retryable: bool = False
     output_artifact_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    checkpoint_artifact_id: UUID | None = None
+    checkpoint_manifest_revision_id: UUID | None = None
+    resumable: bool = False
+    total_shots: int = Field(default=0, ge=0)
+    completed_shots: int = Field(default=0, ge=0)
 
 
 class SkillStageMetrics(BaseModel):
@@ -870,7 +892,7 @@ class TimelineV3Revision(BaseModel):
     revision_number: int = Field(ge=1)
     parent_revision_id: UUID | None = None
     frame_rate: FrameRate = Field(default_factory=FrameRate)
-    video_clips: list[TimelineV3Clip] = Field(default_factory=list, max_length=500)
+    video_clips: list[TimelineV3Clip] = Field(default_factory=list)
     picture_lock_revision_id: UUID | None = None
     narration: list[TimelineAudioItem] = Field(default_factory=list, max_length=500)
     music: list[TimelineAudioItem] = Field(default_factory=list, max_length=20)
@@ -927,7 +949,7 @@ class MixRevision(BaseModel):
 
 class PictureLockRequest(BaseModel):
     production_project_id: UUID
-    clips: list[TimelineV3Clip] = Field(min_length=1, max_length=500)
+    clips: list[TimelineV3Clip] = Field(min_length=1)
     exact_overlays: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
 
 

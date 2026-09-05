@@ -8,6 +8,7 @@ export function imageModelOptions(settings = {}) {
     executionMode: "remote_api",
     providerLabel: "阿里百炼",
   }));
+  if (settings.allow_local_tool === false) return remoteModels;
   const localCapability = settings.execution_mode === "local_tool"
     ? settings.selected_capabilities
     : null;

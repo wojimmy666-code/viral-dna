@@ -166,7 +166,7 @@ class ProductionSeed(BaseModel):
     style_bible_revision_id: UUID | None = None
     style_bible_snapshot: dict[str, Any] = Field(default_factory=dict)
     reference_assets: list[ProductionSeedReference] = Field(default_factory=list)
-    shots: list[ProductionSeedShot] = Field(min_length=1, max_length=500)
+    shots: list[ProductionSeedShot] = Field(min_length=1)
     audio_intent: ProductionSeedAudioIntent = Field(default_factory=ProductionSeedAudioIntent)
     subtitle_intent: ProductionSeedSubtitleIntent = Field(
         default_factory=ProductionSeedSubtitleIntent

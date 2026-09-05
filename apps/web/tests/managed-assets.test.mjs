@@ -53,5 +53,5 @@ test("treats managed identity and depth control as independent optional inputs",
   assert.match(workspaceSource, /depth_control_assets/);
   assert.match(workspaceSource, /selectedInputSources\.has\("provider_managed_assets"\)/);
   assert.match(workspaceSource, /selectedInputSources\.has\("depth_control"\)/);
-  assert.match(workspaceSource, /\{usesDepthControl && \(/);
+  assert.match(workspaceSource, /\{usesDepthControl && sourceVideoUrl && \(/);
 });

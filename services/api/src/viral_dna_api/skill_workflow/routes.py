@@ -47,6 +47,7 @@ from .contracts import (
     SkillRunDetail,
     SkillRunMetrics,
     SkillStepRun,
+    StoryboardPromptDraftUpdate,
     TimelineV3Revision,
 )
 from .service import SkillWorkflowService, SkillWorkflowServiceError
@@ -265,6 +266,15 @@ def create_skill_workflow_router(service: SkillWorkflowService) -> APIRouter:
     ) -> ShotManifestRevision:
         try:
             return await service.rewrite_storyboard_shot(run_id, shot_key, payload)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
+
+    @router.put("/projects/{project_id}/storyboard-draft", response_model=ShotManifestRevision)
+    async def put_storyboard_draft(
+        project_id: UUID, payload: StoryboardPromptDraftUpdate
+    ) -> ShotManifestRevision:
+        try:
+            return await service.put_storyboard_prompt_draft(project_id, payload)
         except SkillWorkflowServiceError as exc:
             _raise_http(exc)
 

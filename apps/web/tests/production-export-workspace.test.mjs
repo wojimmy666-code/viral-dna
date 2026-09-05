@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { productionNavigation } from "../src/creation-workspace/workspace-ui.js";
 
 const exportSource = readFileSync(
   new URL("../src/ProductionExportWorkspace.jsx", import.meta.url),
@@ -23,11 +24,12 @@ test("unlocks a dedicated final export workflow step after editing", () => {
   assert.match(productionUiSource, /id: "export", label: "导出成片"/);
   assert.doesNotMatch(productionUiSource, /id: "export"[^\n]+locked: true/);
   assert.match(workflowSource, /<ProductionExportWorkspace/);
-  assert.match(workflowSource, /project\.active_step === "editing"/);
+  assert.equal(productionNavigation({ active_step: "editing" }).find((step) => step.id === "export").enabled, true);
 });
 
 test("binds final renders to an immutable timeline revision and exposes presets", () => {
-  assert.match(exportSource, /expected_revision_id: timeline\.revision_id/);
+  assert.match(exportSource, /expected_revision_id: currentTimeline\.revision_id/);
+  assert.match(exportSource, /currentTimeline\.revision_id !== expectedTimelineRevisionId/);
   assert.match(exportSource, /value: "720p"/);
   assert.match(exportSource, /value: "1080p"/);
   assert.match(exportSource, /value: "project"/);

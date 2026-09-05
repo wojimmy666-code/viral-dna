@@ -941,6 +941,24 @@
   margin-top: var(--space-4);
 }
 
+.skill-preparation-panel {
+  container-name: skill-preparation;
+  container-type: inline-size;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Preparation content stretches; shared editing/export toolbar actions do not. */
+.skill-preparation-panel > .skill-stage-actions-stack {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: stretch;
+  min-width: 0;
+}
+
+.skill-preparation-panel > .skill-stage-actions-stack > button {
+  justify-self: start;
+}
+
 .skill-mix-form {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -992,6 +1010,9 @@
 
 .skill-look-workspace {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
   gap: var(--space-3);
 }
 
@@ -1125,14 +1146,20 @@
 }
 
 .skill-look-grid {
+  --skill-look-max-height: clamp(280px, 56vh, 560px);
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 320px));
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
   gap: var(--space-3);
   margin-top: var(--space-3);
 }
 
 .skill-look-grid button {
   position: relative;
+  justify-self: center;
+  min-width: 0;
+  width: min(100%, calc(var(--skill-look-max-height) * var(--skill-look-ratio, 1.777778)));
+  aspect-ratio: var(--skill-look-ratio, 16 / 9);
   overflow: hidden;
   padding: 0;
   border: 2px solid transparent;
@@ -1145,6 +1172,19 @@
   border-color: var(--accent);
 }
 
+.skill-look-grid button:not(:disabled):hover {
+  border-color: var(--accent-border);
+}
+
+.skill-look-grid button.is-selected:not(:disabled):hover {
+  border-color: var(--accent);
+}
+
+.skill-look-grid button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .skill-look-grid button:disabled {
   cursor: default;
   opacity: 1;
@@ -1152,9 +1192,21 @@
 
 .skill-look-grid img {
   width: 100%;
-  aspect-ratio: 16 / 9;
+  height: 100%;
   display: block;
-  object-fit: cover;
+  object-fit: contain;
+}
+
+@container skill-preparation (min-width: 600px) {
+  .skill-look-grid {
+    grid-template-columns: repeat(var(--skill-look-compact-columns, 2), minmax(0, 1fr));
+  }
+}
+
+@container skill-preparation (min-width: 1120px) {
+  .skill-look-grid {
+    grid-template-columns: repeat(var(--skill-look-columns, 4), minmax(0, 1fr));
+  }
 }
 
 .skill-look-grid span {
@@ -1276,11 +1328,36 @@
 
 .skill-storyboard-progress {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
   gap: var(--space-3);
   padding: var(--space-4);
-  border: 1px solid var(--accent-border);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-panel);
   background: var(--surface-panel);
+}
+
+.skill-storyboard-progress-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3) var(--space-4);
+}
+
+.skill-storyboard-progress-summary > div {
+  min-width: 0;
+}
+
+.skill-storyboard-progress > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@container skill-preparation (min-width: 900px) {
+  .skill-storyboard-progress-summary {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  }
 }
 
 .skill-storyboard-progress.is-error {
@@ -1298,12 +1375,23 @@
 }
 
 .skill-storyboard-progress-heading > div {
+  min-width: 0;
   justify-content: flex-start;
 }
 
+.skill-storyboard-progress-heading svg,
+.skill-storyboard-progress-heading > span {
+  flex-shrink: 0;
+}
+
 .skill-storyboard-progress-meta {
+  flex-wrap: wrap;
   color: var(--text-secondary);
   font-size: var(--type-caption-size);
+}
+
+.skill-storyboard-progress-meta > span {
+  overflow-wrap: anywhere;
 }
 
 .skill-storyboard-progress-track {

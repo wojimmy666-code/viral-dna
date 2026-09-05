@@ -38,6 +38,7 @@ from ..models import (
     WorkflowItemStatus,
 )
 from ..platform_skills.contracts import SkillVersionSnapshot
+from ..production import ProductionServiceError
 from ..production_seeds import (
     ProductionSeedAudioIntent,
     ProductionSeedReference,
@@ -111,6 +112,7 @@ from .contracts import (
     SkillStageMetrics,
     SkillStepRun,
     SkillWorkflowStage,
+    StoryboardPromptDraftUpdate,
     StyleBibleRevision,
     TimelineAudioItem,
     TimelineCaptionCue,
@@ -126,10 +128,20 @@ from .storyboard_authoring import (
     StoryboardAuthor,
     StoryboardAuthoringContext,
     StoryboardAuthoringError,
+    StoryboardAuthoringResult,
     assess_prompts,
     compile_image_prompt,
     compile_video_prompt,
     creative_spec_from_authored,
+)
+from .storyboard_prompts import (
+    allocate_frames,
+    creative_approach,
+    draft_issues,
+    editable_prompt_body,
+    effective_prompt,
+    factor_prompt_context,
+    local_body_from_prompt,
 )
 
 
@@ -281,6 +293,8 @@ class WorkflowRepository(Protocol):
 
 class ProductionSeedConsumer(Protocol):
     async def create_project_from_seed(self, seed, **kwargs): ...
+
+    async def sync_project_from_skill_seed(self, project_id: UUID, seed): ...
 
     async def get_project(self, project_id: UUID): ...
 
@@ -474,6 +488,7 @@ class SkillWorkflowService:
         run = max(runs, key=lambda item: item.updated_at, default=None)
         if run is not None:
             await self._recover_interrupted_storyboard(run)
+            manifests = await self.repository.list_shot_manifest_revisions(project.id)
         look_test = max(look_tests, key=lambda item: item.updated_at, default=None)
         if run is not None and look_test is not None:
             look_test = await self._repair_empty_succeeded_look_test(run, look_test)
@@ -523,7 +538,19 @@ class SkillWorkflowService:
             style_bible=active_bible,
             look_test=look_test,
             outline=_latest(outlines),
-            shot_manifest=_latest(manifests),
+            shot_manifest=(
+                factor_prompt_context(manifests[-1], active_bible).model_copy(
+                    update={
+                        "creative_approach": creative_approach(
+                            manifests[-1],
+                            _latest(outlines),
+                            active_brief.objective if active_brief else "",
+                        ),
+                    }
+                )
+                if manifests and active_bible
+                else _latest(manifests)
+            ),
             run=(await self.run_detail(run.id) if run else None),
             production_seed_id=(seeds[-1].id if seeds else None),
             production_project_id=project.source_binding.production_project_id,
@@ -2021,6 +2048,11 @@ class SkillWorkflowService:
 
     async def compile_storyboard(self, run_id: UUID) -> SkillRunDetail:
         run, project = await self._require_run(run_id)
+        async with self._lock(project.id):
+            return await self._compile_storyboard(run.id)
+
+    async def _compile_storyboard(self, run_id: UUID) -> SkillRunDetail:
+        run, project = await self._require_run(run_id)
         await self._assert_budget(run)
         brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
         bible = _latest(await self.repository.list_style_bible_revisions(project.id))
@@ -2038,19 +2070,42 @@ class SkillWorkflowService:
                 "skill": snapshot.content_digest,
                 "run_contract": contract.input_hash,
                 "compiler": self.COMPILER_VERSION,
+                "storyboard_policy": "nonempty-checkpoint-v1",
+                "asset_usages": content_digest(await self.repository.list_asset_usages(project.id)),
+                "claims": content_digest(await self.repository.list_claim_evidence(project.id)),
             }
         )
         active = self._storyboard_tasks.get(run.id)
         if active is not None and not active.done():
             return await self.run_detail(run.id)
+        await self._recover_interrupted_storyboard(run)
+        checkpoint = await self._storyboard_checkpoint(project.id, run.id, input_hash)
+        previous = await self.repository.list_skill_step_runs(run.id)
+        answered = any(
+            item.operation == "compile_storyboard"
+            and item.input_hash == input_hash
+            and item.error_code
+            in {"model_schema_invalid", "storyboard_empty", "model_response_invalid"}
+            for item in previous
+        )
         step, reused = await self._begin_step(
             run,
             SkillWorkflowStage.STORYBOARD_DESIGN,
             "compile_storyboard",
             input_hash,
+            reconciled=checkpoint is not None or answered,
         )
         if reused:
             return await self.run_detail(run.id)
+        await self.repository.save_skill_run(
+            run.model_copy(
+                update={
+                    "execution_status": ExecutionStatus.RUNNING,
+                    "last_error": None,
+                    "updated_at": utc_now(),
+                }
+            )
+        )
         started = time.perf_counter()
         task = asyncio.create_task(
             self._run_storyboard_compilation(
@@ -2063,6 +2118,7 @@ class SkillWorkflowService:
                 step,
                 input_hash=input_hash,
                 started=started,
+                checkpoint=checkpoint,
             )
         )
         self._storyboard_tasks[run.id] = task
@@ -2081,6 +2137,7 @@ class SkillWorkflowService:
         *,
         input_hash: str,
         started: float,
+        checkpoint: Artifact | None = None,
     ) -> None:
         try:
             step = await self._update_storyboard_step(step, 8)
@@ -2090,6 +2147,10 @@ class SkillWorkflowService:
                 *(str(item.id) for item in usages),
                 *(str(item.id) for item in claims if item.status == ClaimStatus.APPROVED),
             }
+
+            async def model_started(provider: str, model: str) -> None:
+                await self._update_storyboard_step(step, 18, provider=provider, model=model)
+
             context = StoryboardAuthoringContext(
                 manifest=snapshot.manifest,
                 brand=await self.repository.get_brand_snapshot(brief.brand_snapshot_id),
@@ -2111,29 +2172,65 @@ class SkillWorkflowService:
                     for item in claims
                     if item.status == ClaimStatus.APPROVED
                 ],
+                on_model_started=model_started,
             )
             if context.brand is None:
                 raise StoryboardAuthoringError("brand_snapshot_missing", "品牌快照不存在")
-            step = await self._update_storyboard_step(step, 18)
-            authored, step = await self._author_storyboard_with_heartbeat(
-                context,
-                step,
-            )
+            resumed = checkpoint is not None
+            if checkpoint is not None:
+                authored = StoryboardAuthoringResult.model_validate(
+                    checkpoint.generation_parameters["authored"]
+                )
+            else:
+                step = await self._update_storyboard_step(step, 18)
+                authored, step = await self._author_storyboard_with_heartbeat(context, step)
+                if not authored.storyboard.shots:
+                    raise StoryboardAuthoringError(
+                        "storyboard_empty", "模型未返回任何镜头，请重新生成", retryable=True
+                    )
+                latest = _latest(await self.repository.list_shot_manifest_revisions(project.id))
+                checkpoint = Artifact(
+                    project_id=project.id,
+                    kind="storyboard_checkpoint",
+                    revision_number=step.attempt,
+                    source_step_run_id=step.id,
+                    content_hash=content_digest(authored),
+                    input_hash=input_hash,
+                    producer_version=self.COMPILER_VERSION,
+                    provider=authored.provider,
+                    model=authored.model,
+                    generation_parameters={
+                        "authored": authored.model_dump(mode="json"),
+                        "compiled_shots": [],
+                        "manifest_revision_id": str(latest.id) if latest else None,
+                    },
+                    provenance={"skill_run_id": str(run.id)},
+                )
+                # Persist the complete response before any compilation/quality work.
+                await self.repository.save_skill_artifact(checkpoint)
             step = await self._update_storyboard_step(
                 step,
                 55,
                 provider=authored.provider,
                 model=authored.model,
                 request_id=authored.request_id,
-                provider_ms=authored.provider_ms,
-                input_tokens=authored.usage.input_tokens if authored.usage else 0,
-                cached_input_tokens=(
-                    authored.usage.cached_input_tokens if authored.usage else 0
+                provider_ms=0 if resumed else authored.provider_ms,
+                input_tokens=authored.usage.input_tokens if authored.usage and not resumed else 0,
+                cached_input_tokens=authored.usage.cached_input_tokens
+                if authored.usage and not resumed
+                else 0,
+                output_tokens=authored.usage.output_tokens if authored.usage and not resumed else 0,
+                reasoning_tokens=authored.usage.reasoning_tokens
+                if authored.usage and not resumed
+                else 0,
+                total_tokens=authored.usage.total_tokens if authored.usage and not resumed else 0,
+                actual_cost_micros=0 if resumed else authored.actual_cost_micros,
+                checkpoint_artifact_id=checkpoint.id,
+                checkpoint_manifest_revision_id=checkpoint.generation_parameters.get(
+                    "manifest_revision_id"
                 ),
-                output_tokens=authored.usage.output_tokens if authored.usage else 0,
-                reasoning_tokens=authored.usage.reasoning_tokens if authored.usage else 0,
-                total_tokens=authored.usage.total_tokens if authored.usage else 0,
-                actual_cost_micros=authored.actual_cost_micros,
+                resumable=True,
+                total_shots=len(authored.storyboard.shots),
             )
             shot_weights: list[float] = []
             archetypes = {
@@ -2143,7 +2240,9 @@ class SkillWorkflowService:
                 archetype = archetypes.get(item.archetype_key)
                 duration = archetype.edit_duration_seconds if archetype else None
                 shot_weights.append((duration.min + duration.max) / 2 if duration else 1.0)
-            shot_frames = _allocate_frames(brief.target_duration_frames, shot_weights)
+            shot_frames = _allocate_frames(
+                max(brief.target_duration_frames, len(shot_weights)), shot_weights
+            )
             frames_by_beat: dict[str, int] = {}
             for item, duration in zip(authored.storyboard.shots, shot_frames, strict=True):
                 frames_by_beat[item.beat_key] = frames_by_beat.get(item.beat_key, 0) + duration
@@ -2157,13 +2256,13 @@ class SkillWorkflowService:
                     message=item.audience_takeaway,
                     audience_takeaway=item.audience_takeaway,
                     content_units=item.content_units,
-                    suggested_shot_count=item.suggested_shot_count,
+                    suggested_shot_count=sum(
+                        shot.beat_key == item.key for shot in authored.storyboard.shots
+                    ),
                     rhythm=item.rhythm,
                     transition_strategy=item.transition_strategy,
                     evidence_refs=[
-                        item
-                        for item in item.evidence_refs
-                        if item in allowed_evidence_refs
+                        item for item in item.evidence_refs if item in allowed_evidence_refs
                     ],
                 )
                 for index, item in enumerate(authored.storyboard.beats, start=1)
@@ -2180,7 +2279,22 @@ class SkillWorkflowService:
             }
             outline_payload["content_hash"] = content_digest(outline_payload)
             outline = OutlineRevision.model_validate(outline_payload)
-            await self.repository.save_outline_revision(outline)
+            saved_outline_id = checkpoint.generation_parameters.get("outline_revision_id")
+            saved_outline = next(
+                (
+                    item
+                    for item in await self.repository.list_outline_revisions(project.id)
+                    if str(item.id) == saved_outline_id
+                ),
+                None,
+            )
+            if saved_outline is not None:
+                outline = saved_outline
+            else:
+                await self.repository.save_outline_revision(outline)
+                checkpoint = await self._save_storyboard_checkpoint(
+                    checkpoint, outline_revision_id=str(outline.id)
+                )
             step = await self._update_storyboard_step(step, 65)
 
             role_specs = {item.role: item for item in snapshot.manifest.spec.intake.asset_roles}
@@ -2235,10 +2349,18 @@ class SkillWorkflowService:
                 )
             }
             total_shots = len(authored.storyboard.shots)
+            completed = [
+                ShotManifestShot.model_validate(item)
+                for item in checkpoint.generation_parameters.get("compiled_shots", [])
+            ]
             for index, (authored_shot, duration) in enumerate(
                 zip(authored.storyboard.shots, shot_frames, strict=True),
                 start=1,
             ):
+                if index <= len(completed):
+                    shots.append(completed[index - 1])
+                    cursor += duration
+                    continue
                 shot_key = _stable_token("shot", project.id, index)
                 generation_duration = min(
                     allowed_durations,
@@ -2359,11 +2481,7 @@ class SkillWorkflowService:
                         ),
                         cached_input_tokens=(
                             step.cached_input_tokens
-                            + (
-                                rewritten_usage.cached_input_tokens
-                                if rewritten_usage
-                                else 0
-                            )
+                            + (rewritten_usage.cached_input_tokens if rewritten_usage else 0)
                         ),
                         output_tokens=(
                             step.output_tokens
@@ -2377,9 +2495,7 @@ class SkillWorkflowService:
                             step.total_tokens
                             + (rewritten_usage.total_tokens if rewritten_usage else 0)
                         ),
-                        actual_cost_micros=(
-                            step.actual_cost_micros + rewritten.actual_cost_micros
-                        ),
+                        actual_cost_micros=(step.actual_cost_micros + rewritten.actual_cost_micros),
                     )
                     creative_spec = creative_spec_from_authored(rewritten.storyboard.shots[0])
                     image_prompt = compile_image_prompt(
@@ -2447,9 +2563,13 @@ class SkillWorkflowService:
                 shot_material["input_hash"] = content_digest(shot_material)
                 shots.append(ShotManifestShot.model_validate(shot_material))
                 cursor += duration
+                checkpoint = await self._save_storyboard_checkpoint(
+                    checkpoint, compiled_shots=[item.model_dump(mode="json") for item in shots]
+                )
                 step = await self._update_storyboard_step(
                     step,
                     65 + round(index / total_shots * 25),
+                    completed_shots=index,
                 )
             manifest_payload = {
                 "id": uuid4(),
@@ -2462,8 +2582,9 @@ class SkillWorkflowService:
                 "style_bible_revision_id": bible.id,
                 "fps": brief.fps,
                 "shots": shots,
+                "creative_approach": authored.storyboard.creative_approach,
                 "continuity_bible": authored.storyboard.continuity_bible,
-                "edit_plan": authored.storyboard.edit_plan,
+                "edit_plan": {**authored.storyboard.edit_plan, "shot_count": len(shots)},
                 "project_negative_constraints": authored.storyboard.project_negative_constraints,
                 "authoring_provider": authored.provider,
                 "authoring_model": authored.model,
@@ -2474,8 +2595,57 @@ class SkillWorkflowService:
                 "created_at": utc_now(),
             }
             manifest_payload["content_hash"] = content_digest(manifest_payload)
-            manifest = ShotManifestRevision.model_validate(manifest_payload)
+            manifest = factor_prompt_context(
+                ShotManifestRevision.model_validate(manifest_payload), bible
+            )
+            compiled_shots = []
+            for shot in manifest.shots:
+                material = shot.model_dump(mode="python", exclude={"input_hash"})
+                for part in ("image", "video"):
+                    material[f"{part}_prompt"] = effective_prompt(
+                        editable_prompt_body(shot, part),
+                        getattr(manifest, f"common_{part}_prompt"),
+                        video=part == "video",
+                        duration=shot.generation_duration_seconds,
+                        aspect_ratio=brief.output_aspect_ratio,
+                        fps=manifest.fps,
+                    )
+                material["prompt_quality"] = assess_prompts(
+                    material["image_prompt"],
+                    material["video_prompt"],
+                    minimum_score=minimum_score,
+                    forbidden_copy_terms=forbidden_copy_terms,
+                    allowed_context=prompt_allowed_context,
+                    required_image_sections=snapshot.manifest.spec.quality.required_image_sections,
+                    required_video_sections=snapshot.manifest.spec.quality.required_video_sections,
+                    image_character_range=(image_character_range[0], 8000),
+                    video_character_range=(video_character_range[0], 8000),
+                ).model_copy(update={"rewrite_attempts": shot.prompt_quality.rewrite_attempts})
+                material["input_hash"] = content_digest(material)
+                compiled_shots.append(ShotManifestShot.model_validate(material))
+            manifest = manifest.model_copy(
+                update={
+                    "shots": compiled_shots,
+                    "creative_approach": creative_approach(manifest, outline, brief.objective),
+                }
+            )
+            manifest = manifest.model_copy(
+                update={
+                    "content_hash": content_digest(
+                        manifest.model_dump(mode="python", exclude={"content_hash"})
+                    )
+                }
+            )
             await self.repository.save_shot_manifest_revision(manifest)
+            checkpoint = await self._save_storyboard_checkpoint(
+                checkpoint, manifest_revision_id=str(manifest.id)
+            )
+            step = await self._update_storyboard_step(
+                step,
+                95,
+                checkpoint_manifest_revision_id=manifest.id,
+                completed_shots=len(manifest.shots),
+            )
             artifact = await self._save_structured_artifact(
                 project.id,
                 step.id,
@@ -2491,6 +2661,8 @@ class SkillWorkflowService:
                     ("outline", str(outline.id), outline.content_hash),
                 ],
             )
+            await self.projects.bind_skill_run(project.id, stage=ProjectStage.STORYBOARD_DESIGN)
+            step = await self._update_storyboard_step(step, 95, resumable=False)
             await self._finish_step(
                 step,
                 [artifact.id],
@@ -2501,36 +2673,210 @@ class SkillWorkflowService:
                 request_id=authored.request_id,
                 actual_cost_micros=step.actual_cost_micros,
             )
-            await self.projects.bind_skill_run(project.id, stage=ProjectStage.STORYBOARD_DESIGN)
-        except asyncio.CancelledError:
-            await self.repository.save_skill_step_run(
-                step.model_copy(
+            await self._save_storyboard_checkpoint(checkpoint, completed=True)
+            current_run = await self.repository.get_skill_run(run.id) or run
+            await self.repository.save_skill_run(
+                current_run.model_copy(
                     update={
-                        "execution_status": ExecutionStatus.CANCELLED,
-                        "error_code": "storyboard_cancelled",
-                        "error_message": "大纲与分镜生成已停止，可重新开始",
-                        "retryable": True,
-                        "completed_at": utc_now(),
-                        "last_heartbeat_at": utc_now(),
+                        "execution_status": ExecutionStatus.PENDING,
+                        "last_error": None,
+                        "updated_at": utc_now(),
                     }
                 )
             )
-        except StoryboardAuthoringError as exc:
-            await self._fail_step(
+        except asyncio.CancelledError:
+            await self._stop_storyboard(
+                run,
+                project,
+                bible,
                 step,
+                checkpoint,
+                "storyboard_cancelled",
+                "大纲与分镜生成已停止",
+                started=started,
+                cancelled=True,
+            )
+        except StoryboardAuthoringError as exc:
+            if exc.provider_error is not None:
+                failure = exc.provider_error
+                step = await self._update_storyboard_step(
+                    step,
+                    step.progress,
+                    request_id=failure.provider_request_id,
+                    provider_ms=failure.latency_ms,
+                    **({"model": failure.resolved_model} if failure.resolved_model else {}),
+                )
+                if failure.raw_content:
+                    await self.repository.save_skill_artifact(
+                        Artifact(
+                            project_id=project.id,
+                            kind="storyboard_model_response",
+                            revision_number=step.attempt,
+                            source_step_run_id=step.id,
+                            input_hash=input_hash,
+                            content_hash=content_digest(failure.raw_content),
+                            producer_version=self.COMPILER_VERSION,
+                            generation_parameters={"raw_content": failure.raw_content},
+                        )
+                    )
+            await self._stop_storyboard(
+                run,
+                project,
+                bible,
+                step,
+                checkpoint,
                 exc.code,
                 str(exc),
-                retryable=exc.retryable,
                 started=started,
+                retryable=exc.retryable,
             )
         except Exception as exc:
-            await self._fail_step(
+            await self._stop_storyboard(
+                run,
+                project,
+                bible,
                 step,
+                checkpoint,
                 "storyboard_compile_failed",
-                str(exc),
-                retryable=True,
+                f"分镜后续编译失败：{exc}",
                 started=started,
             )
+
+    async def _storyboard_checkpoint(
+        self,
+        project_id: UUID,
+        run_id: UUID,
+        input_hash: str,
+    ) -> Artifact | None:
+        checkpoint = max(
+            (
+                item
+                for item in await self.repository.list_skill_artifacts(project_id)
+                if item.kind == "storyboard_checkpoint"
+                and item.input_hash == input_hash
+                and item.provenance.get("skill_run_id") == str(run_id)
+                and not item.stale
+                and not item.generation_parameters.get("completed")
+            ),
+            key=lambda item: item.created_at,
+            default=None,
+        )
+        if checkpoint is not None:
+            latest = _latest(await self.repository.list_shot_manifest_revisions(project_id))
+            if (str(latest.id) if latest else None) != checkpoint.generation_parameters.get(
+                "manifest_revision_id"
+            ):
+                raise _fail(
+                    409,
+                    "storyboard_resume_conflict",
+                    "分镜草稿已被人工修改，不能用旧任务覆盖；请在当前草稿上继续编辑并确认",
+                )
+        return checkpoint
+
+    async def _save_storyboard_checkpoint(self, checkpoint: Artifact, **updates: Any) -> Artifact:
+        parameters = {**checkpoint.generation_parameters, **updates}
+        return await self.repository.save_skill_artifact(
+            checkpoint.model_copy(
+                update={
+                    "generation_parameters": parameters,
+                    "content_hash": content_digest(parameters),
+                }
+            )
+        )
+
+    async def _stop_storyboard(
+        self,
+        run: SkillRun,
+        project: Project,
+        bible: StyleBibleRevision,
+        step: SkillStepRun,
+        checkpoint: Artifact | None,
+        code: str,
+        message: str,
+        *,
+        started: float,
+        retryable: bool = True,
+        cancelled: bool = False,
+    ) -> None:
+        step = await self.repository.get_skill_step_run(step.id) or step
+        if step.execution_status == ExecutionStatus.SUCCEEDED:
+            return
+        if checkpoint is not None:
+            parameters = checkpoint.generation_parameters
+            revisions = await self.repository.list_shot_manifest_revisions(project.id)
+            latest = _latest(revisions)
+            unchanged = (str(latest.id) if latest else None) == parameters.get(
+                "manifest_revision_id"
+            )
+            compiled = parameters.get("compiled_shots", [])
+            if unchanged and compiled and parameters.get("outline_revision_id"):
+                authored = StoryboardAuthoringResult.model_validate(parameters["authored"])
+                brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
+                material = dict(
+                    project_id=project.id,
+                    revision_number=len(revisions) + 1,
+                    outline_revision_id=parameters["outline_revision_id"],
+                    style_bible_revision_id=bible.id,
+                    fps=brief.fps,
+                    shots=compiled,
+                    creative_approach=authored.storyboard.creative_approach,
+                    continuity_bible=authored.storyboard.continuity_bible,
+                    edit_plan={**authored.storyboard.edit_plan, "shot_count": len(compiled)},
+                    project_negative_constraints=authored.storyboard.project_negative_constraints,
+                    authoring_model=authored.model,
+                    authoring_provider=authored.provider,
+                    authoring_request_id=authored.request_id,
+                    input_hash=step.input_hash,
+                )
+                draft = factor_prompt_context(
+                    ShotManifestRevision(**material, content_hash=content_digest(material)), bible
+                )
+                draft = draft.model_copy(
+                    update={
+                        "content_hash": content_digest(
+                            draft.model_dump(mode="json", exclude={"content_hash"})
+                        )
+                    }
+                )
+                await self.repository.save_shot_manifest_revision(draft)
+                checkpoint = await self._save_storyboard_checkpoint(
+                    checkpoint, manifest_revision_id=str(draft.id)
+                )
+            step = await self._update_storyboard_step(
+                step,
+                step.progress,
+                checkpoint_artifact_id=checkpoint.id,
+                resumable=unchanged,
+                checkpoint_manifest_revision_id=checkpoint.generation_parameters.get(
+                    "manifest_revision_id"
+                ),
+                completed_shots=len(compiled),
+                total_shots=len(parameters["authored"]["storyboard"]["shots"]),
+            )
+            if unchanged:
+                message += (
+                    f"。已保存 {step.total_shots} 个镜头的原始结果，"
+                    f"已完成 {len(compiled)} 个；可继续处理"
+                )
+        failed = await self._fail_step(
+            step, code, message[:2000], retryable=retryable, started=started
+        )
+        if cancelled:
+            await self.repository.save_skill_step_run(
+                failed.model_copy(update={"execution_status": ExecutionStatus.CANCELLED})
+            )
+        current_run = await self.repository.get_skill_run(run.id) or run
+        await self.repository.save_skill_run(
+            current_run.model_copy(
+                update={
+                    "execution_status": ExecutionStatus.BLOCKED
+                    if cancelled
+                    else ExecutionStatus.FAILED,
+                    "last_error": message[:2000],
+                    "updated_at": utc_now(),
+                }
+            )
+        )
 
     async def _author_storyboard_with_heartbeat(
         self,
@@ -2539,14 +2885,14 @@ class SkillWorkflowService:
     ) -> tuple[Any, SkillStepRun]:
         """Keep task progress fresh while a text provider is producing one large JSON result."""
         author_task = asyncio.create_task(self.storyboard_author.author(context))
-        pulse = 18
         try:
             while True:
                 done, _ = await asyncio.wait({author_task}, timeout=5)
                 if done:
-                    return author_task.result(), step
-                pulse = min(52, pulse + 1)
-                step = await self._update_storyboard_step(step, pulse)
+                    result = author_task.result()
+                    return result, await self.repository.get_skill_step_run(step.id) or step
+                # A heartbeat is liveness, not measurable progress in a single model response.
+                step = await self._update_storyboard_step(step, 18)
         except asyncio.CancelledError:
             author_task.cancel()
             try:
@@ -2561,6 +2907,11 @@ class SkillWorkflowService:
         progress: int,
         **updates: Any,
     ) -> SkillStepRun:
+        step = await self.repository.get_skill_step_run(step.id) or step
+        if isinstance(updates.get("checkpoint_manifest_revision_id"), str):
+            updates["checkpoint_manifest_revision_id"] = UUID(
+                updates["checkpoint_manifest_revision_id"]
+            )
         return await self.repository.save_skill_step_run(
             step.model_copy(
                 update={
@@ -2598,17 +2949,26 @@ class SkillWorkflowService:
         )
         if running is None:
             return
-        await self.repository.save_skill_step_run(
-            running.model_copy(
-                update={
-                    "execution_status": ExecutionStatus.FAILED,
-                    "error_code": "storyboard_worker_interrupted",
-                    "error_message": "服务重启中断了大纲与分镜生成，请继续生成",
-                    "retryable": True,
-                    "completed_at": utc_now(),
-                    "last_heartbeat_at": utc_now(),
-                }
-            )
+        checkpoint = (
+            await self.repository.get_skill_artifact(running.checkpoint_artifact_id)
+            if running.checkpoint_artifact_id
+            else None
+        )
+        project = await self.repository.get_project(run.project_id)
+        bible = _latest(await self.repository.list_style_bible_revisions(run.project_id))
+        if project is None or bible is None:
+            return
+        ended = running.last_heartbeat_at or running.started_at or utc_now()
+        elapsed = max(0, (ended - (running.started_at or ended)).total_seconds())
+        await self._stop_storyboard(
+            run,
+            project,
+            bible,
+            running,
+            checkpoint,
+            "storyboard_worker_interrupted",
+            "服务重启中断了大纲与分镜处理",
+            started=time.perf_counter() - elapsed,
         )
 
     async def rewrite_storyboard_shot(
@@ -2679,9 +3039,7 @@ class SkillWorkflowService:
         next_spec = next_spec.model_copy(
             update={
                 "evidence_refs": [
-                    item
-                    for item in next_spec.evidence_refs
-                    if item in allowed_evidence_refs
+                    item for item in next_spec.evidence_refs if item in allowed_evidence_refs
                 ]
             }
         )
@@ -2771,6 +3129,22 @@ class SkillWorkflowService:
                     "locked_fields": effective_locked_fields,
                 }
             )
+            for part in ("image", "video"):
+                if f"{part}_prompt" not in payload.parts:
+                    continue
+                common = getattr(manifest, f"common_{part}_prompt")
+                body = local_body_from_prompt(
+                    material[f"{part}_prompt"], common, video=part == "video"
+                )
+                material[f"{part}_prompt_body"] = body
+                material[f"{part}_prompt"] = effective_prompt(
+                    body,
+                    common,
+                    video=part == "video",
+                    duration=item.generation_duration_seconds,
+                    aspect_ratio=brief.output_aspect_ratio,
+                    fps=manifest.fps,
+                )
             material["input_hash"] = content_digest(material)
             next_shots.append(ShotManifestShot.model_validate(material))
         outline = _latest(await self.repository.list_outline_revisions(project.id))
@@ -2788,6 +3162,255 @@ class SkillWorkflowService:
                 project_negative_constraints=manifest.project_negative_constraints,
             ),
         )
+
+    async def put_storyboard_prompt_draft(
+        self,
+        project_id: UUID,
+        payload: StoryboardPromptDraftUpdate,
+    ) -> ShotManifestRevision:
+        async with self._lock(project_id):
+            project = await self._require_skill_project(project_id)
+            revisions = await self.repository.list_shot_manifest_revisions(project.id)
+            current = _latest(revisions)
+            bible = _latest(await self.repository.list_style_bible_revisions(project.id))
+            brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
+            outline = _latest(await self.repository.list_outline_revisions(project.id))
+            if current is None or bible is None or brief is None or outline is None:
+                raise _fail(409, "storyboard_inputs_missing", "请先生成大纲与分镜")
+            if current.id != payload.expected_revision_id:
+                raise _fail(
+                    409,
+                    "storyboard_revision_stale",
+                    "分镜已在其他页面更新，当前草稿已保留；请刷新后核对再修改",
+                )
+            if (
+                current.style_bible_revision_id != bible.id
+                or current.outline_revision_id != outline.id
+            ):
+                raise _fail(
+                    409, "storyboard_revision_stale", "风格或大纲已更新，请重新生成分镜后再编辑"
+                )
+            keys = [shot.stable_shot_key for shot in payload.shots]
+            if len(keys) != len(set(keys)):
+                raise _fail(422, "shot_key_duplicate", "分镜标识不能重复")
+            draft = factor_prompt_context(current, bible)
+            old_by_key = {
+                shot.stable_shot_key: shot for revision in revisions for shot in revision.shots
+            }
+            old_by_key.update({shot.stable_shot_key: shot for shot in draft.shots})
+            incoming = [
+                (shot.stable_shot_key, shot.image_prompt_body, shot.video_prompt_body)
+                for shot in payload.shots
+            ]
+            existing = [
+                (
+                    shot.stable_shot_key,
+                    editable_prompt_body(shot, "image"),
+                    editable_prompt_body(shot, "video"),
+                )
+                for shot in draft.shots
+            ]
+            if incoming == existing and all(
+                shot.image_prompt_body is not None and shot.video_prompt_body is not None
+                for shot in current.shots
+            ):
+                return current
+            average = max(1, brief.target_duration_frames // max(1, len(payload.shots)))
+            weights = [
+                (
+                    old_by_key[shot.stable_shot_key].timing_weight_frames
+                    or old_by_key[shot.stable_shot_key].duration_frames
+                )
+                if shot.stable_shot_key in old_by_key
+                else average
+                for shot in payload.shots
+            ]
+            try:
+                durations = allocate_frames(weights, brief.target_duration_frames)
+            except ValueError as exc:
+                raise _fail(422, "shot_duration_invalid", str(exc)) from exc
+            contracts = await self.repository.list_run_contract_revisions(project.id)
+            run = max(
+                await self.repository.list_skill_runs(project.id),
+                key=lambda item: item.updated_at,
+                default=None,
+            )
+            active = self._storyboard_tasks.get(run.id) if run else None
+            if active is not None and not active.done():
+                raise _fail(
+                    409, "storyboard_processing", "分镜正在处理，请停止任务后再修改；当前草稿已保留"
+                )
+            contract = (
+                await self.repository.get_run_contract_revision(run.run_contract_revision_id)
+                if run
+                else _latest(contracts)
+            )
+            allowed_durations = contract.video_duration_capabilities_seconds if contract else [4]
+            cursor = 0
+            shots = []
+            for index, (edit, duration) in enumerate(zip(payload.shots, durations, strict=True), 1):
+                old = old_by_key.get(edit.stable_shot_key)
+                material = (
+                    old.model_dump(mode="python", exclude={"input_hash"})
+                    if old
+                    else {
+                        "stable_shot_key": edit.stable_shot_key,
+                        "narrative_role": "自定义镜头",
+                        "description": "用户新增的分镜",
+                        "continuity_group_ids": ["global"],
+                        "generation_duration_seconds": min(
+                            allowed_durations,
+                            key=lambda value: (abs(value - duration / brief.fps), value),
+                        ),
+                    }
+                )
+                material.update(
+                    order=index,
+                    start_frame=cursor,
+                    duration_frames=duration,
+                    timing_weight_frames=weights[index - 1],
+                )
+                # Overlay coordinates are timeline-absolute; rebase them when shots move.
+                if old:
+                    material["exact_overlays"] = [
+                        overlay.model_copy(
+                            update={
+                                "start_frame": cursor
+                                + min(duration - 1, max(0, overlay.start_frame - old.start_frame)),
+                                "end_frame": cursor
+                                + min(duration, max(1, overlay.end_frame - old.start_frame)),
+                            }
+                        )
+                        for overlay in old.exact_overlays
+                    ]
+                for part in ("image", "video"):
+                    body = getattr(edit, f"{part}_prompt_body")
+                    material[f"{part}_prompt_body"] = body
+                    material[f"{part}_prompt"] = effective_prompt(
+                        body,
+                        getattr(draft, f"common_{part}_prompt"),
+                        video=part == "video",
+                        duration=material["generation_duration_seconds"],
+                        aspect_ratio=brief.output_aspect_ratio,
+                        fps=brief.fps,
+                    )
+                    if len(material[f"{part}_prompt"]) > 8000:
+                        raise _fail(
+                            422,
+                            "shot_prompt_too_long",
+                            f"分镜 {index} 的{'图片' if part == 'image' else '视频'}提示词"
+                            "加上全片规范后超过 8000 字，请缩短正文",
+                        )
+                material["prompt_quality"] = assess_prompts(
+                    material["image_prompt"],
+                    material["video_prompt"],
+                    minimum_score=85,
+                    forbidden_copy_terms=[],
+                    allowed_context="",
+                )
+                material["input_hash"] = content_digest(
+                    {key: value for key, value in material.items() if key != "input_hash"}
+                )
+                shots.append(ShotManifestShot.model_validate(material))
+                cursor += duration
+            if shots and [shot.stable_shot_key for shot in shots] != [
+                shot.stable_shot_key for shot in current.shots
+            ]:
+                outline, shots = await self._sync_storyboard_outline(project.id, outline, shots)
+            material = draft.model_dump(mode="python", exclude={"id", "content_hash", "created_at"})
+            material.update(
+                id=uuid4(),
+                revision_number=len(revisions) + 1,
+                shots=shots,
+                outline_revision_id=outline.id,
+                creative_approach=creative_approach(draft, outline, brief.objective),
+                edit_plan={
+                    **draft.edit_plan,
+                    "shot_count": len(shots),
+                    "target_duration_seconds": brief.target_duration_seconds,
+                },
+                input_hash=content_digest(payload),
+                created_at=utc_now(),
+            )
+            material["content_hash"] = content_digest(material)
+            saved = ShotManifestRevision.model_validate(material)
+            await self.repository.save_shot_manifest_revision(saved)
+            next_by_key = {shot.stable_shot_key: shot for shot in shots}
+            for old in current.shots:
+                updated = next_by_key.get(old.stable_shot_key)
+                semantic_fields = (
+                    "image_prompt",
+                    "video_prompt",
+                    "order",
+                    "start_frame",
+                    "duration_frames",
+                    "generation_duration_seconds",
+                    "exact_overlays",
+                    "image_asset_usage_ids",
+                    "video_reference_usage_ids",
+                )
+                if updated is None or any(
+                    getattr(old, field) != getattr(updated, field) for field in semantic_fields
+                ):
+                    await self.mark_dependency_stale(
+                        DependencyImpactRequest(
+                            depends_on_type="shot",
+                            depends_on_id=old.stable_shot_key,
+                            next_digest=updated.input_hash
+                            if updated
+                            else content_digest({"removed": old.stable_shot_key}),
+                        ),
+                        apply=True,
+                    )
+            await self._invalidate_gates_from(
+                project.id, SkillGate.STORYBOARD_APPROVED, "分镜提示词或镜头结构已更新"
+            )
+            return saved
+
+    async def _sync_storyboard_outline(
+        self,
+        project_id: UUID,
+        outline: OutlineRevision,
+        shots: list[ShotManifestShot],
+    ) -> tuple[OutlineRevision, list[ShotManifestShot]]:
+        """Update editorial references from the actual list, without changing stable shot IDs."""
+        keys = {beat.stable_beat_key for beat in outline.beats}
+        previous_key = outline.beats[0].stable_beat_key
+        groups: dict[str, list[ShotManifestShot]] = {}
+        updated_shots = []
+        for shot in shots:
+            key = next((key for key in shot.continuity_group_ids if key in keys), previous_key)
+            previous_key = key
+            material = shot.model_dump(mode="python", exclude={"input_hash"})
+            material["continuity_group_ids"] = list(
+                dict.fromkeys([*shot.continuity_group_ids, key])
+            )
+            updated = ShotManifestShot(**material, input_hash=content_digest(material))
+            updated_shots.append(updated)
+            groups.setdefault(key, []).append(updated)
+        beats = [
+            beat.model_copy(
+                update={
+                    "order": index,
+                    "target_duration_frames": sum(
+                        shot.duration_frames for shot in groups[beat.stable_beat_key]
+                    ),
+                    "suggested_shot_count": len(groups[beat.stable_beat_key]),
+                }
+            )
+            for index, beat in enumerate(
+                (beat for beat in outline.beats if beat.stable_beat_key in groups), 1
+            )
+        ]
+        material = outline.model_dump(mode="python", exclude={"id", "content_hash", "created_at"})
+        material.update(
+            beats=beats,
+            input_hash=content_digest(beats),
+            revision_number=len(await self.repository.list_outline_revisions(project_id)) + 1,
+        )
+        saved = OutlineRevision(**material, content_hash=content_digest(material))
+        await self.repository.save_outline_revision(saved)
+        return saved, updated_shots
 
     async def put_outline(self, project_id: UUID, payload: OutlineUpdate) -> OutlineRevision:
         project = await self._require_skill_project(project_id)
@@ -2866,8 +3489,7 @@ class SkillWorkflowService:
                 )
             )
             cursor += shot.duration_frames
-        if cursor != brief.target_duration_frames:
-            raise _fail(422, "shot_duration_invalid", "分镜总帧数必须等于创作简报目标帧数")
+        # Actual shot timing is editable; the brief duration is a target, not a count limit.
         # Existing keys are retained exactly; only genuinely new shots may introduce a new key.
         if current and not previous_keys.intersection(incoming_keys):
             raise _fail(422, "shot_identity_lost", "编辑分镜时必须保留已有稳定镜头身份")
@@ -2881,6 +3503,9 @@ class SkillWorkflowService:
             "created_at": utc_now(),
         }
         if current:
+            material["creative_approach"] = current[-1].creative_approach
+            material["common_image_prompt"] = current[-1].common_image_prompt
+            material["common_video_prompt"] = current[-1].common_video_prompt
             material["continuity_bible"] = payload.continuity_bible or current[-1].continuity_bible
             material["edit_plan"] = payload.edit_plan or current[-1].edit_plan
             material["project_negative_constraints"] = (
@@ -2919,6 +3544,19 @@ class SkillWorkflowService:
         payload: GateDecisionRequest,
     ) -> GateDecision:
         run, project = await self._require_run(run_id)
+        async with self._lock(project.id):
+            decision = await self._decide_gate_locked(run_id, gate, payload)
+        if payload.decision == GateDecisionValue.APPROVE and gate != SkillGate.DELIVERY_APPROVED:
+            await self._advance_full_auto(run, gate)
+        return decision
+
+    async def _decide_gate_locked(
+        self,
+        run_id: UUID,
+        gate: SkillGate,
+        payload: GateDecisionRequest,
+    ) -> GateDecision:
+        run, project = await self._require_run(run_id)
         account = await self.account_context.current_account()
         if payload.decision == GateDecisionValue.SKIP:
             snapshot = await self._require_snapshot(project.id)
@@ -2929,6 +3567,11 @@ class SkillWorkflowService:
                 raise _fail(409, "gate_skip_forbidden", "该人工门禁不能跳过")
         if payload.decision == GateDecisionValue.APPROVE:
             await self._validate_gate(run, project, gate, payload)
+            if gate == SkillGate.STORYBOARD_APPROVED:
+                try:
+                    await self._create_production_from_storyboard(run, project)
+                except ProductionServiceError as exc:
+                    raise _fail(exc.status_code, exc.code, str(exc)) from exc
         decision = GateDecision(
             project_id=project.id,
             skill_run_id=run.id,
@@ -2952,8 +3595,6 @@ class SkillWorkflowService:
             await self.repository.save_skill_run(run)
             return decision
         next_index = GATE_ORDER.index(gate) + 1
-        if gate == SkillGate.STORYBOARD_APPROVED:
-            await self._create_production_from_storyboard(run, project)
         next_stage = (
             list(SkillWorkflowStage)[next_index]
             if next_index < len(SkillWorkflowStage)
@@ -2976,8 +3617,6 @@ class SkillWorkflowService:
             stage=ProjectStage(next_stage.value),
             status=ProjectStatus.COMPLETED if completed else ProjectStatus.RUNNING,
         )
-        if payload.decision == GateDecisionValue.APPROVE and not completed:
-            await self._advance_full_auto(run, gate)
         return decision
 
     async def create_audio_asset(
@@ -3707,6 +4346,12 @@ class SkillWorkflowService:
                 ]
                 if not running:
                     continue
+                if any(step.operation == "compile_storyboard" for step in running):
+                    await self._recover_interrupted_storyboard(run)
+                    running = [step for step in running if step.operation != "compile_storyboard"]
+                    if not running:
+                        continue
+                    run = await self.repository.get_skill_run(run.id) or run
                 run_requires_block = False
                 for step in running:
                     interrupted_look: LookTest | None = None
@@ -3924,6 +4569,9 @@ class SkillWorkflowService:
             manifest = _latest(await self.repository.list_shot_manifest_revisions(project.id))
             if outline is None or bible is None or manifest is None:
                 raise _fail(409, "shot_manifest_required", "请先生成并审核分镜方案")
+            issues = draft_issues(manifest)
+            if issues:
+                raise _fail(422, "storyboard_draft_incomplete", "；".join(issues[:8]))
             if (
                 manifest.outline_revision_id != outline.id
                 or manifest.style_bible_revision_id != bible.id
@@ -4003,8 +4651,6 @@ class SkillWorkflowService:
     ) -> None:
         if self.production_service is None:
             raise _fail(503, "production_service_unavailable", "后半程生产服务未启用")
-        if project.source_binding.production_project_id is not None:
-            return
         brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
         bible = _latest(await self.repository.list_style_bible_revisions(project.id))
         manifest = _latest(await self.repository.list_shot_manifest_revisions(project.id))
@@ -4075,10 +4721,15 @@ class SkillWorkflowService:
             ),
         )
         await self.repository.save_production_seed(seed)
-        detail = await self.production_service.create_project_from_seed(
-            seed,
-            budget_limit_micros=contract.budget_limit_micros,
-        )
+        if project.source_binding.production_project_id is not None:
+            detail = await self.production_service.sync_project_from_skill_seed(
+                project.source_binding.production_project_id, seed
+            )
+        else:
+            detail = await self.production_service.create_project_from_seed(
+                seed,
+                budget_limit_micros=contract.budget_limit_micros,
+            )
         await self.projects.bind_skill_run(
             project.id,
             production_project_id=detail.project.id,
@@ -4306,6 +4957,8 @@ class SkillWorkflowService:
         stage: SkillWorkflowStage,
         operation: str,
         input_hash: str,
+        *,
+        reconciled: bool = False,
     ) -> tuple[SkillStepRun, bool]:
         if run.cancel_requested_at is not None:
             raise _fail(409, "run_cancelled", "运行已取消")
@@ -4333,7 +4986,7 @@ class SkillWorkflowService:
             ),
             None,
         )
-        if submitted is not None:
+        if submitted is not None and not reconciled:
             raise _fail(
                 409,
                 "provider_reconcile_required",
@@ -4416,6 +5069,7 @@ class SkillWorkflowService:
         retryable: bool,
         started: float,
     ) -> SkillStepRun:
+        step = await self.repository.get_skill_step_run(step.id) or step
         total_ms = max(0, round((time.perf_counter() - started) * 1000))
         return await self.repository.save_skill_step_run(
             step.model_copy(

@@ -72,6 +72,26 @@ def create_project_router(service: ProjectService) -> APIRouter:
         except ProjectServiceError as exc:
             _raise_http(exc)
 
+    # Fixed batch paths must precede UUID parameters: otherwise "batch" is
+    # consumed as project_id and rejected before the batch handler can run.
+    @router.post("/projects/batch/lifecycle", response_model=ProjectBatchMutationResponse)
+    async def batch_lifecycle(
+        payload: ProjectBatchLifecycleRequest,
+    ) -> ProjectBatchMutationResponse:
+        try:
+            return await service.batch_lifecycle(payload.project_ids, payload.action)
+        except ProjectServiceError as exc:
+            _raise_http(exc)
+
+    @router.delete("/projects/batch", response_model=ProjectBatchMutationResponse)
+    async def batch_delete_projects(
+        payload: ProjectBatchDeleteRequest,
+    ) -> ProjectBatchMutationResponse:
+        try:
+            return await service.batch_delete_permanently(payload.project_ids)
+        except ProjectServiceError as exc:
+            _raise_http(exc)
+
     @router.get("/projects/{project_id}", response_model=ProjectSummary)
     async def get_project(project_id: UUID) -> ProjectSummary:
         try:
@@ -93,24 +113,6 @@ def create_project_router(service: ProjectService) -> APIRouter:
     ) -> ProjectSummary:
         try:
             return await service.mutate_lifecycle(project_id, payload.action)
-        except ProjectServiceError as exc:
-            _raise_http(exc)
-
-    @router.post("/projects/batch/lifecycle", response_model=ProjectBatchMutationResponse)
-    async def batch_lifecycle(
-        payload: ProjectBatchLifecycleRequest,
-    ) -> ProjectBatchMutationResponse:
-        try:
-            return await service.batch_lifecycle(payload.project_ids, payload.action)
-        except ProjectServiceError as exc:
-            _raise_http(exc)
-
-    @router.delete("/projects/batch", response_model=ProjectBatchMutationResponse)
-    async def batch_delete_projects(
-        payload: ProjectBatchDeleteRequest,
-    ) -> ProjectBatchMutationResponse:
-        try:
-            return await service.batch_delete_permanently(payload.project_ids)
         except ProjectServiceError as exc:
             _raise_http(exc)
 

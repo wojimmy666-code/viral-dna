@@ -139,7 +139,7 @@ export function VideoGenerationSettingsPopover({
         <fieldset className="video-setting-section video-audio-setting">
           <legend>分镜声音</legend>
           <div className="video-audio-options">
-            <button
+            {sourceAudioAvailable && <button
               aria-pressed={audioStrategy === "reuse_source"}
               className={audioStrategy === "reuse_source" ? "active" : ""}
               disabled={controlsDisabled || !sourceAudioAvailable}
@@ -148,7 +148,7 @@ export function VideoGenerationSettingsPopover({
             >
               <SpeakerHigh size={18} />
               <span><strong>沿用原音频</strong><small>{sourceAudioAvailable ? "使用该分镜在原视频中的声音" : "原视频没有可用音频"}</small></span>
-            </button>
+            </button>}
             <button
               aria-pressed={audioStrategy === "generate_native"}
               className={audioStrategy === "generate_native" ? "active" : ""}

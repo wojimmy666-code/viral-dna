@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { CreationNavigation, CreationWorkspace } from "./creation-workspace/CreationWorkspace.jsx";
+import { mainCreationStep, productionNavigation, readWorkspaceLocation, rememberWorkspaceLocation, savedWorkspaceLocation, sourceCapabilities, workspaceSearch } from "./creation-workspace/workspace-ui.js";
 import {
   ArrowLeft,
   ArrowRight,
@@ -13,7 +16,6 @@ import {
   FolderOpen,
   GitBranch,
   ImageSquare,
-  LockSimple,
   MagicWand,
   PencilSimple,
   Plus,
@@ -23,7 +25,6 @@ import {
   X,
 } from "@phosphor-icons/react";
 import {
-  PRODUCTION_STEPS,
   REFERENCE_TYPE_OPTIONS,
   budgetMicrosFromYuan,
   budgetYuanFromMicros,
@@ -36,7 +37,6 @@ import {
   normalizeReferenceTags,
   productionDefaultsForSource,
   productionChangeLabel,
-  productionUnlockedStepIndex,
   referenceAssetsContinueLabel,
   referenceTypeLabel,
 } from "./production-ui.js";
@@ -800,51 +800,6 @@ function ProductionList({
   );
 }
 
-function ProductionSteps({ active, project, referenceCount, gate, onChange }) {
-  const activeIndex = productionUnlockedStepIndex(project.active_step);
-  return (
-    <nav aria-label="创作工作流" className="production-stepper">
-      {PRODUCTION_STEPS.map((step, index) => {
-        const exportReady = step.id === "export" && project.active_step === "editing";
-        const locked = Boolean(step.locked) || (index > activeIndex && !exportReady);
-        const selected = active === step.id;
-        const completed = index < activeIndex || (step.id === "project_setup" && project.current_revision_id);
-        return (
-          <button
-            aria-current={selected ? "step" : undefined}
-            className={`${selected ? "active" : ""} ${locked ? "locked" : ""}`}
-            disabled={locked}
-            key={step.id}
-            onClick={() => onChange(step.id)}
-            type="button"
-          >
-            <span className="production-step-number">
-              {locked ? <LockSimple size={13} /> : completed ? <Check size={13} weight="bold" /> : index + 1}
-            </span>
-            <span>
-              <strong>{step.label}</strong>
-              <small>
-                {step.id === "reference_assets"
-                  ? referenceCount > 0
-                    ? `${referenceCount} 项资产`
-                    : "可选 · 0 项"
-                  : step.id === "shot_videos"
-                    && step.id === project.active_step
-                    && gate
-                    ? `${gate.approved_shot_count || 0} / ${gate.required_shot_count} 已采用`
-                    : step.id === "shot_images"
-                      && step.id === project.active_step
-                      && gate
-                      ? `${gate.approved_shot_count} / ${gate.required_shot_count} 已确认`
-                    : step.description}
-              </small>
-            </span>
-          </button>
-        );
-      })}
-    </nav>
-  );
-}
 
 function promptDecisionKey(shotPlanId, fieldKey) {
   return `${shotPlanId}:${fieldKey}`;
@@ -1581,6 +1536,8 @@ function BranchDialog({ revision, name, setName, busy, error, onClose, onSubmit 
 }
 
 export function ProductionHub({
+  workflow = null,
+  workspaceRef = null,
   allowProjectCreation = true,
   recordId,
   analysisId,
@@ -1607,6 +1564,19 @@ export function ProductionHub({
   onProjectsChanged,
   onNotice,
 }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const editorRef = useRef(null);
+  const locationRef = useRef(location);
+  locationRef.current = location;
+  const restoredLocation = useMemo(() => savedWorkspaceLocation(recordId, location.search), [recordId]);
+  const restoreStarted = useRef("");
+  const navigationBusy = useRef(false);
+  const shotRequestId = useRef(0);
+  const projectRefreshRequestId = useRef(0);
+  const shotSelectionPending = useRef(false);
+  const projectOpenRequestId = useRef(0);
+  const [changingSection, setChangingSection] = useState(false);
   const sourceProductionDefaults = useMemo(
     () => productionDefaultsForSource({
       width: sourceMedia.width,
@@ -1638,7 +1608,8 @@ export function ProductionHub({
     videoDraft,
   } = useShotVideoGenerationDraft({ request, onNotice });
   const [impactReview, setImpactReview] = useState(null);
-  const [activeSection, setActiveSection] = useState("project_setup");
+  const [localSection, setLocalSection] = useState(restoredLocation.section || "project_setup");
+  const activeSection = workflow?.section || localSection;
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1682,6 +1653,76 @@ export function ProductionHub({
     imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
   );
   const [focusedCandidateId, setFocusedCandidateId] = useState("");
+  const capabilities = sourceCapabilities(detail?.project, sourceMedia);
+
+  function updateLocation(update, { replace = true } = {}) {
+    const search = workspaceSearch(locationRef.current.search, update);
+    rememberWorkspaceLocation(recordId, search);
+    if (search !== locationRef.current.search) {
+      locationRef.current = { ...locationRef.current, search };
+      navigate({ pathname: locationRef.current.pathname, search }, { replace });
+    }
+  }
+
+  function setActiveSection(section) {
+    setLocalSection(section);
+    workflow?.onSectionChange?.(section);
+  }
+
+  async function flushWorkspace() {
+    await flushShotDraft();
+    await flushVideoDraft();
+    const timeline = await editorRef.current?.flush();
+    if (await workflow?.beforeNavigate?.() === false) throw new Error("请先完成当前修改的保存");
+    return timeline;
+  }
+
+  useImperativeHandle(workspaceRef, () => ({
+    flush: flushWorkspace,
+    refresh: () => refreshProject(),
+    navigate: changeSection,
+  }));
+
+  useEffect(() => {
+    if (workflow?.section) updateLocation({ section: workflow.section });
+  }, [workflow?.section]);
+
+  async function changeSection(section, { fromHistory = false } = {}) {
+    if (navigationBusy.current || busy || workflow?.busy) return;
+    const next = workflow?.resolveSection?.(section) || section;
+    const step = (workflow?.steps || productionNavigation(detail?.project, gate)).find((item) => item.id === mainCreationStep(next));
+    if ((step && !step.enabled) || workflow?.canNavigate?.(next) === false) {
+      if (fromHistory) updateLocation({ section: activeSection });
+      return;
+    }
+    navigationBusy.current = true;
+    setChangingSection(true);
+    try {
+      await flushWorkspace();
+      setActionError("");
+      setActiveSection(next);
+      if (!fromHistory) updateLocation({ productionId: selectedProjectId, section: next, shotId: selectedShotId, visualBeatId: selectedVisualBeatId, candidateId: focusedCandidateId }, { replace: false });
+    } catch (saveError) {
+      setActionError(saveError.message);
+      if (fromHistory) updateLocation({ section: activeSection });
+    } finally {
+      navigationBusy.current = false;
+      setChangingSection(false);
+    }
+  }
+
+  async function leaveWorkspace() {
+    try {
+      await flushWorkspace();
+      if (workflow?.onBack) { workflow.onBack(); return; }
+      projectOpenRequestId.current += 1;
+      shotRequestId.current += 1;
+      setSelectedProjectId(null);
+      setDetail(null);
+      restoreStarted.current = recordId;
+      updateLocation({ productionId: "", section: "", shotId: "", visualBeatId: "", candidateId: "" }, { replace: false });
+    } catch (saveError) { setActionError(saveError.message); }
+  }
   const handleShotImageDraftPersisted = useCallback(({ detail: persisted }) => {
     if (!persisted?.plan) return;
     const projectId = String(persisted.plan.project_id || "");
@@ -1766,8 +1807,7 @@ export function ProductionHub({
 
   useEffect(() => {
     if (!listSignal) return;
-    setSelectedProjectId(null);
-    setDetail(null);
+    void leaveWorkspace();
     setAnalysisUpdatePreview(null);
     setAnalysisUpdateOpen(false);
     setAnalysisUpdateDecisions({});
@@ -1808,7 +1848,8 @@ export function ProductionHub({
     resetShotDraft();
     resetVideoDraft();
     setImpactReview(null);
-    setActiveSection("project_setup");
+    setLocalSection(restoredLocation.section || "project_setup");
+    restoreStarted.current = "";
     setCreateOpen(false);
     setProjectLifecycle("active");
     setTrashedProjects([]);
@@ -1827,6 +1868,33 @@ export function ProductionHub({
     setGenerationCandidateCount(1);
     setFocusedCandidateId("");
   }, [recordId]);
+
+  useEffect(() => {
+    const projectId = workflow?.productionProjectId || restoredLocation.productionId;
+    if (!projectId || restoreStarted.current === recordId || restoreStarted.current === `${recordId}:${projectId}`) return;
+    if (!workflow && !projects.some((item) => item.id === projectId)) return;
+    restoreStarted.current = `${recordId}:${projectId}`;
+    setFocusedCandidateId(restoredLocation.candidateId || "");
+    openProject(projectId, {
+      section: workflow?.section || restoredLocation.section || "project_setup",
+      shotPlanId: restoredLocation.shotId || null,
+      visualBeatId: restoredLocation.visualBeatId || null,
+    }).catch(() => undefined);
+  }, [recordId, workflow?.productionProjectId, projects, restoredLocation]);
+
+  useEffect(() => {
+    const target = readWorkspaceLocation(location.search);
+    if (target.section && target.section !== activeSection) void changeSection(target.section, { fromHistory: true });
+    if (target.productionId && selectedProjectId && target.productionId !== selectedProjectId && !workflow) {
+      void openProject(target.productionId, { section: target.section || "project_setup", shotPlanId: target.shotId, visualBeatId: target.visualBeatId });
+    } else if (target.shotId && selectedProjectId && selectedShotId && target.shotId !== selectedShotId) {
+      void selectShot(target.shotId, { visualBeatId: target.visualBeatId, candidateId: target.candidateId });
+    } else if (target.shotId === selectedShotId && target.visualBeatId && target.visualBeatId !== selectedVisualBeatId) {
+      void selectVisualBeat(target.visualBeatId);
+    } else if (target.candidateId !== focusedCandidateId && target.shotId === selectedShotId) {
+      setFocusedCandidateId(target.candidateId);
+    }
+  }, [location.search]);
 
   useEffect(() => {
     loadTrashedProjects({ quiet: true }).catch(() => undefined);
@@ -1900,6 +1968,10 @@ export function ProductionHub({
     preferredVisualBeatId = selectedVisualBeatId,
   ) {
     if (!projectId) return null;
+    const refreshRequest = ++projectRefreshRequestId.current;
+    const selectionAtStart = shotRequestId.current;
+    const canHydrateShot = () => refreshRequest === projectRefreshRequestId.current
+      && selectionAtStart === shotRequestId.current && !shotSelectionPending.current;
     const [
       nextDetail,
       nextAssets,
@@ -1915,12 +1987,13 @@ export function ProductionHub({
       request(`/productions/${projectId}/gate-status`),
       request("/settings/image-generation"),
     ]);
+    if (!canHydrateShot()) return nextDetail;
     setDetail(nextDetail);
     setAssets(nextAssets || []);
     setRevisions(nextRevisions || []);
     setShots(nextShots || []);
     setGate(nextGate);
-    setGenerationSettings(nextGenerationSettings);
+    setGenerationSettings(workflow ? imageGenerationSettings : nextGenerationSettings);
     setSettingsDraft(settingsFromProject(nextDetail.project));
     const targetShotId = (
       preferredShotId
@@ -1933,7 +2006,6 @@ export function ProductionHub({
       : (nextShots || []).find(
         (item) => item.plan.lifecycle_status !== "discarded",
       )?.plan?.id || null;
-    setSelectedShotId(targetShotId);
     if (targetShotId) {
       const [nextShotDetail, persistedVideoDraft] = await Promise.all([
         request(`/production-shots/${targetShotId}`),
@@ -1943,6 +2015,8 @@ export function ProductionHub({
         nextShotDetail,
         preferredVisualBeatId,
       );
+      if (!canHydrateShot()) return nextDetail;
+      setSelectedShotId(targetShotId);
       setShotDetail(nextShotDetail);
       setSelectedVisualBeatId(targetVisualBeat?.id || null);
       if (targetVisualBeat?.id) {
@@ -1961,12 +2035,13 @@ export function ProductionHub({
         persistedDraft: persistedVideoDraft,
       });
     } else {
+      setSelectedShotId(null);
       setShotDetail(null);
       setSelectedVisualBeatId(null);
       resetShotDraft();
       resetVideoDraft();
     }
-    await refreshAnalysisUpdate(projectId);
+    if (nextDetail.project.video_id) await refreshAnalysisUpdate(projectId);
     return nextDetail;
   }
 
@@ -1996,12 +2071,11 @@ export function ProductionHub({
 
   async function openProject(
     projectId,
-    { section = "project_setup", shotPlanId = null } = {},
+    { section = "project_setup", shotPlanId = null, visualBeatId = null } = {},
   ) {
-    const pendingSaves = Promise.allSettled([
-      flushShotDraft(),
-      flushVideoDraft(),
-    ]);
+    const openRequest = ++projectOpenRequestId.current;
+    try { await flushWorkspace(); } catch (saveError) { setActionError(saveError.message); return; }
+    if (openRequest !== projectOpenRequestId.current) return;
     setSelectedProjectId(projectId);
     setContentLoading(true);
     setContentError("");
@@ -2017,31 +2091,37 @@ export function ProductionHub({
     setAnalysisUpdateDecisions({});
     setAnalysisUpdateError("");
     try {
-      await pendingSaves;
-      await refreshProject(projectId, shotPlanId);
+      const opened = await refreshProject(projectId, shotPlanId, visualBeatId);
+      if (openRequest !== projectOpenRequestId.current) return;
+      const resolved = workflow?.resolveSection?.(section) || (mainCreationStep(section) === "project_setup" ? "project_setup" : section);
+      const allowed = workflow ? workflow.canNavigate?.(resolved) !== false
+        : !mainCreationStep(resolved) || productionNavigation(opened.project).some((step) => step.id === mainCreationStep(resolved) && step.enabled);
+      const nextSection = allowed ? resolved : workflow?.section || opened.project.active_step || "project_setup";
+      setActiveSection(nextSection);
+      updateLocation({ productionId: projectId, section: nextSection, shotId: shotPlanId || "", visualBeatId: visualBeatId || "" });
     } catch (requestError) {
       setContentError(requestError.message);
     } finally {
-      setContentLoading(false);
+      if (openRequest === projectOpenRequestId.current) setContentLoading(false);
     }
   }
 
-  async function selectShot(shotPlanId) {
-    const pendingSaves = Promise.allSettled([
-      flushShotDraft(),
-      flushVideoDraft(),
-    ]);
-    setSelectedShotId(shotPlanId);
-    setActionError("");
-    setImpactReview(null);
-    setShotDetail(null);
+  async function selectShot(shotPlanId, { visualBeatId = null, candidateId = "" } = {}) {
+    const selectionRequest = ++shotRequestId.current;
+    shotSelectionPending.current = true;
     try {
-      await pendingSaves;
+      await flushWorkspace();
+      if (selectionRequest !== shotRequestId.current) return;
       const [nextShotDetail, persistedVideoDraft] = await Promise.all([
         request(`/production-shots/${shotPlanId}`),
         request(`/production-shots/${shotPlanId}/video-generation-draft`),
       ]);
-      const firstVisualBeat = visualBeatFromDetail(nextShotDetail);
+      const firstVisualBeat = visualBeatFromDetail(nextShotDetail, visualBeatId);
+      if (selectionRequest !== shotRequestId.current) return;
+      setSelectedShotId(shotPlanId);
+      setFocusedCandidateId(candidateId);
+      setActionError("");
+      setImpactReview(null);
       setShotDetail(nextShotDetail);
       setSelectedVisualBeatId(firstVisualBeat?.id || null);
       if (firstVisualBeat?.id) {
@@ -2059,8 +2139,11 @@ export function ProductionHub({
         settings: videoGenerationSettings,
         persistedDraft: persistedVideoDraft,
       });
+      updateLocation({ shotId: shotPlanId, visualBeatId: firstVisualBeat?.id || "", candidateId });
     } catch (requestError) {
-      setActionError(requestError.message);
+      if (selectionRequest === shotRequestId.current) setActionError(requestError.message);
+    } finally {
+      if (selectionRequest === shotRequestId.current) shotSelectionPending.current = false;
     }
   }
 
@@ -2557,10 +2640,10 @@ export function ProductionHub({
     }
   }
 
-  function selectVisualBeat(visualBeatId) {
+  async function selectVisualBeat(visualBeatId) {
     const beat = visualBeatFromDetail(shotDetail, visualBeatId);
     if (!beat) return;
-    flushShotDraft().catch(() => undefined);
+    try { await flushWorkspace(); } catch (error) { setActionError(error.message); return; }
     setSelectedVisualBeatId(beat.id);
     hydrateShotDraft({
       detail: shotDetail,
@@ -2568,6 +2651,8 @@ export function ProductionHub({
       visualBeatId: beat.id,
     });
     setActionError("");
+    setFocusedCandidateId("");
+    updateLocation({ visualBeatId: beat.id, candidateId: "" });
   }
 
   async function revokeImageApproval() {
@@ -2735,11 +2820,14 @@ export function ProductionHub({
 
   async function advanceWorkflow() {
     await executeAction(async () => {
-      await request(`/productions/${detail.project.id}/advance`, {
+      await flushWorkspace();
+      if (workflow && !workflow.imagesApproved && await workflow.onAdvance("shot_images") === false) return;
+      const latest = await request(`/productions/${detail.project.id}`);
+      if (!["shot_videos", "editing", "export"].includes(latest.project.active_step)) await request(`/productions/${detail.project.id}/advance`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          expected_revision_id: detail.project.current_revision_id,
+          expected_revision_id: latest.project.current_revision_id,
           target_step: "shot_videos",
         }),
       });
@@ -2748,7 +2836,8 @@ export function ProductionHub({
         onProjectsChanged(),
       ]);
       setActiveSection("shot_videos");
-      onNotice("图片阶段已完成，已进入分段视频工作台");
+      updateLocation({ section: "shot_videos" }, { replace: false });
+      onNotice("图片阶段已完成，已进入分镜视频");
     });
   }
 
@@ -3219,11 +3308,14 @@ export function ProductionHub({
 
   async function advanceToEditing() {
     await executeAction(async () => {
-      await request(`/productions/${detail.project.id}/advance`, {
+      await flushWorkspace();
+      if (workflow && !workflow.videosApproved && await workflow.onAdvance("shot_videos") === false) return;
+      const latest = await request(`/productions/${detail.project.id}`);
+      if (!["editing", "export"].includes(latest.project.active_step)) await request(`/productions/${detail.project.id}/advance`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          expected_revision_id: detail.project.current_revision_id,
+          expected_revision_id: latest.project.current_revision_id,
           target_step: "editing",
         }),
       });
@@ -3232,6 +3324,7 @@ export function ProductionHub({
         onProjectsChanged(),
       ]);
       setActiveSection("editing");
+      updateLocation({ section: "editing" }, { replace: false });
       onNotice({
         type: "success",
         title: "已进入视频剪辑",
@@ -3649,6 +3742,30 @@ export function ProductionHub({
     }
   }
 
+  function renderWorkspace(children) {
+    return <CreationWorkspace
+      title={workflow?.title || detail?.project.name || "创作方案"}
+      subtitle={workflow?.subtitle || (detail ? `${detail.project.output_aspect_ratio} · ${detail.project.output_width} × ${detail.project.output_height}` : "")}
+      source={workflow?.source || "原视频"}
+      metrics={workflow?.metrics}
+      backLabel={workflow ? "项目" : "所有方案"}
+      onBack={leaveWorkspace}
+      actions={<>
+        <button aria-pressed={activeSection === "reference_assets"} className="secondary-button compact" disabled={changingSection} onClick={() => void changeSection("reference_assets")} type="button"><FolderOpen size={16} />参考资产</button>
+        <button aria-pressed={activeSection === "revisions"} className="secondary-button compact" disabled={!detail || changingSection} onClick={() => void changeSection("revisions")} type="button"><ClockCounterClockwise size={16} />版本记录</button>
+        {!workflow && detail && <details className="production-workspace-menu"><summary aria-label={`${detail.project.name}的更多操作`}><DotsThree size={20} /></summary><div role="menu"><button className="danger" disabled={projectLifecycleBusy} onClick={() => openProjectLifecycleAction(detail.project, "trash")} role="menuitem" type="button"><Trash size={16} />移入回收站</button></div></details>}
+      </>}
+      navigation={<CreationNavigation active={activeSection} busy={changingSection || busy || workflow?.busy} onChange={(section) => void changeSection(section)} steps={workflow?.steps || productionNavigation(detail?.project, gate)} />}
+    >{workflow?.subnavigation}{!workflow && ["editing", "audio_caption"].includes(activeSection) && <nav className="creation-subnav" aria-label="剪辑内容">{[{ id: "editing", label: "画面剪辑" }, { id: "audio_caption", label: "配乐与字幕" }].map((item) => <button aria-current={activeSection === item.id ? "page" : undefined} disabled={changingSection || busy} key={item.id} onClick={() => void changeSection(item.id)} type="button">{item.label}</button>)}</nav>}{workflow?.message}{actionError && !["project_setup", "reference_assets", "shot_images", "shot_videos"].includes(activeSection) && <div className="production-inline-error" role="alert">{actionError}</div>}{children}</CreationWorkspace>;
+  }
+
+  if (!selectedProjectId && workflow) {
+    return renderWorkspace(<>
+      {actionError && <div className="production-inline-error" role="alert">{actionError}</div>}
+      <div className="creation-stage-body">{activeSection === "reference_assets" ? workflow.referenceContent : workflow.preparation}</div>
+    </>);
+  }
+
   if (!selectedProjectId) {
     const lifecycleProjects = projectLifecycle === "trashed" ? trashedProjects : projects;
     const lifecycleLoading = projectLifecycle === "trashed" ? trashedProjectsLoading : loading;
@@ -3697,44 +3814,12 @@ export function ProductionHub({
     );
   }
 
-  return (
-    <section className="production-workspace">
-      <header className="production-workspace-header">
-        <button className="production-back-button" onClick={() => setSelectedProjectId(null)} type="button"><ArrowLeft size={16} />所有方案</button>
-        {detail && (
-          <div className="production-workspace-title">
-            <div><h3>{detail.project.name}</h3><p>{detail.project.output_aspect_ratio} · {detail.project.output_width} × {detail.project.output_height} · Revision {detail.current_revision?.revision_number || 1}</p></div>
-            <div className="production-workspace-actions">
-              <button className="secondary-button compact" onClick={() => { setActionError(""); setActiveSection("revisions"); }} type="button"><ClockCounterClockwise size={16} />版本记录</button>
-              <details className="production-workspace-menu">
-                <summary aria-label={`${detail.project.name}的更多操作`} title="更多操作">
-                  <DotsThree size={20} weight="bold" />
-                </summary>
-                <div role="menu">
-                  <button
-                    className="danger"
-                    disabled={projectLifecycleBusy}
-                    onClick={(event) => {
-                      event.currentTarget.closest("details")?.removeAttribute("open");
-                      openProjectLifecycleAction(detail.project, "trash");
-                    }}
-                    role="menuitem"
-                    type="button"
-                  >
-                    <Trash size={16} />移入回收站
-                  </button>
-                </div>
-              </details>
-            </div>
-          </div>
-        )}
-      </header>
-
+  return renderWorkspace(<>
       {contentLoading && <div className="production-content-loading"><CircleNotch className="spin" size={24} /><span>正在打开创作方案</span></div>}
       {!contentLoading && contentError && <div className="production-inline-error production-content-error" role="alert"><WarningCircle size={18} />{contentError}</div>}
       {!contentLoading && !contentError && detail && (
         <>
-          <ProductionSteps active={activeSection} gate={gate} onChange={(section) => { setActionError(""); setActiveSection(section); }} project={detail.project} referenceCount={assets.length} />
+          {workflow?.stageTools && <div className="creation-stage-tools">{workflow.stageTools}</div>}
           <AnalysisUpdateBanner
             onOpen={() => {
               setAnalysisUpdateError("");
@@ -3759,12 +3844,13 @@ export function ProductionHub({
               preview={analysisUpdatePreview}
             />
           )}
-          <div className="production-stage-content">
-            {activeSection === "project_setup" && <ProjectSettings busy={busy} detail={detail} draft={settingsDraft} error={actionError} onOpenReferences={() => setActiveSection("reference_assets")} onSave={submitSettings} setDraft={setSettingsDraft} />}
-            {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onContinue={() => { setActionError(""); setActiveSection("shot_images"); }} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
+          <div className="production-stage-content creation-stage-body">
+            {workflow && mainCreationStep(activeSection) === "project_setup" && workflow.preparation}
+            {!workflow && activeSection === "project_setup" && <ProjectSettings busy={busy} detail={detail} draft={settingsDraft} error={actionError} onOpenReferences={() => void changeSection("reference_assets")} onSave={submitSettings} setDraft={setSettingsDraft} />}
+            {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onContinue={() => void changeSection("shot_images")} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
             {activeSection === "shot_images" && (
               <ShotImageWorkspace
-                advanced={["shot_videos", "editing", "export"].includes(
+                advanced={workflow ? workflow.imagesApproved : ["shot_videos", "editing", "export"].includes(
                   detail.project.active_step,
                 )}
                 assets={assets}
@@ -3777,6 +3863,8 @@ export function ProductionHub({
                 generationInputMode={generationInputMode}
                 generationModelAlias={generationModelAlias}
                 generationSettings={generationSettings}
+                initialCandidateId={focusedCandidateId}
+                onPreviewCandidate={(candidateId) => { setFocusedCandidateId(candidateId); updateLocation({ shotId: selectedShotId, visualBeatId: selectedVisualBeatId, candidateId }); }}
                 onAdvance={advanceWorkflow}
                 onApprove={approveCandidate}
                 onApproveSource={approveSourceKeyframe}
@@ -3814,20 +3902,21 @@ export function ProductionHub({
                 setGenerationModelAlias={setGenerationModelAlias}
                 shotDetail={shotDetail}
                 shots={shots}
-                sourceVideoUrl={resolveUrl(
+                sourceVideoUrl={capabilities.hasVideo ? resolveUrl(
                   "/api/v1/productions/" + detail.project.id + "/source-video",
-                )}
+                ) : ""}
                 textModelLabel={shotImageTextModelLabel}
               />
             )}
             {activeSection === "shot_videos" && (
               <ShotVideoWorkspace
-                advanced={["editing", "export"].includes(detail.project.active_step)}
+                advanced={workflow ? workflow.videosApproved : ["editing", "export"].includes(detail.project.active_step)}
                 assets={assets}
                 busy={busy}
                 error={actionError}
                 gate={gate}
                 initialCandidateId={focusedCandidateId}
+                onPreviewCandidate={(candidateId) => { setFocusedCandidateId(candidateId); updateLocation({ shotId: selectedShotId, candidateId }); }}
                 onAdvance={advanceToEditing}
                 onApprove={approveVideoCandidate}
                 onArchiveCandidates={archiveVideoCandidates}
@@ -3862,10 +3951,10 @@ export function ProductionHub({
                 setVideoDraft={setVideoDraft}
                 shotDetail={shotDetail}
                 shots={shots}
-                sourceVideoUrl={resolveUrl(
+                sourceVideoUrl={capabilities.hasVideo ? resolveUrl(
                   "/api/v1/productions/" + detail.project.id + "/source-video",
-                )}
-                sourceAudioAvailable={Boolean(sourceMedia.hasAudio)}
+                ) : ""}
+                sourceAudioAvailable={capabilities.hasAudio}
                 videoDraft={videoDraft}
                 videoGenerationSettings={videoGenerationSettings}
                 videoGenerationSettingsError={videoGenerationSettingsError}
@@ -3873,8 +3962,11 @@ export function ProductionHub({
                 textModelLabel={videoTextModelLabel}
               />
             )}
-            {activeSection === "editing" && (
+            {["editing", "audio_caption"].includes(activeSection) && (
               <VideoEditorWorkspace
+                workspaceRef={editorRef}
+                onTimelineChanged={workflow?.onTimelineChanged}
+                initialInspectorTab={activeSection === "audio_caption" ? "audio" : "clip"}
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}
                 project={detail.project}
@@ -3885,6 +3977,8 @@ export function ProductionHub({
             {activeSection === "export" && (
               <ProductionExportWorkspace
                 lockedResolution={lockedExportResolution}
+                expectedTimelineRevisionId={workflow?.exportTimelineRevisionId}
+                onArtifactsChanged={workflow?.onExportArtifactsChanged}
                 onNotice={onNotice}
                 onNotificationsChanged={onNotificationsChanged}
                 onProjectChanged={async () => {
@@ -3939,6 +4033,5 @@ export function ProductionHub({
         onConfirm={confirmImpactReview}
         review={impactReview}
       />
-    </section>
-  );
+    </>);
 }

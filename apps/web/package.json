@@ -8,8 +8,10 @@
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "check:design": "node --test tests/typography-system.test.mjs",
     "preview": "vite preview",
-    "test": "node --test tests/sites-worker.test.mjs tests/video-layout.test.mjs tests/analysis-import-ui.test.mjs tests/production-ui.test.mjs tests/shot-image-ui.test.mjs tests/shot-video-workspace.test.mjs tests/shot-navigation-thumbnail.test.mjs tests/asset-library-ui.test.mjs tests/category-profile-ui.test.mjs tests/app-layout.test.mjs tests/app-routing.test.mjs tests/notification-ui.test.mjs tests/editing-timeline-workspace.test.mjs tests/timeline-interactions.test.mjs tests/production-export-workspace.test.mjs tests/record-lifecycle-ui.test.mjs tests/record-thumbnail-ui.test.mjs tests/platform-connection-ui.test.mjs tests/skill-workflow-ui.test.mjs tests/typography-system.test.mjs tests/viral-report-ui.test.mjs tests/managed-assets.test.mjs tests/video-reference-strategy.test.mjs tests/prompt-editor.test.mjs tests/depth-control-job-ui.test.mjs tests/video-enhancement-ui.test.mjs tests/settings-boundaries.test.mjs tests/text-model-settings.test.mjs",
-    "test:sites": "node --test tests/sites-worker.test.mjs"
+    "pretest": "node --test tests/sidebar-state.test.mjs tests/api-errors.test.mjs",
+    "test": "node --test tests/storyboard-draft.test.mjs tests/creation-workspace.test.mjs tests/creation-workspace-runtime.test.mjs tests/sites-worker.test.mjs tests/video-layout.test.mjs tests/analysis-import-ui.test.mjs tests/production-ui.test.mjs tests/shot-image-ui.test.mjs tests/shot-video-workspace.test.mjs tests/shot-navigation-thumbnail.test.mjs tests/asset-library-ui.test.mjs tests/category-profile-ui.test.mjs tests/app-layout.test.mjs tests/app-routing.test.mjs tests/notification-ui.test.mjs tests/editing-timeline-workspace.test.mjs tests/timeline-interactions.test.mjs tests/production-export-workspace.test.mjs tests/record-lifecycle-ui.test.mjs tests/record-thumbnail-ui.test.mjs tests/platform-connection-ui.test.mjs tests/skill-workflow-ui.test.mjs tests/typography-system.test.mjs tests/viral-report-ui.test.mjs tests/managed-assets.test.mjs tests/video-reference-strategy.test.mjs tests/prompt-editor.test.mjs tests/depth-control-job-ui.test.mjs tests/video-enhancement-ui.test.mjs tests/settings-boundaries.test.mjs tests/text-model-settings.test.mjs",
+    "test:sites": "node --test tests/sites-worker.test.mjs",
+    "test:sidebar": "node --test tests/sidebar-state.test.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

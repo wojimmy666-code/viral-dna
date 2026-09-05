@@ -217,6 +217,7 @@ def _reference_type_for_seed(reference: ProductionSeedReference) -> ReferenceAss
         return ReferenceAssetType.PROP
     return ReferenceAssetType.PRODUCT
 
+
 _DURATION_ALIGNMENT_WARNING_PREFIX = "裁剪后时长与原分镜差异过大"
 _OPTIONAL_PREPARATION_STEPS = {
     ProductionStep.PROJECT_SETUP,
@@ -1685,6 +1686,195 @@ class ProductionService:
             reference_count=len(linked_references),
             shot_count=len(plans),
         )
+
+    async def sync_project_from_skill_seed(
+        self,
+        project_id: UUID,
+        seed: ProductionSeed,
+    ) -> ProductionProjectDetail:
+        """Re-approval updates the existing production, retaining stable media identities."""
+        async with await self._project_lock(project_id):
+            project = await self._require_project(project_id)
+            if (
+                project.origin_type != ProductionOriginType.SKILL_RUN
+                or seed.origin_type != ProductionSeedOrigin.SKILL_RUN
+                or project.owner_project_id != seed.owner_project_id
+                or project.origin_id != seed.origin_id
+            ):
+                raise _fail(409, "skill_seed_project_mismatch", "分镜方案与当前 Skill 项目不匹配")
+            previous = (
+                await self.repository.get_production_seed(project.production_seed_id)
+                if project.production_seed_id
+                else None
+            )
+            if previous is None:
+                raise _fail(409, "skill_seed_missing", "无法找到当前创作方案的分镜基线")
+            plans = await self.repository.list_shot_plans(project.id)
+            by_key = {plan.stable_shot_key: plan for plan in plans}
+            previous_shots = {shot.stable_shot_key: shot for shot in previous.shots}
+            incoming = {shot.stable_shot_key: shot for shot in seed.shots}
+            affected = {
+                plan.id
+                for plan in plans
+                if plan.stable_shot_key in previous_shots
+                and (
+                    plan.stable_shot_key not in incoming
+                    or incoming[plan.stable_shot_key].model_dump()
+                    != previous_shots[plan.stable_shot_key].model_dump()
+                )
+            }
+            if any(
+                run.shot_plan_id in affected
+                and run.status
+                in {
+                    ProductionRunStatus.QUEUED,
+                    ProductionRunStatus.RUNNING,
+                    ProductionRunStatus.CANCELLATION_REQUESTED,
+                }
+                for run in await self.repository.list_generation_runs(project.id)
+            ):
+                raise _fail(
+                    409,
+                    "storyboard_generation_running",
+                    "修改涉及的分镜仍在生成，请等待完成或停止任务后再确认；提示词草稿已保存",
+                )
+            references = await self._list_reference_assets(project.id)
+            reference_by_usage_id = {
+                item.id: matched
+                for item in seed.reference_assets
+                if (
+                    matched := next(
+                        (reference for reference in references if reference.sha256 == item.sha256),
+                        None,
+                    )
+                )
+            }
+            revision_id = uuid4()
+            fresh = self._shot_plans_from_seed(project, seed, revision_id, reference_by_usage_id)
+            active = []
+            new_plans = []
+            for planned in fresh:
+                old = by_key.get(planned.stable_shot_key)
+                if old is None:
+                    active.append(planned)
+                    new_plans.append(planned)
+                    continue
+                baseline = previous_shots.get(planned.stable_shot_key)
+                fields = {
+                    field
+                    for field in (
+                        "image_prompt",
+                        "video_prompt",
+                        "image_negative_constraints",
+                        "video_negative_constraints",
+                    )
+                    if baseline is None
+                    or getattr(incoming[planned.stable_shot_key], field) != getattr(baseline, field)
+                }
+                values = {field: getattr(planned, field) for field in fields}
+                updated = (
+                    self._apply_shot_fields(
+                        old,
+                        ShotPlanFieldsUpdate(**values),
+                        fields,
+                        revision_id,
+                        image_changed=bool(fields & {"image_prompt", "image_negative_constraints"}),
+                        video_changed=bool(fields & {"video_prompt", "video_negative_constraints"}),
+                    )
+                    if fields
+                    else old
+                )
+                # Compiled Seed prompts must retain their exact snapshot.
+                if "image_prompt" in fields:
+                    updated = updated.model_copy(
+                        update={
+                            "image_prompt": planned.image_prompt,
+                            "visual_beats": [
+                                beat.model_copy(update={"image_prompt": planned.image_prompt})
+                                if index == 0
+                                else beat
+                                for index, beat in enumerate(updated.visual_beats)
+                            ],
+                        }
+                    )
+                timing = {
+                    field: getattr(planned, field)
+                    for field in (
+                        "index",
+                        "order",
+                        "start_frame",
+                        "duration_frames",
+                        "timing_fps",
+                        "start_seconds",
+                        "end_seconds",
+                        "duration_seconds",
+                        "handle_in_frames",
+                        "handle_out_frames",
+                        "exact_overlay_instructions",
+                    )
+                }
+                if (
+                    fields
+                    or any(getattr(updated, field) != value for field, value in timing.items())
+                    or updated.lifecycle_status == ShotLifecycleStatus.DISCARDED
+                ):
+                    updated = updated.model_copy(
+                        update={
+                            **timing,
+                            "lifecycle_status": ShotLifecycleStatus.ACTIVE,
+                            "required": True,
+                            "revision_id": revision_id,
+                            "updated_at": utc_now(),
+                        }
+                    )
+                active.append(updated)
+            # Unrelated shots added in the shared production editor remain intact.
+            unmanaged = [
+                plan
+                for plan in plans
+                if plan.stable_shot_key not in previous_shots
+                and plan.stable_shot_key not in incoming
+                and plan.lifecycle_status == ShotLifecycleStatus.ACTIVE
+            ]
+            active.extend(unmanaged)
+            discarded = [
+                plan.model_copy(
+                    update={
+                        "lifecycle_status": ShotLifecycleStatus.DISCARDED,
+                        "required": False,
+                        "revision_id": revision_id,
+                        "updated_at": utc_now(),
+                    }
+                )
+                for plan in plans
+                if plan.stable_shot_key not in incoming and plan not in unmanaged
+            ]
+            combined, _ = self._resequence_plans(active, discarded, revision_id)
+            existing_bindings = await self._all_bindings(plans)
+            new_bindings = self._reference_bindings_from_seed(
+                seed, new_plans, reference_by_usage_id
+            )
+            await self.repository.save_production_seed(seed)
+            updated_project = project.model_copy(
+                update={
+                    "production_seed_id": seed.id,
+                    "style_bible_revision_id": seed.style_bible_revision_id,
+                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "status": ProductionProjectStatus.ACTIVE,
+                }
+            )
+            updated_project, revision = await self._prepare_revision(
+                updated_project,
+                ProductionChangeKind.SHOT_STRUCTURE_CHANGED,
+                "同步已确认的 Skill 分镜与提示词，保留历史候选和成片",
+                revision_id=revision_id,
+                shot_plans=combined,
+                reference_bindings=[*existing_bindings, *new_bindings],
+            )
+            await self.repository.save_production_bundle(
+                updated_project, revision, shot_plans=combined, reference_bindings=new_bindings
+            )
+        return await self.get_project(project.id)
 
     async def list_projects(
         self,
@@ -9289,9 +9479,7 @@ class ProductionService:
                         else None
                     ),
                     source_keyframe_relative_path=(
-                        primary_reference.relative_path
-                        if primary_reference is not None
-                        else None
+                        primary_reference.relative_path if primary_reference is not None else None
                     ),
                     source_keyframe_origin="skill",
                     start_seconds=start_seconds,
@@ -9329,9 +9517,7 @@ class ProductionService:
                 if usage_id in reference_by_usage_id
             ]
             identity_references = [
-                reference
-                for reference in references
-                if reference.type == ReferenceAssetType.PERSON
+                reference for reference in references if reference.type == ReferenceAssetType.PERSON
             ]
             selected_identity_id = (
                 identity_references[(shot.order - 1) % len(identity_references)].id

@@ -32,6 +32,7 @@ import {
   FilmStrip,
   Gear,
   LinkSimple,
+  List,
   ListBullets,
   LockSimple,
   MagnifyingGlass,
@@ -53,6 +54,9 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
+import { apiErrorMessage } from "./api-errors.js";
+import { AppSidebar } from "./app-sidebar/AppSidebar.jsx";
+import { useSidebarLayout } from "./app-sidebar/useSidebarLayout.js";
 import { CategoryProfileLibrary } from "./category-profiles/index.js";
 import { PlatformAdminConsole } from "./admin/PlatformAdminConsole.jsx";
 import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
@@ -84,6 +88,7 @@ import {
 } from "./NotificationCenter.jsx";
 import { notificationToastPayload } from "./notification-ui.js";
 import { ProductionHub } from "./ProductionWorkflow.jsx";
+import { rememberWorkspaceLocation, savedWorkspaceLocation, workspaceSearch } from "./creation-workspace/workspace-ui.js";
 import {
   buildRecordBreadcrumb,
 } from "./app-layout.js";
@@ -372,14 +377,7 @@ async function apiRequest(path, options = {}) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = payload?.detail;
-    const message =
-      typeof detail === "string"
-        ? detail
-        : typeof detail?.message === "string"
-          ? detail.message
-          : typeof payload?.message === "string"
-            ? payload.message
-            : "请求失败，请稍后重试";
+    const message = apiErrorMessage(payload, response.status);
     const requestError = new Error(projectFacingMessage(message));
     if (detail && typeof detail === "object") {
       requestError.code = detail.code || null;
@@ -628,6 +626,10 @@ export function App() {
     [location.pathname],
   );
   const activeNav = appRoute.activeNav;
+  const sidebarLayout = useSidebarLayout(appRoute);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const closeNavigation = useCallback(() => setNavigationOpen(false), []);
+  useEffect(closeNavigation, [closeNavigation, location.pathname, location.search]);
   const [sourceMode, setSourceMode] = useState("link");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState(null);
@@ -718,6 +720,7 @@ export function App() {
   const [activeShotId, setActiveShotId] = useState(null);
   const [replacementVersion, setReplacementVersion] = useState(null);
   const [recordWorkspaceMode, setRecordWorkspaceMode] = useState("analysis");
+  const productionWorkspaceRef = useRef(null);
   const [productionProjects, setProductionProjects] = useState([]);
   const [productionsLoading, setProductionsLoading] = useState(false);
   const [productionsError, setProductionsError] = useState("");
@@ -1218,6 +1221,8 @@ export function App() {
 
   function applyRecordWorkspaceDetail(detail) {
     resetProductionWorkspace();
+    const saved = savedWorkspaceLocation(detail.record.id, window.location.search);
+    if (saved.productionId || saved.section) setRecordWorkspaceMode("production");
     setVideo(detail.video);
     setAnalysisVersions(detail.analyses || []);
     setAnalysis(detail.analyses?.[0] || null);
@@ -2331,7 +2336,14 @@ export function App() {
     }
   }
 
-  function changeRecordWorkspace(mode) {
+  async function changeRecordWorkspace(mode) {
+    try { await productionWorkspaceRef.current?.flush(); }
+    catch (saveError) { showNotice({ type: "error", title: "修改尚未保存", message: saveError.message }); return; }
+    if (mode === "analysis") {
+      const search = workspaceSearch(location.search, { productionId: "", section: "", shotId: "", visualBeatId: "", candidateId: "" });
+      rememberWorkspaceLocation(video?.record_id, search);
+      navigate({ pathname: location.pathname, search }, { replace: true });
+    }
     setRecordWorkspaceMode(mode);
     if (mode !== "production") setActiveProductionProjectName("");
     if (mode === "production" && video?.record_id) {
@@ -2440,20 +2452,27 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
-      <Sidebar
+    <div className={`app-shell ${sidebarLayout.collapsed ? "sidebar-is-collapsed" : ""}`}>
+      <AppSidebar
         activeNav={sidebarActiveNav}
+        navItems={navItems}
+        collapsed={sidebarLayout.collapsed}
+        onToggle={sidebarLayout.toggle}
+        routeKey={location.pathname}
+        inProject={recordDetailMode || skillProjectMode}
+        mobileOpen={navigationOpen}
+        onCloseMobile={closeNavigation}
         historyLifecycle={historyLifecycle}
         historyLifecycleCounts={historyLifecycleCounts}
-        onSelect={selectNav}
+        onSelect={(id) => id === "settings" ? openModelSettings("profile") : selectNav(id)}
         onSelectHistoryLifecycle={changeHistoryLifecycle}
-        onOpenSettings={() => openModelSettings("profile")}
-        settingsOpen={activeNav === "settings"}
         historyCount={historyLifecycleCounts.active}
       />
 
       <div className="app-body">
         <Topbar
+          navigationOpen={navigationOpen}
+          onOpenNavigation={() => setNavigationOpen(true)}
           assetMode={["skills", "assets", "categories", "platform-connections"].includes(activeNav)}
           focusMode={recordDetailMode || skillProjectMode}
           hideCreate
@@ -2596,6 +2615,9 @@ export function App() {
             </NewAnalysisPage>
           ) : appRoute.name === "skill-workspace" ? (
             <SkillProjectWorkspace
+              key={appRoute.recordId}
+              navigationTarget={notificationTarget}
+              onNotificationsChanged={refreshNotifications}
               imageGenerationSettings={effectiveImageSettings}
               navigate={navigate}
               onNotice={showNotice}
@@ -2631,7 +2653,7 @@ export function App() {
                 )}
                 {report && (
                 <section className="report-card" ref={reportSectionRef}>
-                  <ReportHeader
+                  {recordWorkspaceMode === "analysis" && <ReportHeader
                     video={video}
                     report={report}
                     onDownload={downloadPromptPackage}
@@ -2640,7 +2662,7 @@ export function App() {
                     activeAnalysisId={report.analysis_id}
                     onVersionChange={openAnalysisVersion}
                     showActions={recordWorkspaceMode === "analysis"}
-                  />
+                  />}
                   <RecordWorkspaceTabs
                     active={recordWorkspaceMode}
                     count={productionProjects.length}
@@ -2724,6 +2746,7 @@ export function App() {
                   </>
                 ) : (
                   <ProductionHub
+                    workspaceRef={productionWorkspaceRef}
                     analysisId={report.analysis_id}
                     error={productionsError}
                     imageGenerationSettings={effectiveImageSettings}
@@ -3315,113 +3338,6 @@ function HistoryPage({
         )}
       </main>
     </>
-  );
-}
-
-function Sidebar({
-  activeNav,
-  historyLifecycle,
-  historyLifecycleCounts,
-  onSelect,
-  onSelectHistoryLifecycle,
-  onOpenSettings,
-  settingsOpen,
-  historyCount,
-}) {
-  const activeNavItemRef = useRef(null);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia("(max-width: 820px)").matches) return;
-    const frame = window.requestAnimationFrame(() => {
-      activeNavItemRef.current?.scrollIntoView({ block: "nearest", inline: "center" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [activeNav]);
-
-  return (
-    <aside className="sidebar">
-      <div className="brand">
-        <span className="brand-mark">
-          <Play size={18} weight="fill" />
-        </span>
-        <span>
-          <strong>ViralDNA</strong>
-          <small>视频逆向拆解系统</small>
-        </span>
-      </div>
-
-      <nav className="side-nav" aria-label="主导航">
-        <p className="nav-section-label">创作研究</p>
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          return (
-            <div className={`nav-group ${item.id === "history" ? "history-nav-group" : ""}`} key={item.id}>
-              <button
-                className={`nav-item ${activeNav === item.id ? "active" : ""}`}
-                onClick={() => onSelect(item.id)}
-                ref={activeNav === item.id ? activeNavItemRef : undefined}
-                type="button"
-              >
-                <Icon size={18} weight={activeNav === item.id ? "fill" : "regular"} />
-                <span>{item.label}</span>
-                {item.id === "history" && <span className="nav-count">{historyCount || 0}</span>}
-              </button>
-              {item.id === "history" && activeNav === "history" && (
-                <div className="history-lifecycle-nav" aria-label="项目范围">
-                  {RECORD_LIFECYCLES.map((lifecycle) => (
-                    <button
-                      className={historyLifecycle === lifecycle ? "active" : ""}
-                      key={lifecycle}
-                      onClick={() => onSelectHistoryLifecycle(lifecycle)}
-                      type="button"
-                    >
-                      <span>{RECORD_LIFECYCLE_META[lifecycle].label}</span>
-                      <small>{historyLifecycleCounts[lifecycle] || 0}</small>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
-
-        <div className="nav-divider" />
-        <p className="nav-section-label">系统</p>
-        <button
-          className={`nav-item ${activeNav === "platform-connections" ? "active" : ""}`}
-          onClick={() => onSelect("platform-connections")}
-          ref={activeNav === "platform-connections" ? activeNavItemRef : undefined}
-          type="button"
-        >
-          <LinkSimple
-            size={18}
-            weight={activeNav === "platform-connections" ? "bold" : "regular"}
-          />
-          <span>平台连接</span>
-        </button>
-        <button
-          aria-expanded={settingsOpen}
-          aria-haspopup="dialog"
-          className={`nav-item ${settingsOpen ? "active" : ""}`}
-          onClick={onOpenSettings}
-          ref={settingsOpen ? activeNavItemRef : undefined}
-          type="button"
-        >
-          <Gear size={18} weight={settingsOpen ? "fill" : "regular"} />
-          <span>模型与设置</span>
-        </button>
-      </nav>
-
-      <div className="sidebar-footer">
-        <span className="environment-icon">
-          <ShieldCheck size={18} />
-        </span>
-        <span>
-          <strong>内测环境</strong>
-          <small>混合分析引擎已启用</small>
-        </span>
-      </div>
-    </aside>
   );
 }
 
@@ -4756,6 +4672,8 @@ function ModelSettingsDialog({
 }
 
 function Topbar({
+  navigationOpen = false,
+  onOpenNavigation,
   assetMode = false,
   focusMode = false,
   hideCreate = false,
@@ -4769,6 +4687,16 @@ function Topbar({
   const primaryActionsHidden = assetMode || focusMode;
   return (
     <header className={`topbar ${assetMode ? "asset-mode" : ""} ${focusMode ? "focus-mode" : ""}`}>
+      <button
+        aria-label="打开导航"
+        aria-expanded={navigationOpen}
+        aria-controls="app-navigation-drawer"
+        className="icon-button mobile-navigation-toggle"
+        onClick={onOpenNavigation}
+        type="button"
+      >
+        <List size={22} aria-hidden="true" />
+      </button>
       {!primaryActionsHidden && (
         <div className="global-search">
           <MagnifyingGlass size={18} />

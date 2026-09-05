@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { storyboardProgressState } from "../src/skill-workflow/storyboard-progress.js";
 
 import {
   buildCategoryProfileCreativeInputs,
   buildRunContractPayload,
   dimensionsForResolutionLabel,
+  lookTestLayoutStyle,
   resolutionForRatio,
   resolutionLabelForDimensions,
   SKILL_WORKFLOW_STAGES,
@@ -32,6 +34,54 @@ const wizardSource = readFileSync(
   "utf8",
 );
 
+test("storyboard failure freezes elapsed time and recovers a recorded legacy model name", () => {
+  const step = {
+    execution_status: "failed", progress: 18, started_at: "2026-09-05T12:45:36Z",
+    completed_at: "2026-09-05T12:47:36Z", total_ms: 120350,
+    error_code: "storyboard_model_failed",
+    error_message: "qwen3.6-flash-2026-04-16：返回 13 个镜头，要求 15 个", retryable: true,
+  };
+  const before = storyboardProgressState(step, Date.parse("2026-09-05T13:47:36Z"));
+  const after = storyboardProgressState(step, Date.parse("2026-09-06T13:47:36Z"));
+  assert.equal(before.elapsedMs, 120350);
+  assert.deepEqual(after, before);
+  assert.equal(before.model, "qwen3.6-flash-2026-04-16");
+  assert.equal(before.retryLabel, "重新生成");
+  assert.ok(before.endedAt);
+  assert.equal(before.running, false);
+  assert.match(wizardSource, /running \? heartbeatLabel/);
+});
+
+test("storyboard retry labels reflect checkpoints and never overwrite a newer manual draft", () => {
+  const step = { execution_status: "failed", resumable: true, retryable: true,
+    total_shots: 13, completed_shots: 2, checkpoint_manifest_revision_id: "partial-draft" };
+  const saved = storyboardProgressState(step, 0, { id: "partial-draft" });
+  assert.equal(saved.retryLabel, "继续处理");
+  assert.equal(saved.canRetry, true);
+  assert.match(saved.savedLabel, /13 个镜头/);
+  const edited = storyboardProgressState(step, 0, { id: "manual-draft" });
+  assert.equal(edited.resumeConflict, true);
+  assert.equal(edited.canRetry, false);
+  assert.equal(storyboardProgressState({ ...step, retryable: false }).canRetry, false);
+});
+
+test("storyboard waiting shows the actual model and elapsed time without inventing completion", () => {
+  const step = { execution_status: "running", model: "user-selected-model", progress: 18,
+    started_at: "2026-09-05T12:00:00Z" };
+  const state = storyboardProgressState(step, Date.parse("2026-09-05T12:02:00Z"));
+  assert.equal(state.elapsedMs, 120000);
+  assert.equal(state.model, "user-selected-model");
+  assert.equal(state.progress, 18);
+  assert.match(state.title, /正在生成/);
+  assert.equal(state.canRetry, false);
+});
+
+test("storyboard insert, add and local draft recovery do not impose a shot count ceiling", () => {
+  const editor = readFileSync(new URL("../src/skill-workflow/StoryboardPromptEditor.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(editor, /shots\.length\s*(?:>=|<=|>|<)\s*\d+/);
+  assert.match(wizardSource, /busy=\{busy \|\| storyboardRunning\}/);
+});
+
 test("keeps the fixed eight-stage G0-G7 workflow explicit", () => {
   assert.equal(SKILL_WORKFLOW_STAGES.length, 8);
   assert.deepEqual(
@@ -53,6 +103,28 @@ test("projects provider resolution labels onto the selected aspect ratio", () =>
   assert.equal(resolutionForRatio("9:16", 1024), "576x1024");
   assert.equal(dimensionsForResolutionLabel("9:16", "1080P"), "1080x1920");
   assert.equal(resolutionLabelForDimensions(videoModel, "1080x1920"), "1080P");
+});
+
+test("Look Test preview geometry follows the selected portrait, landscape or square contract", () => {
+  for (const [width, height] of [[576, 1024], [1920, 1080], [1024, 1024], [800, 1000]]) {
+    const contract = Object.freeze({ image_width: width, image_height: height });
+    const style = lookTestLayoutStyle(contract, 4);
+    assert.equal(style["--skill-look-ratio"], width / height);
+    assert.equal(style["--skill-look-columns"], 4);
+    assert.equal(style["--skill-look-compact-columns"], 2);
+  }
+});
+
+test("Look Test uses only populated columns and safe layout defaults before candidates arrive", () => {
+  for (const [count, wide, compact] of [[0, 1, 1], [1, 1, 1], [2, 2, 2], [3, 3, 2], [4, 4, 2], [8, 4, 2]]) {
+    const style = lookTestLayoutStyle(null, count);
+    assert.equal(style["--skill-look-columns"], wide);
+    assert.equal(style["--skill-look-compact-columns"], compact);
+    assert.equal(style["--skill-look-ratio"], 16 / 9);
+  }
+  for (const contract of [{ image_width: 0, image_height: 1024 }, { image_width: Infinity, image_height: 1024 }, { image_width: 576, image_height: -1 }]) {
+    assert.equal(lookTestLayoutStyle(contract, 4)["--skill-look-ratio"], 16 / 9);
+  }
 });
 
 test("requires explicit model, resolution and full-auto budget choices", () => {
@@ -239,17 +311,18 @@ test("makes storyboard authoring observable, recoverable and model-auditable", (
   assert.match(wizardSource, /<StoryboardProgress/);
   assert.match(wizardSource, /storyboard\/cancel/);
   assert.match(wizardSource, /heartbeatLabel\(step\?\.last_heartbeat_at, clockNow\)/);
-  assert.match(wizardSource, /文案模型 \{manifest\.authoring_model/);
+  assert.match(readFileSync(new URL("../src/skill-workflow/storyboard-progress.js", import.meta.url), "utf8"), /文案模型/);
   assert.match(wizardSource, /大纲与分镜已开始生成/);
 });
 
-test("reviews structured directing fields and auto-saves storyboard edits", () => {
-  assert.match(wizardSource, /<ContinuitySummary manifest=\{manifest\}/);
-  assert.match(wizardSource, /creative_spec/);
-  assert.match(wizardSource, /prompt_quality/);
-  assert.match(wizardSource, /AI 优化此镜头/);
-  assert.match(wizardSource, /修改会自动保存/);
-  assert.match(wizardSource, /<AutosaveStatus/);
-  assert.match(wizardSource, /setTimeout\(\(\) => \{\s*void saveStoryboard\(\);\s*\}, 900\)/);
-  assert.doesNotMatch(wizardSource, />保存大纲与分镜</);
+test("keeps storyboard editing direct and hides internal directing metadata", () => {
+  const editor = readFileSync(new URL("../src/skill-workflow/StoryboardPromptEditor.jsx", import.meta.url), "utf8");
+  assert.match(wizardSource, /<StoryboardPromptEditor/);
+  assert.match(wizardSource, /beforeNavigate: \(\) => storyboardEditorRef\.current\?\.flush\(\)/);
+  assert.doesNotMatch(wizardSource, /ContinuitySummary|StoryboardReview|storyboardEditing|导演大纲|AI 优化此镜头/);
+  assert.match(editor, /<AutosaveStatus/);
+  assert.match(editor, /storyboard-draft/);
+  assert.match(editor, /onBlur=\{\(\) => void flush\(\)\}/);
+  assert.match(editor, /setTimeout\(\(\) => \{ void session\.flush\(\); \}, 900\)/);
+  assert.doesNotMatch(editor, /完成编辑|修改会自动保存|画面说明|成片帧数/);
 });

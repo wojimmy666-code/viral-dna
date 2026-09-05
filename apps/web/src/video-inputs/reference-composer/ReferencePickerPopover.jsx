@@ -110,14 +110,14 @@ export function ReferencePickerPopover({
         >
           <IdentificationCard size={17} />选择托管人物
         </button>
-        <button
+        {onCreateDepth && <button
           disabled={!supportsDepthControl}
           onClick={onCreateDepth}
           title={supportsDepthControl ? "创建或管理深度视频" : "当前模型不支持深度控制"}
           type="button"
         >
           <Stack size={17} />创建或管理深度视频
-        </button>
+        </button>}
       </footer>
     </AnchoredPopover>
   );
