@@ -37,6 +37,8 @@ import { MediaLightbox } from "./MediaLightbox.jsx";
 import { AddToAssetsButton } from "./generated-assets/AddToAssetsButton.jsx";
 import { ImageGenerationCommandBar } from "./image-generation-controls/ImageGenerationCommandBar.jsx";
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
+import { ImageBatchToolbar } from "./image-generation-controls/ImageBatchToolbar.jsx";
+import { SkillShotNavigation } from "./image-generation-controls/SkillShotNavigation.jsx";
 import { AutosaveStatus } from "./ui/system/index.js";
 import {
   assetDirectoryLabel,
@@ -325,6 +327,9 @@ export function ShotImageWorkspace({
   generationInputMode,
   generationModelAlias,
   generationSettings,
+  generationResolution,
+  setGenerationResolution,
+  onGenerationModelChange,
   project,
   advanced,
   busy,
@@ -358,6 +363,7 @@ export function ShotImageWorkspace({
   onSelectVisualBeat,
   onUpdateVisualBeat,
   onAdvance,
+  onBatchResults,
   onNotice,
   request,
   saveState = "saved",
@@ -373,6 +379,11 @@ export function ShotImageWorkspace({
   const [mentionMenu, setMentionMenu] = useState(null);
   const [pendingOutputModes, setPendingOutputModes] = useState({});
   const promptRef = useRef(null);
+  const navigationHandlers = useRef({});
+  const [batchItems, setBatchItems] = useState([]);
+  const isSkillMode = project?.origin_type === "skill_run";
+  navigationHandlers.current = { select: onSelectShot, add: () => setShotCreateOpen(true),
+    drag: setDraggedShotId, drop: dropShot, move: moveShot, discard: onDiscardShot, restore: onRestoreShot };
   const loadedShotPlan = shotDetail?.plan;
   const detailReady = Boolean(
     loadedShotPlan
@@ -447,22 +458,29 @@ export function ShotImageWorkspace({
     () => new Map(assets.map((asset) => [asset.id, asset])),
     [assets],
   );
+  const pictureBindings = useMemo(() => {
+    if (!isSkillMode && visualBeats.length <= 1) return draft.referenceBindings;
+    const ids = new Set(draft.imagePromptMentions.map((item) => item.reference_asset_id));
+    return draft.referenceBindings.filter((item) => ids.has(item.reference_asset_id));
+  }, [isSkillMode, visualBeats.length, draft.referenceBindings, draft.imagePromptMentions]);
   const identityPolicy = useMemo(
-    () => imageIdentityPolicy(draft.referenceBindings, assets),
-    [assets, draft.referenceBindings],
+    () => imageIdentityPolicy(pictureBindings, assets),
+    [assets, pictureBindings],
   );
   const generationInputManifest = useMemo(
     () => imageGenerationInputManifest({
-      inputMode: identityPolicy.enabled ? "keyframe_edit" : generationInputMode,
-      sourceUrl: plan?.source_keyframe_url || "",
-      referenceBindings: draft.referenceBindings,
+      inputMode: identityPolicy.enabled && !isSkillMode ? "keyframe_edit" : generationInputMode,
+      sourceUrl: isSkillMode ? "" : plan?.source_keyframe_url || "",
+      referenceBindings: pictureBindings,
       assets,
+      allowTextReferences: isSkillMode,
     }),
     [
       assets,
-      draft.referenceBindings,
+      pictureBindings,
       generationInputMode,
       identityPolicy.enabled,
+      isSkillMode,
       plan?.source_keyframe_url,
     ],
   );
@@ -636,7 +654,7 @@ export function ShotImageWorkspace({
   );
   const identityGenerationBlocker = !identityPolicy.valid
     ? identityPolicy.blocker
-    : identityPolicy.enabled && !plan?.source_keyframe_url
+    : identityPolicy.enabled && !isSkillMode && !plan?.source_keyframe_url
       ? "人物身份替换需要先选择原视频关键帧"
       : "";
   useEffect(() => {
@@ -700,13 +718,16 @@ export function ShotImageWorkspace({
   ]);
 
   useEffect(() => {
-    if (identityPolicy.enabled) {
+    if (isSkillMode) {
+      setGenerationInputMode("text_to_image");
+    } else if (identityPolicy.enabled) {
       setGenerationInputMode("keyframe_edit");
     } else if (plan?.source_kind === "blank") {
       setGenerationInputMode("text_to_image");
     }
   }, [
     identityPolicy.enabled,
+    isSkillMode,
     plan?.id,
     plan?.source_kind,
     setGenerationInputMode,
@@ -1034,7 +1055,7 @@ export function ShotImageWorkspace({
     : [];
 
   return (
-    <section className="shot-image-workspace" data-output-mode={outputMode}>
+    <section className={`shot-image-workspace ${isSkillMode ? "is-skill" : ""}`} data-output-mode={outputMode}>
       <header className="shot-workspace-header">
         <div>
           <h3>分镜图片</h3>
@@ -1068,8 +1089,13 @@ export function ShotImageWorkspace({
         </div>
       )}
 
+      {isSkillMode && <ImageBatchToolbar key={project.id} projectId={project.id} request={request} busy={busy}
+        settings={generationSettings} aspectRatio={project.output_aspect_ratio}
+        pictureCount={activeShots.filter(item => item.plan.output_mode !== "source_video").reduce((count, item) => count + (item.plan.visual_beats?.length || 1), 0)}
+        onFlush={onFlushDraft} onResults={onBatchResults} onState={setBatchItems} onSelectShot={onSelectShot} />}
       <div className="shot-workspace-grid">
-        <aside className="shot-navigation-panel">
+        {isSkillMode ? <SkillShotNavigation shots={activeShots} discarded={discardedShots} selectedId={selectedShotId}
+          busy={busy} items={batchItems} handlers={navigationHandlers} /> : <aside className="shot-navigation-panel">
           <div className="shot-panel-title">
             <div><strong>分镜列表</strong><small>{activeShots.length} 个有效镜头</small></div>
             <button
@@ -1188,7 +1214,7 @@ export function ShotImageWorkspace({
               ))}
             </div>
           )}
-        </aside>
+        </aside>}
 
         <main className="shot-canvas-panel">
           {!detailReady || !plan ? (
@@ -1488,11 +1514,14 @@ export function ShotImageWorkspace({
               <ImageGenerationCommandBar
                 aspectRatio={project?.output_aspect_ratio}
                 busy={busy}
+                batchStatus={batchItems.find((item) => item.visual_beat_id === activeVisualBeat?.id)?.status}
                 candidateCount={candidateCount}
+                resolution={isSkillMode ? generationResolution : undefined}
+                onResolutionChange={setGenerationResolution}
                 estimatedCostLabel={commandCostLabel}
                 generationAvailable={generationAvailable}
                 identityBlocker={identityGenerationBlocker}
-                identityLocked={identityPolicy.enabled}
+                identityLocked={identityPolicy.enabled && !isSkillMode}
                 inputCount={generationInputManifest.length}
                 inputMode={generationInputMode}
                 latestRun={latestRun}
@@ -1507,8 +1536,8 @@ export function ShotImageWorkspace({
                 onGenerate={onGenerate}
                 onInputModeChange={setGenerationInputMode}
                 onModelChange={(alias, nextExecutionMode) => {
-                  setGenerationEngine(nextExecutionMode);
-                  setGenerationModelAlias(alias);
+                  if (onGenerationModelChange) onGenerationModelChange(alias, nextExecutionMode);
+                  else { setGenerationEngine(nextExecutionMode); setGenerationModelAlias(alias); }
                 }}
                 planApproved={plan.image_status === "approved"}
                 settings={effectiveGenerationSettings}

@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { resolutionDisplayLabel } from "../media-resolution.js";
 import { SpeakerHigh, SpeakerSlash, Waveform } from "@phosphor-icons/react";
 import {
   formatVideoDuration,
@@ -95,7 +96,7 @@ export function VideoGenerationSettingsPopover({
                 onClick={() => onResolutionChange(resolution)}
                 type="button"
               >
-                {resolution}
+                {resolutionDisplayLabel(resolution)}
               </button>
             ))}
           </div>

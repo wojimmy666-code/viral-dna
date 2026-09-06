@@ -1,3 +1,4 @@
+import { resolutionDisplayLabel } from "../media-resolution.js";
 import {
   formatVideoDuration,
   videoDurationConstraintLabel,
@@ -82,7 +83,7 @@ export function videoModelCatalogUiState({
 export function videoModelCapabilitySummary(model, providers = []) {
   const resolutions = model?.capabilities?.supported_resolutions || [];
   const resolutionLabel = resolutions.length > 0
-    ? resolutions.join(" / ")
+    ? resolutions.map(resolutionDisplayLabel).join(" / ")
     : "分辨率待确认";
   return [
     videoProviderLabel(model, providers),
@@ -115,7 +116,7 @@ export function videoOutputSummary({
 }) {
   return [
     aspectRatio || "未设置画幅",
-    resolution || "未设置分辨率",
+    resolutionDisplayLabel(resolution) || "未设置分辨率",
     `${formatVideoDuration(duration)}秒`,
     `${Number(candidateCount) || 1}个`,
     videoAudioStrategyLabel(audioStrategy),

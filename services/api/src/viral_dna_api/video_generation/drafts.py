@@ -149,28 +149,9 @@ class ShotVideoGenerationDraftService:
         plan = await self.repository.get_shot_plan(shot_plan_id)
         if plan is None:
             raise _fail(404, "shot_not_found", "分镜不存在")
-        contract = await self._skill_contract(plan)
-        if contract is not None:
-            expected_resolution = contract.video_resolution_label
-            expected_audio = (
-                VideoGenerationAudioStrategy.GENERATE_NATIVE
-                if contract.generate_video_audio
-                else VideoGenerationAudioStrategy.MUTED
-            )
-            if payload.model_alias != contract.video_model_id:
-                raise _fail(
-                    409, "run_contract_model_mismatch", "更换视频模型前必须更新并确认项目生成契约"
-                )
-            if payload.resolution.upper() != expected_resolution:
-                raise _fail(
-                    409, "run_contract_resolution_mismatch", "视频分辨率与项目生成契约不一致"
-                )
-            if payload.candidate_count != contract.candidate_count_by_stage.get("shot_video", 1):
-                raise _fail(
-                    409, "run_contract_candidate_count_mismatch", "视频候选数与项目生成契约不一致"
-                )
-            if payload.audio_strategy != expected_audio:
-                raise _fail(409, "run_contract_audio_mismatch", "视频音频策略与项目生成契约不一致")
+        # Skill contracts supply initial defaults only. Drafts may be edited
+        # independently; the generation gateway validates actual capabilities,
+        # pricing and budget when a task is submitted.
         now = _now()
         intent = current.intent
         intent_text = (

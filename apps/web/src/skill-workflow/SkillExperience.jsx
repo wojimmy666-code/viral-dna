@@ -1,4 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SkillCover } from "./SkillCover.jsx";
+import { readOnce } from "../creation-workspace/read-request.js";
+import { imageModelOptions } from "../image-generation-controls/image-generation-ui.js";
+import { imageResolutionOptions, resolutionForDimensions } from "../media-resolution.js";
+import { useGenerationPreferences } from "../image-generation-controls/generation-preferences.js";
+import { ImageGenerationChoiceFields, imageChoicePayload, imageChoiceState } from "../image-generation-controls/ImageGenerationChoiceFields.jsx";
 import {
   ArrowLeft,
   ArrowRight,
@@ -41,7 +47,6 @@ import {
   EXECUTION_LABELS,
   formatMicros,
   lookTestLayoutStyle,
-  resolutionForRatio,
   REVIEW_LABELS,
   SKILL_WORKFLOW_STAGES,
   skillCreationNavigation,
@@ -126,27 +131,12 @@ function ErrorState({ message, onRetry }) {
   );
 }
 
-function SkillCover({ skill, compact = false }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <div className={`skill-cover ${compact ? "is-compact" : ""}`}>
-      {!failed && skill.cover_url ? (
-        <img alt="" onError={() => setFailed(true)} src={skill.cover_url} />
-      ) : (
-        <div className="skill-cover-fallback" aria-hidden="true">
-          <FilmStrip size={compact ? 28 : 42} weight="duotone" />
-          <span>{skill.category}</span>
-        </div>
-      )}
-    </div>
-  );
-}
 
 function SkillCard({ skill, onFavorite, onOpen, onStart }) {
   return (
     <article className="skill-card">
+      <SkillCover skill={skill} onOpen={() => onOpen(skill)} />
       <button className="skill-card-main" onClick={() => onOpen(skill)} type="button">
-        <SkillCover skill={skill} />
         <div className="skill-card-copy">
           <div className="skill-card-heading">
             <h2>{skill.name}</h2>
@@ -344,16 +334,7 @@ function WizardStepRail({ current }) {
 }
 
 function ratioResolutionOptions(ratio, model) {
-  const capabilities = model?.capabilities;
-  return [1024, 1536, 2048]
-    .map((edge) => resolutionForRatio(ratio, edge))
-    .filter((value) => {
-      if (!capabilities) return true;
-      const [width, height] = value.split("x").map(Number);
-      return width <= capabilities.maximum_width
-        && height <= capabilities.maximum_height
-        && width * height <= capabilities.maximum_pixels;
-    });
+  return imageResolutionOptions(ratio, model);
 }
 
 function videoResolutionOptions(ratio, model) {
@@ -544,7 +525,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
     });
     const preview = buildRunContractPayload({
       draft,
-      imageModels: settings.image?.models,
+      imageModels: imageModelOptions(settings.image),
       videoModels: settings.video?.models,
     });
     const videoModel = settings.video?.models?.find((item) => item.alias === draft.videoModel);
@@ -556,7 +537,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
       setError("当前视频模型不支持所选分辨率");
       return;
     }
-    if (preview.estimate_status !== "known") {
+    if (preview.estimate_status !== "known" && !(preview.estimate_status === "partial" && preview.allow_unknown_local_image_cost)) {
       setError("当前模型组合缺少明确价格，不能开始付费生成");
       return;
     }
@@ -651,7 +632,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
       const contract = await request(`/projects/${projectId}/run-contract`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildRunContractPayload({ draft, imageModels: settings.image?.models, videoModels: settings.video?.models })),
+        body: JSON.stringify(buildRunContractPayload({ draft, imageModels: imageModelOptions(settings.image), videoModels: settings.video?.models })),
       });
       const preflight = await request(`/projects/${projectId}/preflight`, { method: "POST" });
       if (!preflight.can_start) throw new Error(preflight.issues[0]?.message || "创建前检查未通过");
@@ -672,7 +653,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
   if (skillState.loading || loading) return <PageShell className="skill-page"><LoadingState label="正在准备创建向导" /></PageShell>;
   if (skillState.error) return <PageShell className="skill-page"><ErrorState message={skillState.error} /></PageShell>;
   const selectedAssets = assets.filter((asset) => draft.selectedAssetIds.includes(asset.id));
-  const imageModels = (settings.image?.models || []).filter((item) => (
+  const imageModels = imageModelOptions(settings.image).filter((item) => (
     item.available !== false
     && (item.capabilities?.text_to_image === true || item.capabilities?.image_to_image === true)
   ));
@@ -692,7 +673,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
   return (
     <PageShell className="skill-page skill-wizard-page">
       <button className="skill-back-button" onClick={() => navigate(`/skills/${skill.slug}`)} type="button"><ArrowLeft size={16} />{skill.name}</button>
-      <PageHeader description="项目会锁定当前 Skill 版本；模型、分辨率与音频策略由你明确决定。" title="创建 Skill 项目" />
+      <PageHeader description="项目保留当前 Skill 版本；生成配置作为默认值，后续每次生成均可调整。" title="创建 Skill 项目" />
       <WizardStepRail current={step} />
       {error && <ErrorState message={error} />}
       <SurfacePanel className="skill-wizard-panel">
@@ -773,23 +754,36 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
         )}
         {step === 2 && (
           <div className="skill-form-grid">
-            <WizardField hint="不会自动替换为其他模型" label="图片模型" required><select onChange={(event) => update("imageModel", event.target.value)} value={draft.imageModel}><option value="">主动选择模型</option>{imageModels.map((item) => <option key={item.alias} value={item.alias}>{item.label} · {item.provider}</option>)}</select></WizardField>
-            <WizardField label="图片分辨率" required><select onChange={(event) => update("imageResolution", event.target.value)} value={draft.imageResolution}><option value="">主动选择分辨率</option>{ratioResolutionOptions(draft.aspectRatio, selectedImageModel).map((item) => <option key={item} value={item}>{item}</option>)}</select></WizardField>
-            <WizardField hint="不会自动替换为更便宜的模型" label="视频模型" required><select onChange={(event) => update("videoModel", event.target.value)} value={draft.videoModel}><option value="">主动选择模型</option>{videoModels.map((item) => <option key={item.alias} value={item.alias}>{item.label} · {item.provider}</option>)}</select></WizardField>
-            <WizardField label="视频分辨率" required><select onChange={(event) => update("videoResolution", event.target.value)} value={draft.videoResolution}><option value="">主动选择分辨率</option>{videoResolutionOptions(draft.aspectRatio, selectedVideoModel).map((item) => <option key={item} value={item}>{item}</option>)}</select></WizardField>
-            <WizardField label="视频帧率"><select onChange={(event) => update("fps", event.target.value)} value={draft.fps}><option value="24">24 FPS</option><option value="25">25 FPS</option><option value="30">30 FPS</option></select></WizardField>
+            <p className="skill-field-wide">用于预填后续生成参数，每次生成时均可调整。</p>
+            <WizardField label="默认图片模型" required><select onChange={(event) => update("imageModel", event.target.value)} value={draft.imageModel}><option value="">主动选择模型</option>{imageModels.map((item) => <option disabled={!item.configured} key={item.alias} value={item.alias}>{item.label}{!item.configured ? " · 尚未配置" : ""}</option>)}</select></WizardField>
+            <WizardField label="默认图片分辨率" required><select onChange={(event) => update("imageResolution", event.target.value)} value={draft.imageResolution}><option value="">主动选择分辨率</option>{ratioResolutionOptions(draft.aspectRatio, selectedImageModel).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></WizardField>
+            <WizardField label="默认视频模型" required><select onChange={(event) => update("videoModel", event.target.value)} value={draft.videoModel}><option value="">主动选择模型</option>{videoModels.map((item) => <option key={item.alias} value={item.alias}>{item.label} · {item.provider}</option>)}</select></WizardField>
+            <WizardField label="默认视频分辨率" required><select onChange={(event) => update("videoResolution", event.target.value)} value={draft.videoResolution}><option value="">主动选择分辨率</option>{videoResolutionOptions(draft.aspectRatio, selectedVideoModel).map((item) => <option key={item} value={item}>{resolutionForDimensions(item)}</option>)}</select></WizardField>
+            {!settings.image?.local_executable_path && <button className="text-button" onClick={() => navigate("/settings/device")} type="button">配置本机 ImageGen</button>}
+            {selectedImageModel?.provider === "local_tool" && selectedImageModel.unit_cost_micros == null && (
+              <div className="skill-field-wide">
+                {draft.automationMode === "full_auto" || Number(draft.budgetCny) > 0
+                  ? <InlineMessage tone="warning">本机费用未知，无法执行硬预算检查；请先在图片生成设置中配置费用。</InlineMessage>
+                  : <label className="skill-check-field"><input checked={Boolean(draft.allowUnknownLocalImageCost)} onChange={(event) => update("allowUnknownLocalImageCost", event.target.checked)} type="checkbox" /><span>我了解本机 ImageGen 使用现有账号权益，费用未知，允许本项目使用。</span></label>}
+              </div>
+            )}
+            <WizardField label="默认视频帧率"><select onChange={(event) => update("fps", event.target.value)} value={draft.fps}><option value="24">24 FPS</option><option value="25">25 FPS</option><option value="30">30 FPS</option></select></WizardField>
             <WizardField label="运行方式"><select onChange={(event) => update("automationMode", event.target.value)} value={draft.automationMode}><option value="guided">引导模式</option><option value="full_auto">全自动执行（仍保留人工门禁）</option></select></WizardField>
             <WizardField hint={draft.automationMode === "full_auto" ? "全自动模式必填" : "可选；达到上限时暂停"} label="预算上限（元）"><input min="0.01" onChange={(event) => update("budgetCny", event.target.value)} step="0.01" type="number" value={draft.budgetCny} /></WizardField>
-            <WizardField label="配乐"><select onChange={(event) => update("musicStrategy", event.target.value)} value={draft.musicStrategy}><option value="none">不添加</option><option value="select">从资产库选择</option><option value="generate">生成新配乐</option></select></WizardField>
-            <WizardField label="旁白"><select onChange={(event) => update("narrationStrategy", event.target.value)} value={draft.narrationStrategy}><option value="none">不添加</option><option value="recorded">使用录音</option><option value="generated">生成旁白</option></select></WizardField>
-            <WizardField label="字幕"><select onChange={(event) => update("subtitleStrategy", event.target.value)} value={draft.subtitleStrategy}><option value="none">不添加</option><option value="final_speech">从最终语音生成</option><option value="manual">手工字幕</option></select></WizardField>
-            <label className="skill-check-field"><input checked={draft.generateVideoAudio} onChange={(event) => update("generateVideoAudio", event.target.checked)} type="checkbox" /><span><strong>分镜视频生成新音频</strong><small>{selectedVideoModel && !selectedVideoModel.capabilities?.native_audio ? "当前模型不支持原生音频，请关闭或更换模型。" : "关闭时分镜视频静音，声音在画面锁定后统一处理。"}</small></span></label>
+            <label className="skill-check-field"><input checked={draft.generateVideoAudio} onChange={(event) => update("generateVideoAudio", event.target.checked)} type="checkbox" /><span><strong>默认生成新音频</strong><small>{selectedVideoModel && !selectedVideoModel.capabilities?.native_audio ? "当前模型不支持原生音频，请关闭或更换模型。" : "用于分镜视频生成，可在每次生成时调整。"}</small></span></label>
           </div>
         )}
         {step === 3 && (
           <div className="skill-confirm-grid">
             <section><h2>项目</h2><dl><div><dt>Skill</dt><dd>{skill.name} v{skill.current_version.version}</dd></div><div><dt>品类档案</dt><dd>{selectedCategoryProfile?.display_name || "未选择"}</dd></div><div><dt>目标</dt><dd>{draft.objective}</dd></div><div><dt>成片</dt><dd>{draft.durationSeconds} 秒 · {draft.aspectRatio} · {draft.fps} FPS</dd></div><div><dt>素材</dt><dd>{selectedAssets.length} 个</dd></div></dl></section>
-            <section><h2>生成契约</h2><dl><div><dt>图片</dt><dd>{draft.imageModel} · {draft.imageResolution}</dd></div><div><dt>视频</dt><dd>{draft.videoModel} · {draft.videoResolution}</dd></div><div><dt>分镜音频</dt><dd>{draft.generateVideoAudio ? "生成" : "不生成"}</dd></div><div><dt>运行方式</dt><dd>{draft.automationMode === "full_auto" ? "全自动执行" : "引导模式"}</dd></div><div><dt>当前估算</dt><dd>{contractPreview.estimate_status === "known" ? formatMicros(contractPreview.estimated_cost_micros) : "未知（不能开始付费生成）"}</dd></div><div><dt>预算上限</dt><dd>{draft.budgetCny ? `¥${Number(draft.budgetCny).toFixed(2)}` : "未设置"}</dd></div></dl></section>
+            <section><h2>默认生成配置</h2><dl>
+              <div><dt>默认图片</dt><dd>{selectedImageModel?.label || draft.imageModel} · {resolutionForDimensions(draft.imageResolution)}</dd></div>
+              <div><dt>默认视频</dt><dd>{selectedVideoModel?.label || draft.videoModel} · {resolutionForDimensions(draft.videoResolution)}</dd></div>
+              <div><dt>默认分镜音频</dt><dd>{draft.generateVideoAudio ? "生成" : "不生成"}</dd></div>
+              <div><dt>运行方式</dt><dd>{draft.automationMode === "full_auto" ? "全自动执行" : "引导模式"}</dd></div>
+              <div><dt>当前估算</dt><dd>{contractPreview.estimate_status === "known" ? formatMicros(contractPreview.estimated_cost_micros) : contractPreview.estimate_status === "partial" ? `已知部分 ${formatMicros(contractPreview.estimated_cost_micros)}，本机图片费用未知` : "未知（不能开始付费生成）"}</dd></div>
+              <div><dt>预算上限</dt><dd>{draft.budgetCny ? `¥${Number(draft.budgetCny).toFixed(2)}` : "未设置"}</dd></div>
+            </dl></section>
             <InlineMessage><ShieldCheck size={18} /><span>创建后 Skill 版本、品牌和素材用途将冻结为可追溯快照；所有 G0–G7 审核都需要你明确确认。</span></InlineMessage>
           </div>
         )}
@@ -830,7 +824,7 @@ function GateAction({ busy, gate, label, onDecide, relatedRevisionIds = [] }) {
 
 function StageSummary({ stage, workspace }) {
   if (stage.id === "creative_brief") return <dl className="skill-summary-list"><div><dt>目标</dt><dd>{workspace.brief?.objective}</dd></div><div><dt>受众</dt><dd>{workspace.brief?.audience}</dd></div><div><dt>渠道</dt><dd>{workspace.brief?.distribution_channel}</dd></div><div><dt>输出</dt><dd>{workspace.brief?.target_duration_seconds} 秒 · {workspace.brief?.output_aspect_ratio}</dd></div></dl>;
-  if (stage.id === "style_confirmation") return <div className="skill-style-summary"><p>{workspace.treatment?.core_idea || "批准简报后即可编译风格方案。"}</p>{workspace.style_bible && <div className="skill-keyword-list">{workspace.style_bible.positive_lock.map((item) => <span key={item}>{item}</span>)}</div>}</div>;
+  if (stage.id === "style_confirmation") return null;
   if (stage.id === "storyboard_design") return workspace.outline ? <ol className="skill-outline-list">{workspace.outline.beats.map((beat) => <li key={beat.stable_beat_key}><span>{beat.order}</span><div><strong>{beat.title}</strong><p>{beat.message || beat.purpose}</p><small>{beat.target_duration_frames} 帧</small></div></li>)}</ol> : <p className="skill-panel-note">风格确认后，系统会生成可编辑的大纲、分镜提示词和视频提示词。</p>;
   return null;
 }
@@ -841,6 +835,7 @@ function LookTestWorkspace({
   contract,
   lookTest,
   modelOption,
+  settings,
   onCancel,
   onGenerate,
   onRefresh,
@@ -848,6 +843,13 @@ function LookTestWorkspace({
   resolveUrl,
 }) {
   const items = lookTest?.items || [];
+  const [choice, setChoice] = useGenerationPreferences(`viraldna:look-options:${lookTest?.project_id}`, {
+    model: lookTest?.generation_parameters?.model_alias || contract.image_model_id,
+    resolution: `${lookTest?.generation_parameters?.width || contract.image_width}x${lookTest?.generation_parameters?.height || contract.image_height}`,
+    allowUnknownCost: Boolean(contract.allow_unknown_local_image_cost),
+  });
+  const ratio = contract.image_width >= contract.image_height ? (contract.image_width === contract.image_height ? "1:1" : "16:9") : (contract.image_width / contract.image_height > 0.7 ? "4:5" : "9:16");
+  const choiceState = imageChoiceState(settings, ratio, choice);
   const status = lookTest?.execution_status || "pending";
   const candidates = lookTest?.candidate_ids || [];
   const emptySuccess = status === "succeeded" && candidates.length === 0;
@@ -860,21 +862,21 @@ function LookTestWorkspace({
   const retryable = emptySuccess || (["failed", "cancelled"].includes(displayStatus)
     && items.some((item) => item.retryable)
     && !items.some((item) => item.execution_status === "blocked"));
-  const modelLabel = modelOption?.label || contract?.image_model_id || "未指定";
-  const providerLabel = modelOption?.provider || contract?.image_provider_connection_id || "未指定";
+  const modelLabel = imageModelOptions(settings).find(item => item.alias === lookTest?.model)?.label || modelOption?.label || contract?.image_model_id || "未指定";
+  const providerLabel = lookTest?.provider || modelOption?.provider || contract?.image_provider_connection_id || "未指定";
 
   return (
     <section className="skill-look-workspace" aria-live="polite">
-      <SectionHeader
-        description={`${modelLabel} · ${providerLabel} · ${contract?.image_width} × ${contract?.image_height}`}
-        title="Look Test"
-      />
+      <p className="skill-panel-note">{modelLabel} · {providerLabel === "local_tool" ? "本机工具" : providerLabel} · {resolutionForDimensions(lookTest?.output_width || contract?.image_width, lookTest?.output_height || contract?.image_height)}</p>
+      <div className="image-batch-options"><ImageGenerationChoiceFields settings={settings} aspectRatio={ratio} value={choice} onChange={setChoice} disabled={busy || running} />
+        {!running && <span>预计 {choiceState.model?.unit_cost_micros == null ? "费用未知" : formatMicros(choiceState.model.unit_cost_micros * Math.max(1, totalItems) * (contract.candidate_count_by_stage?.look_test || 1))}</span>}
+      </div>
 
       {(running || ["failed", "cancelled", "blocked"].includes(displayStatus)) && (
         <div className={`skill-look-progress is-${displayStatus}`}>
           <div className="skill-look-progress-heading">
             <div>
-              <strong>{running ? "正在并行生成" : LOOK_ITEM_LABELS[displayStatus]}</strong>
+              <strong>{running ? "正在生成" : LOOK_ITEM_LABELS[displayStatus]}</strong>
               <span>{finishedItems}/{totalItems} 组完成 · {formatDurationMs(elapsed)}</span>
             </div>
             <StatusBadge tone={running ? "info" : displayStatus === "blocked" ? "warning" : "danger"}>
@@ -950,10 +952,10 @@ function LookTestWorkspace({
       )}
 
       <div className="skill-look-actions">
-        {displayStatus === "pending" && <button className="primary-button" disabled={busy} onClick={onGenerate} type="button">生成 Look Test</button>}
+        {["pending", "succeeded"].includes(displayStatus) && <button className="primary-button" disabled={busy || !choiceState.ready} onClick={() => onGenerate({ ...imageChoicePayload(settings, ratio, choice), request_id: crypto.randomUUID() })} type="button">{displayStatus === "succeeded" ? "生成新一组风格图" : "生成 Look Test"}</button>}
         {running && <button className="secondary-button" disabled={busy} onClick={onCancel} type="button">停止等待</button>}
-        {retryable && <button className="primary-button" disabled={busy} onClick={onGenerate} type="button">继续生成未完成项</button>}
-        {displayStatus === "blocked" && <button className="secondary-button" disabled={busy} onClick={onRefresh} type="button">重新检查状态</button>}
+        {retryable && <button className="primary-button" disabled={busy} onClick={() => onGenerate()} type="button">继续生成未完成项</button>}
+        {displayStatus === "blocked" && <button className="secondary-button" disabled={busy} onClick={providerLabel === "local_tool" ? () => onGenerate() : onRefresh} type="button">{providerLabel === "local_tool" ? "恢复已生成图片" : "重新检查状态"}</button>}
       </div>
     </section>
   );
@@ -1041,35 +1043,30 @@ export function SkillProjectWorkspace({
   const storyboardEditorRef = useRef(null);
 
   async function load() {
-    const nextProject = await request(`/projects/${projectId}`);
-    const [nextWorkspace, nextSkill, nextProductions] = await Promise.all([
-      request(`/projects/${projectId}/skill-workspace`),
-      request(`/skills/${encodeURIComponent(nextProject.skill_slug)}`),
-      request(`/records/${projectId}/productions`).catch(() => []),
+    const [nextProject, nextWorkspace] = await Promise.all([
+      readOnce(request, `/projects/${projectId}`),
+      readOnce(request, `/projects/${projectId}/skill-workspace`),
     ]);
-    const nextRunMetrics = nextWorkspace.run?.run?.id
-      ? await request(`/skill-runs/${nextWorkspace.run.run.id}/metrics`).catch(() => null)
-      : null;
-    let nextTimeline = null;
-    let nextExportJobs = [];
-    if (nextWorkspace.production_project_id) {
-      const [timelineResult, exportResult] = await Promise.all([
-        request(`/productions/${nextWorkspace.production_project_id}/timeline`).catch(() => null),
-        request(`/productions/${nextWorkspace.production_project_id}/timeline/final-renders`).catch(() => ({ items: [] })),
-      ]);
-      nextTimeline = timelineResult;
-      nextExportJobs = exportResult.items || [];
-    }
+    const nextSkill = await readOnce(request, `/skills/${encodeURIComponent(nextProject.skill_slug)}`);
     setProject(nextProject);
     setWorkspace(nextWorkspace);
-    setRunMetrics(nextRunMetrics);
     setSkill(nextSkill);
-    setProductions(nextProductions || []);
-    setProductionTimeline(nextTimeline);
-    setExportJobs(nextExportJobs);
     setSelectedStage((current) => workspace ? current : resolveSkillSection(nextWorkspace, current || nextWorkspace.run?.run?.current_stage));
     return nextWorkspace;
   }
+
+  useEffect(() => {
+    const productionId = workspace?.production_project_id;
+    if (!productionId || !["editing", "audio_caption", "export"].includes(selectedStage)) return;
+    let active = true;
+    readOnce(request, `/productions/${productionId}/timeline`).then((value) => {
+      if (active) setProductionTimeline(value);
+    }).catch(() => undefined);
+    if (selectedStage === "export") readOnce(request, `/productions/${productionId}/timeline/final-renders`).then((value) => {
+      if (active) setExportJobs(value.items || []);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [workspace?.production_project_id, selectedStage, request]);
 
   useEffect(() => {
     let active = true;
@@ -1152,8 +1149,8 @@ export function SkillProjectWorkspace({
     await perform(() => request(`/skill-runs/${workspace.run.run.id}/style/compile`, { method: "POST" }), "风格方案已编译");
   }
 
-  async function generateLookTest() {
-    await perform(() => request(`/skill-runs/${workspace.run.run.id}/look-test/generate`, { method: "POST" }), "Look Test 已开始生成");
+  async function generateLookTest(parameters) {
+    await perform(() => request(`/skill-runs/${workspace.run.run.id}/look-test/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, ...(parameters ? { body: JSON.stringify(parameters) } : {}) }), "Look Test 已开始生成");
   }
 
   async function cancelLookTest() {
@@ -1317,6 +1314,8 @@ export function SkillProjectWorkspace({
   ));
   const latestMatchingExport = matchingExportJobs[0] || null;
   const actualCostMicros = runMetrics?.actual_cost_micros ?? run.actual_cost_micros;
+  const localImageCostUnknown = workspace.run_contract.image_provider_connection_id === "local_tool"
+    && workspace.run_contract.estimate_status !== "known";
   const budgetPercent = workspace.run_contract?.budget_limit_micros
     ? Math.round((actualCostMicros / workspace.run_contract.budget_limit_micros) * 100)
     : null;
@@ -1337,13 +1336,14 @@ export function SkillProjectWorkspace({
     cost: persistedStageMetrics.actual_cost_micros,
   } : fallbackStageMetrics;
   const lockedImageSettings = skillImageGenerationSettings(imageGenerationSettings, workspace.run_contract);
-  const lockedImageModel = (imageGenerationSettings?.models || [])
+  const lockedImageModel = imageModelOptions(lockedImageSettings)
     .find((item) => item.alias === workspace.run_contract.image_model_id);
   const lockedVideoSettings = {
     ...videoGenerationSettings,
     default_model_alias: workspace.run_contract.video_model_id,
     default_resolution: workspace.run_contract.video_resolution_label,
-    models: (videoGenerationSettings?.models || []).filter((item) => item.alias === workspace.run_contract.video_model_id),
+    default_audio_strategy: workspace.run_contract.generate_video_audio ? "generate_native" : "muted",
+    models: videoGenerationSettings?.models || [],
   };
   const productionTimelineChanged = Boolean(
     productionTimeline?.revision_id
@@ -1368,6 +1368,7 @@ export function SkillProjectWorkspace({
                     contract={workspace.run_contract}
                     lookTest={workspace.look_test}
                     modelOption={lockedImageModel}
+                    settings={lockedImageSettings}
                     onCancel={cancelLookTest}
                     onGenerate={generateLookTest}
                     onRefresh={() => setRefreshToken((value) => value + 1)}
@@ -1453,11 +1454,9 @@ export function SkillProjectWorkspace({
     onNotice={onNotice}
     onOpenModelSettings={onOpenModelSettings}
     onProjectsChanged={async () => {
-      const next = await request(`/records/${project.id}/productions`);
-      setProductions(next || []);
       const refreshed = await request(`/projects/${project.id}/skill-workspace`);
       setWorkspace(refreshed);
-      return next || [];
+      return [];
     }}
     projects={productions}
     recordId={project.id}
@@ -1497,7 +1496,7 @@ export function SkillProjectWorkspace({
           return <button aria-current={selectedStage === item.id ? "page" : undefined} disabled={busy || !preceding || (item.id === "audio_caption" && !stageState(workspace, SKILL_WORKFLOW_STAGES[5]).approved)} key={item.id} onClick={() => void goToSection(item.id)} type="button">{item.label}{itemState.approved && <Check size={13} />}<small>{!itemState.approved && itemState.current ? "待确认" : ""}</small></button>;
         })}
       </nav>,
-      metrics: <><span>实际成本 {formatMicros(actualCostMicros)}</span><details className="creation-metrics-detail"><summary>耗时与成本</summary><div><p>本阶段 {formatDurationMs(selectedStageMetrics.total)} · {formatMicros(selectedStageMetrics.cost)}</p><p>排队 {formatDurationMs(selectedStageMetrics.queue)}</p><p>模型 {formatDurationMs(selectedStageMetrics.provider)}</p><p>后处理 {formatDurationMs(selectedStageMetrics.postprocess)}</p>{budgetPercent != null && <p>预算已使用 {budgetPercent}%</p>}</div></details></>,
+      metrics: <><span>{localImageCostUnknown ? "已知成本" : "实际成本"} {formatMicros(actualCostMicros)}{localImageCostUnknown ? " · 本机图片费用未知" : ""}</span><details className="creation-metrics-detail"><summary>耗时与成本</summary><div><p>本阶段 {formatDurationMs(selectedStageMetrics.total)} · {localImageCostUnknown ? "已知部分 " : ""}{formatMicros(selectedStageMetrics.cost)}</p><p>排队 {formatDurationMs(selectedStageMetrics.queue)}</p><p>模型 {formatDurationMs(selectedStageMetrics.provider)}</p><p>后处理 {formatDurationMs(selectedStageMetrics.postprocess)}</p>{budgetPercent != null && <p>预算已使用 {budgetPercent}%</p>}</div></details></>,
     }}
   />;
 }

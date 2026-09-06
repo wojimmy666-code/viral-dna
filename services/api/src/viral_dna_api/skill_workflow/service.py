@@ -13,13 +13,17 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from ..category_profiles.contracts import CategoryProfileSnapshot
 from ..category_profiles.service import CategoryProfileService, CategoryProfileServiceError
 from ..image_generation import ImageGenerationGateway, ImageGenerationGatewayError
-from ..image_generation.catalog import ImageModelCatalogError, load_image_model_catalog
+from ..image_generation.catalog import ImageModelCatalogError
+from ..image_generation.selection import (
+    LOCAL_UNCERTAIN_IMAGE_ERRORS,
+    permits_unknown_local_image_cost,
+    resolve_skill_image_selection,
+)
 from ..models import (
     GenerationCandidate,
     GenerationKind,
     GenerationRun,
     ImageExecutionMode,
-    ImageGenerationCreate,
     ImageGenerationInputMode,
     ProductionAdvanceRequest,
     ProductionOriginType,
@@ -755,6 +759,14 @@ class SkillWorkflowService:
             raise _fail(409, "run_contract_locked", "运行开始后不能更换模型或分辨率，请新建项目")
         revisions = await self.repository.list_run_contract_revisions(project.id)
         material = payload.model_dump(mode="python")
+        if payload.image_provider_connection_id == "local_tool":
+            try:
+                selection = await resolve_skill_image_selection(
+                    payload, getattr(self.image_gateway, "settings_service", None)
+                )
+            except ImageModelCatalogError as exc:
+                raise _fail(409, "image_model_unavailable", str(exc)) from exc
+            material["image_tool_snapshot"] = selection.tool_snapshot
         item = RunContractRevision(
             **material,
             project_id=project.id,
@@ -877,8 +889,11 @@ class SkillWorkflowService:
                 )
             # Project assets are an availability pool, not one model request. Reference
             # mode and capacity are validated later against each shot's explicit inputs.
+            image_model = None
             try:
-                image_model = load_image_model_catalog().option(contract.image_model_id)
+                image_model = await resolve_skill_image_selection(
+                    contract, getattr(self.image_gateway, "settings_service", None)
+                )
                 image_capability = image_model.capabilities
                 if image_model.provider != contract.image_provider_connection_id:
                     issues.append(
@@ -958,7 +973,23 @@ class SkillWorkflowService:
                         message="当前执行配置不支持 Logo 等 exact 素材的确定性合成",
                     )
                 )
-            if contract.estimate_status != "known":
+            unknown_local_allowed = permits_unknown_local_image_cost(contract)
+            local_cost_unknown = (
+                image_model is not None
+                and image_model.provider == "local_tool"
+                and image_model.unit_cost_micros is None
+            )
+            if local_cost_unknown and not unknown_local_allowed:
+                issues.append(
+                    PreflightIssue(
+                        code="local_image_cost_unknown",
+                        severity="error",
+                        message="本机图片费用未知；引导模式需明确接受未知费用，有硬预算时请先配置本机费用",
+                    )
+                )
+            if contract.estimate_status != "known" and not (
+                contract.estimate_status == "partial" and unknown_local_allowed
+            ):
                 issues.append(
                     PreflightIssue(
                         code="cost_estimate_unknown",
@@ -1210,7 +1241,7 @@ class SkillWorkflowService:
         await self.projects.bind_skill_run(project.id, stage=ProjectStage.STYLE_CONFIRMATION)
         return await self.run_detail(run.id)
 
-    async def start_look_test_generation(self, run_id: UUID) -> LookTest:
+    async def start_look_test_generation(self, run_id: UUID, payload=None) -> LookTest:
         """Start durable Look Test work and return immediately for progress polling."""
 
         if self.image_gateway is None:
@@ -1220,7 +1251,7 @@ class SkillWorkflowService:
             active = self._look_test_tasks.get(run.id)
             if active is not None and not active.done():
                 return await self._latest_look_test(project.id)
-            prepared = await self._prepare_look_test_generation(run, project)
+            prepared = await self._prepare_look_test_generation(run, project, payload)
             if prepared is None:
                 return await self._latest_look_test(project.id)
             task = asyncio.create_task(self._execute_look_test(*prepared))
@@ -1300,7 +1331,10 @@ class SkillWorkflowService:
             raise _fail(409, "look_test_inputs_missing", "请先完成风格编译")
         return look
 
-    async def _prepare_look_test_generation(self, run: SkillRun, project: Project):
+    async def _prepare_look_test_generation(self, run: SkillRun, project: Project, payload=None):
+        from ..image_generation.selection import resolve_skill_image_request
+        from .contracts import LookTestGenerationRequest
+
         look = await self._latest_look_test(project.id)
         look = await self._repair_empty_succeeded_look_test(run, look)
         bible = await self.repository.get_style_bible_revision(look.style_bible_revision_id)
@@ -1308,6 +1342,81 @@ class SkillWorkflowService:
         brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
         if bible is None or contract is None or brief is None:
             raise _fail(409, "look_test_inputs_missing", "请先完成风格编译")
+        if payload and payload.request_id and payload.request_id == look.generation_request_id:
+            return None
+        # Resume reads the old task snapshot, never the mutable UI selection.
+        options = payload or LookTestGenerationRequest.model_validate(look.generation_parameters)
+        try:
+            contract, selection = await resolve_skill_image_request(
+                contract,
+                options,
+                getattr(self.image_gateway, "settings_service", None),
+                stage="look_test",
+            )
+        except ImageModelCatalogError as exc:
+            raise _fail(409, "image_generation_parameters_invalid", str(exc)) from exc
+        if payload and payload.request_id:
+            if look.execution_status in {ExecutionStatus.RUNNING, ExecutionStatus.BLOCKED} or (
+                look.generation_parameters.get("execution_mode") == "local_tool"
+                and any(
+                    item.execution_status in {ExecutionStatus.FAILED, ExecutionStatus.BLOCKED}
+                    for item in look.items
+                )
+            ):
+                raise _fail(
+                    409, "look_test_unresolved", "请先停止或恢复原任务，再开始新的风格图生成"
+                )
+            look = look.model_copy(
+                update={
+                    "id": uuid4(),
+                    "items": [],
+                    "execution_status": ExecutionStatus.PENDING,
+                    "history_candidate_ids": look.candidate_ids,
+                    "generation_request_id": payload.request_id,
+                    "created_at": utc_now(),
+                    "updated_at": utc_now(),
+                }
+            )
+        options = options.model_copy(
+            update={
+                "model_alias": contract.image_model_id,
+                "execution_mode": "local_tool"
+                if selection.provider == "local_tool"
+                else "remote_api",
+                "width": contract.image_width,
+                "height": contract.image_height,
+                "candidate_count": contract.candidate_count_by_stage.get("look_test", 1),
+                "image_tool_snapshot": selection.tool_snapshot,
+                "allow_unknown_cost": permits_unknown_local_image_cost(contract),
+            }
+        )
+        look = look.model_copy(
+            update={
+                "generation_parameters": options.model_dump(mode="json"),
+                "output_width": contract.image_width,
+                "output_height": contract.image_height,
+            }
+        )
+        if contract.image_provider_connection_id == "local_tool":
+            try:
+                selection = await resolve_skill_image_selection(
+                    contract, getattr(self.image_gateway, "settings_service", None)
+                )
+            except ImageModelCatalogError as exc:
+                raise _fail(409, "image_model_unavailable", str(exc)) from exc
+            if selection.unit_cost_micros is None and not permits_unknown_local_image_cost(
+                contract
+            ):
+                raise _fail(
+                    409,
+                    "local_image_cost_unknown",
+                    "本机费用未知，请先确认费用；硬预算下不能执行未知费用任务",
+                )
+            look = await self._recover_local_look_images(look)
+            if look.items and all(
+                item.execution_status == ExecutionStatus.BLOCKED for item in look.items
+            ):
+                return None
         if look.execution_status == ExecutionStatus.SUCCEEDED and look.candidate_ids:
             return None
         await self._assert_budget(run)
@@ -1345,6 +1454,7 @@ class SkillWorkflowService:
             content_digest(
                 {
                     "style": bible.content_hash,
+                    "look_id": str(look.id),
                     "model": contract.image_model_id,
                     "provider": contract.image_provider_connection_id,
                     "width": contract.image_width,
@@ -1360,7 +1470,10 @@ class SkillWorkflowService:
         items: list[LookTestItem] = []
         for shot_key in look.representative_shot_keys:
             existing = existing_by_key.get(shot_key)
-            if existing is not None and existing.execution_status == ExecutionStatus.SUCCEEDED:
+            if existing is not None and existing.execution_status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.BLOCKED,
+            }:
                 items.append(existing)
             else:
                 items.append(
@@ -1381,13 +1494,13 @@ class SkillWorkflowService:
         prepared_look = look.model_copy(
             update={
                 "items": items,
-                "candidate_ids": [
-                    candidate_id for item in items for candidate_id in item.candidate_ids
-                ],
+                "candidate_ids": look.history_candidate_ids
+                + [candidate_id for item in items for candidate_id in item.candidate_ids],
                 "selected_candidate_ids": [
                     candidate_id
                     for candidate_id in look.selected_candidate_ids
-                    if any(candidate_id in item.candidate_ids for item in items)
+                    if candidate_id in look.history_candidate_ids
+                    or any(candidate_id in item.candidate_ids for item in items)
                 ],
                 "execution_status": ExecutionStatus.RUNNING,
                 "progress": round(completed_count * 100 / max(1, len(items))),
@@ -1403,6 +1516,92 @@ class SkillWorkflowService:
         )
         await self.repository.save_look_test(prepared_look)
         return run, project, prepared_look, bible, contract, brief, step
+
+    async def _recover_local_look_images(self, look: LookTest) -> LookTest:
+        """Reconcile local files before any retry; never regenerate an unknown outcome."""
+        items = []
+        for item in look.items:
+            if not item.generation_run_id or item.execution_status == ExecutionStatus.SUCCEEDED:
+                items.append(item)
+                continue
+            saved = await self.repository.get_generation_run(item.generation_run_id)
+            candidates = await self.repository.list_generation_candidates(item.generation_run_id)
+            if saved and saved.status not in {
+                ProductionRunStatus.COMPLETED,
+                ProductionRunStatus.CACHED,
+            }:
+                if saved.status in {
+                    ProductionRunStatus.QUEUED,
+                    ProductionRunStatus.RUNNING,
+                    ProductionRunStatus.CANCELLED,
+                }:
+                    saved = saved.model_copy(
+                        update={"status": ProductionRunStatus.FAILED, "completed_at": utc_now()}
+                    )
+                    await self.repository.save_generation_run(saved)
+                try:
+                    saved, candidates = await self.image_gateway.recover_local_tool_output(saved)
+                    await self.repository.save_generation_run(saved)
+                    for candidate in candidates:
+                        await self.repository.save_generation_candidate(candidate)
+                except ImageGenerationGatewayError:
+                    pass
+            if (
+                saved
+                and saved.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+                and candidates
+            ):
+                item = item.model_copy(
+                    update={
+                        "execution_status": ExecutionStatus.SUCCEEDED,
+                        "progress": 100,
+                        "candidate_ids": [candidate.id for candidate in candidates],
+                        "error_code": None,
+                        "error_message": None,
+                        "retryable": False,
+                    }
+                )
+            elif item.attempt and (
+                not saved
+                or saved.error_code
+                in LOCAL_UNCERTAIN_IMAGE_ERRORS
+                | {
+                    None,
+                    "worker_interrupted",
+                    "generation_interrupted",
+                    "generation_cancelled",
+                    "local_tool_timeout",
+                    "local_tool_output_missing",
+                    "local_tool_result_missing",
+                    "local_tool_result_invalid",
+                    "look_test_in_progress",
+                }
+            ):
+                item = item.model_copy(
+                    update={
+                        "execution_status": ExecutionStatus.BLOCKED,
+                        "retryable": False,
+                        "error_message": "本机任务结果尚未确认；可恢复已有图片，不会自动重复生成。",
+                    }
+                )
+            items.append(item)
+        look = look.model_copy(
+            update={
+                "items": items,
+                "candidate_ids": list(
+                    dict.fromkeys(
+                        look.history_candidate_ids
+                        + [candidate for item in items for candidate in item.candidate_ids]
+                    )
+                ),
+                "execution_status": ExecutionStatus.BLOCKED
+                if any(item.execution_status == ExecutionStatus.BLOCKED for item in items)
+                else look.execution_status,
+                "updated_at": utc_now(),
+            }
+        )
+        await self.repository.save_look_test(look)
+        return look
 
     async def _repair_empty_succeeded_look_test(
         self,
@@ -1630,7 +1829,17 @@ class SkillWorkflowService:
         current_look = look
         current_step = step
         state_lock = asyncio.Lock()
-        semaphore = asyncio.Semaphore(self.LOOK_TEST_CONCURRENCY)
+        settings_service = getattr(self.image_gateway, "settings_service", None)
+        local_settings = (
+            settings_service.get()
+            if contract.image_provider_connection_id == "local_tool" and settings_service
+            else None
+        )
+        semaphore = asyncio.Semaphore(
+            min(self.LOOK_TEST_CONCURRENCY, local_settings.local_concurrency)
+            if local_settings
+            else self.LOOK_TEST_CONCURRENCY
+        )
         cancel_events = {
             item.shot_key: Event()
             for item in look.items
@@ -1650,7 +1859,7 @@ class SkillWorkflowService:
                 succeeded = sum(
                     item.execution_status == ExecutionStatus.SUCCEEDED for item in items
                 )
-                candidate_ids = [
+                candidate_ids = current_look.history_candidate_ids + [
                     candidate_id for item in items for candidate_id in item.candidate_ids
                 ]
                 current_look = current_look.model_copy(
@@ -1704,7 +1913,7 @@ class SkillWorkflowService:
 
         async def run_item(item: LookTestItem, index: int) -> None:
             nonlocal run
-            if item.execution_status == ExecutionStatus.SUCCEEDED:
+            if item.execution_status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.BLOCKED}:
                 return
             async with semaphore:
                 cancel_event = cancel_events[item.shot_key]
@@ -1733,6 +1942,50 @@ class SkillWorkflowService:
                     index,
                 )
                 await self.repository.save_shot_plan(plan)
+                if local_settings is not None:
+                    workspace = self.image_gateway.workspace
+                    input_path = (
+                        workspace.production_shot_root(
+                            transient_project.record_id, transient_project.id, plan.id
+                        )
+                        / "images"
+                        / str(generation_run_id)
+                        / "input.json"
+                    )
+                    await self.repository.save_generation_run(
+                        GenerationRun(
+                            id=generation_run_id,
+                            project_id=transient_project.id,
+                            shot_plan_id=plan.id,
+                            revision_id=bible.id,
+                            kind="image",
+                            input_mode="text_to_image",
+                            provider="local_tool",
+                            model=local_settings.local_tool_id or "imagegen",
+                            model_snapshot=local_settings.local_tool_version or "unreported",
+                            model_alias="local_tool",
+                            prompt_version="look-test/v1",
+                            schema_version="look-test/v1",
+                            pricing_version="local",
+                            request_fingerprint=content_digest(
+                                {
+                                    "plan": str(plan.id),
+                                    "prompt": plan.image_prompt,
+                                    "contract": str(contract.id),
+                                }
+                            )[7:],
+                            input_snapshot_relative_path=workspace.relative(input_path),
+                            execution_mode="local_tool",
+                            adapter_id=local_settings.local_adapter_id,
+                            status=ProductionRunStatus.RUNNING,
+                            started_at=utc_now(),
+                            cost_source=local_settings.local_cost_source,
+                            cost_estimate_known=False,
+                            actual_cost_known=False,
+                            error_code="look_test_in_progress",
+                            request_payload={"candidate_count": item.requested_candidate_count},
+                        )
+                    )
                 try:
                     generation_run, candidates = await asyncio.wait_for(
                         self.image_gateway.generate(
@@ -1750,7 +2003,8 @@ class SkillWorkflowService:
                                 else ImageExecutionMode.REMOTE_API
                             ),
                             model_alias=contract.image_model_id,
-                            reuse_cache=True,
+                            allow_unknown_cost=permits_unknown_local_image_cost(contract),
+                            reuse_cache=look.generation_request_id is None,
                             run_id=generation_run_id,
                             cancel_event=cancel_event,
                         ),
@@ -1872,6 +2126,26 @@ class SkillWorkflowService:
                         error_message=str(exc),
                         retryable=True,
                     )
+                finally:
+                    if local_settings is not None:
+                        saved = await self.repository.get_generation_run(generation_run_id)
+                        if saved and saved.status == ProductionRunStatus.RUNNING:
+                            state = next(
+                                entry
+                                for entry in current_look.items
+                                if entry.shot_key == item.shot_key
+                            )
+                            await self.repository.save_generation_run(
+                                saved.model_copy(
+                                    update={
+                                        "status": ProductionRunStatus.FAILED,
+                                        "error_code": state.error_code or "worker_interrupted",
+                                        "error_message": state.error_message,
+                                        "completed_at": utc_now(),
+                                        "updated_at": utc_now(),
+                                    }
+                                )
+                            )
 
         heartbeat_task = asyncio.create_task(heartbeat())
         try:
@@ -3813,8 +4087,6 @@ class SkillWorkflowService:
                 narration.append(item)
             else:
                 sfx.append(item)
-        elif contract.music_strategy != "none" or contract.narration_strategy != "none":
-            raise _fail(409, "required_audio_missing", "运行契约要求的配乐或旁白尚未加入时间线")
 
         speech_revision_id = (
             production_timeline.revision_id
@@ -4612,13 +4884,6 @@ class SkillWorkflowService:
                 or mixes[-1].id not in payload.related_revision_ids
             ):
                 raise _fail(409, "gate_revision_stale", "G6 必须绑定当前声音时间线与混音版本")
-            contract = await self._run_contract(run)
-            if contract.music_strategy != "none" and not revisions[-1].music:
-                raise _fail(409, "music_required", "运行契约要求的全片配乐尚未加入")
-            if contract.narration_strategy != "none" and not revisions[-1].narration:
-                raise _fail(409, "narration_required", "运行契约要求的旁白尚未加入")
-            if contract.subtitle_strategy != "none" and not revisions[-1].subtitles:
-                raise _fail(409, "subtitles_required", "运行契约要求的最终字幕尚未加入")
             referenced_audio_ids = {
                 item.asset_id
                 for item in (revisions[-1].narration + revisions[-1].music + revisions[-1].sfx)
@@ -4710,7 +4975,7 @@ class SkillWorkflowService:
                 creative_direction=snapshot.manifest.spec.audio,
             ),
             subtitle_intent=ProductionSeedSubtitleIntent(
-                enabled=contract.subtitle_strategy != "none",
+                enabled=contract.subtitle_strategy not in {None, "none"},
                 language=brief.locale,
                 source=(
                     "final_speech"
@@ -4778,26 +5043,25 @@ class SkillWorkflowService:
         if production_id is None:
             raise _fail(409, "production_required", "尚未创建后半程创作方案")
         detail = await self.production_service.get_project(production_id)
-        shots = await self.production_service.list_shots(production_id)
-        for response in shots:
-            plan = response.plan
-            if not plan.required or plan.image_status == WorkflowItemStatus.APPROVED:
-                continue
-            input_mode = (
-                ImageGenerationInputMode.KEYFRAME_EDIT
-                if plan.source_keyframe_url or plan.source_keyframe_relative_path
-                else ImageGenerationInputMode.TEXT_TO_IMAGE
-            )
-            await self.production_service.create_image_run(
-                plan.id,
-                ImageGenerationCreate(
+        from ..image_batches_models import ImageBatchRequest
+
+        batches = self.production_service.image_batches
+        batch = await batches.latest(production_id)
+        if batch is None or batch.status not in {"running", "stopping"}:
+            batch = await batches.create(
+                production_id,
+                ImageBatchRequest(
                     expected_revision_id=detail.project.current_revision_id,
-                    expected_shot_revision_id=plan.revision_id,
-                    candidate_count=contract.candidate_count_by_stage.get("shot_image", 1),
-                    input_mode=input_mode,
-                    execution_mode="remote_api",
-                    model_alias=contract.image_model_id,
+                    mode="missing",
                 ),
+            )
+        task = batches.tasks.get(batch.id)
+        if task is not None:
+            await asyncio.shield(task)
+        result = await batches.require(production_id, batch.id)
+        if result.status != "completed":
+            raise _fail(
+                409, "image_batch_incomplete", "部分分镜图片尚未完成，请在图片阶段检查并继续任务"
             )
 
     async def _full_auto_generate_videos(

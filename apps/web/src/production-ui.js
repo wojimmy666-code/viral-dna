@@ -107,8 +107,9 @@ export function imageGenerationInputManifest({
   sourceUrl = "",
   referenceBindings = [],
   assets = [],
+  allowTextReferences = false,
 } = {}) {
-  if (inputMode === "text_to_image") return [];
+  if (inputMode === "text_to_image" && !allowTextReferences) return [];
   const assetsById = new Map((assets || []).map((asset) => [asset.id, asset]));
   const references = [...(referenceBindings || [])]
     .sort((left, right) => (

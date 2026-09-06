@@ -49,6 +49,8 @@ class TimelineRepository(Protocol):
 
     async def get_generation_candidate(self, candidate_id: UUID): ...
 
+    async def get_shot_plan(self, shot_plan_id: UUID): ...
+
 
 class EditingHandoffProvider(Protocol):
     async def get_editing_handoff(self, project_id: UUID) -> EditingHandoffManifest: ...
@@ -126,7 +128,17 @@ class TimelineService:
         async with lock:
             timeline = await asyncio.to_thread(self._read_current_timeline, project)
             if timeline is not None:
-                return await self._synchronize_timeline_with_handoff(project, timeline)
+                timeline = await self._synchronize_timeline_with_handoff(project, timeline)
+                clips = []
+                for clip in timeline.clips:
+                    if clip.editing_guidance is None:
+                        plan = await self.repository.get_shot_plan(clip.shot_plan_id)
+                        if plan and plan.editing_guidance is not None:
+                            clip = clip.model_copy(
+                                update={"editing_guidance": plan.editing_guidance}
+                            )
+                    clips.append(clip)
+                return timeline.model_copy(update={"clips": clips})
             return await self._initialize_timeline(project)
 
     async def update_timeline(
@@ -187,9 +199,10 @@ class TimelineService:
                 source_path, _ = await self.handoff_provider.resolve_candidate_content(
                     source_clip.candidate_id
                 )
-                cover_timestamp = source_clip.trim_in_seconds + (
-                    source_clip.trim_out_seconds - source_clip.trim_in_seconds
-                ) / 2
+                cover_timestamp = (
+                    source_clip.trim_in_seconds
+                    + (source_clip.trim_out_seconds - source_clip.trim_in_seconds) / 2
+                )
                 try:
                     inspection = await self.video_inspector.inspect(
                         source_path,
@@ -204,9 +217,7 @@ class TimelineService:
                 quality_status = inspection.quality_status
                 quality_report = inspection.quality_report
                 warnings = [
-                    str(item)
-                    for item in quality_report.get("warnings", [])
-                    if str(item).strip()
+                    str(item) for item in quality_report.get("warnings", []) if str(item).strip()
                 ]
             next_clips = [
                 item.model_copy(
@@ -283,17 +294,12 @@ class TimelineService:
             current = await self._require_current_timeline(project)
             self._require_revision(current, expected_revision_id)
             revision_id = uuid4()
-            destination = (
-                self._timeline_root(project)
-                / "audio"
-                / f"{revision_id}{suffix}"
-            )
+            destination = self._timeline_root(project) / "audio" / f"{revision_id}{suffix}"
             await asyncio.to_thread(self._write_bytes_atomic, destination, content)
             track = TimelineBackgroundAudioTrack(
                 source_relative_path=self.workspace.relative(destination),
                 source_url=(
-                    f"/api/v1/productions/{project.id}/timeline/background-audio"
-                    f"?v={revision_id}"
+                    f"/api/v1/productions/{project.id}/timeline/background-audio?v={revision_id}"
                 ),
                 name=Path(filename).name[:240] or f"背景音频{suffix}",
                 enabled=True,
@@ -355,8 +361,7 @@ class TimelineService:
         for index, clip in enumerate(enabled):
             if clip.blocker_messages:
                 errors.extend(
-                    f"分镜 {clip.shot_index}：{message}"
-                    for message in clip.blocker_messages
+                    f"分镜 {clip.shot_index}：{message}" for message in clip.blocker_messages
                 )
             if clip.trim_out_seconds > clip.candidate_duration_seconds + 0.05:
                 errors.append(f"分镜 {clip.shot_index} 的出点超过候选视频时长")
@@ -377,9 +382,7 @@ class TimelineService:
                         next_clip.timeline_duration_seconds / 2,
                     )
                     if transition.duration_seconds > maximum + 0.001:
-                        errors.append(
-                            f"分镜 {clip.shot_index} 的转场时长不能超过 {maximum:.2f} 秒"
-                        )
+                        errors.append(f"分镜 {clip.shot_index} 的转场时长不能超过 {maximum:.2f} 秒")
         if (
             timeline.audio_track.enabled
             and any(clip.audio_mode == VideoClipAudioMode.SOURCE for clip in enabled)
@@ -560,7 +563,9 @@ class TimelineService:
             if candidate is not None and candidate.duration_seconds is not None
             else source.trim_out_seconds
         )
+        plan = await self.repository.get_shot_plan(source.shot_plan_id)
         return TimelineClip(
+            editing_guidance=plan.editing_guidance if plan else None,
             id=clip_id or uuid4(),
             shot_plan_id=source.shot_plan_id,
             shot_index=source.shot_index,
@@ -670,8 +675,7 @@ class TimelineService:
                 preserved_audio_mode == VideoClipAudioMode.CANDIDATE
                 and not replacement.candidate_audio_available
             ) or (
-                preserved_audio_mode == VideoClipAudioMode.SOURCE
-                and not handoff.source_audio_url
+                preserved_audio_mode == VideoClipAudioMode.SOURCE and not handoff.source_audio_url
             ):
                 preserved_audio_mode = replacement.audio_mode
             replacement = replacement.model_copy(
@@ -682,6 +686,9 @@ class TimelineService:
                     "audio_mode": preserved_audio_mode,
                     "audio_volume": existing.audio_volume,
                     "transition_after": existing.transition_after,
+                    "editing_guidance": existing.editing_guidance
+                    if existing.editing_guidance is not None
+                    else replacement.editing_guidance,
                 }
             )
             next_clips.append(replacement)
@@ -865,6 +872,7 @@ class TimelineService:
                     "audio_mode",
                     "audio_volume",
                     "transition_after",
+                    "editing_guidance",
                 ):
                     value = getattr(update, field)
                     if value is not None:
@@ -887,8 +895,7 @@ class TimelineService:
                 "clips": next_clips,
                 "audio_track": payload.audio_track or current.audio_track,
                 "background_audio_track": (
-                    payload.background_audio_track
-                    or current.background_audio_track
+                    payload.background_audio_track or current.background_audio_track
                 ),
                 "subtitle_cues": (
                     payload.subtitle_cues
@@ -1130,9 +1137,7 @@ class TimelineService:
             job = job.model_copy(
                 update={
                     "status": (
-                        TimelineRenderStatus.CANCELLED
-                        if cancelled
-                        else TimelineRenderStatus.FAILED
+                        TimelineRenderStatus.CANCELLED if cancelled else TimelineRenderStatus.FAILED
                     ),
                     "error_code": exc.code,
                     "error_message": str(exc),
@@ -1170,8 +1175,7 @@ class TimelineService:
         if not timeline.audio_track.source_audio_url:
             return None
         path = (
-            self.workspace.analysis_root(project.record_id, project.base_analysis_id)
-            / "audio.wav"
+            self.workspace.analysis_root(project.record_id, project.base_analysis_id) / "audio.wav"
         )
         return path if path.is_file() else None
 
@@ -1294,9 +1298,7 @@ class TimelineService:
     ) -> ProductionTimeline:
         root = self._timeline_root(project)
         snapshot = (
-            root
-            / "revisions"
-            / f"{timeline.revision_number:04d}-{timeline.revision_id}.json"
+            root / "revisions" / f"{timeline.revision_number:04d}-{timeline.revision_id}.json"
         )
         revision = TimelineRevision(
             id=timeline.revision_id,
@@ -1315,9 +1317,10 @@ class TimelineService:
         self._write_json_atomic(root / "timeline.json", timeline.model_dump(mode="json"))
         self._write_json_atomic(
             root / "revisions.json",
-            {"schema_version": "viral-dna-timeline-revisions/v1", "items": [
-                item.model_dump(mode="json") for item in revisions
-            ]},
+            {
+                "schema_version": "viral-dna-timeline-revisions/v1",
+                "items": [item.model_dump(mode="json") for item in revisions],
+            },
         )
         return timeline
 

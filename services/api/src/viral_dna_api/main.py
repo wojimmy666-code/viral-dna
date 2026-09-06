@@ -50,6 +50,7 @@ from .identity import (
     create_identity_router,
     require_platform_admin,
 )
+from .image_batches_models import ImageBatch, ImageBatchRequest
 from .image_generation import (
     ImageGenerationGateway,
     ImageGenerationSettingsService,
@@ -203,6 +204,8 @@ from .platform_skills import (
     create_platform_skill_admin_router,
     create_platform_skill_router,
 )
+from .platform_skills.presentation import SkillPresentationService
+from .platform_skills.presentation_routes import create_skill_presentation_router
 from .production import (
     MAX_REFERENCE_IMAGE_BYTES,
     ProductionService,
@@ -291,12 +294,14 @@ async def lifespan(_app: FastAPI):
     await project_service.bootstrap_analysis_projects()
     await production_service.recover_generation_runs()
     await skill_workflow_service.recover()
+    await skill_presentation_service.recover()
     await depth_control_job_service.recover()
     await video_enhancement_service.recover()
     media_staging_service.start_cleanup()
     try:
         yield
     finally:
+        await skill_presentation_service.shutdown()
         await timeline_export_service.shutdown()
         await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
@@ -336,6 +341,9 @@ public_media_stager = PublicMediaStager(workspace_manager)
 account_context_service = create_account_context_service(workspace_manager)
 platform_skill_catalog_service = PlatformSkillCatalogService(
     default_account_catalog_path().parent / "platform-skills.json"
+)
+skill_presentation_service = SkillPresentationService(
+    platform_skill_catalog_service, default_account_catalog_path().parent / "platform-skill-media"
 )
 project_service = ProjectService(
     store,
@@ -541,6 +549,7 @@ app.include_router(
     prefix=API_PREFIX,
     dependencies=[Depends(require_platform_admin)],
 )
+app.include_router(create_skill_presentation_router(skill_presentation_service, require_platform_admin), prefix=API_PREFIX)
 app.include_router(create_project_router(project_service), prefix=API_PREFIX)
 app.include_router(create_skill_workflow_router(skill_workflow_service), prefix=API_PREFIX)
 app.include_router(
@@ -1192,6 +1201,63 @@ async def get_production_reference_thumbnail(asset_id: UUID) -> FileResponse:
 async def list_production_shots(project_id: UUID) -> list[ShotPlanResponse]:
     try:
         return await production_service.list_shots(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/shots/navigation")
+async def production_shot_navigation(project_id: UUID):
+    try:
+        return await production_service.shot_navigation(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/image-batches/preview", response_model=ImageBatch
+)
+async def preview_image_batch(project_id: UUID, payload: ImageBatchRequest):
+    try:
+        return await production_service.image_batches.preview(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/image-batches",
+    response_model=ImageBatch,
+    status_code=202,
+)
+async def create_image_batch(project_id: UUID, payload: ImageBatchRequest):
+    try:
+        return await production_service.image_batches.create(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/image-batches/latest",
+    response_model=ImageBatch | None,
+)
+async def latest_image_batch(project_id: UUID):
+    try:
+        return await production_service.image_batches.latest(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/image-batches/{{batch_id}}/{{action}}",
+    response_model=ImageBatch,
+)
+async def control_image_batch(project_id: UUID, batch_id: UUID, action: Literal["stop", "resume"]):
+    try:
+        operation = (
+            production_service.image_batches.stop
+            if action == "stop"
+            else production_service.image_batches.resume
+        )
+        return await operation(project_id, batch_id)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

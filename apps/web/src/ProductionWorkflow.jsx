@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { readOnce } from "./creation-workspace/read-request.js";
+import { useGenerationPreferences } from "./image-generation-controls/generation-preferences.js";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CreationNavigation, CreationWorkspace } from "./creation-workspace/CreationWorkspace.jsx";
 import { mainCreationStep, productionNavigation, readWorkspaceLocation, rememberWorkspaceLocation, savedWorkspaceLocation, sourceCapabilities, workspaceSearch } from "./creation-workspace/workspace-ui.js";
@@ -1598,6 +1600,7 @@ export function ProductionHub({
   const [selectedShotId, setSelectedShotId] = useState(null);
   const [selectedVisualBeatId, setSelectedVisualBeatId] = useState(null);
   const [shotDetail, setShotDetail] = useState(null);
+  const shotCache = useRef(new Map());
   const {
     applyPersistedVideoDraft,
     flushVideoDraft,
@@ -1646,12 +1649,22 @@ export function ProductionHub({
   const [generationSettings, setGenerationSettings] = useState(
     imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS,
   );
-  const [generationEngine, setGenerationEngine] = useState("default");
-  const [generationInputMode, setGenerationInputMode] = useState("keyframe_edit");
-  const [generationCandidateCount, setGenerationCandidateCount] = useState(1);
-  const [generationModelAlias, setGenerationModelAlias] = useState(
-    imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
+  const [imageChoices, setImageChoices] = useGenerationPreferences(
+    `viraldna:image-options:${recordId}:${selectedShotId || "default"}:${selectedVisualBeatId || "first"}`,
+    {
+      engine: "default", inputMode: workflow ? "text_to_image" : "keyframe_edit",
+      count: imageGenerationSettings?.default_candidate_count || 1,
+      model: imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
+      resolution: imageGenerationSettings?.image_width ? `${imageGenerationSettings.image_width}x${imageGenerationSettings.image_height}` : "",
+    },
   );
+  const { engine: generationEngine, inputMode: generationInputMode, count: generationCandidateCount, model: generationModelAlias, resolution: generationResolution } = imageChoices;
+  const setGenerationEngine = (value) => setImageChoices((current) => ({ engine: typeof value === "function" ? value(current.engine) : value }));
+  const setGenerationInputMode = (value) => setImageChoices((current) => ({ inputMode: typeof value === "function" ? value(current.inputMode) : value }));
+  const setGenerationCandidateCount = (value) => setImageChoices((current) => ({ count: typeof value === "function" ? value(current.count) : value }));
+  const setGenerationModelAlias = (value) => setImageChoices((current) => ({ model: typeof value === "function" ? value(current.model) : value }));
+  const setGenerationResolution = (value) => setImageChoices({ resolution: value });
+  const selectImageModel = (model, engine) => setImageChoices({ model, engine, resolution: "" });
   const [focusedCandidateId, setFocusedCandidateId] = useState("");
   const capabilities = sourceCapabilities(detail?.project, sourceMedia);
 
@@ -1798,11 +1811,6 @@ export function ProductionHub({
   useEffect(() => {
     const nextSettings = imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS;
     setGenerationSettings(nextSettings);
-    setGenerationModelAlias((current) => {
-      if (current === "local_tool" && nextSettings.local_executable_path) return current;
-      if ((nextSettings.models || []).some((model) => model.alias === current)) return current;
-      return nextSettings.remote_model_alias || "qwen_image_2_pro";
-    });
   }, [imageGenerationSettings]);
 
   useEffect(() => {
@@ -1863,9 +1871,6 @@ export function ProductionHub({
     setGenerationSettings(
       imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS,
     );
-    setGenerationEngine("default");
-    setGenerationInputMode("keyframe_edit");
-    setGenerationCandidateCount(1);
     setFocusedCandidateId("");
   }, [recordId]);
 
@@ -1897,8 +1902,24 @@ export function ProductionHub({
   }, [location.search]);
 
   useEffect(() => {
+    if (workflow) return;
     loadTrashedProjects({ quiet: true }).catch(() => undefined);
   }, [recordId]);
+
+  useEffect(() => {
+    if (activeSection !== "revisions" || !selectedProjectId) return;
+    let active = true;
+    readOnce(request, `/productions/${selectedProjectId}/revisions`).then((value) => {
+      if (active) setRevisions(value || []);
+    }).catch((error) => { if (active) setActionError(error.message); });
+    return () => { active = false; };
+  }, [activeSection, selectedProjectId, request]);
+
+  useEffect(() => {
+    if (activeSection !== "shot_videos" || !selectedProjectId || contentLoading) return;
+    refreshProject(selectedProjectId, selectedShotId, selectedVisualBeatId, "shot_videos")
+      .catch((error) => setActionError(error.message));
+  }, [activeSection, selectedProjectId]);
 
   useEffect(() => {
     if (
@@ -1966,6 +1987,7 @@ export function ProductionHub({
     projectId = selectedProjectId,
     preferredShotId = selectedShotId,
     preferredVisualBeatId = selectedVisualBeatId,
+    section = activeSection,
   ) {
     if (!projectId) return null;
     const refreshRequest = ++projectRefreshRequestId.current;
@@ -1982,10 +2004,10 @@ export function ProductionHub({
     ] = await Promise.all([
       request(`/productions/${projectId}`),
       request(`/productions/${projectId}/references`),
-      request(`/productions/${projectId}/revisions`),
-      request(`/productions/${projectId}/shots`),
+      section === "revisions" ? readOnce(request, `/productions/${projectId}/revisions`) : Promise.resolve([]),
+      request(`/productions/${projectId}/shots${workflow && section !== "shot_videos" ? "/navigation" : ""}`),
       request(`/productions/${projectId}/gate-status`),
-      request("/settings/image-generation"),
+      imageGenerationSettings ? Promise.resolve(imageGenerationSettings) : readOnce(request, "/settings/image-generation"),
     ]);
     if (!canHydrateShot()) return nextDetail;
     setDetail(nextDetail);
@@ -2009,7 +2031,7 @@ export function ProductionHub({
     if (targetShotId) {
       const [nextShotDetail, persistedVideoDraft] = await Promise.all([
         request(`/production-shots/${targetShotId}`),
-        request(`/production-shots/${targetShotId}/video-generation-draft`),
+        section === "shot_videos" ? request(`/production-shots/${targetShotId}/video-generation-draft`) : Promise.resolve(null),
       ]);
       const targetVisualBeat = visualBeatFromDetail(
         nextShotDetail,
@@ -2018,6 +2040,7 @@ export function ProductionHub({
       if (!canHydrateShot()) return nextDetail;
       setSelectedShotId(targetShotId);
       setShotDetail(nextShotDetail);
+      shotCache.current.set(targetShotId, nextShotDetail);
       setSelectedVisualBeatId(targetVisualBeat?.id || null);
       if (targetVisualBeat?.id) {
         hydrateShotDraft({
@@ -2028,7 +2051,7 @@ export function ProductionHub({
       } else {
         resetShotDraft();
       }
-      hydrateVideoDraft({
+      if (section === "shot_videos") hydrateVideoDraft({
         shotPlanId: targetShotId,
         detail: nextShotDetail,
         settings: videoGenerationSettings,
@@ -2091,7 +2114,7 @@ export function ProductionHub({
     setAnalysisUpdateDecisions({});
     setAnalysisUpdateError("");
     try {
-      const opened = await refreshProject(projectId, shotPlanId, visualBeatId);
+      const opened = await refreshProject(projectId, shotPlanId, visualBeatId, section);
       if (openRequest !== projectOpenRequestId.current) return;
       const resolved = workflow?.resolveSection?.(section) || (mainCreationStep(section) === "project_setup" ? "project_setup" : section);
       const allowed = workflow ? workflow.canNavigate?.(resolved) !== false
@@ -2112,9 +2135,15 @@ export function ProductionHub({
     try {
       await flushWorkspace();
       if (selectionRequest !== shotRequestId.current) return;
+      // Show selection immediately; the canvas has a local loading state.
+      setSelectedShotId(shotPlanId);
+      setActionError("");
+      const cached = shotCache.current.get(shotPlanId);
+      const summary = shots.find((item) => item.plan.id === shotPlanId)?.plan;
       const [nextShotDetail, persistedVideoDraft] = await Promise.all([
-        request(`/production-shots/${shotPlanId}`),
-        request(`/production-shots/${shotPlanId}/video-generation-draft`),
+        cached && cached.plan.revision_id === summary?.revision_id && activeSection === "shot_images"
+          ? Promise.resolve(cached) : readOnce(request, `/production-shots/${shotPlanId}`),
+        activeSection === "shot_videos" ? request(`/production-shots/${shotPlanId}/video-generation-draft`) : Promise.resolve(null),
       ]);
       const firstVisualBeat = visualBeatFromDetail(nextShotDetail, visualBeatId);
       if (selectionRequest !== shotRequestId.current) return;
@@ -2123,6 +2152,7 @@ export function ProductionHub({
       setActionError("");
       setImpactReview(null);
       setShotDetail(nextShotDetail);
+      shotCache.current.set(shotPlanId, nextShotDetail);
       setSelectedVisualBeatId(firstVisualBeat?.id || null);
       if (firstVisualBeat?.id) {
         hydrateShotDraft({
@@ -2133,7 +2163,7 @@ export function ProductionHub({
       } else {
         resetShotDraft();
       }
-      hydrateVideoDraft({
+      if (activeSection === "shot_videos") hydrateVideoDraft({
         shotPlanId,
         detail: nextShotDetail,
         settings: videoGenerationSettings,
@@ -2141,13 +2171,17 @@ export function ProductionHub({
       });
       updateLocation({ shotId: shotPlanId, visualBeatId: firstVisualBeat?.id || "", candidateId });
     } catch (requestError) {
-      if (selectionRequest === shotRequestId.current) setActionError(requestError.message);
+      if (selectionRequest === shotRequestId.current) {
+        setActionError(requestError.message);
+        setSelectedShotId(shotDetail?.plan?.id || null);
+      }
     } finally {
       if (selectionRequest === shotRequestId.current) shotSelectionPending.current = false;
     }
   }
 
   async function executeAction(action) {
+    shotCache.current.clear();
     setBusy(true);
     setActionError("");
     try {
@@ -2301,6 +2335,7 @@ export function ProductionHub({
       shotDraft,
     );
     if (!shotDetail?.plan || !activeBeat) return;
+    if (workflow && !generationResolution) { setActionError("请为本次图片生成选择分辨率"); return; }
     const candidateCount = Math.min(
       4,
       Math.max(1, Math.trunc(Number(generationCandidateCount) || 1)),
@@ -2312,10 +2347,11 @@ export function ProductionHub({
     const acceptsUnknownCost = (
       generationSettings.enabled
       && executionMode === "local_tool"
-      && generationSettings.local_cost_source === "unknown"
+      && !["unmetered", "configured_rate"].includes(generationSettings.local_cost_source)
     );
     if (
       acceptsUnknownCost
+      && !generationSettings.allow_unknown_local_image_cost
       && !window.confirm(
         `本机工具无法提供可验证的成本信息。是否仍要为画面 ${activeBeat.index} 生成 ${candidateCount} 张候选？`,
       )
@@ -2346,8 +2382,9 @@ export function ProductionHub({
             candidate_count: candidateCount,
             input_mode: effectiveInputMode,
             execution_mode: executionMode,
-            model_alias: executionMode === "remote_api" ? generationModelAlias : null,
+            model_alias: executionMode === "remote_api" ? generationModelAlias : "local_tool",
             allow_unknown_cost: acceptsUnknownCost,
+            ...(generationResolution ? { width: Number(generationResolution.split("x")[0]), height: Number(generationResolution.split("x")[1]) } : {}),
             generation_intent: imageGenerationIntentForShot(shotDetail),
           }),
         },
@@ -2449,6 +2486,29 @@ export function ProductionHub({
     } else {
       await executeAction(() => apply(false));
     }
+  }
+
+  async function refreshImageBatchResults(shotIds) {
+    if (!selectedProjectId) return;
+    for (const id of shotIds) shotCache.current.delete(id);
+    const projectId = selectedProjectId;
+    const selection = shotRequestId.current;
+    const refreshId = projectRefreshRequestId.current;
+    const nextShots = await readOnce(request, `/productions/${projectId}/shots/navigation`);
+    if (refreshId !== projectRefreshRequestId.current) return;
+    setShots(nextShots);
+    const required = nextShots.filter((item) => item.plan.required !== false && item.plan.lifecycle_status !== "discarded");
+    const approved = required.filter((item) => item.plan.image_status === "approved").length;
+    setGate({ allowed: required.length > 0 && approved === required.length, required_shot_count: required.length,
+      approved_shot_count: approved, blocker_messages: [] });
+    if (nextShots[0]?.current_revision_id) setDetail((current) => current?.project.id === projectId
+      ? { ...current, project: { ...current.project, current_revision_id: nextShots[0].current_revision_id } } : current);
+    if (!shotIds.includes(selectedShotId)) return;
+    const next = await readOnce(request, `/production-shots/${selectedShotId}`);
+    if (selection !== shotRequestId.current || shotSelectionPending.current) return;
+    shotCache.current.set(selectedShotId, next);
+    setShotDetail(next);
+    hydrateShotDraft({ detail: next, shotPlanId: selectedShotId, visualBeatId: selectedVisualBeatId });
   }
 
   async function setShotOutputMode({
@@ -3863,6 +3923,9 @@ export function ProductionHub({
                 generationInputMode={generationInputMode}
                 generationModelAlias={generationModelAlias}
                 generationSettings={generationSettings}
+                generationResolution={generationResolution}
+                setGenerationResolution={setGenerationResolution}
+                onGenerationModelChange={selectImageModel}
                 initialCandidateId={focusedCandidateId}
                 onPreviewCandidate={(candidateId) => { setFocusedCandidateId(candidateId); updateLocation({ shotId: selectedShotId, visualBeatId: selectedVisualBeatId, candidateId }); }}
                 onAdvance={advanceWorkflow}
@@ -3877,6 +3940,7 @@ export function ProductionHub({
                 onFlushDraft={flushShotDraft}
                 onArchiveCandidate={archiveImageCandidate}
                 onGenerate={generateShotCandidates}
+                onBatchResults={refreshImageBatchResults}
                 onRevokeApproval={revokeImageApproval}
                 onReorderShots={reorderShots}
                 onReorderVisualBeats={reorderVisualBeats}

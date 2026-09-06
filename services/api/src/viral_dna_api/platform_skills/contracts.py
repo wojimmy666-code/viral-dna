@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .presentation_models import SkillPresentation
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -451,6 +453,7 @@ class PlatformSkill(BaseModel):
     category: str = Field(min_length=1, max_length=60)
     tags: list[str] = Field(default_factory=list, max_length=20)
     cover_url: str | None = None
+    presentation: SkillPresentation = Field(default_factory=SkillPresentation)
     lifecycle: SkillLifecycle = SkillLifecycle.DRAFT
     current_published_version_id: UUID | None = None
     usage_count: int = Field(default=0, ge=0)
@@ -460,6 +463,7 @@ class PlatformSkill(BaseModel):
 
 class SkillCatalogItem(PlatformSkill):
     current_version: PlatformSkillVersion
+    fallback_cover_url: str | None = None
     favorited: bool = False
     supported_channels: list[str] = Field(default_factory=list)
     aspect_ratios: list[str] = Field(default_factory=list)

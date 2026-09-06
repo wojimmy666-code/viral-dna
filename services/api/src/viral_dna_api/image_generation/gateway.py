@@ -179,13 +179,16 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
         "layout": "道具或布局",
     }
     mention_labels = {
-        item.reference_asset_id: item.label
-        for item in request.shot.image_prompt_mentions
+        item.reference_asset_id: item.label for item in request.shot.image_prompt_mentions
     }
     primary_identity = identity_reference(request.references)
     if request.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
         lines = [
-            "本次任务是纯文字生成，不使用原视频关键帧或参考图片。",
+            (
+                "本次基于文字与指定参考素材创作新画面，不存在原视频关键帧。"
+                if request.references
+                else "本次任务是纯文字生成，不使用原视频关键帧或参考图片。"
+            ),
             f"生成要求：{request.shot.image_prompt.strip()}",
             "根据文字从零构建完整画面，严格遵循主体、场景、构图、镜头、光影和风格描述。",
         ]
@@ -249,7 +252,7 @@ def _negative_prompt(request: ImageGenerationRequest) -> str:
             "双人脸",
             "人脸重影",
         ]
-        if primary_identity is not None
+        if primary_identity is not None and request.source_path is not None
         else []
     )
     base = [
@@ -300,7 +303,7 @@ def _candidate_quality_report(
             "id": "text_artifacts",
             "label": "异常文字与水印",
             "status": "required",
-        }
+        },
     ]
     role_checks = {
         "identity": ("identity_consistency", "人物身份一致性"),
@@ -458,10 +461,7 @@ def _sum_model_usage(outcomes: list[SemanticQualityOutcome]) -> dict[str, Any]:
         "total_tokens",
         "image_count",
     )
-    totals = {
-        field: sum(getattr(outcome.usage, field) for outcome in outcomes)
-        for field in fields
-    }
+    totals = {field: sum(getattr(outcome.usage, field) for outcome in outcomes) for field in fields}
     totals["call_count"] = sum(
         bool(outcome.report.get("provider_request_id")) for outcome in outcomes
     )
@@ -505,6 +505,7 @@ class ImageGenerationGateway:
         reuse_cache: bool = True,
         run_id: UUID | None = None,
         cancel_event: Any | None = None,
+        reserve_cost: Any | None = None,
     ) -> tuple[GenerationRun, list[GenerationCandidate]]:
         try:
             selected_input_mode = ImageGenerationInputMode(input_mode)
@@ -541,6 +542,7 @@ class ImageGenerationGateway:
                 state=identity_policy,
                 input_mode=selected_input_mode,
                 source_present=source_path is not None,
+                reference_creation=shot.source_kind == "skill_generated",
             )
         except IdentityPolicyViolation as exc:
             raise ImageGenerationGatewayError(
@@ -548,16 +550,17 @@ class ImageGenerationGateway:
                 exc.code,
                 str(exc),
             ) from exc
-        if (
-            selected_input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
-            and (source_path is None or not await asyncio.to_thread(source_path.is_file))
+        if selected_input_mode == ImageGenerationInputMode.KEYFRAME_EDIT and (
+            source_path is None or not await asyncio.to_thread(source_path.is_file)
         ):
             raise ImageGenerationGatewayError(
                 409,
                 "source_keyframe_required",
                 "真实图片生成需要可读取的原分镜关键帧",
             )
-        if selected_input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
+        if selected_input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE and (
+            not bindings or shot.source_kind != "skill_generated"
+        ):
             references = ()
             source_path = None
         else:
@@ -600,6 +603,7 @@ class ImageGenerationGateway:
                 source_present=source_path is not None,
                 references=references,
                 capability=identity.capability,
+                reference_creation=shot.source_kind == "skill_generated",
             )
         except IdentityPolicyViolation as exc:
             raise ImageGenerationGatewayError(
@@ -631,6 +635,10 @@ class ImageGenerationGateway:
                 "image_to_image_unsupported",
                 "当前模型或本机工具不支持关键帧编辑",
             )
+        if references and not identity.capability.image_to_image:
+            raise ImageGenerationGatewayError(
+                422, "image_to_image_unsupported", "当前模型不支持参考图片输入"
+            )
         if len(references) > identity.capability.max_reference_images:
             raise ImageGenerationGatewayError(
                 422,
@@ -653,11 +661,25 @@ class ImageGenerationGateway:
             allow_unknown_cost=allow_unknown_cost,
             seed=seed,
         )
-        width, height = _output_dimensions(
-            project.output_width,
-            project.output_height,
-            identity.capability,
-        )
+        if project.origin_type == "skill_run":
+            width, height = project.output_width, project.output_height
+            cap = identity.capability
+            if (
+                width > cap.maximum_width
+                or height > cap.maximum_height
+                or width * height > cap.maximum_pixels
+            ):
+                raise ImageGenerationGatewayError(
+                    409,
+                    "image_resolution_unsupported",
+                    "当前工具不支持项目选择的分辨率；不会自动降低清晰度",
+                )
+        else:
+            width, height = _output_dimensions(
+                project.output_width,
+                project.output_height,
+                identity.capability,
+            )
         prompt = _compiled_prompt(request)
         negative_prompt = _negative_prompt(request)
         input_payload = self._input_payload(
@@ -697,10 +719,7 @@ class ImageGenerationGateway:
         )
         if cached is not None:
             return cached
-        if (
-            identity.cost_source == GenerationCostSource.UNKNOWN
-            and not allow_unknown_cost
-        ):
+        if identity.cost_source == GenerationCostSource.UNKNOWN and not allow_unknown_cost:
             raise ImageGenerationGatewayError(
                 409,
                 "unknown_cost_confirmation_required",
@@ -720,6 +739,10 @@ class ImageGenerationGateway:
                     f"本次预计成本 ¥{identity.estimated_cost_micros / 1_000_000:.2f}，"
                     f"方案剩余预算 ¥{remaining / 1_000_000:.2f}"
                 ),
+            )
+        if reserve_cost is not None:
+            await reserve_cost(
+                identity.estimated_cost_micros if identity.cost_estimate_known else None
             )
         _write_atomic(input_path, _canonical_json(input_payload) + b"\n")
         adapter_request = AdapterRequest(
@@ -806,16 +829,12 @@ class ImageGenerationGateway:
                 if project.budget_limit_micros is None
                 else max(
                     0,
-                    project.budget_limit_micros
-                    - project.actual_cost_micros
-                    - actual_cost,
+                    project.budget_limit_micros - project.actual_cost_micros - actual_cost,
                 )
             )
             reviewed_candidates: list[GenerationCandidate] = []
             reference_paths = tuple(item.path for item in references)
-            reference_labels = tuple(
-                f"{item.role}：{item.label}" for item in references
-            )
+            reference_labels = tuple(f"{item.role}：{item.label}" for item in references)
             for candidate in candidates:
                 if cancel_event is not None and cancel_event.is_set():
                     raise ImageGenerationGatewayError(
@@ -854,9 +873,7 @@ class ImageGenerationGateway:
             for outcome in semantic_outcomes
             if outcome.report.get("status") != "skipped_budget"
         )
-        semantic_actual_cost = sum(
-            outcome.actual_cost_micros for outcome in semantic_outcomes
-        )
+        semantic_actual_cost = sum(outcome.actual_cost_micros for outcome in semantic_outcomes)
         estimated_cost = identity.estimated_cost_micros + semantic_estimated_cost
         actual_cost += semantic_actual_cost
         if semantic_actual_cost > 0:
@@ -984,9 +1001,7 @@ class ImageGenerationGateway:
             )
 
         output = (
-            input_payload.get("output")
-            if isinstance(input_payload.get("output"), dict)
-            else {}
+            input_payload.get("output") if isinstance(input_payload.get("output"), dict) else {}
         )
         references = (
             input_payload.get("references")
@@ -1160,15 +1175,12 @@ class ImageGenerationGateway:
             return None
         runs = await self.repository.list_generation_runs(project.id, shot.id)
         for source_run in reversed(runs):
-            if (
-                source_run.request_fingerprint != fingerprint
-                or source_run.status
-                not in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
-            ):
+            if source_run.request_fingerprint != fingerprint or source_run.status not in {
+                ProductionRunStatus.COMPLETED,
+                ProductionRunStatus.CACHED,
+            }:
                 continue
-            source_candidates = await self.repository.list_generation_candidates(
-                source_run.id
-            )
+            source_candidates = await self.repository.list_generation_candidates(source_run.id)
             if len(source_candidates) != candidate_count:
                 continue
             reusable = True
@@ -1177,24 +1189,15 @@ class ImageGenerationGateway:
                     content_path = self.workspace.resolve(candidate.relative_path)
                     metadata_path = self.workspace.resolve(candidate.metadata_relative_path)
                     if (
-                        not await asyncio.to_thread(
-                            _filesystem_path(content_path).is_file
-                        )
-                        or not await asyncio.to_thread(
-                            _filesystem_path(metadata_path).is_file
-                        )
-                        or await asyncio.to_thread(_sha256_file, content_path)
-                        != candidate.sha256
+                        not await asyncio.to_thread(_filesystem_path(content_path).is_file)
+                        or not await asyncio.to_thread(_filesystem_path(metadata_path).is_file)
+                        or await asyncio.to_thread(_sha256_file, content_path) != candidate.sha256
                     ):
                         reusable = False
                         break
                     if candidate.thumbnail_relative_path:
-                        thumbnail_path = self.workspace.resolve(
-                            candidate.thumbnail_relative_path
-                        )
-                        if not await asyncio.to_thread(
-                            _filesystem_path(thumbnail_path).is_file
-                        ):
+                        thumbnail_path = self.workspace.resolve(candidate.thumbnail_relative_path)
+                        if not await asyncio.to_thread(_filesystem_path(thumbnail_path).is_file):
                             reusable = False
                             break
                 except (OSError, WorkspaceError):
@@ -1411,12 +1414,8 @@ class ImageGenerationGateway:
         identity = AdapterIdentity(
             execution_mode=mode,
             provider="local_tool",
-            model=settings.local_model or detection.tool_id,
-            model_snapshot=(
-                f"{settings.local_model}@{detection.tool_version}"
-                if settings.local_model
-                else detection.tool_version
-            ),
+            model=detection.tool_id,
+            model_snapshot=detection.tool_version,
             adapter_id=settings.local_adapter_id,
             adapter_version=GATEWAY_VERSION,
             protocol_version=detection.protocol_version,
@@ -1432,6 +1431,8 @@ class ImageGenerationGateway:
                 "concurrency_limit": settings.local_concurrency,
                 "model_policy": settings.local_model_policy,
                 "model": settings.local_model,
+                "orchestration_model": settings.local_model,
+                "image_engine": detection.tool_id,
                 "reasoning_effort": settings.local_reasoning_effort,
                 "proxy_source": settings.local_proxy_source,
                 "proxy_enabled": bool(settings.local_proxy_effective_url),

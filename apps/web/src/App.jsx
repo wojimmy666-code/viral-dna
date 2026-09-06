@@ -59,6 +59,7 @@ import { AppSidebar } from "./app-sidebar/AppSidebar.jsx";
 import { useSidebarLayout } from "./app-sidebar/useSidebarLayout.js";
 import { CategoryProfileLibrary } from "./category-profiles/index.js";
 import { PlatformAdminConsole } from "./admin/PlatformAdminConsole.jsx";
+import { uploadFormWithProgress } from "./api-upload.js";
 import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsPanel.jsx";
 import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
@@ -389,6 +390,8 @@ async function apiRequest(path, options = {}) {
   }
   return payload;
 }
+
+apiRequest.upload = (path, body, onProgress, signal) => uploadFormWithProgress(`${API_BASE}${path}`, body, onProgress, signal, apiErrorMessage);
 
 function formatTime(seconds = 0) {
   const minutes = Math.floor(seconds / 60);

@@ -33,12 +33,8 @@ class FakeRepository:
     def __init__(self, project: ProductionProject) -> None:
         self.project = project
         self.candidates = {
-            UUID("00000000-0000-0000-0000-000000000101"): SimpleNamespace(
-                duration_seconds=5.0
-            ),
-            UUID("00000000-0000-0000-0000-000000000102"): SimpleNamespace(
-                duration_seconds=5.0
-            ),
+            UUID("00000000-0000-0000-0000-000000000101"): SimpleNamespace(duration_seconds=5.0),
+            UUID("00000000-0000-0000-0000-000000000102"): SimpleNamespace(duration_seconds=5.0),
         }
 
     async def get_production_project(self, project_id):
@@ -46,6 +42,9 @@ class FakeRepository:
 
     async def get_generation_candidate(self, candidate_id):
         return self.candidates.get(candidate_id)
+
+    async def get_shot_plan(self, shot_plan_id):
+        return SimpleNamespace(editing_guidance=getattr(self, "editing_guidance", None))
 
 
 class FakeHandoffProvider:
@@ -203,6 +202,36 @@ async def test_timeline_initializes_from_handoff_and_persists_revision(timeline_
     root = workspace.production_paths(project.record_id, project.id).timelines
     assert (root / "timeline.json").is_file()
     assert workspace.resolve(revisions.items[0].snapshot_relative_path).is_file()
+
+
+@pytest.mark.asyncio
+async def test_editing_guidance_autosaves_without_changing_trim_and_can_be_cleared(
+    timeline_context,
+):
+    service, _, project, _ = timeline_context
+    service.repository.editing_guidance = "在动作停稳后硬切，与下一镜保持运动方向一致。"
+    original = await service.get_timeline(project.id)
+    clip = original.clips[0]
+    assert clip.editing_guidance == service.repository.editing_guidance
+    updated = await service.update_timeline(
+        project.id,
+        TimelineUpdateRequest(
+            expected_revision_id=original.revision_id,
+            clip_updates=[TimelineClipUpdate(clip_id=clip.id, editing_guidance="在节拍重音处切换")],
+        ),
+    )
+    assert updated.clips[0].editing_guidance == "在节拍重音处切换"
+    assert updated.clips[0].trim_in_seconds == clip.trim_in_seconds
+    assert updated.clips[0].trim_out_seconds == clip.trim_out_seconds
+    assert (await service.get_timeline(project.id)).clips[0].editing_guidance == "在节拍重音处切换"
+    await service.update_timeline(
+        project.id,
+        TimelineUpdateRequest(
+            expected_revision_id=updated.revision_id,
+            clip_updates=[TimelineClipUpdate(clip_id=clip.id, editing_guidance="")],
+        ),
+    )
+    assert (await service.get_timeline(project.id)).clips[0].editing_guidance == ""
 
 
 @pytest.mark.asyncio
@@ -372,8 +401,7 @@ async def test_timeline_syncs_replaced_video_without_losing_editor_choices(
         }
     )
     timeline_path = (
-        workspace.production_paths(project.record_id, project.id).timelines
-        / "timeline.json"
+        workspace.production_paths(project.record_id, project.id).timelines / "timeline.json"
     )
     service._write_json_atomic(timeline_path, staged.model_dump(mode="json"))
 
@@ -409,12 +437,8 @@ async def test_timeline_syncs_replaced_video_without_losing_editor_choices(
 
     synced = await service.get_timeline(project.id)
     loaded_again = await service.get_timeline(project.id)
-    synced_first = next(
-        clip for clip in synced.clips if clip.shot_plan_id == first.shot_plan_id
-    )
-    synced_second = next(
-        clip for clip in synced.clips if clip.shot_plan_id == second.shot_plan_id
-    )
+    synced_first = next(clip for clip in synced.clips if clip.shot_plan_id == first.shot_plan_id)
+    synced_second = next(clip for clip in synced.clips if clip.shot_plan_id == second.shot_plan_id)
     revisions = await service.list_revisions(project.id)
 
     assert synced.revision_number == 3

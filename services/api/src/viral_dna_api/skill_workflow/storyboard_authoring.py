@@ -727,12 +727,10 @@ def compile_video_prompt(
         f"动作仅完成一次：{phases}。结束状态：{spec.end_state}。"
         f"摄影机{chinese_term(spec.camera.motion)}，"
         f"{spec.camera.motion_extent or '运动幅度极小且稳定'}；"
-        f"{spec.camera.focus}。在指定结束状态形成明确的剪辑落点，"
-        f"方便{chinese_term(spec.transition.kind)}。\n\n"
+        f"{spec.camera.focus}。\n\n"
         f"【同步音效】{foley}；{spec.sound.ambience}。"
         "声音必须与可见动作及环境匹配，不得无故出现新的声源；"
         f"禁止内容：{forbidden_audio or '未在本镜头指定的额外声音'}。\n\n"
-        f"【剪辑落点】{spec.transition.cut_out}。{spec.transition.continuity_note}。\n\n"
         f"【严格约束】一镜到底，不得自动切镜或突然换景；{constraints}；不得生成字幕、Logo、水印或任何新增文字。"
     )
 

@@ -19,6 +19,7 @@ from .generated_artifacts.domain import (
     GeneratedArtifact,
     StorageObjectReference,
 )
+from .image_batches_models import ImageBatch
 from .models import (
     AnalysisJob,
     AnalysisRecord,
@@ -106,6 +107,7 @@ class InMemoryStore:
         self.shot_plans: dict[UUID, ShotPlan] = {}
         self.reference_bindings: dict[UUID, ReferenceBinding] = {}
         self.generation_runs: dict[UUID, GenerationRun] = {}
+        self.image_batches: dict[UUID, ImageBatch] = {}
         self.generation_candidates: dict[UUID, GenerationCandidate] = {}
         self.video_provider_tasks: dict[UUID, VideoProviderTask] = {}
         self.video_clip_preparations: dict[UUID, VideoClipPreparation] = {}
@@ -293,6 +295,11 @@ class InMemoryStore:
 
     async def delete_production_project(self, project_id: UUID) -> None:
         async with self._lock:
+            self.image_batches = {
+                key: item
+                for key, item in self.image_batches.items()
+                if item.project_id != project_id
+            }
             shot_plan_ids = {
                 item.id for item in self.shot_plans.values() if item.project_id == project_id
             }
@@ -325,9 +332,7 @@ class InMemoryStore:
                 if item.project_id != project_id
             }
             self.shot_plans = {
-                key: item
-                for key, item in self.shot_plans.items()
-                if item.project_id != project_id
+                key: item for key, item in self.shot_plans.items() if item.project_id != project_id
             }
             self.generation_runs = {
                 key: item
@@ -481,16 +486,12 @@ class InMemoryStore:
     async def list_assets(self) -> list[Asset]:
         return sorted(self.assets.values(), key=lambda asset: asset.created_at)
 
-    async def save_generated_artifact(
-        self, artifact: GeneratedArtifact
-    ) -> GeneratedArtifact:
+    async def save_generated_artifact(self, artifact: GeneratedArtifact) -> GeneratedArtifact:
         async with self._lock:
             self.generated_artifacts[artifact.id] = artifact
         return artifact
 
-    async def get_generated_artifact(
-        self, artifact_id: UUID
-    ) -> GeneratedArtifact | None:
+    async def get_generated_artifact(self, artifact_id: UUID) -> GeneratedArtifact | None:
         return self.generated_artifacts.get(artifact_id)
 
     async def list_generated_artifacts(self) -> list[GeneratedArtifact]:
@@ -511,9 +512,7 @@ class InMemoryStore:
             references = [item for item in references if item.storage_object_id == object_id]
         return sorted(references, key=lambda item: item.created_at)
 
-    async def save_asset_provenance(
-        self, provenance: AssetProvenance
-    ) -> AssetProvenance:
+    async def save_asset_provenance(self, provenance: AssetProvenance) -> AssetProvenance:
         async with self._lock:
             self.asset_provenance[provenance.asset_id] = provenance
         return provenance
@@ -578,6 +577,25 @@ class InMemoryStore:
             for event in approval_events or []:
                 self.approval_events[event.id] = event
         return project, revision
+
+    async def save_image_batch(self, batch: ImageBatch) -> ImageBatch:
+        async with self._lock:
+            self.image_batches[batch.id] = batch.model_copy(deep=True)
+        return batch
+
+    async def get_image_batch(self, batch_id: UUID) -> ImageBatch | None:
+        item = self.image_batches.get(batch_id)
+        return item.model_copy(deep=True) if item else None
+
+    async def list_image_batches(self, project_id: UUID) -> list[ImageBatch]:
+        return sorted(
+            (
+                item.model_copy(deep=True)
+                for item in self.image_batches.values()
+                if item.project_id == project_id
+            ),
+            key=lambda item: item.created_at,
+        )
 
     async def save_shot_plan(self, shot_plan: ShotPlan) -> ShotPlan:
         async with self._lock:
@@ -656,9 +674,7 @@ class InMemoryStore:
                 if item.project_id != project_id
             }
             self.shot_plans = {
-                key: item
-                for key, item in self.shot_plans.items()
-                if item.project_id != project_id
+                key: item for key, item in self.shot_plans.items() if item.project_id != project_id
             }
 
     async def save_reference_binding(
@@ -1019,11 +1035,7 @@ class InMemoryStore:
         analysis_id: UUID,
     ) -> list[ViralConceptSet]:
         return sorted(
-            (
-                item
-                for item in self.viral_concept_sets.values()
-                if item.analysis_id == analysis_id
-            ),
+            (item for item in self.viral_concept_sets.values() if item.analysis_id == analysis_id),
             key=lambda item: item.created_at,
         )
 
@@ -1131,9 +1143,7 @@ class InMemoryStore:
     ) -> CreativeBriefRevision:
         return await self._save_workflow("creative_brief_revisions", item)
 
-    async def list_creative_brief_revisions(
-        self, project_id: UUID
-    ) -> list[CreativeBriefRevision]:
+    async def list_creative_brief_revisions(self, project_id: UUID) -> list[CreativeBriefRevision]:
         return await self._list_workflow("creative_brief_revisions", "project_id", project_id)
 
     async def replace_asset_usages(
@@ -1166,17 +1176,13 @@ class InMemoryStore:
     async def list_claim_evidence(self, project_id: UUID) -> list[ClaimEvidence]:
         return await self._list_workflow("claim_evidence", "project_id", project_id)
 
-    async def save_run_contract_revision(
-        self, item: RunContractRevision
-    ) -> RunContractRevision:
+    async def save_run_contract_revision(self, item: RunContractRevision) -> RunContractRevision:
         return await self._save_workflow("run_contract_revisions", item)
 
     async def get_run_contract_revision(self, item_id: UUID) -> RunContractRevision | None:
         return await self._get_workflow("run_contract_revisions", item_id)
 
-    async def list_run_contract_revisions(
-        self, project_id: UUID
-    ) -> list[RunContractRevision]:
+    async def list_run_contract_revisions(self, project_id: UUID) -> list[RunContractRevision]:
         return await self._list_workflow("run_contract_revisions", "project_id", project_id)
 
     async def save_creative_treatment_revision(
@@ -1189,17 +1195,13 @@ class InMemoryStore:
     ) -> list[CreativeTreatmentRevision]:
         return await self._list_workflow("creative_treatment_revisions", "project_id", project_id)
 
-    async def save_style_bible_revision(
-        self, item: StyleBibleRevision
-    ) -> StyleBibleRevision:
+    async def save_style_bible_revision(self, item: StyleBibleRevision) -> StyleBibleRevision:
         return await self._save_workflow("style_bible_revisions", item)
 
     async def get_style_bible_revision(self, item_id: UUID) -> StyleBibleRevision | None:
         return await self._get_workflow("style_bible_revisions", item_id)
 
-    async def list_style_bible_revisions(
-        self, project_id: UUID
-    ) -> list[StyleBibleRevision]:
+    async def list_style_bible_revisions(self, project_id: UUID) -> list[StyleBibleRevision]:
         return await self._list_workflow("style_bible_revisions", "project_id", project_id)
 
     async def save_look_test(self, item: LookTest) -> LookTest:
@@ -1214,14 +1216,10 @@ class InMemoryStore:
     async def list_outline_revisions(self, project_id: UUID) -> list[OutlineRevision]:
         return await self._list_workflow("outline_revisions", "project_id", project_id)
 
-    async def save_shot_manifest_revision(
-        self, item: ShotManifestRevision
-    ) -> ShotManifestRevision:
+    async def save_shot_manifest_revision(self, item: ShotManifestRevision) -> ShotManifestRevision:
         return await self._save_workflow("shot_manifest_revisions", item)
 
-    async def list_shot_manifest_revisions(
-        self, project_id: UUID
-    ) -> list[ShotManifestRevision]:
+    async def list_shot_manifest_revisions(self, project_id: UUID) -> list[ShotManifestRevision]:
         return await self._list_workflow("shot_manifest_revisions", "project_id", project_id)
 
     async def save_skill_run(self, item: SkillRun) -> SkillRun:
@@ -1257,9 +1255,7 @@ class InMemoryStore:
     async def list_skill_artifacts(self, project_id: UUID) -> list[Artifact]:
         return await self._list_workflow("skill_artifacts", "project_id", project_id)
 
-    async def save_artifact_dependency(
-        self, item: ArtifactDependency
-    ) -> ArtifactDependency:
+    async def save_artifact_dependency(self, item: ArtifactDependency) -> ArtifactDependency:
         return await self._save_workflow("artifact_dependencies", item)
 
     async def list_artifact_dependencies(

@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import to_jsonable_python
 
+from ..editing_guidance import separate_shot_editing_guidance
+from ..models import ImageGenerationOverrides
 from ..production_seeds.contracts import ExactOverlayInstruction
 
 
@@ -272,6 +274,7 @@ class RunContractInput(BaseModel):
     image_model_id: str = Field(min_length=1, max_length=200)
     image_width: int = Field(ge=256, le=8192)
     image_height: int = Field(ge=256, le=8192)
+    allow_unknown_local_image_cost: bool = False
     video_provider_connection_id: str = Field(min_length=1, max_length=160)
     video_model_id: str = Field(min_length=1, max_length=200)
     video_width: int = Field(ge=256, le=8192)
@@ -287,9 +290,9 @@ class RunContractInput(BaseModel):
     text_model_selection: str = Field(min_length=1, max_length=200)
     audio_source_strategy: Literal["candidate", "source", "muted"] = "muted"
     generate_video_audio: bool = False
-    music_strategy: Literal["none", "select", "generate"] = "none"
-    narration_strategy: Literal["none", "recorded", "generated"] = "none"
-    subtitle_strategy: Literal["none", "final_speech", "manual"] = "none"
+    music_strategy: Literal["none", "select", "generate"] | None = None
+    narration_strategy: Literal["none", "recorded", "generated"] | None = None
+    subtitle_strategy: Literal["none", "final_speech", "manual"] | None = None
     automation_mode: AutomationMode = AutomationMode.GUIDED
     budget_limit_micros: int | None = Field(default=None, gt=0)
     estimated_cost_micros: int = Field(default=0, ge=0)
@@ -310,6 +313,7 @@ class RunContractInput(BaseModel):
 
 
 class RunContractRevision(RunContractInput):
+    image_tool_snapshot: dict[str, Any] = Field(default_factory=dict)
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     revision_number: int = Field(ge=1)
@@ -402,13 +406,20 @@ class LookTestItem(BaseModel):
     retryable: bool = False
 
 
+class LookTestGenerationRequest(ImageGenerationOverrides):
+    request_id: UUID | None = None
+
+
 class LookTest(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     style_bible_revision_id: UUID
     representative_shot_keys: list[str] = Field(min_length=1, max_length=4)
     run_contract_revision_id: UUID
-    candidate_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    candidate_ids: list[UUID] = Field(default_factory=list)
+    history_candidate_ids: list[UUID] = Field(default_factory=list)
+    generation_parameters: dict[str, Any] = Field(default_factory=dict)
+    generation_request_id: UUID | None = None
     selected_candidate_ids: list[UUID] = Field(default_factory=list, max_length=4)
     items: list[LookTestItem] = Field(default_factory=list, max_length=4)
     execution_status: ExecutionStatus = ExecutionStatus.PENDING
@@ -510,6 +521,12 @@ class PromptQualityReport(BaseModel):
 
 
 class ShotManifestShot(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def separate_editing_notes(cls, value):
+        return separate_shot_editing_guidance(value)
+
+    editing_guidance: str | None = Field(default=None, max_length=4000)
     stable_shot_key: str = Field(pattern=r"^shot_[a-z0-9]{8,64}$")
     order: int = Field(ge=1)
     narrative_role: str = Field(min_length=1, max_length=80)

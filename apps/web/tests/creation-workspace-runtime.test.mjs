@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parse } from "@babel/parser";
 import { SKILL_WORKFLOW_STAGES, stageState } from "../src/skill-workflow/skill-workflow-ui.js";
+import { readOnce } from "../src/creation-workspace/read-request.js";
 
 // Execute the real event handlers with isolated state/network boundaries. This
 // exercises async behavior, not screenshots or a substitute for browser QA.
@@ -31,6 +32,11 @@ function productionScope() {
     selectedShotId: "a",
     selectedVisualBeatId: "beat-a",
     focusedCandidateId: "candidate-a",
+    activeSection: "shot_images",
+    shotCache: { current: new Map() },
+    shots: [],
+    imageGenerationSettings: {},
+    readOnce,
     actionError: "",
     shotDetail: { plan: { id: "a" } },
     workflow: null,
@@ -111,4 +117,35 @@ test("audio approval must finish pending timeline saves before deciding which re
   };
   await skillHandler("confirmAudioCaption", scope)();
   assert.deepEqual(events, ["save", "finalize-new", ["new-skill", "new-mix"]]);
+});
+
+test("batch retry reuses the submitted snapshot; a later explicit click starts a new full batch", async () => {
+  const calls = [];
+  let loseReply = true;
+  const scope = {
+    base: "/productions/p/image-batches", projectId: "p", settings: {}, aspectRatio: "9:16",
+    choice: { model: "local_tool", resolution: "720x1280" },
+    pendingRequest: { current: null }, callbacks: { current: { onFlush: async () => {} } },
+    setWorking: () => {}, setError: () => {}, setPreview: () => {}, accept: async () => {},
+    imageChoicePayload: (_settings, _ratio, value) => ({ model_alias: value.model, resolution: value.resolution }),
+    request: async (path, options) => {
+      calls.push({ path, body: options?.body && JSON.parse(options.body) });
+      if (path.endsWith("/preview")) return { items: [] };
+      if (path === "/productions/p") return { project: { current_revision_id: "revision" } };
+      if (loseReply) { loseReply = false; throw new Error("reply lost"); }
+      return { status: "completed" };
+    },
+  };
+  const prepare = handler("../src/image-generation-controls/ImageBatchToolbar.jsx", "ImageBatchToolbar", "prepare", scope);
+  await prepare();
+  const first = calls.at(-1).body;
+  assert.equal(first.mode, "all");
+  scope.choice = { model: "qwen_image_2", resolution: "1080x1920" };
+  await prepare();
+  assert.deepEqual(calls.at(-1).body, first);
+  assert.equal(calls.filter(c => c.path.endsWith("/preview")).length, 1);
+  await prepare();
+  assert.notEqual(calls.at(-1).body.request_id, first.request_id);
+  assert.equal(calls.at(-1).body.model_alias, "qwen_image_2");
+  assert.equal(calls.at(-1).body.mode, "all");
 });

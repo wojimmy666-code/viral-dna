@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from .control_assets.domain import DepthControlAsset
+from .editing_guidance import separate_shot_editing_guidance
 from .prompt_engine.contracts import PromptShotDraft
 from .reference_routes.domain import VideoReferenceRouteCapability
 from .schema import WORKSPACE_SCHEMA_VERSION
@@ -197,9 +198,7 @@ class ShotOutputMode(StrEnum):
 def normalize_shot_output_mode(value: object) -> object:
     """Collapse the former source/generated image routes into one image workflow."""
 
-    if value is None or (
-        isinstance(value, str) and value in {"source_images", "generated_images"}
-    ):
+    if value is None or (isinstance(value, str) and value in {"source_images", "generated_images"}):
         return ShotOutputMode.IMAGE_TO_VIDEO
     return value
 
@@ -978,6 +977,7 @@ class ImageGenerationSettingsResponse(BaseModel):
     catalog_version: str
     pricing_version: str
     selected_capabilities: ImageGenerationCapability | None = None
+    local_capabilities: ImageGenerationCapability | None = None
     models: list[ImageGenerationModelOption]
 
 
@@ -2162,6 +2162,15 @@ class ProviderManagedAssetBinding(BaseModel):
 
 
 class ShotPlan(BaseModel):
+    editing_guidance: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def separate_skill_editing_notes(cls, value):
+        if isinstance(value, dict) and value.get("source_kind") == "skill_generated":
+            return separate_shot_editing_guidance(value)
+        return value
+
     id: UUID = Field(default_factory=uuid4)
     project_id: UUID
     revision_id: UUID
@@ -2207,6 +2216,7 @@ class ShotPlan(BaseModel):
     @classmethod
     def normalize_legacy_output_mode(cls, value: object) -> object:
         return normalize_shot_output_mode(value)
+
     video_prompt: str = Field(default="", max_length=8000)
     video_prompt_mentions: list[VideoPromptMention] = Field(
         default_factory=list,
@@ -3222,7 +3232,25 @@ class ChangeImpactResponse(BaseModel):
     summary: str
 
 
-class ImageGenerationCreate(BaseModel):
+class ImageGenerationOverrides(BaseModel):
+    """Per-request choices; omitted values inherit project defaults."""
+
+    model_alias: str | None = Field(default=None, max_length=80, pattern=r"^[a-zA-Z0-9_.-]+$")
+    execution_mode: Literal["remote_api", "local_tool"] | None = None
+    width: int | None = Field(default=None, ge=256, le=8192)
+    height: int | None = Field(default=None, ge=256, le=8192)
+    candidate_count: int | None = Field(default=None, ge=1, le=4)
+    allow_unknown_cost: bool = False
+    image_tool_snapshot: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_dimensions_together(self):
+        if (self.width is None) != (self.height is None):
+            raise ValueError("图片宽度和高度必须同时指定")
+        return self
+
+
+class ImageGenerationCreate(ImageGenerationOverrides):
     expected_revision_id: UUID
     expected_shot_revision_id: UUID | None = None
     visual_beat_id: UUID | None = None
@@ -3237,6 +3265,8 @@ class ImageGenerationCreate(BaseModel):
     allow_unknown_cost: bool = False
     generation_intent: Literal["standard", "new_variation"] = "standard"
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    image_batch_id: UUID | None = None
+    preserve_approval: bool = False
 
 
 class VideoGenerationCreate(BaseModel):
@@ -3790,6 +3820,7 @@ class CandidateBatchLifecycleResponse(BaseModel):
 
 
 class TimelineClip(BaseModel):
+    editing_guidance: str | None = Field(default=None, max_length=4000)
     id: UUID = Field(default_factory=uuid4)
     shot_plan_id: UUID
     shot_index: int = Field(ge=1)
@@ -3965,6 +3996,7 @@ class ProductionTimeline(BaseModel):
 
 
 class TimelineClipUpdate(BaseModel):
+    editing_guidance: str | None = Field(default=None, max_length=4000)
     clip_id: UUID
     enabled: bool | None = None
     trim_in_seconds: float | None = Field(default=None, ge=0)

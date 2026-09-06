@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { storyboardProgressState } from "../src/skill-workflow/storyboard-progress.js";
+import { imageModelOptions } from "../src/image-generation-controls/image-generation-ui.js";
+import { imageResolutionOptions, resolutionForDimensions } from "../src/media-resolution.js";
+import { skillImageGenerationSettings } from "../src/skill-workflow/skill-workflow-ui.js";
 
 import {
   buildCategoryProfileCreativeInputs,
@@ -28,6 +31,48 @@ const videoModel = {
     rates_micros: { "720P": 100_000, "1080P": 200_000 },
   },
 };
+
+test("Skill local choice reuses ImageGen without exposing the orchestration model as an image model", () => {
+  const settings = { local_executable_path: "existing-adapter", local_model: "gpt-5.6-sol", models: [{ alias: "remote" }], local_cost_source: "unknown" };
+  const locked = skillImageGenerationSettings(settings, { image_provider_connection_id: "local_tool", image_model_id: "local_tool", candidate_count_by_stage: { shot_image: 2 } });
+  const options = imageModelOptions(locked);
+  assert.equal(locked.execution_mode, "local_tool");
+  assert.equal(locked.local_executable_path, "existing-adapter");
+  assert.equal(options.length, 2);
+  const local = options.find(item => item.alias === "local_tool");
+  assert.equal(local.label, "image-2（本机 ImageGen）");
+  assert.equal(local.unit_cost_micros, null);
+  assert.equal(local.configured, true);
+});
+
+test("resolution tiers retain actual dimensions and never claim unsupported 4K", () => {
+  const model = imageModelOptions({ local_executable_path: "adapter" })[0];
+  const options = imageResolutionOptions("9:16", model);
+  assert.equal(options.find((item) => item.label === "1080p").value, "1080x1920");
+  assert.ok(!options.some((item) => item.label === "4K"));
+  assert.equal(resolutionForDimensions(576, 1024), "原有规格");
+  assert.equal(resolutionForDimensions(1920, 1080), "1080p");
+  assert.equal(resolutionForDimensions(2160, 3840), "4K");
+  assert.deepEqual(imageResolutionOptions("16:9", null), []);
+});
+
+test("unknown local cost is explicit and cannot bypass a hard budget or unknown video pricing", () => {
+  const draft = { imageModel: "local_tool", imageResolution: "1080x1920", videoModel: "video-explicit", videoResolution: "720x1280", allowUnknownLocalImageCost: true, automationMode: "guided" };
+  const imageModels = imageModelOptions({ local_executable_path: "adapter", local_cost_source: "unknown" });
+  const payload = buildRunContractPayload({ draft, imageModels, videoModels: [videoModel] });
+  assert.equal(payload.image_provider_connection_id, "local_tool");
+  assert.equal(payload.estimate_status, "partial");
+  assert.equal(payload.allow_unknown_local_image_cost, true);
+  assert.equal(buildRunContractPayload({ draft: { ...draft, budgetCny: 10 }, imageModels, videoModels: [videoModel] }).allow_unknown_local_image_cost, false);
+  assert.equal(buildRunContractPayload({ draft, imageModels, videoModels: [] }).estimate_status, "unknown");
+});
+
+test("style confirmation removes the redundant intent, style pills and Look Test heading", () => {
+  const source = readFileSync(new URL("../src/skill-workflow/SkillExperience.jsx", import.meta.url), "utf8");
+  assert.match(source, /stage\.id === "style_confirmation"\) return null/);
+  assert.doesNotMatch(source, /title="Look Test"/);
+  assert.doesNotMatch(source, /contract\?\.image_width\} ×/);
+});
 
 const wizardSource = readFileSync(
   new URL("../src/skill-workflow/SkillExperience.jsx", import.meta.url),

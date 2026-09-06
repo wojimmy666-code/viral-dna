@@ -668,6 +668,8 @@ export function ShotVideoWorkspace({
       ? "没有已开放的视频生成模型"
     : !selectedModel
       ? "请选择视频生成模型"
+      : !supportedResolutions.includes(videoDraft.resolution)
+        ? "请选择当前模型支持的视频分辨率"
       : maximumReferenceCount > 0
         && selectedCapacityReferenceCount > maximumReferenceCount
         ? `当前模型最多支持 ${maximumReferenceCount} 项生成参考，本次已选择 ${selectedCapacityReferenceCount} 项；不会自动丢弃参考，请切换模型或手动减少`
@@ -752,9 +754,9 @@ export function ShotVideoWorkspace({
       ...current,
       modelAlias,
       durationSeconds: String(nextDuration),
-      resolution: preferredVideoResolution(model, current.resolution),
+      resolution: plan.source_kind === "skill_generated" ? current.resolution : preferredVideoResolution(model, current.resolution),
       audioStrategy: (
-        current.audioStrategy === "generate_native" && !model?.capabilities?.native_audio
+        plan.source_kind !== "skill_generated" && current.audioStrategy === "generate_native" && !model?.capabilities?.native_audio
           ? (sourceAudioAvailable ? "reuse_source" : "muted")
           : current.audioStrategy
       ),

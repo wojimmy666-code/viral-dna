@@ -8,7 +8,14 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from pydantic_core import to_jsonable_python
 
 
@@ -90,6 +97,16 @@ class ExactOverlayInstruction(BaseModel):
 
 
 class ProductionSeedShot(BaseModel):
+    editing_guidance: str | None = Field(default=None, max_length=4000)
+
+    @model_serializer(mode="wrap")
+    def serialize_without_absent_editing_guidance(self, handler):
+        # Old immutable Seeds did not contain this field. Retain their exact hash.
+        result = handler(self)
+        if self.editing_guidance is None:
+            result.pop("editing_guidance", None)
+        return result
+
     stable_shot_key: str = Field(pattern=r"^shot_[a-z0-9]{8,64}$")
     order: int = Field(ge=1)
     narrative_role: str = Field(default="body", min_length=1, max_length=80)
@@ -130,8 +147,8 @@ class ProductionSeedShot(BaseModel):
 
 class ProductionSeedAudioIntent(BaseModel):
     clip_audio_strategy: Literal["candidate", "source", "muted"] = "muted"
-    music_strategy: Literal["none", "select", "generate"] = "none"
-    narration_strategy: Literal["none", "recorded", "generated"] = "none"
+    music_strategy: Literal["none", "select", "generate"] | None = None
+    narration_strategy: Literal["none", "recorded", "generated"] | None = None
     sfx_enabled: bool = False
     creative_direction: dict[str, Any] = Field(default_factory=dict)
 
@@ -139,7 +156,7 @@ class ProductionSeedAudioIntent(BaseModel):
 class ProductionSeedSubtitleIntent(BaseModel):
     enabled: bool = False
     language: str = Field(default="zh-CN", min_length=2, max_length=20)
-    source: Literal["final_speech", "manual", "none"] = "none"
+    source: Literal["final_speech", "manual", "none"] | None = None
     style: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -148,9 +165,7 @@ class ProductionSeed(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    schema_version: Literal["viral-dna-production-seed/v1"] = (
-        "viral-dna-production-seed/v1"
-    )
+    schema_version: Literal["viral-dna-production-seed/v1"] = "viral-dna-production-seed/v1"
     id: UUID = Field(default_factory=uuid4)
     owner_project_id: UUID
     origin_type: ProductionSeedOrigin

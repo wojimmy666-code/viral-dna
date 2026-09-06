@@ -198,7 +198,7 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
     candidateCount: normalizedCandidateCount(
       persistedDraft?.candidate_count,
     ),
-    audioStrategy: persistedDraft?.audio_strategy || "reuse_source",
+    audioStrategy: persistedDraft?.audio_strategy || settings?.default_audio_strategy || "reuse_source",
     modelAlias,
     resolution: (
       persistedDraft?.resolution

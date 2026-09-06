@@ -63,6 +63,14 @@ def test_integer_frame_projection_and_skill_seed_integrity() -> None:
     assert seed.shots[0].duration_frames == 80
     assert canonical_digest(seed) == seed.content_hash
 
+    legacy = seed.model_dump(mode="json")
+    for shot in legacy["shots"]:
+        shot.pop("editing_guidance", None)
+    legacy["content_hash"] = canonical_digest({key: value for key, value in legacy.items() if key != "content_hash"})
+    restored = ProductionSeed.model_validate(legacy)
+    assert restored.content_hash == legacy["content_hash"]
+    assert "editing_guidance" not in restored.model_dump(mode="json")["shots"][0]
+
     tampered = seed.model_dump(mode="python")
     tampered["name"] = "tampered"
     with pytest.raises(ValidationError):

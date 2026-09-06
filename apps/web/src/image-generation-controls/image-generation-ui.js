@@ -9,19 +9,21 @@ export function imageModelOptions(settings = {}) {
     providerLabel: "阿里百炼",
   }));
   if (settings.allow_local_tool === false) return remoteModels;
-  const localCapability = settings.execution_mode === "local_tool"
+  const localCapability = settings.local_capabilities || (settings.execution_mode === "local_tool"
     ? settings.selected_capabilities
-    : null;
+    : null);
   return [
     ...remoteModels,
     {
       alias: LOCAL_IMAGE_MODEL_ALIAS,
       provider: "local_tool",
       providerLabel: "本机工具",
-      model: settings.local_model || settings.local_tool_id || "imagegen",
-      label: settings.local_model || settings.local_tool_id || "本机 ImageGen",
+      model: "imagegen",
+      label: "image-2（本机 ImageGen）",
+      orchestrationModel: settings.local_model,
       description: "使用当前设备中已配置的 ImageGen 工具生成图片。",
-      unit_cost_micros: settings.local_unit_cost_micros,
+      unit_cost_micros: settings.local_cost_source === "unmetered" ? 0
+        : settings.local_cost_source === "configured_rate" ? settings.local_unit_cost_micros : null,
       recommended: false,
       configured: Boolean(settings.local_executable_path),
       executionMode: "local_tool",
@@ -32,9 +34,12 @@ export function imageModelOptions(settings = {}) {
         max_reference_images: 4,
         max_input_images: 5,
         max_candidates: 4,
+        maximum_width: 2048,
+        maximum_height: 2048,
+        maximum_pixels: 4_194_304,
       },
     },
-  ];
+  ].filter((item) => !settings.locked_model_alias || item.alias === settings.locked_model_alias);
 }
 
 export function imageModelCompatibility(model, { inputCount = 0, inputMode = "keyframe_edit" } = {}) {
@@ -43,7 +48,7 @@ export function imageModelCompatibility(model, { inputCount = 0, inputMode = "ke
   if (inputMode === "text_to_image" && !capability.text_to_image) {
     return { compatible: false, reason: "不支持纯文生图" };
   }
-  if (inputMode === "keyframe_edit" && !capability.image_to_image) {
+  if ((inputMode === "keyframe_edit" || inputCount > 0) && !capability.image_to_image) {
     return { compatible: false, reason: "不支持图生图" };
   }
   const maximumInputs = Number(capability.max_input_images || 1);
@@ -53,8 +58,8 @@ export function imageModelCompatibility(model, { inputCount = 0, inputMode = "ke
   return { compatible: true, reason: "" };
 }
 
-export function imageGenerationSummary({ aspectRatio, candidateCount, inputMode }) {
-  const mode = inputMode === "text_to_image" ? "纯文生图" : "图生图";
+export function imageGenerationSummary({ aspectRatio, candidateCount, inputMode, inputCount = 0 }) {
+  const mode = inputMode === "text_to_image" ? (inputCount > 0 ? "参考图创作" : "纯文生图") : "图生图";
   return `${mode} · ${aspectRatio || "跟随方案"} · 自适应 · ${candidateCount}张`;
 }
 

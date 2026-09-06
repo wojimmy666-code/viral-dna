@@ -38,11 +38,17 @@ from .control_assets.models import (
     DepthControlUpdateResponse,
 )
 from .control_assets.service import DepthControlService, DepthControlServiceError
+from .image_batches import ImageBatchService, input_fingerprint
+from .image_batches_models import ImageBatch
 from .image_generation import ImageGenerationGateway, ImageGenerationGatewayError
+from .image_generation.catalog import ImageModelCatalogError
 from .image_generation.identity_policy import (
     IdentityPolicyViolation,
     validate_identity_bindings,
     validate_identity_generation,
+)
+from .image_generation.selection import (
+    permits_unknown_local_image_cost,
 )
 from .managed_assets.service import ManagedAssetCatalogService, ManagedAssetServiceError
 from .media import MediaProcessingError, MediaProcessor
@@ -337,6 +343,12 @@ def _resolve_workspace_source_path(raw_path: str, workspace_root: Path) -> Path:
 
 
 class ProductionRepository(Protocol):
+    async def save_image_batch(self, batch: ImageBatch) -> ImageBatch: ...
+
+    async def get_image_batch(self, batch_id: UUID) -> ImageBatch | None: ...
+
+    async def list_image_batches(self, project_id: UUID) -> list[ImageBatch]: ...
+
     async def get_record(self, record_id: UUID) -> AnalysisRecord | None: ...
 
     async def get_video(self, video_id: UUID) -> Video | None: ...
@@ -1318,6 +1330,36 @@ class ProductionService:
         self._project_locks: dict[UUID, asyncio.Lock] = {}
         self._generation_tasks: dict[UUID, asyncio.Task[None]] = {}
         self._generation_cancellations: dict[UUID, Event] = {}
+        self._image_cost_reservations: dict[UUID, tuple[UUID, int]] = {}
+        self.image_batches = ImageBatchService(self)
+
+    @staticmethod
+    def _image_bindings_for_beat(plan, beat, bindings):
+        if plan.source_kind != ShotSourceKind.SKILL_GENERATED and len(plan.visual_beats) == 1:
+            return bindings
+        ids = {item.reference_asset_id for item in beat.image_prompt_mentions}
+        return [item for item in bindings if item.reference_asset_id in ids]
+
+    async def _reserve_image_cost(self, project_id, run_id, cost):
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id)
+            reserved = sum(
+                value
+                for owner, value in self._image_cost_reservations.values()
+                if owner == project_id
+            )
+            if project.budget_limit_micros is not None:
+                if (
+                    cost is None
+                    or project.actual_cost_micros + reserved + cost > project.budget_limit_micros
+                ):
+                    raise _fail(
+                        409,
+                        "production_budget_exceeded",
+                        "本次费用与正在生成任务的预留费用超过剩余预算",
+                    )
+            self._image_cost_reservations[run_id] = (project_id, cost or 0)
 
     async def _project_lock(self, project_id: UUID) -> asyncio.Lock:
         async with self._lock_guard:
@@ -1811,6 +1853,7 @@ class ProductionService:
                         "handle_in_frames",
                         "handle_out_frames",
                         "exact_overlay_instructions",
+                        "editing_guidance",
                     )
                 }
                 if (
@@ -1894,6 +1937,7 @@ class ProductionService:
         return sorted(projects, key=lambda item: item.updated_at, reverse=True)
 
     async def trash_project(self, project_id: UUID) -> ProductionProject:
+        await self.image_batches.pause_project(project_id)
         lock = await self._project_lock(project_id)
         async with lock:
             project = await self._require_project(project_id, include_trashed=True)
@@ -1928,6 +1972,7 @@ class ProductionService:
             return updated
 
     async def permanently_delete_project(self, project_id: UUID) -> None:
+        await self.image_batches.pause_project(project_id)
         lock = await self._project_lock(project_id)
         async with lock:
             project = await self._require_project(project_id, include_trashed=True)
@@ -2894,6 +2939,34 @@ class ProductionService:
                 image_preview=previews[plan.id][0],
                 video_preview=previews[plan.id][1],
             )
+            for plan in plans
+        ]
+
+    async def shot_navigation(self, project_id: UUID) -> list[dict]:
+        project = await self._require_project(project_id)
+        project, plans = await self._ensure_project_shots(project)
+        fields = {
+            "id",
+            "index",
+            "order",
+            "revision_id",
+            "project_id",
+            "start_seconds",
+            "end_seconds",
+            "duration_seconds",
+            "lifecycle_status",
+            "required",
+            "output_mode",
+            "source_kind",
+            "image_status",
+            "video_status",
+        }
+        return [
+            {
+                "plan": plan.model_dump(mode="json", include=fields),
+                "current_revision_id": str(project.current_revision_id),
+                "visual_beat_count": len(plan.visual_beats),
+            }
             for plan in plans
         ]
 
@@ -5719,7 +5792,10 @@ class ProductionService:
         shot_plan_id: UUID,
         payload: ImageGenerationCreate,
     ) -> GenerationRunResponse:
-        run = await self._enqueue_image_run(shot_plan_id, payload)
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            run = await self._enqueue_image_run(shot_plan_id, payload)
         self._schedule_image_run(run.id)
         return await self._run_response(run)
 
@@ -6126,7 +6202,7 @@ class ProductionService:
         project = await self._require_project(plan.project_id)
         self._require_generation_revision(project, plan, payload)
         payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
-        await self._validate_skill_image_contract(project, payload)
+        payload = await self._validate_skill_image_contract(project, payload)
         beat = _visual_beat(plan, payload.visual_beat_id)
         if payload.visual_beat_id != beat.id:
             payload = payload.model_copy(update={"visual_beat_id": beat.id})
@@ -6134,9 +6210,10 @@ class ProductionService:
             payload = payload.model_copy(update={"seed": secrets.randbelow(2_147_483_648)})
         if not beat.image_prompt.strip():
             raise _fail(409, "image_prompt_required", "请先填写图片提示词")
-        if beat.image_status == WorkflowItemStatus.APPROVED:
+        if beat.image_status == WorkflowItemStatus.APPROVED and not payload.preserve_approval:
             raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
         bindings = await self.repository.list_reference_bindings(plan.id)
+        bindings = self._image_bindings_for_beat(plan, beat, bindings)
         assets = await self._list_reference_assets(project.id)
         gateway_plan = _shot_for_visual_beat(plan, beat)
         try:
@@ -6144,6 +6221,7 @@ class ProductionService:
             validate_identity_generation(
                 state=identity_policy,
                 input_mode=payload.input_mode,
+                reference_creation=plan.source_kind == "skill_generated",
                 source_present=bool(
                     gateway_plan.source_keyframe_url or gateway_plan.source_keyframe_relative_path
                 ),
@@ -6294,6 +6372,7 @@ class ProductionService:
                 str(exc)[:2000],
             )
         finally:
+            self._image_cost_reservations.pop(run_id, None)
             self._generation_cancellations.pop(run_id, None)
             current = self._generation_tasks.get(run_id)
             if current is asyncio.current_task():
@@ -6597,6 +6676,8 @@ class ProductionService:
                 continue
             for run in await self.repository.list_generation_runs(project.id):
                 if run.status == ProductionRunStatus.QUEUED and run.request_payload:
+                    if run.request_payload.get("image_batch_id"):
+                        continue  # The batch resumes its own bounded queue after user confirmation.
                     if run.kind == GenerationKind.VIDEO:
                         self._schedule_video_run(run.id)
                     else:
@@ -6651,6 +6732,7 @@ class ProductionService:
                             "服务重启导致任务中断，请人工重试以避免重复计费",
                         )
                         interrupted += 1
+        await self.image_batches.recover()
         return {
             "recovered": recovered,
             "interrupted": interrupted,
@@ -6658,6 +6740,7 @@ class ProductionService:
         }
 
     async def shutdown_generation_runs(self) -> None:
+        await self.image_batches.shutdown()
         tasks = [task for task in self._generation_tasks.values() if not task.done()]
         for cancellation in self._generation_cancellations.values():
             cancellation.set()
@@ -6689,11 +6772,12 @@ class ProductionService:
             gateway_plan = _shot_for_visual_beat(plan, beat)
             if not beat.image_prompt.strip():
                 raise _fail(409, "image_prompt_required", "请先填写图片提示词")
-            if beat.image_status == WorkflowItemStatus.APPROVED:
+            if beat.image_status == WorkflowItemStatus.APPROVED and not payload.preserve_approval:
                 raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
 
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
             bindings = await self.repository.list_reference_bindings(plan.id)
+            bindings = self._image_bindings_for_beat(plan, beat, bindings)
             assets = await self._list_reference_assets(project.id)
             assets_by_id = {item.id: item for item in assets}
             for binding in bindings:
@@ -6710,34 +6794,57 @@ class ProductionService:
                 self._resolve_source_keyframe(project, gateway_plan) if uses_images else None
             )
             generation_project = project
-            skill_contract = await self._skill_run_contract(project)
-            if skill_contract is not None:
+            payload = await self._validate_skill_image_contract(project, payload)
+            if payload.width is not None and payload.height is not None:
                 generation_project = project.model_copy(
                     update={
-                        "output_width": skill_contract.image_width,
-                        "output_height": skill_contract.image_height,
+                        "output_width": payload.width,
+                        "output_height": payload.height,
                     }
                 )
-            try:
-                run, candidates = await self.image_gateway.generate(
-                    generation_project,
-                    gateway_plan,
-                    payload.expected_revision_id,
-                    bindings,
-                    assets,
-                    candidate_count=payload.candidate_count,
-                    source_path=source_path,
-                    input_mode=payload.input_mode,
-                    execution_mode=payload.execution_mode,
-                    model_alias=payload.model_alias,
-                    allow_unknown_cost=payload.allow_unknown_cost,
-                    seed=payload.seed,
-                    reuse_cache=payload.generation_intent != "new_variation",
-                    run_id=run_id,
-                    cancel_event=cancellation,
-                )
-            except ImageGenerationGatewayError as exc:
-                raise _fail(exc.status_code, exc.code, str(exc)) from exc
+            snapshot_fingerprint = input_fingerprint(plan, beat, bindings)
+        # Provider latency must not hold the project edit/revision lock.
+        gateway_options = {}
+        if isinstance(self.image_gateway, ImageGenerationGateway):
+            gateway_options["reserve_cost"] = lambda cost: self._reserve_image_cost(
+                project.id, run_id, cost
+            )
+        try:
+            run, candidates = await self.image_gateway.generate(
+                generation_project,
+                gateway_plan,
+                payload.expected_revision_id,
+                bindings,
+                assets,
+                candidate_count=payload.candidate_count,
+                source_path=source_path,
+                input_mode=payload.input_mode,
+                execution_mode=payload.execution_mode,
+                model_alias=payload.model_alias,
+                allow_unknown_cost=payload.allow_unknown_cost,
+                seed=payload.seed,
+                reuse_cache=payload.generation_intent != "new_variation",
+                run_id=run_id,
+                cancel_event=cancellation,
+                **gateway_options,
+            )
+        except ImageGenerationGatewayError as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+        async with lock:
+            project = await self._require_project(plan.project_id)
+            plan = await self._require_shot(shot_plan_id)
+            current_beat = next((item for item in plan.visual_beats if item.id == beat.id), None)
+            current_bindings = await self.repository.list_reference_bindings(plan.id)
+            unchanged = current_beat is not None and snapshot_fingerprint == input_fingerprint(
+                plan,
+                current_beat,
+                self._image_bindings_for_beat(plan, current_beat, current_bindings),
+            )
+            preserve_selection = (
+                not unchanged or current_beat.image_status == WorkflowItemStatus.APPROVED
+            )
+            if current_beat is not None:
+                beat = current_beat
             now = utc_now()
             run = run.model_copy(
                 update={
@@ -6769,10 +6876,14 @@ class ProductionService:
                     "simulated_generation_forbidden",
                     "模拟占位图不能作为图片生成结果，请先配置真实生图引擎",
                 )
-            prior_candidate_updates = await self._reset_selected_image_candidates(
-                project,
-                plan,
-                visual_beat_id=beat.id,
+            prior_candidate_updates = (
+                []
+                if preserve_selection
+                else await self._reset_selected_image_candidates(
+                    project,
+                    plan,
+                    visual_beat_id=beat.id,
+                )
             )
             revision_id = uuid4()
             updated_beat = beat.model_copy(
@@ -6786,17 +6897,23 @@ class ProductionService:
                     "updated_at": utc_now(),
                 }
             )
-            updated_plan = _sync_shot_visual_beats(
-                plan,
-                [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
-                revision_id=revision_id,
+            updated_plan = (
+                plan
+                if preserve_selection
+                else _sync_shot_visual_beats(
+                    plan,
+                    [updated_beat if item.id == beat.id else item for item in plan.visual_beats],
+                    revision_id=revision_id,
+                )
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": project.active_step
+                    if preserve_selection
+                    else ProductionStep.SHOT_IMAGES,
                     "estimated_cost_micros": (
                         project.estimated_cost_micros + run.estimated_cost_micros
                     ),
@@ -6825,6 +6942,7 @@ class ProductionService:
                 generation_runs=[run],
                 generation_candidates=[*prior_candidate_updates, *candidates],
             )
+            self._image_cost_reservations.pop(run_id, None)
         await self._notify_generation_run(run)
         return await self.get_generation_run(run.id)
 
@@ -9489,6 +9607,7 @@ class ProductionService:
                     image_prompt_mentions=mentions,
                     image_negative_constraints=item.image_negative_constraints,
                     video_prompt=item.video_prompt,
+                    editing_guidance=item.editing_guidance,
                     video_negative_constraints=item.video_negative_constraints,
                     exact_overlay_instructions=exact_overlays,
                     image_status=WorkflowItemStatus.READY,
@@ -9709,6 +9828,8 @@ class ProductionService:
         except IncompatibleShotPlanSchemaError:
             plans = []
             incompatible_schema = True
+        if plans and project.origin_type == ProductionOriginType.SKILL_RUN:
+            return project, plans  # Skill shots have no legacy source-video frame repairs.
         if plans:
             current_project = await self._require_project(project.id)
             current_project, plans = await self._repair_legacy_simulated_outputs(
@@ -11534,21 +11655,30 @@ class ProductionService:
         self,
         project: ProductionProject,
         payload: ImageGenerationCreate,
-    ) -> None:
+    ) -> ImageGenerationCreate:
         contract = await self._skill_run_contract(project)
         if contract is None:
-            return
-        if payload.model_alias != contract.image_model_id:
-            raise _fail(
-                409,
-                "run_contract_model_mismatch",
-                "图片模型与项目生成契约不一致；更换模型前必须由用户更新并确认契约",
+            return payload
+        from .image_generation.selection import resolve_skill_image_request
+
+        try:
+            effective, selection = await resolve_skill_image_request(
+                contract, payload, getattr(self.image_gateway, "settings_service", None)
             )
-        expected_count = contract.candidate_count_by_stage.get("shot_image", 1)
-        if payload.candidate_count != expected_count:
-            raise _fail(409, "run_contract_candidate_count_mismatch", "图片候选数与生成契约不一致")
-        if payload.allow_unknown_cost:
-            raise _fail(409, "unknown_cost_forbidden", "Skill 项目不允许绕过未知成本检查")
+        except ImageModelCatalogError as exc:
+            raise _fail(409, "image_generation_parameters_invalid", str(exc)) from exc
+        return payload.model_copy(
+            update={
+                "model_alias": effective.image_model_id,
+                "execution_mode": "local_tool"
+                if selection.provider == "local_tool"
+                else "remote_api",
+                "width": effective.image_width,
+                "height": effective.image_height,
+                "image_tool_snapshot": selection.tool_snapshot,
+                "allow_unknown_cost": permits_unknown_local_image_cost(effective),
+            }
+        )
 
     async def _validate_skill_video_contract(
         self,
@@ -11558,25 +11688,8 @@ class ProductionService:
         contract = await self._skill_run_contract(project)
         if contract is None:
             return
-        if payload.model_alias != contract.video_model_id:
-            raise _fail(
-                409,
-                "run_contract_model_mismatch",
-                "视频模型与项目生成契约不一致；更换模型前必须由用户更新并确认契约",
-            )
-        expected_resolution = contract.video_resolution_label
-        if payload.resolution != expected_resolution:
-            raise _fail(409, "run_contract_resolution_mismatch", "视频分辨率与生成契约不一致")
-        expected_count = contract.candidate_count_by_stage.get("shot_video", 1)
-        if payload.candidate_count != expected_count:
-            raise _fail(409, "run_contract_candidate_count_mismatch", "视频候选数与生成契约不一致")
-        expected_audio = (
-            VideoGenerationAudioStrategy.GENERATE_NATIVE
-            if contract.generate_video_audio
-            else VideoGenerationAudioStrategy.MUTED
-        )
-        if payload.audio_strategy != expected_audio:
-            raise _fail(409, "run_contract_audio_mismatch", "视频音频策略与生成契约不一致")
+        # Model capabilities, actual-price estimates and budget are validated by
+        # the shared video gateway; project defaults are not execution locks.
         if payload.allow_unknown_cost:
             raise _fail(409, "unknown_cost_forbidden", "Skill 项目不允许绕过未知成本检查")
 

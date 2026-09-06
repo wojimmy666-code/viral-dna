@@ -66,6 +66,7 @@ function timelineUpdatePayload(draft) {
       timeline_duration_seconds: Number(clip.timeline_duration_seconds),
       audio_mode: clip.audio_mode,
       audio_volume: Number(clip.audio_volume),
+      editing_guidance: clip.editing_guidance,
       transition_after: clip.id === lastEnabledClipId
         ? { kind: "none", duration_seconds: 0 }
         : clip.transition_after,
@@ -635,6 +636,10 @@ function ClipInspector({ clip, clips, hasSourceAudio, onChange, onMove }) {
         <span>片段音量 · {Math.round(clip.audio_volume * 100)}%</span>
         <input max="2" min="0" step="0.05" type="range" value={clip.audio_volume} onChange={(event) => onChange({ audio_volume: Number(event.target.value) })} />
       </label>
+      {clip.editing_guidance != null && <label className="timeline-field">
+        <span>剪辑建议</span>
+        <textarea maxLength={4000} rows={4} value={clip.editing_guidance} onChange={(event) => onChange({ editing_guidance: event.target.value })} />
+      </label>}
       <div className="timeline-field-pair">
         <label>
           <span>片尾转场</span>

@@ -1102,7 +1102,11 @@ class PlatformSkillCatalogService:
             spec = version.manifest.spec
             items.append(
                 SkillCatalogItem(
-                    **skill.model_dump(mode="python"),
+                    **{
+                        **skill.model_dump(mode="python"),
+                        "cover_url": skill.presentation.cover_url or skill.cover_url,
+                    },
+                    fallback_cover_url=skill.cover_url,
                     current_version=version,
                     favorited=skill.id in favorites,
                     supported_channels=spec.intent.supported_channels,
@@ -1150,7 +1154,11 @@ class PlatformSkillCatalogService:
             raise PlatformSkillError(409, "skill_version_missing", "Skill 发布版本不存在")
         spec = version.manifest.spec
         return SkillCatalogItem(
-            **skill.model_dump(mode="python"),
+            **{
+                **skill.model_dump(mode="python"),
+                "cover_url": skill.presentation.cover_url or skill.cover_url,
+            },
+            fallback_cover_url=skill.cover_url,
             current_version=version,
             favorited=skill.id in (favorite_skill_ids or set()),
             supported_channels=spec.intent.supported_channels,
@@ -1178,6 +1186,37 @@ class PlatformSkillCatalogService:
 
     async def list_admin(self) -> SkillCatalogState:
         return await asyncio.to_thread(self._read_state)
+
+    async def get_platform_skill(self, skill_id: str):
+        state = await asyncio.to_thread(self._read_state)
+        skill = next((item for item in state.skills if item.id == skill_id), None)
+        if skill is None:
+            raise PlatformSkillError(404, "skill_not_found", "Skill 不存在")
+        return skill
+
+    async def save_presentation(self, skill_id, presentation, expected_revision):
+        async with self._lock:
+            state = await asyncio.to_thread(self._read_state)
+            skill = next((item for item in state.skills if item.id == skill_id), None)
+            if skill is None:
+                raise PlatformSkillError(404, "skill_not_found", "Skill 不存在")
+            if skill.presentation.revision != expected_revision:
+                raise PlatformSkillError(
+                    409, "presentation_conflict", "封面已被其他操作更新，请重新加载后再保存"
+                )
+            skill.presentation = presentation.model_copy(update={"revision": expected_revision + 1})
+            skill.updated_at = utc_now()
+            await asyncio.to_thread(self._write_state, state)
+            return skill.presentation
+
+    async def is_presentation_asset_published(self, skill_id, asset_id):
+        skill = await self.get_platform_skill(skill_id)
+        if skill.lifecycle != SkillLifecycle.PUBLISHED or not skill.current_published_version_id:
+            return False
+        return any(
+            asset_id in {item.image_asset_id, item.video_asset_id, item.poster_asset_id}
+            for item in skill.presentation.items
+        )
 
     async def create_version(self, payload: SkillVersionCreate) -> PlatformSkillVersion:
         async with self._lock:

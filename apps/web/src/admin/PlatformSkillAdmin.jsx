@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { SkillPresentationEditor } from "./SkillPresentationEditor.jsx";
 import {
   CheckCircle,
   CircleNotch,
@@ -38,6 +39,7 @@ export function PlatformSkillAdmin({ request }) {
   const [packageFile, setPackageFile] = useState(null);
   const [changelog, setChangelog] = useState("");
   const [editor, setEditor] = useState(null);
+  const [presentationSkillId, setPresentationSkillId] = useState(null);
 
   async function load() {
     setLoading(true);
@@ -162,7 +164,9 @@ export function PlatformSkillAdmin({ request }) {
               <div className="platform-skill-group-heading">
                 <div><strong>{skill.name}</strong><span>{skill.category} · {skill.id}</span></div>
                 <span className={`platform-skill-status is-${skill.lifecycle}`}>{STATUS_LABELS[skill.lifecycle]}</span>
+                <button className="secondary-button compact" type="button" onClick={() => setPresentationSkillId(current => current === skill.id ? null : skill.id)}>封面与预览</button>
               </div>
+              {presentationSkillId === skill.id && <SkillPresentationEditor key={skill.id} skill={skill} request={request} onClose={() => setPresentationSkillId(null)} onSaved={() => { setPresentationSkillId(null); setValidation({valid:true,message:"封面与预览已更新"}); load(); }} />}
               <div className="platform-skill-version-list">
                 {versions.map((version) => (
                   <div key={version.id}>

@@ -21,6 +21,7 @@ from .generated_artifacts.domain import (
     GeneratedArtifact,
     StorageObjectReference,
 )
+from .image_batches_models import ImageBatch
 from .media_staging.domain import MediaAccessLease, MediaStagingConfig
 from .models import (
     AnalysisJob,
@@ -325,6 +326,7 @@ class SQLiteStore:
         | _PROJECT_V14_TABLES
         | _PROJECT_V15_TABLES
         | _PROJECT_V16_TABLES
+        | frozenset({"image_batches"})
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -442,6 +444,13 @@ class SQLiteStore:
                 self._create_skill_workflow_indexes(connection)
                 if 16 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (16)")
+                self._create_json_tables(connection, frozenset({"image_batches"}))
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_image_batches_project "
+                    "ON image_batches(json_extract(payload, '$.project_id'))"
+                )
+                if 17 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (17)")
             except Exception:
                 connection.rollback()
                 raise
@@ -644,6 +653,7 @@ class SQLiteStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+
                 def keys_for(table: str, field: str, values: set[str]) -> set[str]:
                     if not values:
                         return set()
@@ -664,6 +674,7 @@ class SQLiteStore:
                     {project_key},
                 )
                 deletions = {
+                    "image_batches": keys_for("image_batches", "project_id", {project_key}),
                     "reference_bindings": keys_for(
                         "reference_bindings",
                         "shot_plan_id",
@@ -729,6 +740,7 @@ class SQLiteStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+
                 def keys_for(table: str, field: str, values: set[str]) -> set[str]:
                     if not values:
                         return set()
@@ -1129,14 +1141,10 @@ class SQLiteStore:
         assets = [Asset.model_validate_json(payload) for payload in payloads]
         return sorted(assets, key=lambda item: item.created_at)
 
-    async def save_generated_artifact(
-        self, artifact: GeneratedArtifact
-    ) -> GeneratedArtifact:
+    async def save_generated_artifact(self, artifact: GeneratedArtifact) -> GeneratedArtifact:
         return await self._save("generated_artifacts", artifact.id, artifact)
 
-    async def get_generated_artifact(
-        self, artifact_id: UUID
-    ) -> GeneratedArtifact | None:
+    async def get_generated_artifact(self, artifact_id: UUID) -> GeneratedArtifact | None:
         return await self._get("generated_artifacts", artifact_id, GeneratedArtifact)
 
     async def list_generated_artifacts(self) -> list[GeneratedArtifact]:
@@ -1160,9 +1168,7 @@ class SQLiteStore:
             references = [item for item in references if item.storage_object_id == object_id]
         return sorted(references, key=lambda item: item.created_at)
 
-    async def save_asset_provenance(
-        self, provenance: AssetProvenance
-    ) -> AssetProvenance:
+    async def save_asset_provenance(self, provenance: AssetProvenance) -> AssetProvenance:
         return await self._save("asset_provenance", provenance.asset_id, provenance)
 
     async def get_asset_provenance(self, asset_id: UUID) -> AssetProvenance | None:
@@ -1253,6 +1259,27 @@ class SQLiteStore:
             await asyncio.to_thread(self._upsert_many, entries, deletions)
         return project, revision
 
+    async def save_image_batch(self, batch: ImageBatch) -> ImageBatch:
+        return await self._save("image_batches", batch.id, batch)
+
+    async def get_image_batch(self, batch_id: UUID) -> ImageBatch | None:
+        return await self._get("image_batches", batch_id, ImageBatch)
+
+    async def list_image_batches(self, project_id: UUID) -> list[ImageBatch]:
+        def read():
+            with self._connect() as connection:
+                return connection.execute(
+                    "SELECT payload FROM image_batches "
+                    "WHERE json_extract(payload, '$.project_id') = ? ORDER BY updated_at",
+                    (str(project_id),),
+                ).fetchall()
+
+        rows = await asyncio.to_thread(read)
+        return sorted(
+            (ImageBatch.model_validate_json(row[0]) for row in rows),
+            key=lambda item: item.created_at,
+        )
+
     async def save_shot_plan(self, shot_plan: ShotPlan) -> ShotPlan:
         return await self._save("shot_plans", shot_plan.id, shot_plan)
 
@@ -1273,12 +1300,9 @@ class SQLiteStore:
             raise IncompatibleShotPlanSchemaError(project_id) from exc
 
     async def list_shot_plans(self, project_id: UUID) -> list[ShotPlan]:
-        entries = await asyncio.to_thread(self._read_all_entries, "shot_plans")
-        payloads = [
-            payload
-            for _, payload in entries
-            if self._payload_value(payload, "project_id") == str(project_id)
-        ]
+        payloads = await asyncio.to_thread(
+            self._read_filtered, "shot_plans", "project_id", project_id
+        )
         try:
             shot_plans = [ShotPlan.model_validate_json(payload) for payload in payloads]
         except ValidationError as exc:
@@ -1305,7 +1329,9 @@ class SQLiteStore:
         self,
         shot_plan_id: UUID,
     ) -> list[ReferenceBinding]:
-        payloads = await asyncio.to_thread(self._read_all, "reference_bindings")
+        payloads = await asyncio.to_thread(
+            self._read_filtered, "reference_bindings", "shot_plan_id", shot_plan_id
+        )
         bindings = [ReferenceBinding.model_validate_json(payload) for payload in payloads]
         return sorted(
             (binding for binding in bindings if binding.shot_plan_id == shot_plan_id),
@@ -1520,7 +1546,9 @@ class SQLiteStore:
         project_id: UUID,
         shot_plan_id: UUID | None = None,
     ) -> list[GenerationRun]:
-        payloads = await asyncio.to_thread(self._read_all, "generation_runs")
+        payloads = await asyncio.to_thread(
+            self._read_filtered, "generation_runs", "project_id", project_id
+        )
         runs = [GenerationRun.model_validate_json(payload) for payload in payloads]
         filtered = [run for run in runs if run.project_id == project_id]
         if shot_plan_id is not None:
@@ -1536,8 +1564,7 @@ class SQLiteStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "SELECT payload FROM shot_video_generation_drafts "
-                    "WHERE record_key = ?",
+                    "SELECT payload FROM shot_video_generation_drafts WHERE record_key = ?",
                     (str(draft.shot_plan_id),),
                 ).fetchone()
                 current_version = 0
@@ -1757,6 +1784,19 @@ class SQLiteStore:
         payloads = await asyncio.to_thread(self._read_all, table)
         return [model_type.model_validate_json(payload) for payload in payloads]
 
+    def _read_filtered(self, table: str, field: str, value: UUID) -> list[str]:
+        if table not in {"shot_plans", "reference_bindings", "generation_runs"} or field not in {
+            "project_id",
+            "shot_plan_id",
+        }:
+            raise ValueError("Unsupported indexed query")
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT payload FROM {table} WHERE json_extract(payload, '$.{field}') = ?",  # noqa: S608 - allowlisted identifiers
+                (str(value),),
+            ).fetchall()
+        return [row[0] for row in rows]
+
     async def save_project(self, project: Project) -> Project:
         return await self._save("projects", project.id, project)
 
@@ -1834,9 +1874,7 @@ class SQLiteStore:
     async def delete_skill_favorite(self, account_id: UUID, skill_id: str) -> None:
         items = await self.list_skill_favorites(account_id)
         deletions = [
-            ("account_skill_favorites", str(item.id))
-            for item in items
-            if item.skill_id == skill_id
+            ("account_skill_favorites", str(item.id)) for item in items if item.skill_id == skill_id
         ]
         if deletions:
             async with self._lock:
@@ -1868,9 +1906,7 @@ class SQLiteStore:
     ) -> CreativeBriefRevision:
         return await self._save("creative_brief_revisions", item.id, item)
 
-    async def list_creative_brief_revisions(
-        self, project_id: UUID
-    ) -> list[CreativeBriefRevision]:
+    async def list_creative_brief_revisions(self, project_id: UUID) -> list[CreativeBriefRevision]:
         return await self._list_project_models(
             "creative_brief_revisions", CreativeBriefRevision, project_id
         )
@@ -1894,9 +1930,7 @@ class SQLiteStore:
     async def replace_asset_usages(
         self, project_id: UUID, items: list[AssetUsage]
     ) -> list[AssetUsage]:
-        return await self._replace_project_models(
-            "asset_usages", project_id, items, AssetUsage
-        )
+        return await self._replace_project_models("asset_usages", project_id, items, AssetUsage)
 
     async def list_asset_usages(self, project_id: UUID) -> list[AssetUsage]:
         return await self._list_project_models("asset_usages", AssetUsage, project_id)
@@ -1911,17 +1945,13 @@ class SQLiteStore:
     async def list_claim_evidence(self, project_id: UUID) -> list[ClaimEvidence]:
         return await self._list_project_models("claim_evidence", ClaimEvidence, project_id)
 
-    async def save_run_contract_revision(
-        self, item: RunContractRevision
-    ) -> RunContractRevision:
+    async def save_run_contract_revision(self, item: RunContractRevision) -> RunContractRevision:
         return await self._save("run_contract_revisions", item.id, item)
 
     async def get_run_contract_revision(self, item_id: UUID) -> RunContractRevision | None:
         return await self._get("run_contract_revisions", item_id, RunContractRevision)
 
-    async def list_run_contract_revisions(
-        self, project_id: UUID
-    ) -> list[RunContractRevision]:
+    async def list_run_contract_revisions(self, project_id: UUID) -> list[RunContractRevision]:
         return await self._list_project_models(
             "run_contract_revisions", RunContractRevision, project_id
         )
@@ -1938,17 +1968,13 @@ class SQLiteStore:
             "creative_treatment_revisions", CreativeTreatmentRevision, project_id
         )
 
-    async def save_style_bible_revision(
-        self, item: StyleBibleRevision
-    ) -> StyleBibleRevision:
+    async def save_style_bible_revision(self, item: StyleBibleRevision) -> StyleBibleRevision:
         return await self._save("style_bible_revisions", item.id, item)
 
     async def get_style_bible_revision(self, item_id: UUID) -> StyleBibleRevision | None:
         return await self._get("style_bible_revisions", item_id, StyleBibleRevision)
 
-    async def list_style_bible_revisions(
-        self, project_id: UUID
-    ) -> list[StyleBibleRevision]:
+    async def list_style_bible_revisions(self, project_id: UUID) -> list[StyleBibleRevision]:
         return await self._list_project_models(
             "style_bible_revisions", StyleBibleRevision, project_id
         )
@@ -1965,14 +1991,10 @@ class SQLiteStore:
     async def list_outline_revisions(self, project_id: UUID) -> list[OutlineRevision]:
         return await self._list_project_models("outline_revisions", OutlineRevision, project_id)
 
-    async def save_shot_manifest_revision(
-        self, item: ShotManifestRevision
-    ) -> ShotManifestRevision:
+    async def save_shot_manifest_revision(self, item: ShotManifestRevision) -> ShotManifestRevision:
         return await self._save("shot_manifest_revisions", item.id, item)
 
-    async def list_shot_manifest_revisions(
-        self, project_id: UUID
-    ) -> list[ShotManifestRevision]:
+    async def list_shot_manifest_revisions(self, project_id: UUID) -> list[ShotManifestRevision]:
         return await self._list_project_models(
             "shot_manifest_revisions", ShotManifestRevision, project_id
         )
@@ -2020,9 +2042,7 @@ class SQLiteStore:
     async def list_skill_artifacts(self, project_id: UUID) -> list[Artifact]:
         return await self._list_project_models("skill_artifacts", Artifact, project_id)
 
-    async def save_artifact_dependency(
-        self, item: ArtifactDependency
-    ) -> ArtifactDependency:
+    async def save_artifact_dependency(self, item: ArtifactDependency) -> ArtifactDependency:
         return await self._save("artifact_dependencies", item.id, item)
 
     async def list_artifact_dependencies(
@@ -2050,9 +2070,7 @@ class SQLiteStore:
         return await self._save("delivery_manifests", item.id, item)
 
     async def list_delivery_manifests(self, project_id: UUID) -> list[DeliveryManifest]:
-        return await self._list_project_models(
-            "delivery_manifests", DeliveryManifest, project_id
-        )
+        return await self._list_project_models("delivery_manifests", DeliveryManifest, project_id)
 
     async def save_timeline_v3_revision(self, item: TimelineV3Revision) -> TimelineV3Revision:
         return await self._save("timeline_v3_revisions", item.id, item)

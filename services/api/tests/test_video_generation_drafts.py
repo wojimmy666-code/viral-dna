@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -54,6 +55,43 @@ def make_shot() -> ShotPlan:
         end_seconds=4,
         duration_seconds=4,
     )
+
+
+@pytest.mark.asyncio
+async def test_skill_video_defaults_do_not_restrict_saved_generation_choices():
+    store = InMemoryStore()
+    service = ShotVideoGenerationDraftService(store, FakeVideoSettings())
+    shot = make_shot()
+    await store.save_shot_plan(shot)
+    contract = SimpleNamespace(
+        video_model_id="bailian_wan_2_7_r2v",
+        video_resolution_label="720P",
+        generate_video_audio=False,
+        candidate_count_by_stage={"shot_video": 1},
+    )
+    service._skill_contract = AsyncMock(return_value=contract)
+    initial = await service.get(shot.id)
+    assert initial.model_alias == contract.video_model_id
+    saved = await service.update(
+        shot.id,
+        ShotVideoGenerationDraftUpdate(
+            expected_draft_version=initial.draft_version,
+            model_alias="seedance_2_0",
+            resolution="1080P",
+            duration_seconds=5,
+            candidate_count=2,
+            audio_strategy="generate_native",
+        ),
+        actor_account_id=None,
+    )
+    assert (saved.model_alias, saved.resolution, saved.candidate_count, saved.audio_strategy) == (
+        "seedance_2_0",
+        "1080P",
+        2,
+        "generate_native",
+    )
+    assert contract.video_model_id == "bailian_wan_2_7_r2v"
+    assert contract.video_resolution_label == "720P"
 
 
 def test_video_generation_draft_persists_user_choice_and_rejects_stale_updates() -> None:

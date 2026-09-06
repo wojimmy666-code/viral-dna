@@ -16,11 +16,15 @@ import {
   imageModelOptions,
 } from "./image-generation-ui.js";
 import "./image-generation-controls.css";
+import { resolutionForDimensions, imageResolutionOptions } from "../media-resolution.js";
 
 export function ImageGenerationCommandBar({
   aspectRatio,
   busy,
+  batchStatus,
   candidateCount,
+  resolution,
+  onResolutionChange,
   estimatedCostLabel,
   generationAvailable,
   identityBlocker,
@@ -48,16 +52,22 @@ export function ImageGenerationCommandBar({
   const selectedKey = settings.execution_mode === "local_tool" && modelAlias === LOCAL_IMAGE_MODEL_ALIAS
     ? LOCAL_IMAGE_MODEL_ALIAS
     : modelAlias;
-  const selectedModel = models.find((model) => model.alias === selectedKey) || models[0] || null;
+  const selectedModel = models.find((model) => model.alias === selectedKey) || null;
+  const resolutions = imageResolutionOptions(aspectRatio, selectedModel);
+  const [width, height] = String(resolution || "").split("x").map(Number);
+  const cap = selectedModel?.capabilities;
+  const resolutionValid = resolution === undefined || Boolean(cap && width && height && width <= cap.maximum_width && height <= cap.maximum_height && width * height <= cap.maximum_pixels);
   const compatibility = imageModelCompatibility(selectedModel, { inputCount, inputMode });
   const maximumCandidates = Math.min(4, Number(selectedModel?.capabilities?.max_candidates || 4));
-  const controlsDisabled = busy || latestRunBusy;
-  const summary = imageGenerationSummary({ aspectRatio, candidateCount, inputMode });
+  const controlsDisabled = busy || latestRunBusy || ["pending", "running"].includes(batchStatus);
+  const summary = imageGenerationSummary({ aspectRatio, candidateCount, inputMode, inputCount })
+    .replace("自适应", resolution !== undefined ? (resolution ? resolutionForDimensions(resolution) : "请选择分辨率") : "自适应");
   const generateDisabled = (
     controlsDisabled
     || planApproved
     || !generationAvailable
     || !compatibility.compatible
+    || !resolutionValid
     || Boolean(identityBlocker)
   );
 
@@ -137,8 +147,10 @@ export function ImageGenerationCommandBar({
             {controlsDisabled
               ? <CircleNotch className="spin" size={17} />
               : <MagicWand size={17} weight="fill" />}
-            {latestRunBusy
+            {latestRunBusy || batchStatus === "running"
               ? "正在生成"
+              : batchStatus === "pending"
+                ? "排队中"
               : busy
                 ? "正在保存并提交"
                 : "生成"}
@@ -172,6 +184,9 @@ export function ImageGenerationCommandBar({
         open={openPopover === "settings"}
         popoverId={settingsPopoverId}
         providerReady={compatibility.compatible}
+        resolution={resolution}
+        resolutions={resolutions}
+        onResolutionChange={onResolutionChange}
       />
       {(identityBlocker || (!compatibility.compatible && compatibility.reason !== "尚未配置")) && (
         <div className="production-inline-error shot-image-command-error" role="status">

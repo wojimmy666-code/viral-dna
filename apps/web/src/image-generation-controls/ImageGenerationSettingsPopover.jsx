@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { AnchoredPopover } from "../video-generation-controls/AnchoredPopover.jsx";
+import { resolutionForDimensions } from "../media-resolution.js";
 
 function ratioShape(aspectRatio) {
   const [width, height] = String(aspectRatio || "").split(":").map(Number);
@@ -25,6 +26,9 @@ export function ImageGenerationSettingsPopover({
   open,
   popoverId,
   providerReady,
+  resolution,
+  resolutions = [],
+  onResolutionChange,
 }) {
   const generatedId = useId().replaceAll(":", "");
   const titleId = `image-settings-popover-title-${generatedId}`;
@@ -85,8 +89,12 @@ export function ImageGenerationSettingsPopover({
           </div>
         </section>
         <section className="image-setting-section">
-          <div className="image-setting-heading"><strong>清晰度</strong><span>由模型自动适配</span></div>
-          <div className="image-readonly-value">自适应</div>
+          <div className="image-setting-heading"><strong>清晰度</strong><span>{resolution === undefined ? "由模型自动适配" : "本次生成"}</span></div>
+          {resolution === undefined ? <div className="image-readonly-value">自适应</div> : <select aria-label="本次图片分辨率" value={resolution} disabled={controlsDisabled} onChange={event => onResolutionChange(event.target.value)}>
+            <option value="">请选择分辨率</option>
+            {resolution && !resolutions.some(item => item.value === resolution) && <option value={resolution}>{resolutionForDimensions(resolution)}</option>}
+            {resolutions.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>}
         </section>
         <fieldset className="image-setting-section">
           <legend>生成数量</legend>

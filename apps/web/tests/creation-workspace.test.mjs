@@ -196,14 +196,15 @@ test("Skill image generation uses the selected contract model even when global s
   assert.equal(resolveImageExecutionMode(settings), "remote_api");
   assert.equal(settings.remote_model_alias, "chosen");
   assert.equal(settings.default_candidate_count, 2);
-  assert.deepEqual(imageModelOptions(settings).map((model) => model.alias), ["chosen"]);
+  assert.deepEqual(imageModelOptions(settings).map((model) => model.alias), ["chosen", "other", "local_tool"]);
   assert.equal(resolveImageExecutionMode(globalSettings), "local_tool");
 });
 
 test("a missing contracted image model never falls back to another model or local execution", () => {
   const settings = skillImageGenerationSettings({ enabled: true, models: [{ alias: "other" }], local_executable_path: "local-tool" }, { image_model_id: "missing" });
   assert.equal(settings.remote_model_alias, "missing");
-  assert.deepEqual(imageModelOptions(settings), []);
+  assert.deepEqual(imageModelOptions(settings).map(model => model.alias), ["other", "local_tool"]);
+  assert.equal(imageModelOptions(settings).find(model => model.alias === settings.remote_model_alias), undefined);
 });
 
 test("timeline source-audio controls require both a source project and a real audio track", () => {

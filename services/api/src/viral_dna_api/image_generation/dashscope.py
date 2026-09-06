@@ -227,10 +227,17 @@ class DashScopeQwenImageAdapter:
                         json=body,
                     )
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    if not isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+                        raise ImageGenerationError(
+                            503,
+                            "remote_outcome_unknown",
+                            "图片请求已发送，但上游结果未确认；请先核对任务，避免重复计费",
+                            retryable=False,
+                        ) from exc
                     if attempt + 1 >= self.max_attempts:
                         raise ImageGenerationError(
                             503,
-                            "remote_transport_error",
+                            "remote_connection_failed",
                             "无法连接百炼图片服务，请稍后重试",
                             retryable=True,
                         ) from exc

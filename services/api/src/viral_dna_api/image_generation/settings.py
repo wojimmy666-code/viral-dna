@@ -173,8 +173,10 @@ def _replace_fixed_arg(values: list[str], name: str, value: str) -> list[str]:
     return updated
 
 
-def _parse_capability() -> ImageGenerationCapability | None:
-    raw = get_config_value("VIRAL_DNA_IMAGE_CAPABILITY_SNAPSHOT", "")
+def _parse_capability(
+    name: str = "VIRAL_DNA_IMAGE_CAPABILITY_SNAPSHOT",
+) -> ImageGenerationCapability | None:
+    raw = get_config_value(name, "")
     if not raw:
         return None
     try:
@@ -216,9 +218,7 @@ class ImageGenerationSettingsService:
         self._credential_probe = credential_probe or _default_credential_probe
         self._codex_discovery = codex_discovery or discover_codex_environment
         self._codex_network_probe = codex_network_probe or probe_codex_network
-        self._codex_sandbox_preflight = (
-            codex_sandbox_preflight or preflight_codex_local_tool
-        )
+        self._codex_sandbox_preflight = codex_sandbox_preflight or preflight_codex_local_tool
 
     def get(
         self,
@@ -292,9 +292,7 @@ class ImageGenerationSettingsService:
         )
         if local_proxy_mode not in {"system", "manual", "disabled"}:
             local_proxy_mode = "system"
-        local_proxy_url = (
-            get_config_value("VIRAL_DNA_IMAGE_LOCAL_PROXY_URL", "").strip() or None
-        )
+        local_proxy_url = get_config_value("VIRAL_DNA_IMAGE_LOCAL_PROXY_URL", "").strip() or None
         detected_proxy = detect_system_proxy()
         try:
             effective_proxy = resolve_local_proxy(local_proxy_mode, local_proxy_url)
@@ -369,13 +367,10 @@ class ImageGenerationSettingsService:
             local_cost_source=local_cost_source,
             local_unit_cost_micros=local_unit_cost,
             semantic_quality_enabled=(
-                get_config_value("VIRAL_DNA_IMAGE_SEMANTIC_QA_ENABLED", "false").lower()
-                == "true"
+                get_config_value("VIRAL_DNA_IMAGE_SEMANTIC_QA_ENABLED", "false").lower() == "true"
             ),
             local_model_policy=local_model_policy,
-            local_model=(
-                get_config_value("VIRAL_DNA_IMAGE_LOCAL_MODEL", "").strip() or None
-            ),
+            local_model=(get_config_value("VIRAL_DNA_IMAGE_LOCAL_MODEL", "").strip() or None),
             local_reasoning_effort=local_reasoning_effort,
             local_proxy_mode=local_proxy_mode,
             local_proxy_url=local_proxy_url,
@@ -391,6 +386,10 @@ class ImageGenerationSettingsService:
             catalog_version=catalog.catalog_version,
             pricing_version=catalog.pricing_version,
             selected_capabilities=capability,
+            local_capabilities=(
+                _parse_capability("VIRAL_DNA_IMAGE_LOCAL_CAPABILITY_SNAPSHOT")
+                or (capability if mode == ImageExecutionMode.LOCAL_TOOL else None)
+            ),
             models=catalog.options(IMAGE_REMOTE_PROVIDER),
         )
 
@@ -491,9 +490,7 @@ class ImageGenerationSettingsService:
             "VIRAL_DNA_IMAGE_LOCAL_PROXY_URL": (
                 proxy_resolution.url if payload.local_proxy_mode == "manual" else ""
             ),
-            "VIRAL_DNA_IMAGE_LOCAL_WINDOWS_SANDBOX_MODE": (
-                payload.local_windows_sandbox_mode
-            ),
+            "VIRAL_DNA_IMAGE_LOCAL_WINDOWS_SANDBOX_MODE": (payload.local_windows_sandbox_mode),
             "VIRAL_DNA_IMAGE_LAST_VALIDATED_AT": validated_at,
         }
         if payload.execution_mode == ImageExecutionMode.REMOTE_API:
@@ -579,6 +576,7 @@ class ImageGenerationSettingsService:
                     ),
                     "VIRAL_DNA_IMAGE_LOCAL_TOOL_ID": detection.tool_id,
                     "VIRAL_DNA_IMAGE_LOCAL_TOOL_VERSION": detection.tool_version,
+                    "VIRAL_DNA_IMAGE_LOCAL_CAPABILITY_SNAPSHOT": capability.model_dump_json(),
                 }
             )
         updates["VIRAL_DNA_IMAGE_CAPABILITY_SNAPSHOT"] = capability.model_dump_json()
@@ -708,10 +706,7 @@ class ImageGenerationSettingsService:
             proxy_resolution.source,
         )
         if payload.windows_sandbox_mode == "unelevated":
-            message = (
-                "Codex Windows 兼容沙箱已可启动。文件访问仍受限，"
-                "但网络隔离弱于增强模式。"
-            )
+            message = "Codex Windows 兼容沙箱已可启动。文件访问仍受限，但网络隔离弱于增强模式。"
         else:
             message = "Codex Windows 增强沙箱已可启动，本次未调用图片模型。"
         return LocalCodexSandboxTestResponse(

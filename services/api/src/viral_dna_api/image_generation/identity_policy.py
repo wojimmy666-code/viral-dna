@@ -41,18 +41,14 @@ def validate_identity_bindings(
     bindings: Sequence[ReferenceBinding],
     assets: Iterable[ReferenceAsset] | None = None,
 ) -> IdentityPolicyState:
-    identity_bindings = [
-        item for item in bindings if item.role == ReferenceRole.IDENTITY
-    ]
+    identity_bindings = [item for item in bindings if item.role == ReferenceRole.IDENTITY]
     if len(identity_bindings) > 1:
         raise IdentityPolicyViolation(
             422,
             "multiple_identity_references",
             "每个分镜只能绑定一个人物身份资产，请保留唯一身份来源后再生成",
         )
-    primary_asset_id = (
-        identity_bindings[0].reference_asset_id if identity_bindings else None
-    )
+    primary_asset_id = identity_bindings[0].reference_asset_id if identity_bindings else None
     if primary_asset_id is not None and assets is not None:
         assets_by_id = {item.id: item for item in assets}
         asset = assets_by_id.get(primary_asset_id)
@@ -81,16 +77,17 @@ def validate_identity_generation(
     source_present: bool,
     references: Sequence[ImageReferenceInput] = (),
     capability: ImageGenerationCapability | None = None,
+    reference_creation: bool = False,
 ) -> None:
     if not state.enabled:
         return
-    if input_mode != ImageGenerationInputMode.KEYFRAME_EDIT:
+    if not reference_creation and input_mode != ImageGenerationInputMode.KEYFRAME_EDIT:
         raise IdentityPolicyViolation(
             422,
             "identity_requires_reference_mode",
             "绑定人物身份资产后必须使用“关键帧编辑（文字 + 图片）”，不能使用纯文字生图",
         )
-    if not source_present:
+    if not reference_creation and not source_present:
         raise IdentityPolicyViolation(
             409,
             "identity_source_keyframe_required",
@@ -98,19 +95,16 @@ def validate_identity_generation(
         )
     if capability is None:
         return
-    identity_inputs = [
-        item for item in references if item.role == ReferenceRole.IDENTITY.value
-    ]
-    if (
-        len(identity_inputs) != 1
-        or identity_inputs[0].asset_id != state.primary_asset_id
-    ):
+    identity_inputs = [item for item in references if item.role == ReferenceRole.IDENTITY.value]
+    if len(identity_inputs) != 1 or identity_inputs[0].asset_id != state.primary_asset_id:
         raise IdentityPolicyViolation(
             409,
             "identity_reference_missing",
             "唯一人物身份资产未进入模型输入，请重新保存参考绑定后再生成",
         )
-    if not capability.image_to_image or not capability.multi_reference:
+    if not capability.image_to_image or (
+        (not reference_creation or len(references) > 1) and not capability.multi_reference
+    ):
         raise IdentityPolicyViolation(
             422,
             "identity_model_unsupported",
@@ -125,7 +119,7 @@ def validate_identity_generation(
                 f"当前已绑定 {len(references)} 张"
             ),
         )
-    required_inputs = 1 + len(references)
+    required_inputs = int(not reference_creation) + len(references)
     if capability.max_input_images < required_inputs:
         raise IdentityPolicyViolation(
             422,

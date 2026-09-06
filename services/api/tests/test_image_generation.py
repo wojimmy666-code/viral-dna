@@ -341,18 +341,14 @@ def test_image_settings_remote_validation_and_secret_persistence(
             )
         )
     )
-    assert calls == [
-        ("test-secret-key", "https://dashscope.aliyuncs.com/api/v1")
-    ]
+    assert calls == [("test-secret-key", "https://dashscope.aliyuncs.com/api/v1")]
     assert saved.enabled is True
     assert saved.remote_model == "qwen-image-2.0"
     assert saved.api_key_configured is True
     assert saved.api_key_hint == "••••••••-key"
     assert saved.validation_latency_ms == 12
     assert "test-secret-key" not in saved.model_dump_json()
-    assert "DASHSCOPE_API_KEY=test-secret-key" in (tmp_path / ".env.local").read_text(
-        "utf-8"
-    )
+    assert "DASHSCOPE_API_KEY=test-secret-key" in (tmp_path / ".env.local").read_text("utf-8")
 
 
 def test_gateway_honors_per_run_remote_model_alias(
@@ -410,7 +406,9 @@ def test_dashscope_adapter_generates_and_downloads_candidates(tmp_path: Path) ->
     output_png = tmp_path / "provider.png"
     Image.new("RGB", (720, 1280), (40, 120, 210)).save(output_png, "PNG")
     output_payload = output_png.read_bytes()
-    request_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    request_url = (
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    )
     result_url = "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/result.png"
     received: dict[str, object] = {}
 
@@ -512,11 +510,7 @@ def test_dashscope_adapter_sends_text_only_content_for_text_to_image(
             return httpx.Response(
                 200,
                 json={
-                    "output": {
-                        "choices": [
-                            {"message": {"content": [{"image": result_url}]}}
-                        ]
-                    },
+                    "output": {"choices": [{"message": {"content": [{"image": result_url}]}}]},
                     "usage": {"image_count": 1},
                     "request_id": "text-to-image-request",
                 },
@@ -685,9 +679,7 @@ def test_local_tool_supports_pure_text_generation_without_image_inputs(
     assert run.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE
     assert len(candidates) == 1
     snapshot = json.loads(
-        filesystem_path(
-            workspace.resolve(run.input_snapshot_relative_path)
-        ).read_text("utf-8")
+        filesystem_path(workspace.resolve(run.input_snapshot_relative_path)).read_text("utf-8")
     )
     assert snapshot["input_mode"] == "text_to_image"
     assert snapshot["source"] is None
@@ -766,6 +758,30 @@ def test_identity_reference_is_second_input_and_exclusive_identity_source() -> N
     assert "混合图像1与图像2的人脸或身份" in negative
     assert "生成第三个人物身份" in negative
 
+    # Skill creation has no source-video control frame. Its first real input is
+    # the identity reference, while the original replacement policy stays strict.
+    from dataclasses import replace
+
+    creative_request = replace(
+        request,
+        source_path=None,
+        source_sha256=None,
+        input_mode=ImageGenerationInputMode.TEXT_TO_IMAGE,
+    )
+    validate_identity_generation(
+        state=validate_identity_bindings(bindings, [identity_asset, scene_asset]),
+        input_mode=ImageGenerationInputMode.TEXT_TO_IMAGE,
+        source_present=False,
+        reference_creation=True,
+        references=references,
+        capability=load_image_model_catalog().option("qwen_image_2_pro").capabilities,
+    )
+    creative_positive = _compiled_prompt(creative_request)
+    assert "不存在原视频关键帧" in creative_positive
+    assert "图像1是人物资产" in creative_positive
+    assert "图像1是原视频" not in creative_positive
+    assert "混合图像1与图像2的人脸或身份" not in _negative_prompt(creative_request)
+
 
 def test_identity_reference_forbids_text_to_image_and_multiple_identities() -> None:
     project = _project()
@@ -781,9 +797,7 @@ def test_identity_reference_forbids_text_to_image_and_multiple_identities() -> N
         sha256="a" * 64,
         rights_confirmed=True,
     )
-    second = first.model_copy(
-        update={"id": uuid4(), "name": "人物二", "sha256": "b" * 64}
-    )
+    second = first.model_copy(update={"id": uuid4(), "name": "人物二", "sha256": "b" * 64})
     first_binding = ReferenceBinding(
         shot_plan_id=shot.id,
         reference_asset_id=first.id,
@@ -926,9 +940,7 @@ def test_gateway_reuses_verified_candidates_without_repeat_cost(
     assert second_run.actual_cost_micros == 0
     assert second_run.estimated_cost_micros == 0
     assert second_run.usage["source_run_id"] == str(first_run.id)
-    assert [item.id for item in second_candidates] != [
-        item.id for item in first_candidates
-    ]
+    assert [item.id for item in second_candidates] != [item.id for item in first_candidates]
     assert [item.relative_path for item in second_candidates] == [
         item.relative_path for item in first_candidates
     ]
@@ -1167,36 +1179,51 @@ def test_codex_network_probe_uses_selected_proxy_and_reports_login(
 def test_codex_windows_system_proxy_is_not_reinjected_into_child_process() -> None:
     proxy_url = "http://127.0.0.1:10808"
 
-    assert codex_local.local_tool_proxy_environment_url(
-        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
-        "system",
-        proxy_url,
-        "windows_user_proxy",
-    ) is None
-    assert codex_local.local_tool_proxy_delivery(
-        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
-        "system",
-        proxy_url,
-        "windows_user_proxy",
-    ) == "codex_native"
-    assert codex_local.local_tool_proxy_environment_url(
-        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
-        "manual",
-        proxy_url,
-        "manual",
-    ) == proxy_url
-    assert codex_local.local_tool_proxy_environment_url(
-        codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
-        "system",
-        proxy_url,
-        "environment",
-    ) == proxy_url
-    assert codex_local.local_tool_proxy_environment_url(
-        "custom-image-tool",
-        "system",
-        proxy_url,
-        "windows_user_proxy",
-    ) == proxy_url
+    assert (
+        codex_local.local_tool_proxy_environment_url(
+            codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+            "system",
+            proxy_url,
+            "windows_user_proxy",
+        )
+        is None
+    )
+    assert (
+        codex_local.local_tool_proxy_delivery(
+            codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+            "system",
+            proxy_url,
+            "windows_user_proxy",
+        )
+        == "codex_native"
+    )
+    assert (
+        codex_local.local_tool_proxy_environment_url(
+            codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+            "manual",
+            proxy_url,
+            "manual",
+        )
+        == proxy_url
+    )
+    assert (
+        codex_local.local_tool_proxy_environment_url(
+            codex_local.CODEX_IMAGEGEN_ADAPTER_ID,
+            "system",
+            proxy_url,
+            "environment",
+        )
+        == proxy_url
+    )
+    assert (
+        codex_local.local_tool_proxy_environment_url(
+            "custom-image-tool",
+            "system",
+            proxy_url,
+            "windows_user_proxy",
+        )
+        == proxy_url
+    )
 
 
 def test_codex_sandbox_preflight_uses_selected_mode_without_model_call(
@@ -1289,9 +1316,7 @@ def test_codex_sandbox_service_reports_delivery_and_never_generates(
 
 
 def test_codex_sandbox_setup_error_is_actionable_and_not_retryable() -> None:
-    error = _codex_windows_sandbox_error(
-        "codex-windows-sandbox-setup.exe：找不到指定的模块。"
-    )
+    error = _codex_windows_sandbox_error("codex-windows-sandbox-setup.exe：找不到指定的模块。")
 
     assert error is not None
     assert error.code == "codex_windows_sandbox_setup_failed"

@@ -1,4 +1,6 @@
 import { CREATION_STEPS, mainCreationStep } from "../creation-workspace/workspace-ui.js";
+import { dimensionsForResolutionLabel, resolutionLabelShortEdge } from "../media-resolution.js";
+export { dimensionsForResolutionLabel, resolutionLabelShortEdge } from "../media-resolution.js";
 
 export const SKILL_WORKFLOW_STAGES = Object.freeze([
   { id: "creative_brief", label: "创作简报", gate: "brief_approved", gateLabel: "批准简报" },
@@ -45,15 +47,18 @@ export function resolveSkillSection(workspace, section) {
 }
 
 export function skillImageGenerationSettings(settings, contract) {
+  const local = contract.image_provider_connection_id === "local_tool";
   return {
     ...settings,
-    execution_mode: "remote_api",
-    allow_local_tool: false,
-    local_tool_id: null,
-    local_executable_path: null,
+    execution_mode: local ? "local_tool" : "remote_api",
+    allow_local_tool: true,
+    locked_model_alias: null,
+    allow_unknown_local_image_cost: Boolean(contract.allow_unknown_local_image_cost),
+    image_width: contract.image_width,
+    image_height: contract.image_height,
     default_candidate_count: contract.candidate_count_by_stage?.shot_image || 1,
     remote_model_alias: contract.image_model_id,
-    models: (settings?.models || []).filter((item) => item.alias === contract.image_model_id),
+    models: settings?.models || [],
   };
 }
 
@@ -108,25 +113,6 @@ export function lookTestLayoutStyle(contract, candidateCount) {
     "--skill-look-columns": columns,
     "--skill-look-compact-columns": Math.min(2, columns),
   };
-}
-
-export function resolutionLabelShortEdge(label) {
-  const normalized = String(label || "").toUpperCase();
-  if (normalized === "2K") return 1440;
-  if (normalized === "4K") return 2160;
-  const match = normalized.match(/^(\d{3,4})P$/);
-  return match ? Number(match[1]) : 0;
-}
-
-export function dimensionsForResolutionLabel(ratio, label) {
-  const shortEdge = resolutionLabelShortEdge(label);
-  const [widthRatio, heightRatio] = String(ratio || "").split(":").map(Number);
-  if (!shortEdge || !widthRatio || !heightRatio) return "";
-  if (widthRatio === heightRatio) return `${shortEdge}x${shortEdge}`;
-  if (widthRatio > heightRatio) {
-    return `${Math.round((shortEdge * widthRatio) / heightRatio / 8) * 8}x${shortEdge}`;
-  }
-  return `${shortEdge}x${Math.round((shortEdge * heightRatio) / widthRatio / 8) * 8}`;
 }
 
 export function resolutionLabelForDimensions(model, dimensions) {
@@ -302,6 +288,9 @@ export function buildRunContractPayload({ draft, imageModels = [], videoModels =
     image_model_id: draft.imageModel,
     image_width: imageWidth,
     image_height: imageHeight,
+    allow_unknown_local_image_cost: image?.provider === "local_tool"
+      && Boolean(draft.allowUnknownLocalImageCost)
+      && draft.automationMode !== "full_auto" && !(Number(draft.budgetCny) > 0),
     video_provider_connection_id: video?.provider || "",
     video_model_id: draft.videoModel,
     video_width: videoWidth,
@@ -313,15 +302,16 @@ export function buildRunContractPayload({ draft, imageModels = [], videoModels =
     text_model_selection: draft.textModel || "workspace_default",
     audio_source_strategy: draft.generateVideoAudio ? "candidate" : "muted",
     generate_video_audio: Boolean(draft.generateVideoAudio),
-    music_strategy: draft.musicStrategy || "none",
-    narration_strategy: draft.narrationStrategy || "none",
-    subtitle_strategy: draft.subtitleStrategy || "none",
+    music_strategy: null,
+    narration_strategy: null,
+    subtitle_strategy: null,
     automation_mode: draft.automationMode || "guided",
     budget_limit_micros: Number(draft.budgetCny) > 0
       ? Math.round(Number(draft.budgetCny) * 1_000_000)
       : null,
     estimated_cost_micros: estimatedCost,
-    estimate_status: estimateKnown ? "known" : "unknown",
+    estimate_status: estimateKnown ? "known"
+      : image?.provider === "local_tool" && Number.isFinite(videoUnitCost) ? "partial" : "unknown",
     allow_provider_fallback: false,
     supports_exact_overlay: true,
   };

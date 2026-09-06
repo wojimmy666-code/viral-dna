@@ -275,7 +275,7 @@ test("derives compact output summaries and candidate choices from model capabili
     candidateCount: 2,
     duration: 5,
     resolution: "720P",
-  }), "9:16 · 720P · 5秒 · 2个 · 原音频");
+  }), "9:16 · 720p · 5秒 · 2个 · 原音频");
   assert.deepEqual(
     videoCandidateCountOptions({ capabilities: { max_candidates: 3 } }),
     [1, 2, 3],

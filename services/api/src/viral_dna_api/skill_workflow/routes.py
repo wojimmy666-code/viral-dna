@@ -28,6 +28,7 @@ from .contracts import (
     GateDecision,
     GateDecisionRequest,
     LookTest,
+    LookTestGenerationRequest,
     LookTestSelection,
     OutlineRevision,
     OutlineUpdate,
@@ -214,9 +215,11 @@ def create_skill_workflow_router(service: SkillWorkflowService) -> APIRouter:
         response_model=LookTest,
         status_code=status.HTTP_202_ACCEPTED,
     )
-    async def generate_look_test(run_id: UUID) -> LookTest:
+    async def generate_look_test(
+        run_id: UUID, payload: LookTestGenerationRequest | None = None
+    ) -> LookTest:
         try:
-            return await service.start_look_test_generation(run_id)
+            return await service.start_look_test_generation(run_id, payload)
         except SkillWorkflowServiceError as exc:
             _raise_http(exc)
 
