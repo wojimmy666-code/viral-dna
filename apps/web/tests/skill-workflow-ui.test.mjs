@@ -368,6 +368,8 @@ test("keeps storyboard editing direct and hides internal directing metadata", ()
   assert.match(editor, /<AutosaveStatus/);
   assert.match(editor, /storyboard-draft/);
   assert.match(editor, /onBlur=\{\(\) => void flush\(\)\}/);
-  assert.match(editor, /setTimeout\(\(\) => \{ void session\.flush\(\); \}, 900\)/);
+  assert.match(editor, /setTimeout\(\(\) => \{ void flush\(\); \}, 900\)/);
+  assert.match(editor, /await globalPromptRef\.current\?\.flush\(\)/);
+  assert.match(editor, /<GlobalPromptEditor/);
   assert.doesNotMatch(editor, /完成编辑|修改会自动保存|画面说明|成片帧数/);
 });

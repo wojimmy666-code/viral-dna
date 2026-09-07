@@ -17,6 +17,12 @@ from ..ai.router import ModelRouter
 from ..ai.text_model_routing import preferred_text_model_aliases
 from ..models import ModelTask, ModelUsage
 from ..platform_skills.contracts import SkillManifest, SkillShotArchetype
+from ..prompt_engine.still_image import (
+    contains_video_directives,
+    static_image_constraints,
+    static_image_text,
+)
+from .asset_grounding import AuthoredAssetReference
 from .contracts import (
     BrandSnapshot,
     CreativeBriefRevision,
@@ -49,6 +55,7 @@ class AuthoredBeat(BaseModel):
 
 
 class AuthoredShot(BaseModel):
+    image_references: list[AuthoredAssetReference] = Field(default_factory=list, max_length=50)
     beat_key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
     archetype_key: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=160)
@@ -82,6 +89,8 @@ class AuthoredShot(BaseModel):
 
 class AuthoredStoryboard(BaseModel):
     creative_approach: str = Field(default="", max_length=300)
+    common_image_prompt: str = Field(default="", max_length=8000)
+    common_video_prompt: str = Field(default="", max_length=8000)
     beats: list[AuthoredBeat] = Field(min_length=1, max_length=30)
     shots: list[AuthoredShot] = Field(min_length=1)
     continuity_bible: dict[str, Any] = Field(default_factory=dict)
@@ -692,16 +701,14 @@ def compile_image_prompt(
         if exact_asset_reserved
         else "画面中不得新增Logo、包装文字、字幕、水印、二维码或未经提供的图形。"
     )
-    constraints = "；".join(spec.failure_constraints)
-    locks = "；".join(spec.continuity_locks)
-    return (
+    constraints = "；".join(static_image_constraints(spec.failure_constraints))
+    return static_image_text(
         f"【参考约束】以当前镜头绑定的{brand_name}产品、材料和场景素材作为主体身份、结构、比例与表面细节依据，不重新设计产品。\n"
         f"【主体与场景】{spec.subject}。{spec.scene}。静态画面定格在：{spec.initial_state}。只呈现一个明确视觉重点。\n"
         f"【构图与镜头】{spec.camera.lens_mm}mm镜头，{chinese_term(spec.camera.framing)}；{spec.camera.position}。{spec.camera.focus}。空间尺度与前后层次符合项目风格。\n"
         f"【光线与色彩】{spec.lighting}。{spec.color_and_texture}。\n"
-        f"【连续性锁定】{locks}。本提示词只描述动作开始前的一张静态分镜图，不包含运镜、时间过程或转场。\n"
         f"【确定性图形】{exact}\n"
-        f"【严格约束】{constraints}；主体几何、材质、数量、朝向和构图关系必须稳定。"
+        f"【严格约束】{constraints}；主体几何、材质、数量、朝向和构图关系应准确合理。"
     )
 
 
@@ -763,9 +770,9 @@ def assess_prompts(
     checks = {
         "image_sections": all(f"【{item}】" in image_prompt for item in image_sections),
         "video_sections": all(f"【{item}】" in video_prompt for item in video_sections),
-        "image_static_only": not bool(
-            re.search(r"\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?\s*秒", image_prompt)
-        ),
+        "image_static_only": not contains_video_directives(image_prompt)
+        and "【连续性锁定】" not in image_prompt
+        and "【主体一致性】" not in image_prompt,
         "first_frame_bound": "唯一首帧" in video_prompt,
         "camera_specific": bool(re.search(r"\d{2,3}mm", video_prompt)),
         "motion_specific": any(

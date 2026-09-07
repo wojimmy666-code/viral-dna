@@ -50,6 +50,7 @@ from .models import (
 )
 from .platform_skills.contracts import AccountSkillFavorite, SkillVersionSnapshot
 from .production_seeds.contracts import ProductionSeed
+from .project_prompts import ProjectPromptRevision, PromptRevisionConflict
 from .projects.contracts import Project
 from .quality.contracts import ContinuityReport
 from .schema import WORKSPACE_SCHEMA_VERSION
@@ -326,7 +327,7 @@ class SQLiteStore:
         | _PROJECT_V14_TABLES
         | _PROJECT_V15_TABLES
         | _PROJECT_V16_TABLES
-        | frozenset({"image_batches"})
+        | frozenset({"image_batches", "project_prompt_revisions"})
     )
 
     def __init__(self, database_path: Path) -> None:
@@ -451,6 +452,13 @@ class SQLiteStore:
                 )
                 if 17 not in applied_versions:
                     connection.execute("INSERT INTO schema_migrations (version) VALUES (17)")
+                self._create_json_tables(connection, frozenset({"project_prompt_revisions"}))
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_project_prompts_scope "
+                    "ON project_prompt_revisions(json_extract(payload, '$.project_id'))"
+                )
+                if 18 not in applied_versions:
+                    connection.execute("INSERT INTO schema_migrations (version) VALUES (18)")
             except Exception:
                 connection.rollback()
                 raise
@@ -674,6 +682,11 @@ class SQLiteStore:
                     {project_key},
                 )
                 deletions = {
+                    "project_prompt_revisions": keys_for(
+                        "project_prompt_revisions",
+                        "project_id",
+                        {project_key},
+                    ),
                     "image_batches": keys_for("image_batches", "project_id", {project_key}),
                     "reference_bindings": keys_for(
                         "reference_bindings",
@@ -1808,12 +1821,14 @@ class SQLiteStore:
 
     async def delete_project(self, project_id: UUID) -> None:
         async with self._lock:
+            prompts = await self.list_project_prompt_revisions(project_id)
             await asyncio.to_thread(
                 self._upsert_many,
                 [],
                 [
                     ("projects", str(project_id)),
                     ("skill_version_snapshots", str(project_id)),
+                    *(("project_prompt_revisions", str(item.id)) for item in prompts),
                 ],
             )
 
@@ -1993,6 +2008,30 @@ class SQLiteStore:
 
     async def save_shot_manifest_revision(self, item: ShotManifestRevision) -> ShotManifestRevision:
         return await self._save("shot_manifest_revisions", item.id, item)
+
+    async def list_project_prompt_revisions(self, project_id: UUID):
+        rows = await self._list_project_models(
+            "project_prompt_revisions", ProjectPromptRevision, project_id
+        )
+        return sorted(rows, key=lambda item: item.revision_number)
+
+    async def save_project_prompt_revision(self, item: ProjectPromptRevision, expected_id: UUID):
+        async with self._lock:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT payload FROM project_prompt_revisions "
+                    "WHERE json_extract(payload, '$.project_id') = ? "
+                    "ORDER BY json_extract(payload, '$.revision_number') DESC LIMIT 1",
+                    (str(item.project_id),),
+                ).fetchone()
+                if row and ProjectPromptRevision.model_validate_json(row[0]).id != expected_id:
+                    raise PromptRevisionConflict("全局提示词已更新，请刷新后核对当前草稿")
+                connection.execute(
+                    "INSERT INTO project_prompt_revisions (record_key, payload) VALUES (?, ?)",
+                    (str(item.id), item.model_dump_json()),
+                )
+        return item
 
     async def list_shot_manifest_revisions(self, project_id: UUID) -> list[ShotManifestRevision]:
         return await self._list_project_models(

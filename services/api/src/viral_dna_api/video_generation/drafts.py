@@ -24,6 +24,7 @@ from ..models import (
     VideoReferenceScope,
     VideoReferenceScopeKind,
 )
+from ..project_prompts import ProjectPromptService, local_prompt, prompt_lock
 from ..prompt_versions import VIDEO_INTENT_PROMPT_VERSION
 from .settings import VideoGenerationSettingsService
 
@@ -118,7 +119,7 @@ class ShotVideoGenerationDraftService:
             raise _fail(404, "shot_not_found", "分镜不存在")
         existing = await self.repository.get_video_generation_draft(shot_plan_id)
         if existing is not None:
-            return _with_current_intent_version(existing)
+            return await self._local_view(_with_current_intent_version(existing))
 
         draft = await self._initial_draft(plan)
         created = await self.repository.compare_and_swap_video_generation_draft(
@@ -126,13 +127,35 @@ class ShotVideoGenerationDraftService:
             expected_draft_version=0,
         )
         if created:
-            return draft
+            return await self._local_view(draft)
         concurrent = await self.repository.get_video_generation_draft(shot_plan_id)
         if concurrent is None:
             raise _fail(500, "video_draft_create_failed", "无法初始化视频生成设置")
-        return _with_current_intent_version(concurrent)
+        return await self._local_view(_with_current_intent_version(concurrent))
+
+    async def _local_view(self, draft):
+        project = await self.repository.get_production_project(draft.project_id)
+        if project is None:
+            return draft
+        context = await ProjectPromptService(self.repository).for_production(project)
+        return draft.model_copy(
+            update={
+                "video_prompt": local_prompt(draft.video_prompt, context, "video"),
+            }
+        )
 
     async def update(
+        self,
+        shot_plan_id: UUID,
+        payload: ShotVideoGenerationDraftUpdate,
+        *,
+        actor_account_id: UUID | None,
+    ) -> ShotVideoGenerationDraft:
+        current = await self.get(shot_plan_id)
+        async with prompt_lock(self.repository, current.project_id):
+            return await self._update(shot_plan_id, payload, actor_account_id=actor_account_id)
+
+    async def _update(
         self,
         shot_plan_id: UUID,
         payload: ShotVideoGenerationDraftUpdate,
@@ -328,8 +351,26 @@ def current_default_input_plan(plan: ShotPlan | None = None) -> VideoGenerationI
         )
         for order, beat in enumerate(approved_targets, start=1)
     ]
+    sources = [VideoGenerationInputSource.APPROVED_IMAGES] if approved_targets else []
+    source_for = {
+        "project_asset": VideoGenerationInputSource.PROJECT_ASSETS,
+        "approved_image": VideoGenerationInputSource.APPROVED_IMAGES,
+        "provider_managed_asset": VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS,
+        "reference_video": VideoGenerationInputSource.REFERENCE_VIDEO,
+        "depth_control": VideoGenerationInputSource.DEPTH_CONTROL,
+    }
+    keys = {(item.reference_kind, item.reference_id) for item in references}
+    for mention in plan.video_prompt_mentions:
+        if (mention.reference_kind, mention.reference_id) not in keys:
+            references.append(
+                VideoGenerationReference(**{**mention.model_dump(), "order": len(references) + 1})
+            )
+            keys.add((mention.reference_kind, mention.reference_id))
+        source = source_for[mention.reference_kind]
+        if source not in sources:
+            sources.append(source)
     return VideoGenerationInputPlan(
-        sources=([VideoGenerationInputSource.APPROVED_IMAGES] if approved_targets else []),
+        sources=sources,
         references=references,
     )
 

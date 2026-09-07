@@ -208,6 +208,8 @@ async def runtime(store=None):
 def payload(manifest, edits=None):
     return StoryboardPromptDraftUpdate(
         expected_revision_id=manifest.id,
+        expected_production_revision_id=manifest.production_revision_id,
+        expected_production_prompt_token=manifest.production_prompt_token,
         shots=edits
         if edits is not None
         else [
@@ -390,13 +392,48 @@ def test_factoring_shared_context_keeps_unique_lighting_and_all_user_content():
         factored = factor_prompt_context(
             env.manifest.model_copy(update={"shots": shots}), env.bible
         )
-        assert "同一产品与材质" in factored.common_image_prompt
+        assert "同一产品与材质" not in factored.common_image_prompt
+        assert "【连续性锁定】" not in factored.common_image_prompt
         assert "同一产品与材质" not in factored.shots[0].image_prompt_body
         assert "独特光线1" in factored.shots[0].image_prompt_body
         assert "第1张" not in factored.shots[0].video_prompt_body
         assert factor_prompt_context(factored, env.bible) == factored
 
     asyncio.run(scenario())
+
+
+@pytest.mark.asyncio
+async def test_existing_editable_manifest_is_projected_without_rewriting_video_or_history():
+    env = await runtime()
+    legacy = env.manifest.model_copy(
+        update={
+            "common_image_prompt": "【主体一致性】保持跨镜头一致\n【全片色彩】低饱和暖色",
+            "shots": [
+                shot.model_copy(
+                    update={
+                        "image_prompt_body": (
+                            "【连续性锁定】沿用上一镜头\n【主体与场景】滤芯静物，85mm"
+                        ),
+                        "image_negative_constraints": ["禁止甩镜", "产品结构变形"],
+                    }
+                )
+                for shot in env.manifest.shots
+            ],
+        }
+    )
+    snapshot = legacy.model_dump(mode="json")
+    projected = factor_prompt_context(legacy, env.bible)
+    assert projected.common_image_prompt == "【全片色彩】低饱和暖色"
+    assert projected.common_video_prompt == legacy.common_video_prompt
+    for shot, original in zip(projected.shots, legacy.shots, strict=True):
+        assert shot.image_prompt_body == "【主体与场景】滤芯静物，85mm"
+        assert shot.image_negative_constraints == ["产品结构变形"]
+        assert shot.video_prompt == original.video_prompt
+        assert shot.video_prompt_body == original.video_prompt_body
+        assert shot.input_hash == original.input_hash
+    assert projected.content_hash == legacy.content_hash
+    assert factor_prompt_context(projected, env.bible) == projected
+    assert legacy.model_dump(mode="json") == snapshot
 
 
 def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_path, monkeypatch):
@@ -428,7 +465,8 @@ def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_
                 )
             )
         before = await env.store.list_shot_plans(production_id)
-        edit = payload(env.manifest)
+        live = (await env.service.workspace(env.project.id)).shot_manifest
+        edit = payload(live)
         edit.shots[0].video_prompt_body += " 结尾停稳。"
         changed = await env.service.put_storyboard_prompt_draft(env.project.id, edit)
         await env.service.decide_gate(
@@ -442,6 +480,7 @@ def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_
         assert [plan.id for plan in after] == [plan.id for plan in before]
         assert after[0].image_status == WorkflowItemStatus.APPROVED
         assert after[0].video_status == WorkflowItemStatus.STALE
+        assert after[1].video_prompt == before[1].video_prompt
         assert after[1].video_status == WorkflowItemStatus.APPROVED
         assert after[1].approved_video_candidate_id == before[1].approved_video_candidate_id
         assert after[0].video_prompt == changed.shots[0].video_prompt
@@ -449,9 +488,10 @@ def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_
             await env.store.get_project(env.project.id)
         ).source_binding.production_project_id == production_id
         assert len(await env.store.list_production_projects(env.project.id)) == 1
+        live = (await env.service.workspace(env.project.id)).shot_manifest
         removed = await env.service.put_storyboard_prompt_draft(
             env.project.id,
-            payload(changed, payload(changed).shots[1:]),
+            payload(live, payload(live).shots[1:]),
         )
         await env.service.decide_gate(
             env.run.id,
@@ -465,9 +505,10 @@ def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_
         assert discarded.lifecycle_status.value == "discarded"
         assert not discarded.required
         assert discarded.approved_video_candidate_id == before[0].approved_video_candidate_id
+        live = (await env.service.workspace(env.project.id)).shot_manifest
         restored = await env.service.put_storyboard_prompt_draft(
             env.project.id,
-            payload(removed, payload(changed).shots),
+            payload(live, payload(changed).shots),
         )
         await env.service.decide_gate(
             env.run.id,

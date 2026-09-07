@@ -12,6 +12,7 @@ from .contracts import (
 )
 from .language_policy import normalize_natural_text, normalize_prompt_draft
 from .providers import compile_minimax_prompt, compile_seedance_prompt, compile_wan_prompt
+from .still_image import static_image_text
 
 _STILL_PROMPT_STOP_SECTION = re.compile(
     r"【(?:时序运镜|时间轴|出场转场|连续性引用|负面约束|约束|补充说明)】"
@@ -56,7 +57,7 @@ def sanitize_still_image_prompt(value: str | None) -> str:
         if _STILL_PROMPT_DYNAMIC_LINE.match(line):
             continue
         kept.append(line)
-    return "\n".join(kept).strip()
+    return static_image_text("\n".join(kept))
 
 
 def compile_still_image_prompt(draft: PromptShotDraft) -> str:

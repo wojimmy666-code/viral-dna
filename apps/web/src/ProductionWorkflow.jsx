@@ -1569,6 +1569,7 @@ export function ProductionHub({
   const location = useLocation();
   const navigate = useNavigate();
   const editorRef = useRef(null);
+  const globalPromptRef = useRef(null);
   const locationRef = useRef(location);
   locationRef.current = location;
   const restoredLocation = useMemo(() => savedWorkspaceLocation(recordId, location.search), [recordId]);
@@ -1637,6 +1638,7 @@ export function ProductionHub({
   const [referenceFile, setReferenceFile] = useState(null);
   const [archiveAsset, setArchiveAsset] = useState(null);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const assetPickerResult = useRef(null);
   const [assetPickerLoading, setAssetPickerLoading] = useState(false);
   const [assetPickerError, setAssetPickerError] = useState("");
   const [libraryAssets, setLibraryAssets] = useState([]);
@@ -1683,11 +1685,16 @@ export function ProductionHub({
   }
 
   async function flushWorkspace() {
+    await flushGlobalPrompts();
     await flushShotDraft();
     await flushVideoDraft();
     const timeline = await editorRef.current?.flush();
     if (await workflow?.beforeNavigate?.() === false) throw new Error("请先完成当前修改的保存");
     return timeline;
+  }
+
+  async function flushGlobalPrompts() {
+    if (await globalPromptRef.current?.flush() === false) throw new Error("请先保存全局提示词，再继续操作");
   }
 
   useImperativeHandle(workspaceRef, () => ({
@@ -2361,6 +2368,7 @@ export function ProductionHub({
     await executeAction(async () => {
       const draftChanged = Object.keys(beatChanges).length > 0
         || Object.keys(shotChanges).length > 0;
+      await flushGlobalPrompts();
       const persistedShotDetail = await flushShotDraft();
       const expectedRevisionId = (
         persistedShotDetail?.current_revision_id
@@ -2608,7 +2616,6 @@ export function ProductionHub({
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
-      onNotice("候选已选择，请继续人工确认");
     });
   }
 
@@ -2932,6 +2939,7 @@ export function ProductionHub({
       return;
     }
     await executeAction(async () => {
+      await flushGlobalPrompts();
       await flushVideoDraft(shotDetail.plan.id);
       let expectedRevisionId = detail.project.current_revision_id;
       let persistedShotDetail = null;
@@ -3592,7 +3600,8 @@ export function ProductionHub({
     }
   }
 
-  async function openAssetPicker() {
+  async function openAssetPicker(onSelected) {
+    assetPickerResult.current = typeof onSelected === 'function' ? onSelected : null;
     setAssetPickerOpen(true);
     setAssetPickerLoading(true);
     setAssetPickerError("");
@@ -3604,7 +3613,9 @@ export function ProductionHub({
       const result = await request(
         `/workspaces/${workspaceId}/assets?page=1&page_size=100`,
       );
-      setLibraryAssets(result?.items || []);
+      setLibraryAssets(assetPickerResult.current
+        ? (result?.items || []).filter((asset) => asset.media_kind === 'image' && asset.type !== 'logo')
+        : result?.items || []);
     } catch (requestError) {
       setAssetPickerError(requestError.message);
     } finally {
@@ -3617,6 +3628,7 @@ export function ProductionHub({
     setBusy(true);
     setAssetPickerError("");
     try {
+      const selectedAsset = libraryAssets.find((asset) => asset.id === selectedLibraryAssetId);
       await request(
         `/productions/${detail.project.id}/assets/${selectedLibraryAssetId}/link`,
         {
@@ -3627,12 +3639,17 @@ export function ProductionHub({
           }),
         },
       );
+      if (detail.project.origin_type === 'skill_run' && detail.project.owner_project_id && selectedAsset?.media_kind === 'image' && selectedAsset.type !== 'logo') {
+        await request(`/projects/${detail.project.owner_project_id}/prompt-assets/${selectedLibraryAssetId}`, { method: 'POST' });
+      }
       setAssetPickerOpen(false);
       setSelectedLibraryAssetId(null);
       await Promise.all([
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
+      assetPickerResult.current?.(selectedAsset);
+      assetPickerResult.current = null;
       onNotice("资产已添加到当前项目");
     } catch (requestError) {
       setAssetPickerError(requestError.message);
@@ -3688,7 +3705,10 @@ export function ProductionHub({
         form.append("tags", JSON.stringify(normalizeReferenceTags(referenceDraft.tags)));
         form.append("rights_confirmed", String(referenceDraft.rightsConfirmed));
         if (referenceDraft.rightsNote.trim()) form.append("rights_note", referenceDraft.rightsNote.trim());
-        await request(`/productions/${detail.project.id}/references`, { method: "POST", body: form });
+        const uploadedReference = await request(`/productions/${detail.project.id}/references`, { method: "POST", body: form });
+        if (detail.project.origin_type === 'skill_run' && detail.project.owner_project_id) {
+          await request(`/projects/${detail.project.owner_project_id}/prompt-assets/${uploadedReference.id}`, { method: 'POST' });
+        }
         setReferenceMode(null);
         await Promise.all([
           refreshProject(detail.project.id, selectedShotId),
@@ -3910,6 +3930,8 @@ export function ProductionHub({
             {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onContinue={() => void changeSection("shot_images")} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
             {activeSection === "shot_images" && (
               <ShotImageWorkspace
+                onAddAssets={openAssetPicker}
+                globalPromptRef={globalPromptRef}
                 advanced={workflow ? workflow.imagesApproved : ["shot_videos", "editing", "export"].includes(
                   detail.project.active_step,
                 )}
@@ -3937,7 +3959,7 @@ export function ProductionHub({
                 onCreateVisualBeat={createVisualBeat}
                 onDeleteVisualBeat={deleteVisualBeat}
                 onDiscardShot={discardShot}
-                onFlushDraft={flushShotDraft}
+                onFlushDraft={async (...args) => { await flushGlobalPrompts(); return flushShotDraft(...args); }}
                 onArchiveCandidate={archiveImageCandidate}
                 onGenerate={generateShotCandidates}
                 onBatchResults={refreshImageBatchResults}
@@ -3974,6 +3996,8 @@ export function ProductionHub({
             )}
             {activeSection === "shot_videos" && (
               <ShotVideoWorkspace
+                onAddAssets={openAssetPicker}
+                globalPromptRef={globalPromptRef}
                 advanced={workflow ? workflow.videosApproved : ["editing", "export"].includes(detail.project.active_step)}
                 assets={assets}
                 busy={busy}
@@ -4069,7 +4093,7 @@ export function ProductionHub({
           error={assetPickerError}
           linkedIds={new Set(assets.map((asset) => asset.id))}
           loading={assetPickerLoading}
-          onClose={() => setAssetPickerOpen(false)}
+          onClose={() => { assetPickerResult.current = null; setAssetPickerOpen(false); }}
           onConfirm={confirmLibraryAsset}
           resolveUrl={resolveUrl}
           selectedId={selectedLibraryAssetId}

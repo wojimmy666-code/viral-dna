@@ -3,6 +3,8 @@ export function storyboardDraftShots(manifest) {
     stable_shot_key: shot.stable_shot_key,
     image_prompt_body: shot.image_prompt_body ?? shot.image_prompt ?? "",
     video_prompt_body: shot.video_prompt_body ?? shot.video_prompt ?? "",
+    image_prompt_mentions: shot.image_prompt_mentions || [],
+    video_prompt_mentions: shot.video_prompt_mentions || [],
   }));
 }
 
@@ -21,6 +23,8 @@ export function newStoryboardShot() {
     stable_shot_key: `shot_${token}`,
     image_prompt_body: "",
     video_prompt_body: "",
+    image_prompt_mentions: [],
+    video_prompt_mentions: [],
   };
 }
 
@@ -39,7 +43,7 @@ export function createStoryboardDraftSession(initialManifest, { save, onChange, 
   return {
     snapshot,
     hydrate(next) {
-      if (editVersion !== savedVersion || pending || next.id === manifest.id || next.revision_number < manifest.revision_number) return;
+      if (editVersion !== savedVersion || pending || (next.id === manifest.id && next.production_prompt_token === manifest.production_prompt_token) || next.revision_number < manifest.revision_number) return;
       manifest = next;
       shots = storyboardDraftShots(next);
       notify();
@@ -58,7 +62,7 @@ export function createStoryboardDraftSession(initialManifest, { save, onChange, 
         try {
           while (editVersion !== savedVersion) {
             const version = editVersion;
-            const payload = { expected_revision_id: manifest.id, shots };
+            const payload = { expected_revision_id: manifest.id, ...(manifest.production_revision_id ? { expected_production_revision_id: manifest.production_revision_id, expected_production_prompt_token: manifest.production_prompt_token } : {}), shots };
             status = "saving";
             error = "";
             notify();

@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
+from ..project_prompts import ProjectPromptRevision, ProjectPromptUpdate
 from .contracts import (
     Artifact,
     AssetUsage,
@@ -67,6 +68,34 @@ def _raise_http(exc: SkillWorkflowServiceError) -> None:
 
 def create_skill_workflow_router(service: SkillWorkflowService) -> APIRouter:
     router = APIRouter(tags=["skill-workflow"])
+
+    @router.get("/projects/{project_id}/prompt-assets")
+    async def prompt_assets(project_id: UUID):
+        try:
+            return await service.prompt_assets(project_id)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
+
+    @router.post("/projects/{project_id}/prompt-assets/{asset_id}")
+    async def add_prompt_asset(project_id: UUID, asset_id: UUID):
+        try:
+            return await service.add_prompt_asset(project_id, asset_id)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
+
+    @router.get("/projects/{project_id}/prompt-context", response_model=ProjectPromptRevision)
+    async def get_prompt_context(project_id: UUID):
+        try:
+            return await service.get_prompt_context(project_id)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
+
+    @router.put("/projects/{project_id}/prompt-context", response_model=ProjectPromptRevision)
+    async def update_prompt_context(project_id: UUID, payload: ProjectPromptUpdate):
+        try:
+            return await service.update_prompt_context(project_id, payload)
+        except SkillWorkflowServiceError as exc:
+            _raise_http(exc)
 
     @router.get(
         "/projects/{project_id}/skill-workspace",

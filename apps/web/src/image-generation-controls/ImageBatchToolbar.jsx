@@ -85,7 +85,7 @@ export function ImageBatchToolbar({ projectId, request, onFlush, onResults, onSt
       const project = await request(`/productions/${projectId}`);
       // Retain the id after an ambiguous transport failure; a network retry is
       // the same batch, a completed explicit click creates a new batch.
-      const payload = { request_id: crypto.randomUUID(), expected_revision_id: project.project.current_revision_id, mode: "all", ...imageChoicePayload(settings, aspectRatio, choice) };
+      const payload = { request_id: crypto.randomUUID(), expected_revision_id: project.project.current_revision_id, mode: "all", ...imageChoicePayload(settings, aspectRatio, choice), candidate_count: 1 };
       const value = await request(`${base}/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       setPreview({ ...value, payload });
       if (value.items.some(item => ["failed", "unknown", "running"].includes(item.status))) return;
@@ -117,7 +117,7 @@ export function ImageBatchToolbar({ projectId, request, onFlush, onResults, onSt
   return <section className="image-batch-toolbar" aria-label="批量生成分镜图片">
     <div className="image-batch-options">
       <ImageGenerationChoiceFields prefix="批量" settings={settings} aspectRatio={aspectRatio} value={choice} disabled={running || working || Boolean(pendingRequest.current)} onChange={patch => { setChoice(patch); setPreview(null); setError(""); }} />
-      {!running && <span>{pictureCount} 个画面 · 预计 {money(selection.model?.unit_cost_micros == null ? null : pictureCount * (settings?.default_candidate_count || 1) * selection.model.unit_cost_micros)}</span>}
+      {!running && <span>{pictureCount} 个分镜 · 每镜 1 张 · 共 {pictureCount} 张 · 预计 {money(selection.model?.unit_cost_micros == null ? null : pictureCount * selection.model.unit_cost_micros)}</span>}
     </div>
     <div className="image-batch-actions">
       {!running && <button className="primary-button compact" disabled={busy || working || !selection.ready} onClick={prepare} type="button">{working ? "正在处理…" : "一键生成全部分镜图"}</button>}
@@ -129,7 +129,7 @@ export function ImageBatchToolbar({ projectId, request, onFlush, onResults, onSt
     </div>
     {running && <progress aria-label="批量图片生成进度" max={counts.total || 1} value={counts.done} />}
     {preview && <div className="image-batch-confirm">
-      <span>{preview.model_label} · {resolutionForDimensions(preview.width, preview.height)} · {previewCounts.pending} 个画面，每画面 {preview.candidate_count} 张 · 共 {previewCounts.pending * preview.candidate_count} 张 · 预计 {money(preview.estimated_cost_micros)} · 跳过 {previewCounts.skipped} 个画面</span>
+      <span>{preview.model_label} · {resolutionForDimensions(preview.width, preview.height)} · {previewCounts.pending} 个分镜，每镜 1 张 · 共 {previewCounts.pending} 张 · 预计 {money(preview.estimated_cost_micros)} · 跳过 {previewCounts.skipped} 个分镜</span>
       {preview.mode === "all" && <span>保留历史图片及已采用结果，新图片需人工采用。</span>}
       <button className="text-button" disabled={working} onClick={() => setPreview(null)} type="button">取消</button>
     </div>}

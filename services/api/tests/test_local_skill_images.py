@@ -235,11 +235,34 @@ async def test_generation_overrides_default_without_changing_contract(
             model_alias,
             720,
             1280,
-            2,
+            1,
         )
         assert env.gateway.calls[0][1]["model_alias"] == model_alias
-        assert env.gateway.calls[0][1]["candidate_count"] == 2
+        assert env.gateway.calls[0][1]["candidate_count"] == 1
         assert vars(contract) == original
+    finally:
+        await env.service.shutdown_generation_runs()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_alias", ["local_tool", "qwen_image_2_pro"])
+async def test_individual_shot_can_still_submit_multiple_images(tmp_path, monkeypatch, model_alias):
+    env = await local_environment(tmp_path, monkeypatch, count=1, cost=100)
+    try:
+        await env.service.create_image_run(
+            env.shots[0].id,
+            ImageGenerationCreate(
+                expected_revision_id=env.project.current_revision_id,
+                visual_beat_id=env.shots[0].visual_beats[0].id,
+                model_alias=model_alias,
+                width=720,
+                height=1280,
+                candidate_count=3,
+            ),
+        )
+        await until(lambda: len(env.gateway.calls) == 1)
+        assert env.gateway.calls[0][1]["candidate_count"] == 3
+        env.gateway.release.set()
     finally:
         await env.service.shutdown_generation_runs()
 

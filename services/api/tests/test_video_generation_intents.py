@@ -65,6 +65,7 @@ class FakeRepository:
         self.draft = draft
         self.project = SimpleNamespace(
             id=shot.project_id,
+            origin_type="analysis",
             base_analysis_id=uuid4(),
             output_aspect_ratio="9:16",
             output_width=1080,
@@ -73,6 +74,12 @@ class FakeRepository:
 
     async def get_shot_plan(self, shot_plan_id):
         return self.shot if shot_plan_id == self.shot.id else None
+
+    async def list_shot_plans(self, project_id):
+        return [self.shot] if project_id == self.project.id else []
+
+    async def list_project_prompt_revisions(self, project_id):
+        return []
 
     async def get_production_project(self, project_id):
         return self.project if project_id == self.project.id else None

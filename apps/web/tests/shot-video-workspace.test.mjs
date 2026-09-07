@@ -541,7 +541,7 @@ test("keeps automatic frame references at their semantic positions", () => {
     selectedReferences: references,
   });
 
-  assert.equal(synchronized.videoPrompt, prompt);
+  assert.equal(synchronized.videoPrompt, prompt.replace('@分镜图/图1 @分镜图/图2 @资产/小喵酱/面部', '@资产/小喵酱/面部'));
   assert.match(synchronized.videoPrompt, /画面以 @分镜图\/图1 为准/);
   assert.match(synchronized.videoPrompt, /@分镜图\/图1 到 @分镜图\/图2/);
   assert.equal(synchronized.videoPromptMentions.length, 3);
@@ -681,8 +681,8 @@ test("recovers the video model catalog and exposes an actionable retry state", (
 });
 
 test("uses one prompt editor role in image and video workspaces", () => {
-  assert.match(videoPromptReferenceEditorSource, /className="prompt-editor-textarea"/);
-  assert.match(imageWorkspaceSource, /className="prompt-editor-textarea"/);
+  assert.match(videoPromptReferenceEditorSource, /<AssetReferenceEditor/);
+  assert.match(imageWorkspaceSource, /<ImageAssetPromptEditor/);
   assert.match(workflowStyles, /\.production-workspace \.prompt-editor-textarea\s*\{[^}]*font-weight:\s*var\(--type-weight-regular\)/s);
 });
 
@@ -935,20 +935,11 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(workspaceSource, /reconcileVideoDraftReferences/);
   assert.match(workspaceSource, /videoPromptMentions/);
   assert.match(workspaceSource, /selectedReferences/);
-  assert.match(videoPromptReferenceEditorSource, /className="video-prompt-highlight"/);
-  assert.match(videoPromptReferenceEditorSource, /document\.addEventListener\("pointerdown"/);
-  assert.match(videoPromptReferenceEditorSource, /aria-activedescendant/);
-  assert.match(videoPromptReferenceEditorSource, /selectionActive \? " selecting"/);
-  assert.match(videoPromptReferenceEditorSource, /onSelect=\{updateSelectionState\}/);
-  assert.match(videoPromptReferenceEditorSource, /new ResizeObserver/);
-  assert.match(videoPromptReferenceEditorSource, /textarea\.clientWidth \+ horizontalBorder/);
-  assert.match(videoPromptReferenceEditorSource, /视频提示词快捷引用/);
-  assert.match(videoPromptReferenceEditorSource, /aria-label="视频提示词"/);
+  assert.match(videoPromptReferenceEditorSource, /<AssetReferenceEditor label="视频提示词"/);
+  assert.match(videoPromptReferenceEditorSource, /references=\{references\} options=\{choices\}/);
   assert.doesNotMatch(videoPromptReferenceEditorSource, /<label[^>]*>视频提示词<\/label>/);
-  assert.match(videoPromptReferenceEditorSource, /加入生成参考并插入提示词/);
-  assert.match(videoPromptReferenceEditorSource, /deleteVideoMentionAtSelection/);
   assert.match(videoPromptReferenceEditorSource, /removedReferences/);
-  assert.match(videoPromptReferenceEditorSource, /event\.nativeEvent\?\.isComposing/);
+  assert.match(videoPromptReferenceEditorSource, /ensureVideoGenerationReference/);
   assert.match(creativeIntentPanelSource, /<CreativeIntentMentionEditor/);
   assert.doesNotMatch(creativeIntentPanelSource, /说明要保留|输入 @ 可精确指定资产|TextModelIndicator|尚未生成/);
   assert.match(creativeIntentPanelSource, /video_intent_model_validation_failed/);

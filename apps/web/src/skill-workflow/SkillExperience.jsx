@@ -1389,6 +1389,7 @@ export function SkillProjectWorkspace({
                   <button className="primary-button" disabled={busy} onClick={compileStoryboard} type="button">生成大纲与分镜</button>
                 )}
                 {workspace.shot_manifest && <StoryboardPromptEditor
+                  resolveUrl={resolveUrl}
                   ref={storyboardEditorRef}
                   key={projectId}
                   approved={currentGateApproved}

@@ -576,7 +576,7 @@ export function synchronizeAutomaticVideoPrompt({
     .replace(/[ \t]+\n/g, "\n")
     .replace(/^[ \t]*\n+/u, "")
     .trim();
-  const tokenLine = selectedTokens.join(" ");
+  const tokenLine = selectedTokens.filter((token) => !body.includes(token)).join(" ");
   const videoPrompt = [tokenLine, body].filter(Boolean).join("\n\n");
   return {
     videoPrompt,
@@ -617,14 +617,12 @@ export function reconcileVideoDraftReferences(
       removedIntentReferenceKeys.add(videoReferenceStableKey(reference));
     }
   }
-  if (
-    change.addedReference?.reference_kind === "approved_image"
-    && change.addedReference.visual_beat_id
-  ) {
-    excluded.delete(String(change.addedReference.visual_beat_id));
-  }
-  if (change.addedReference) {
-    removedIntentReferenceKeys.delete(videoReferenceStableKey(change.addedReference));
+  const additions = [...(change.addedReferences || []), ...(change.addedReference ? [change.addedReference] : [])];
+  for (const reference of additions) {
+    if (reference.reference_kind === "approved_image" && reference.visual_beat_id) {
+      excluded.delete(String(reference.visual_beat_id));
+    }
+    removedIntentReferenceKeys.delete(videoReferenceStableKey(reference));
   }
   if (change.restoreAutomaticReferences) excluded.clear();
 
@@ -640,15 +638,17 @@ export function reconcileVideoDraftReferences(
   const selectedStableKeys = new Set(selectedReferences.map(videoReferenceStableKey));
   const referenceOrderOverride = (change.restoreAutomaticReferences ? [] : requestedOrder || [])
     .filter((key) => selectedStableKeys.has(String(key)));
-  const synchronizedPrompt = synchronizeAutomaticVideoPrompt({
-    prompt: Object.prototype.hasOwnProperty.call(change, "videoPrompt")
-      ? change.videoPrompt
-      : draft.videoPrompt,
-    mentions: Object.prototype.hasOwnProperty.call(change, "videoPromptMentions")
-      ? change.videoPromptMentions
-      : draft.videoPromptMentions,
-    selectedReferences,
-  });
+  // Typed text and atomic-editor undo are authoritative. Do not trim/rebuild
+  // the body on every keystroke, which would erase spaces and reset history.
+  const synchronizedPrompt = Object.prototype.hasOwnProperty.call(change, "videoPrompt")
+    ? {
+      videoPrompt: change.videoPrompt,
+      videoPromptMentions: normalizeVideoPromptMentions(change.videoPrompt,
+        change.videoPromptMentions || draft.videoPromptMentions || [], selectedReferences),
+    }
+    : synchronizeAutomaticVideoPrompt({
+      prompt: draft.videoPrompt, mentions: draft.videoPromptMentions, selectedReferences,
+    });
   const inputSources = new Set(change.inputSources || draft.inputSources || []);
   for (const reference of removedReferences) {
     const source = requiredSourceForVideoMention(reference);

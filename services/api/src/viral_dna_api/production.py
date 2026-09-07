@@ -145,6 +145,7 @@ from .models import (
     VideoGenerationCreate,
     VideoGenerationInputMode,
     VideoGenerationInputSource,
+    VideoGenerationReference,
     VideoPromptMention,
     VideoPromptReferenceKind,
     VideoProviderTask,
@@ -167,7 +168,17 @@ from .production_seeds.contracts import (
     ProductionSeedReference,
     frame_to_seconds,
 )
+from .project_prompts import (
+    ProjectPromptService,
+    ProjectPromptUpdate,
+    PromptRevisionConflict,
+    local_prompt,
+    production_local_token,
+    prompt_lock,
+    prompt_snapshot,
+)
 from .prompt_engine.compiler import sanitize_still_image_prompt
+from .prompt_engine.still_image import static_image_constraints
 from .quality.continuity_service import ContinuityService
 from .storage_errors import IncompatibleShotPlanSchemaError
 from .video_generation import (
@@ -775,7 +786,7 @@ def _shot_for_visual_beat(plan: ShotPlan, beat: ShotVisualBeat) -> ShotPlan:
             ),
             "image_prompt": sanitize_still_image_prompt(beat.image_prompt),
             "image_prompt_mentions": beat.image_prompt_mentions,
-            "image_negative_constraints": beat.image_negative_constraints,
+            "image_negative_constraints": static_image_constraints(beat.image_negative_constraints),
             "required": beat.required,
             "image_status": beat.image_status,
             "approved_image_candidate_id": beat.approved_image_candidate_id,
@@ -787,7 +798,14 @@ def _still_image_prompt_view(plan: ShotPlan) -> ShotPlan:
     """Expose legacy plans with image-only prompts without mutating stored revisions."""
 
     beats = [
-        item.model_copy(update={"image_prompt": sanitize_still_image_prompt(item.image_prompt)})
+        item.model_copy(
+            update={
+                "image_prompt": sanitize_still_image_prompt(item.image_prompt),
+                "image_negative_constraints": static_image_constraints(
+                    item.image_negative_constraints
+                ),
+            }
+        )
         for item in plan.visual_beats
     ]
     primary_prompt = (
@@ -796,6 +814,9 @@ def _still_image_prompt_view(plan: ShotPlan) -> ShotPlan:
     return plan.model_copy(
         update={
             "image_prompt": primary_prompt,
+            "image_negative_constraints": beats[0].image_negative_constraints
+            if beats
+            else static_image_constraints(plan.image_negative_constraints),
             "visual_beats": beats,
         }
     )
@@ -2925,15 +2946,255 @@ class ProductionService:
             for plan in plans
         }
 
+    async def get_prompt_context(self, project_id: UUID):
+        project = await self._require_project(project_id)
+        return await ProjectPromptService(self.repository).for_production(project)
+
+    async def update_prompt_context(self, project_id: UUID, payload: ProjectPromptUpdate):
+        current = await self.get_prompt_context(project_id)
+        async with prompt_lock(self.repository, current.project_id):
+            current = await self.get_prompt_context(project_id)
+            try:
+                return await ProjectPromptService(self.repository).save(current, payload)
+            except PromptRevisionConflict as exc:
+                raise _fail(409, "prompt_revision_stale", str(exc)) from exc
+
+    @staticmethod
+    def _local_prompt_view(plan, context):
+        view = _still_image_prompt_view(plan)
+        return view.model_copy(
+            update={
+                "image_prompt": local_prompt(view.image_prompt, context, "image"),
+                "video_prompt": local_prompt(view.video_prompt, context, "video"),
+                "visual_beats": [
+                    beat.model_copy(
+                        update={
+                            "image_prompt": local_prompt(beat.image_prompt, context, "image"),
+                        }
+                    )
+                    for beat in view.visual_beats
+                ],
+            }
+        )
+
+    async def update_storyboard_prompt_bodies(
+        self,
+        project_id: UUID,
+        bodies: dict,
+        *,
+        expected_revision_id: UUID | None = None,
+        expected_prompt_token: str | None = None,
+    ):
+        """Production owns live locals after handoff; keep media/approvals intact."""
+        async with await self._project_lock(project_id), prompt_lock(self.repository, project_id):
+            project = await self._require_project(project_id)
+            if expected_revision_id and project.current_revision_id != expected_revision_id:
+                raise _fail(
+                    409, "storyboard_revision_stale", "分镜已在后续阶段更新，草稿已保留，请刷新核对"
+                )
+            context = await self.get_prompt_context(project_id)
+            plans = await self.repository.list_shot_plans(project_id)
+            drafts = {
+                plan.id: await self.repository.get_video_generation_draft(plan.id) for plan in plans
+            }
+            if (
+                expected_prompt_token
+                and production_local_token(plans, drafts) != expected_prompt_token
+            ):
+                raise _fail(409, "storyboard_revision_stale", "视频局部草稿已更新，请刷新后核对")
+            revision_id = uuid4()
+            changed, updated = [], []
+            new_bindings, removed_binding_ids = [], []
+            all_bindings = await self._all_bindings(plans)
+            # Validate every row before persisting any of the parallel editors.
+            validated = {}
+            for plan in plans:
+                if plan.stable_shot_key in bodies:
+                    incoming = bodies[plan.stable_shot_key]
+                    validated[plan.id] = (
+                        await self._validate_prompt_mentions(
+                            project, incoming.get("image_mentions", plan.image_prompt_mentions)
+                        ),
+                        await self._validate_video_prompt_mentions(
+                            project,
+                            plan,
+                            incoming.get("video_mentions", plan.video_prompt_mentions),
+                        ),
+                    )
+            for plan in plans:
+                incoming = bodies.get(plan.stable_shot_key)
+                if incoming is None:
+                    updated.append(plan)
+                    continue
+                view = self._local_prompt_view(plan, context)
+                image_mentions, video_mentions = validated[plan.id]
+                refs_changed = image_mentions != plan.image_prompt_mentions
+                video_refs_changed = video_mentions != plan.video_prompt_mentions
+                if refs_changed:
+                    other_ids = {
+                        item.reference_asset_id
+                        for beat in sorted(plan.visual_beats, key=lambda beat: beat.index)[1:]
+                        for item in beat.image_prompt_mentions
+                    }
+                    retained = {item.reference_asset_id for item in image_mentions} | other_ids
+                    old_bindings = [item for item in all_bindings if item.shot_plan_id == plan.id]
+                    inputs = [
+                        ReferenceBindingInput(**item.model_dump())
+                        for item in old_bindings
+                        if item.reference_asset_id in retained
+                    ]
+                    inputs = await self._append_mention_bindings(project, inputs, image_mentions)
+                    built = await self._build_bindings(project, plan, inputs)
+                    new_bindings.extend(built)
+                    removed_binding_ids.extend(item.id for item in old_bindings)
+                    all_bindings = [
+                        item for item in all_bindings if item.shot_plan_id != plan.id
+                    ] + built
+                video_draft = drafts.get(plan.id)
+                next_input_plan = video_draft.input_plan if video_draft else None
+                exclusions = list(video_draft.auto_reference_exclusions) if video_draft else []
+                if video_draft and "video_mentions" in incoming:
+                    next_keys = {
+                        (item.reference_kind, item.reference_id) for item in video_mentions
+                    }
+                    removed_keys = {
+                        (item.reference_kind, item.reference_id)
+                        for item in video_draft.video_prompt_mentions
+                    } - next_keys
+                    next_references = [
+                        item
+                        for item in video_draft.input_plan.references
+                        if (item.reference_kind, item.reference_id) not in removed_keys
+                    ]
+                    removed_candidates = {
+                        ref_id
+                        for kind, ref_id in removed_keys
+                        if kind == VideoPromptReferenceKind.APPROVED_IMAGE
+                    }
+                    added_candidates = {
+                        ref_id
+                        for kind, ref_id in next_keys
+                        if kind == VideoPromptReferenceKind.APPROVED_IMAGE
+                    }
+                    for beat in plan.visual_beats:
+                        if (
+                            beat.approved_image_candidate_id in removed_candidates
+                            and beat.id not in exclusions
+                        ):
+                            exclusions.append(beat.id)
+                        elif (
+                            beat.approved_image_candidate_id in added_candidates
+                            and beat.id in exclusions
+                        ):
+                            exclusions.remove(beat.id)
+                    existing_keys = {
+                        (item.reference_kind, item.reference_id) for item in next_references
+                    }
+                    for mention in video_mentions:
+                        if (mention.reference_kind, mention.reference_id) not in existing_keys:
+                            next_references.append(VideoGenerationReference(**mention.model_dump()))
+                    source_for = {
+                        "project_asset": VideoGenerationInputSource.PROJECT_ASSETS,
+                        "approved_image": VideoGenerationInputSource.APPROVED_IMAGES,
+                        "provider_managed_asset": (
+                            VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS
+                        ),
+                        "reference_video": VideoGenerationInputSource.REFERENCE_VIDEO,
+                        "depth_control": VideoGenerationInputSource.DEPTH_CONTROL,
+                    }
+                    sources = list(
+                        dict.fromkeys(
+                            [
+                                *video_draft.input_plan.sources,
+                                *(source_for[item.reference_kind] for item in next_references),
+                            ]
+                        )
+                    )
+                    next_input_plan = video_draft.input_plan.model_copy(
+                        update={"references": next_references, "sources": sources}
+                    )
+                if video_draft and (
+                    local_prompt(video_draft.video_prompt, context, "video") != incoming["video"]
+                    or video_mentions != video_draft.video_prompt_mentions
+                    or next_input_plan != video_draft.input_plan
+                ):
+                    saved = await self.repository.compare_and_swap_video_generation_draft(
+                        video_draft.model_copy(
+                            update={
+                                "video_prompt": incoming["video"],
+                                "video_prompt_mentions": video_mentions,
+                                "input_plan": next_input_plan,
+                                "auto_reference_exclusions": exclusions,
+                                "draft_version": video_draft.draft_version + 1,
+                                "updated_at": utc_now(),
+                            }
+                        ),
+                        expected_draft_version=video_draft.draft_version,
+                    )
+                    if not saved:
+                        raise _fail(
+                            409, "storyboard_revision_stale", "视频局部草稿已更新，请刷新后核对"
+                        )
+                if (incoming["image"], incoming["video"]) == (
+                    view.image_prompt,
+                    view.video_prompt,
+                ) and not (refs_changed or video_refs_changed):
+                    updated.append(plan)
+                    continue
+                beats = list(plan.visual_beats)
+                primary = min(beats, key=lambda item: item.index) if beats else None
+                beats = [
+                    beat.model_copy(
+                        update={
+                            "image_prompt": incoming["image"],
+                            "image_prompt_mentions": image_mentions,
+                        }
+                    )
+                    if primary and beat.id == primary.id
+                    else beat
+                    for beat in beats
+                ]
+                plan = plan.model_copy(
+                    update={
+                        "revision_id": revision_id,
+                        "image_prompt": incoming["image"],
+                        "image_prompt_mentions": image_mentions,
+                        "video_prompt": incoming["video"],
+                        "video_prompt_mentions": video_mentions,
+                        "visual_beats": beats,
+                        "updated_at": utc_now(),
+                    }
+                )
+                changed.append(plan)
+                updated.append(plan)
+            if changed:
+                project, revision = await self._prepare_revision(
+                    project,
+                    ProductionChangeKind.SHOT_PLAN_CHANGED,
+                    "更新局部提示词，保留历史产物与采用状态",
+                    revision_id=revision_id,
+                    shot_plans=updated,
+                    reference_bindings=all_bindings,
+                )
+                await self.repository.save_production_bundle(
+                    project,
+                    revision,
+                    shot_plans=changed,
+                    reference_bindings=new_bindings,
+                    remove_reference_binding_ids=removed_binding_ids,
+                )
+            return project.current_revision_id
+
     async def list_shots(self, project_id: UUID) -> list[ShotPlanResponse]:
         project = await self._require_project(project_id)
         project, plans = await self._ensure_project_shots(project)
         if project.current_revision_id is None:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
         previews = await self._shot_media_previews(project.id, plans)
+        context = await self.get_prompt_context(project.id)
         return [
             ShotPlanResponse(
-                plan=_still_image_prompt_view(plan),
+                plan=self._local_prompt_view(plan, context),
                 reference_bindings=await self.repository.list_reference_bindings(plan.id),
                 current_revision_id=project.current_revision_id,
                 image_preview=previews[plan.id][0],
@@ -3438,7 +3699,7 @@ class ProductionService:
                 }
             )
         return ShotPlanDetailResponse(
-            plan=_still_image_prompt_view(plan),
+            plan=self._local_prompt_view(plan, await self.get_prompt_context(project.id)),
             reference_bindings=await self.repository.list_reference_bindings(plan.id),
             current_revision_id=project.current_revision_id,
             generation_runs=[await self._run_response(run) for run in reversed(runs)],
@@ -5963,6 +6224,7 @@ class ProductionService:
         *,
         retry_of_run_id: UUID | None = None,
         retry_count: int = 0,
+        frozen_prompt: dict | None = None,
     ) -> GenerationRun:
         plan = await self._require_shot(shot_plan_id)
         self._ensure_shot_active(plan)
@@ -6040,6 +6302,9 @@ class ProductionService:
             self.workspace.production_shot_root(project.record_id, project.id, plan.id)
             / "videos"
             / str(run_id)
+        )
+        request_payload["prompt_snapshot"] = frozen_prompt or prompt_snapshot(
+            plan.video_prompt, await self.get_prompt_context(project.id), "video"
         )
         queue_path = queue_root / "queue.json"
         fingerprint = hashlib.sha256(
@@ -6196,6 +6461,7 @@ class ProductionService:
         *,
         retry_of_run_id: UUID | None = None,
         retry_count: int = 0,
+        frozen_prompt: dict | None = None,
     ) -> GenerationRun:
         plan = await self._require_shot(shot_plan_id)
         self._ensure_shot_active(plan)
@@ -6262,6 +6528,9 @@ class ProductionService:
             self.workspace.production_shot_root(project.record_id, project.id, plan.id)
             / "images"
             / str(run_id)
+        )
+        request_payload["prompt_snapshot"] = frozen_prompt or prompt_snapshot(
+            beat.image_prompt, await self.get_prompt_context(project.id), "image"
         )
         queue_path = queue_root / "queue.json"
         fingerprint = hashlib.sha256(
@@ -6557,6 +6826,7 @@ class ProductionService:
                 video_payload,
                 retry_of_run_id=source.id,
                 retry_count=source.retry_count + 1,
+                frozen_prompt=source.request_payload.get("prompt_snapshot"),
             )
             self._schedule_video_run(run.id)
         else:
@@ -6566,6 +6836,7 @@ class ProductionService:
                 image_payload,
                 retry_of_run_id=source.id,
                 retry_count=source.retry_count + 1,
+                frozen_prompt=source.request_payload.get("prompt_snapshot"),
             )
             self._schedule_image_run(run.id)
         return await self._run_response(run)
@@ -6770,6 +7041,13 @@ class ProductionService:
                 payload.visual_beat_id or queued_run.visual_beat_id,
             )
             gateway_plan = _shot_for_visual_beat(plan, beat)
+            frozen = queued_run.request_payload.get("prompt_snapshot")
+            if frozen:
+                gateway_plan = gateway_plan.model_copy(
+                    update={
+                        "image_prompt": frozen["compiled_prompt"],
+                    }
+                )
             if not beat.image_prompt.strip():
                 raise _fail(409, "image_prompt_required", "请先填写图片提示词")
             if beat.image_status == WorkflowItemStatus.APPROVED and not payload.preserve_approval:
@@ -7119,10 +7397,16 @@ class ProductionService:
                 payload.duration_seconds or plan.duration_seconds,
                 3,
             )
+            frozen = queued_run.request_payload.get("prompt_snapshot")
+            generation_plan = (
+                plan.model_copy(update={"video_prompt": frozen["compiled_prompt"]})
+                if frozen
+                else plan
+            )
             try:
                 run, candidates = await self.video_gateway.generate(
                     project,
-                    plan,
+                    generation_plan,
                     payload.expected_revision_id,
                     tuple(reference_frames),
                     candidate_count=payload.candidate_count,
@@ -9514,18 +9798,6 @@ class ProductionService:
                 for usage_id in item.image_asset_usage_ids
                 if usage_id in reference_by_usage_id
             ]
-            identity_references = [
-                reference
-                for reference in source_references
-                if reference.type == ReferenceAssetType.PERSON
-            ]
-            if len(identity_references) > 1:
-                selected = identity_references[(item.order - 1) % len(identity_references)]
-                source_references = [
-                    reference
-                    for reference in source_references
-                    if reference.type != ReferenceAssetType.PERSON or reference.id == selected.id
-                ]
             primary_reference = next(
                 (
                     reference
@@ -9537,7 +9809,7 @@ class ProductionService:
             mentions = [
                 PromptAssetMention(
                     reference_asset_id=reference.id,
-                    label=reference.name,
+                    label=_reference_asset_mention_label(reference),
                 )
                 for reference in source_references
             ]
@@ -9607,6 +9879,10 @@ class ProductionService:
                     image_prompt_mentions=mentions,
                     image_negative_constraints=item.image_negative_constraints,
                     video_prompt=item.video_prompt,
+                    video_prompt_mentions=[
+                        VideoPromptMention.model_validate(mention)
+                        for mention in (item.video_prompt_mentions or [])
+                    ],
                     editing_guidance=item.editing_guidance,
                     video_negative_constraints=item.video_negative_constraints,
                     exact_overlay_instructions=exact_overlays,
@@ -9635,20 +9911,7 @@ class ProductionService:
                 for usage_id in shot.image_asset_usage_ids
                 if usage_id in reference_by_usage_id
             ]
-            identity_references = [
-                reference for reference in references if reference.type == ReferenceAssetType.PERSON
-            ]
-            selected_identity_id = (
-                identity_references[(shot.order - 1) % len(identity_references)].id
-                if identity_references
-                else None
-            )
             for reference in references:
-                if (
-                    reference.type == ReferenceAssetType.PERSON
-                    and reference.id != selected_identity_id
-                ):
-                    continue
                 bindings.append(
                     ReferenceBinding(
                         shot_plan_id=plan.id,
@@ -10579,7 +10842,7 @@ class ProductionService:
                     label=_simplified_text(
                         mention.label,
                         field_name="提示词资产名称",
-                        max_length=120,
+                        max_length=260,
                     ),
                 )
             )
@@ -11768,6 +12031,8 @@ class ProductionService:
         reference_bindings: list[ReferenceBinding] | None = None,
         video_clip_preparations: list[VideoClipPreparation] | None = None,
     ) -> tuple[ProductionProject, ProductionRevision]:
+        if project.current_revision_id is not None:
+            await ProjectPromptService(self.repository).retain_baseline(project)
         revisions = await self.repository.list_production_revisions(project.id)
         revision_number = max((item.revision_number for item in revisions), default=0) + 1
         revision_id = revision_id or uuid4()

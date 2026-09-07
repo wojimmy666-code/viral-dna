@@ -127,7 +127,7 @@ test("batch retry reuses the submitted snapshot; a later explicit click starts a
     choice: { model: "local_tool", resolution: "720x1280" },
     pendingRequest: { current: null }, callbacks: { current: { onFlush: async () => {} } },
     setWorking: () => {}, setError: () => {}, setPreview: () => {}, accept: async () => {},
-    imageChoicePayload: (_settings, _ratio, value) => ({ model_alias: value.model, resolution: value.resolution }),
+    imageChoicePayload: (_settings, _ratio, value) => ({ model_alias: value.model, resolution: value.resolution, candidate_count: 4 }),
     request: async (path, options) => {
       calls.push({ path, body: options?.body && JSON.parse(options.body) });
       if (path.endsWith("/preview")) return { items: [] };
@@ -140,6 +140,7 @@ test("batch retry reuses the submitted snapshot; a later explicit click starts a
   await prepare();
   const first = calls.at(-1).body;
   assert.equal(first.mode, "all");
+  assert.equal(first.candidate_count, 1);
   scope.choice = { model: "qwen_image_2", resolution: "1080x1920" };
   await prepare();
   assert.deepEqual(calls.at(-1).body, first);
@@ -148,4 +149,22 @@ test("batch retry reuses the submitted snapshot; a later explicit click starts a
   assert.notEqual(calls.at(-1).body.request_id, first.request_id);
   assert.equal(calls.at(-1).body.model_alias, "qwen_image_2");
   assert.equal(calls.at(-1).body.mode, "all");
+  assert.equal(calls.at(-1).body.candidate_count, 1);
+});
+
+test("selecting an image refreshes selection without a toast or implicit approval", async () => {
+  const calls = [];
+  let refreshed = false;
+  let projectsChanged = false;
+  const scope = {
+    detail: { project: { id: "p", current_revision_id: "revision" } }, selectedShotId: "s",
+    executeAction: (action) => action(),
+    request: async (path, options) => { calls.push({ path, body: JSON.parse(options.body) }); },
+    refreshProject: async () => { refreshed = true; },
+    onProjectsChanged: async () => { projectsChanged = true; },
+    onNotice: () => assert.fail("selection must not raise a success toast"),
+  };
+  await productionHandler("selectCandidate", scope)("candidate");
+  assert.deepEqual(calls, [{ path: "/generation-candidates/candidate/select", body: { expected_revision_id: "revision" } }]);
+  assert.ok(refreshed && projectsChanged);
 });

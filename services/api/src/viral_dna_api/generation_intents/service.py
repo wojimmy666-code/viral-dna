@@ -30,6 +30,7 @@ from ..models import (
     VideoIntentStatus,
     VideoPromptMention,
 )
+from ..project_prompts import ProjectPromptService, local_prompt
 from ..video_generation.drafts import ShotVideoGenerationDraftService
 from ..video_generation.settings import VideoGenerationSettingsService
 from .compiler import DIMENSION_LABELS, EDIT_PROCESS_MARKERS, compile_intent_prompt
@@ -47,8 +48,7 @@ SYSTEM_PROMPT_PATH = (
 )
 PRIMARY_SEMANTIC_ATTEMPTS = 2
 CONTINUOUS_TRANSITION_INSTRUCTION = (
-    "人物动作、主体位置、画面构图与光影自然连续衔接，"
-    "前后画面由视频模型生成连续视觉转场。"
+    "人物动作、主体位置、画面构图与光影自然连续衔接，前后画面由视频模型生成连续视觉转场。"
 )
 HARD_CUT_NEGATION_PATTERN = re.compile(
     r"(?:不|不要|无需|避免|禁止|不得|不可|非|取消|去掉|拒绝|无)"
@@ -249,8 +249,7 @@ def _semantic_repair_instructions(
         "\n\n你上一次输出没有通过最终视频提示词语义校验。"
         "请根据校验错误修正上一次结果，并重新输出完整 JSON；不得只解释修改内容。\n"
         f"上一次输出：\n{candidate_json}\n"
-        "校验错误：\n- "
-        + "\n- ".join(issues)
+        "校验错误：\n- " + "\n- ".join(issues)
     )
 
 
@@ -294,10 +293,7 @@ def _normalize_generated_transition_contract(
     intent_text: str,
     intent_context: dict[str, object] | None = None,
 ) -> VideoGenerationIntentIR:
-    if (
-        not _expects_generated_transition(intent_context)
-        or _user_requests_direct_cut(intent_text)
-    ):
+    if not _expects_generated_transition(intent_context) or _user_requests_direct_cut(intent_text):
         return intent
 
     transition_directives = [
@@ -330,8 +326,7 @@ def _normalize_generated_transition_contract(
             continue
         has_transition_directive = True
         if (
-            directive.operation
-            in {VideoIntentOperation.REMOVE, VideoIntentOperation.UNSPECIFIED}
+            directive.operation in {VideoIntentOperation.REMOVE, VideoIntentOperation.UNSPECIFIED}
             or _contains_positive_hard_cut(directive.target_name)
             or _contains_positive_hard_cut(directive.instruction)
         ):
@@ -360,21 +355,14 @@ def _normalize_generated_transition_contract(
         )
 
     transition_instruction = intent.transition_instruction
-    if (
-        not transition_instruction.strip()
-        or _contains_positive_hard_cut(transition_instruction)
-    ):
+    if not transition_instruction.strip() or _contains_positive_hard_cut(transition_instruction):
         transition_instruction = CONTINUOUS_TRANSITION_INSTRUCTION
     return intent.model_copy(
         update={
             "summary": _replace_hard_cut_result(intent.summary),
             "directives": normalized_directives,
-            "final_state_instruction": _replace_hard_cut_result(
-                intent.final_state_instruction
-            ),
-            "creative_instruction": _replace_hard_cut_result(
-                intent.creative_instruction
-            ),
+            "final_state_instruction": _replace_hard_cut_result(intent.final_state_instruction),
+            "creative_instruction": _replace_hard_cut_result(intent.creative_instruction),
             "transition_instruction": transition_instruction,
         }
     )
@@ -395,9 +383,7 @@ def _intent_output_issues(
             issues.append(f"{field_name} 不得包含 @引用，引用只能通过 directive 绑定")
         markers = [marker for marker in EDIT_PROCESS_MARKERS if marker in text]
         if markers:
-            issues.append(
-                f"{field_name} 仍包含编辑过程词：{'、'.join(dict.fromkeys(markers))}"
-            )
+            issues.append(f"{field_name} 仍包含编辑过程词：{'、'.join(dict.fromkeys(markers))}")
     transition_text = intent.transition_instruction.strip()
     if "@" in transition_text:
         issues.append("transition_instruction 不得包含 @引用")
@@ -419,8 +405,7 @@ def _intent_output_issues(
         if text
     )
     model_selected_hard_cut = any(
-        item.operation == VideoIntentOperation.REMOVE
-        for item in transition_directives
+        item.operation == VideoIntentOperation.REMOVE for item in transition_directives
     ) or any(
         _contains_positive_hard_cut(text)
         for text in (
@@ -505,7 +490,13 @@ class VideoIntentCompilationService:
         draft: ShotVideoGenerationDraft,
         intent_mentions: list[VideoPromptMention],
     ) -> dict[str, object]:
+        prompts = await ProjectPromptService(self.repository).for_production(project)
         return {
+            "project_global_video_prompt": prompts.common_video_prompt,
+            "global_prompt_policy": (
+                "全局视频提示词仅作为约束，不得修改或重复到本镜头局部正文。"
+                "不得读取图片提示词。"
+            ),
             "output": {
                 "aspect_ratio": getattr(project, "output_aspect_ratio", ""),
                 "width": getattr(project, "output_width", None),
@@ -515,7 +506,7 @@ class VideoIntentCompilationService:
                 "index": shot.index,
                 "duration_seconds": shot.duration_seconds,
                 "generation_duration_seconds": draft.duration_seconds,
-                "original_video_prompt": shot.video_prompt,
+                "original_video_prompt": local_prompt(shot.video_prompt, prompts, "video"),
                 "visual_beats": [
                     {
                         "index": item.index,

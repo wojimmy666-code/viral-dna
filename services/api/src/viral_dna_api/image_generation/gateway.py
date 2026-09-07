@@ -32,6 +32,7 @@ from ..models import (
     ReferenceBinding,
     ShotPlan,
 )
+from ..prompt_engine.compiler import sanitize_still_image_prompt
 from ..runtime_config import get_config_value
 from ..workspace import WorkspaceError, WorkspaceManager
 from .catalog import ImageModelCatalogError, load_image_model_catalog
@@ -170,6 +171,8 @@ def _output_dimensions(
 
 
 def _compiled_prompt(request: ImageGenerationRequest) -> str:
+    # The gateway is also used directly by Look Test and local ImageGen.
+    image_prompt = sanitize_still_image_prompt(request.shot.image_prompt)
     role_labels = {
         "identity": "唯一人物身份来源",
         "product": "产品外观与结构",
@@ -189,14 +192,14 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
                 if request.references
                 else "本次任务是纯文字生成，不使用原视频关键帧或参考图片。"
             ),
-            f"生成要求：{request.shot.image_prompt.strip()}",
+            f"生成要求：{image_prompt}",
             "根据文字从零构建完整画面，严格遵循主体、场景、构图、镜头、光影和风格描述。",
         ]
         reference_offset = 1
     elif primary_identity is not None:
         lines = [
             "这是受控人物身份替换任务，必须严格区分每张输入图的职责。",
-            "图像1仅用于保留原视频关键帧的姿态、构图、动作关系、机位、运镜意图和光影逻辑。",
+            "图像1仅用于保留原视频关键帧的姿态、构图、空间关系、机位和光影逻辑。",
             "严禁从图像1继承人物的年龄、五官、脸型、肤色、发型、身份或其他生物特征。",
             (
                 "图像2（@"
@@ -205,14 +208,14 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
             ),
             "人物年龄、五官、脸型、肤色和可识别身份必须以图像2为准；不得与图像1的人脸融合，不得生成第三个人物身份。",
             "当图像1与图像2发生冲突时，身份一律服从图像2，姿态、构图和动作一律服从图像1。",
-            f"编辑要求：{request.shot.image_prompt.strip()}",
+            f"编辑要求：{image_prompt}",
         ]
         reference_offset = 2
     else:
         lines = [
             "图像1是原视频分镜关键帧，作为基础图进行编辑。",
             "除下方明确要求替换的内容外，保留原图的镜头视角、构图、主体姿态、动作关系和光影逻辑。",
-            f"编辑要求：{request.shot.image_prompt.strip()}",
+            f"编辑要求：{image_prompt}",
         ]
         reference_offset = 2
     for index, reference in enumerate(request.references, start=reference_offset):
@@ -231,7 +234,9 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
                 else f"图像{index}是参考资产“{reference.name}”，用于参考{label}"
             )
         if reference.notes:
-            detail += f"，说明：{reference.notes.strip()}"
+            notes = sanitize_still_image_prompt(reference.notes)
+            if notes:
+                detail += f"，说明：{notes}"
         if reference.crop_hint:
             detail += f"，裁切提示：{reference.crop_hint.strip()}"
         lines.append(detail + "。")
@@ -247,7 +252,6 @@ def _negative_prompt(request: ImageGenerationRequest) -> str:
             "混合图像1与图像2的人脸或身份",
             "改变图像2人物的年龄、五官、脸型或肤色",
             "生成第三个人物身份",
-            "人物身份漂移",
             "面部融合",
             "双人脸",
             "人脸重影",

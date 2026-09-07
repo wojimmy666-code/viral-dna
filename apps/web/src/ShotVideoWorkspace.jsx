@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import {
   ArrowRight,
   CaretDown,
@@ -227,6 +228,7 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
 }
 
 export function ShotVideoWorkspace({
+  globalPromptRef,
   applyPersistedVideoDraft,
   advanced,
   assets = [],
@@ -238,6 +240,7 @@ export function ShotVideoWorkspace({
   initialCandidateId = "",
   onPreviewCandidate,
   onAdvance,
+  onAddAssets,
   onApprove,
   onArchiveCandidates,
   onCancelRun,
@@ -291,7 +294,8 @@ export function ShotVideoWorkspace({
   const [intentError, setIntentError] = useState("");
   const [intentErrorCode, setIntentErrorCode] = useState("");
   const [referenceSettingsOpen, setReferenceSettingsOpen] = useState(false);
-  const [promptSettingsOpen, setPromptSettingsOpen] = useState(false);
+  const [promptSettingsOpen, setPromptSettingsOpen] = useState(true);
+  const [globalPrompts, setGlobalPrompts] = useState({});
   const plan = shotDetail?.plan;
   const sourceVideoMode = plan?.output_mode === "source_video";
   const depthGeneration = useDepthControlJob({
@@ -473,7 +477,7 @@ export function ShotVideoWorkspace({
     setIntentError("");
     setIntentErrorCode("");
     setReferenceSettingsOpen(false);
-    setPromptSettingsOpen(false);
+    setPromptSettingsOpen(true);
     setDepthSettingsOpen(false);
   }, [plan?.id]);
 
@@ -1150,7 +1154,7 @@ export function ShotVideoWorkspace({
             >
               <summary>
                 <span className="shot-video-config-title">
-                  <strong>视频提示词</strong>
+                  <strong>局部视频提示词</strong>
                   <small>{videoDraft.videoPrompt.length} 字</small>
                 </span>
                 <span className="shot-video-config-actions">
@@ -1164,6 +1168,8 @@ export function ShotVideoWorkspace({
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
                   assets={assets}
+                  disabled={busy}
+                  onAddAssets={onAddAssets || (() => setReferenceSettingsOpen(true))}
                   depthAssets={plan?.depth_control_assets || []}
                   managedAssetBinding={managedAssetBinding}
                   onBlur={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)}
@@ -1182,8 +1188,10 @@ export function ShotVideoWorkspace({
                   prompt={videoDraft.videoPrompt}
                   references={videoDraft.selectedReferences || []}
                 />
+                <PromptPreview common={globalPrompts.common_video_prompt} local={videoDraft.videoPrompt} label="视频提示词" />
               </div>
             </details>
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" request={request} onChange={setGlobalPrompts} disabled={busy} />
             <ShotVideoGenerationControls
               activeRun={activeRun}
               allReferencesApproved={!generationBlockedReason}

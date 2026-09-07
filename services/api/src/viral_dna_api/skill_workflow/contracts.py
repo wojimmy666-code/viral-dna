@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_core import to_jsonable_python
 
 from ..editing_guidance import separate_shot_editing_guidance
-from ..models import ImageGenerationOverrides
+from ..models import ImageGenerationOverrides, PromptAssetMention, VideoPromptMention
 from ..production_seeds.contracts import ExactOverlayInstruction
 
 
@@ -544,6 +544,8 @@ class ShotManifestShot(BaseModel):
     video_prompt_body: str | None = Field(default=None, max_length=8000)
     video_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     image_asset_usage_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    image_prompt_mentions: list[PromptAssetMention] = Field(default_factory=list, max_length=50)
+    video_prompt_mentions: list[VideoPromptMention] = Field(default_factory=list, max_length=50)
     video_reference_usage_ids: list[UUID] = Field(default_factory=list, max_length=50)
     exact_overlays: list[ExactOverlayInstruction] = Field(default_factory=list, max_length=20)
     continuity_group_ids: list[str] = Field(default_factory=list, max_length=30)
@@ -568,12 +570,16 @@ class ShotManifestRevision(BaseModel):
     creative_approach: str = Field(default="", max_length=1000)
     common_image_prompt: str = Field(default="", max_length=8000)
     common_video_prompt: str = Field(default="", max_length=8000)
+    # Live production token, returned by the workspace without changing history.
+    production_revision_id: UUID | None = None
+    production_prompt_token: str | None = None
     continuity_bible: dict[str, Any] = Field(default_factory=dict)
     edit_plan: dict[str, Any] = Field(default_factory=dict)
     project_negative_constraints: list[str] = Field(default_factory=list, max_length=100)
     authoring_provider: str | None = Field(default=None, max_length=120)
     authoring_model: str | None = Field(default=None, max_length=200)
     authoring_request_id: str | None = Field(default=None, max_length=240)
+    asset_selection_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     input_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=utc_now)
@@ -597,10 +603,14 @@ class StoryboardPromptDraftShot(BaseModel):
     stable_shot_key: str = Field(pattern=r"^shot_[a-z0-9]{8,64}$")
     image_prompt_body: str = Field(default="", max_length=8000)
     video_prompt_body: str = Field(default="", max_length=8000)
+    image_prompt_mentions: list[PromptAssetMention] | None = None
+    video_prompt_mentions: list[VideoPromptMention] | None = None
 
 
 class StoryboardPromptDraftUpdate(BaseModel):
     expected_revision_id: UUID
+    expected_production_revision_id: UUID | None = None
+    expected_production_prompt_token: str | None = None
     shots: list[StoryboardPromptDraftShot] = Field(default_factory=list)
 
 

@@ -134,12 +134,12 @@ test("routes image prompt references and bindings through one visual-beat save",
     productionWorkflowSource,
     /\/visual-beats\/\$\{pending\.visualBeatId\}[\s\S]*confirm_stale: true[\s\S]*\.\.\.visualBeatChanges/,
   );
-  assert.match(shotImageSource, /reconcilePromptReferenceRemoval\(/);
+  assert.match(shotImageSource, /<ImageAssetPromptEditor/);
 });
 
 test("auto-saves image prompt edits without a manual save action", () => {
   assert.match(shotImageSource, /<AutosaveStatus/);
-  assert.match(shotImageSource, /onBlur=\{\(\) => Promise\.resolve\(onFlushDraft\?\.\(\)\)/);
+  assert.match(shotImageSource, /<ImageAssetPromptEditor[\s\S]*onBlur=\{onFlushDraft\}/);
   assert.doesNotMatch(shotImageSource, /保存草稿不会自动生成|type="submit">[\s\S]{0,120}保存/);
   assert.match(productionWorkflowSource, /const SHOT_IMAGE_AUTOSAVE_DELAY_MS = 700/);
   assert.match(productionWorkflowSource, /function useShotImageDraftAutosave/);
@@ -171,7 +171,7 @@ test("keeps legacy history visible but hides user-deleted image candidates", () 
 test("image workspace exposes zoom and reversible deletion without lock controls", () => {
   assert.match(shotImageSource, /MediaLightbox/);
   assert.match(shotImageSource, /onArchiveCandidate/);
-  assert.match(shotImageSource, /assetMentionToken\(asset\)/);
+  assert.match(shotImageSource, /<ImageAssetPromptEditor/);
   assert.doesNotMatch(shotImageSource, /锁定原视频要素|SHOT_LOCK_OPTIONS/);
   assert.match(productionWorkflowSource, /actionLabel:\s*"撤销"/);
   assert.match(productionWorkflowSource, /archiveImageCandidate/);

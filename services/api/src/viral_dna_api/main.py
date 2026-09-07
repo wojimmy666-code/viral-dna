@@ -212,6 +212,7 @@ from .production import (
     ProductionServiceError,
 )
 from .project_assets import ProjectAssetService
+from .project_prompts import ProjectPromptRevision, ProjectPromptUpdate
 from .projects import ProjectService, create_project_router
 from .prompt_engine.routes import create_prompt_draft_router
 from .prompt_engine.service import PromptDraftService
@@ -470,6 +471,7 @@ skill_workflow_service = SkillWorkflowService(
     timeline_reader=timeline_service,
     export_reader=timeline_export_service,
     storyboard_author=ModelStoryboardAuthor(preferences=user_preferences_service),
+    asset_library=asset_library_service,
 )
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 app.include_router(
@@ -549,7 +551,10 @@ app.include_router(
     prefix=API_PREFIX,
     dependencies=[Depends(require_platform_admin)],
 )
-app.include_router(create_skill_presentation_router(skill_presentation_service, require_platform_admin), prefix=API_PREFIX)
+app.include_router(
+    create_skill_presentation_router(skill_presentation_service, require_platform_admin),
+    prefix=API_PREFIX,
+)
 app.include_router(create_project_router(project_service), prefix=API_PREFIX)
 app.include_router(create_skill_workflow_router(skill_workflow_service), prefix=API_PREFIX)
 app.include_router(
@@ -939,6 +944,26 @@ async def list_productions(
 async def get_production(project_id: UUID) -> ProductionProjectDetail:
     try:
         return await production_service.get_project(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(
+    f"{API_PREFIX}/productions/{{project_id}}/prompt-context", response_model=ProjectPromptRevision
+)
+async def get_production_prompt_context(project_id: UUID):
+    try:
+        return await production_service.get_prompt_context(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(
+    f"{API_PREFIX}/productions/{{project_id}}/prompt-context", response_model=ProjectPromptRevision
+)
+async def update_production_prompt_context(project_id: UUID, payload: ProjectPromptUpdate):
+    try:
+        return await production_service.update_prompt_context(project_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

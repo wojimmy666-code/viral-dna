@@ -21,6 +21,7 @@ class ImageBatchItem(BaseModel):
     shot_index: int
     beat_index: int
     input_fingerprint: str
+    prompt_snapshot: dict | None = None
     status: Literal[
         "pending", "running", "completed", "skipped", "failed", "cancelled", "unknown"
     ] = "pending"

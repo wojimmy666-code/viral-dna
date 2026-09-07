@@ -1,4 +1,4 @@
-"""Editable shot bodies and frozen, non-editable project prompt context.
+"""Independent editable shot bodies and shared project prompt context.
 
 No model call, translation of user prose, or regeneration of a creative spec is
 performed here. The bodies are authoritative; specs remain directing metadata.
@@ -10,6 +10,11 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from ..prompt_engine.still_image import (
+    static_image_constraints,
+    static_image_style,
+    static_image_text,
+)
 from .contracts import ShotManifestRevision, StyleBibleRevision
 
 DISPLAY_TERMS = {
@@ -155,17 +160,20 @@ def common_style_prompt(bible: StyleBibleRevision, *, video: bool) -> str:
         ("全片构图", bible.composition),
         ("全片光线", bible.lighting),
         ("全片材质", bible.texture),
-        ("主体一致性", [*bible.product_identity_lock, *bible.character_identity_lock]),
     ]
     if video:
         sound = {key: value for key, value in bible.sound.items() if key != "editing_music"}
         sections += [
+            ("主体一致性", [*bible.product_identity_lock, *bible.character_identity_lock]),
             ("全片镜头规范", bible.camera),
             ("全片运动规范", bible.motion),
             ("全片声音", sound),
         ]
     sections += [("全片禁用内容", bible.negative_lock)]
-    return "\n".join(f"【{name}】{style_text(value)}" for name, value in sections if value)
+    if not video:
+        sections = [(name, static_image_style(value)) for name, value in sections]
+    prompt = "\n".join(f"【{name}】{style_text(value)}" for name, value in sections if value)
+    return prompt if video else static_image_text(prompt)
 
 
 def prompt_sections(prompt: str) -> list[tuple[str, str]]:
@@ -189,7 +197,8 @@ def prompt_sections(prompt: str) -> list[tuple[str, str]]:
 
 def editable_prompt_body(shot: Any, part: str) -> str:
     value = getattr(shot, f"{part}_prompt_body", None)
-    return value if value is not None else getattr(shot, f"{part}_prompt")
+    body = value if value is not None else getattr(shot, f"{part}_prompt")
+    return static_image_text(body) if part == "image" else body
 
 
 def local_body_from_prompt(prompt: str, common: str, *, video: bool) -> str:
@@ -204,7 +213,26 @@ def local_body_from_prompt(prompt: str, common: str, *, video: bool) -> str:
 def factor_prompt_context(
     manifest: ShotManifestRevision, bible: StyleBibleRevision
 ) -> ShotManifestRevision:
-    """Factor genuinely repeated sections only; never discard shot-specific text."""
+    """Project legacy image instructions without mutating historical revisions."""
+    manifest = manifest.model_copy(
+        update={
+            "common_image_prompt": static_image_text(manifest.common_image_prompt),
+            "shots": [
+                shot.model_copy(
+                    update={
+                        "image_prompt": static_image_text(shot.image_prompt),
+                        "image_prompt_body": static_image_text(shot.image_prompt_body)
+                        if shot.image_prompt_body is not None
+                        else None,
+                        "image_negative_constraints": static_image_constraints(
+                            shot.image_negative_constraints
+                        ),
+                    }
+                )
+                for shot in manifest.shots
+            ],
+        }
+    )
     if not manifest.shots or all(
         shot.image_prompt_body is not None and shot.video_prompt_body is not None
         for shot in manifest.shots
@@ -230,9 +258,15 @@ def factor_prompt_context(
             for name, text in common
             if name in candidates and (len(shots) > 1 or name not in {"严格约束", "光线与色彩"})
         }
-        shared = [common_style_prompt(bible, video=part == "video")]
+        shared = [
+            getattr(manifest, f"common_{part}_prompt")
+            or common_style_prompt(bible, video=part == "video")
+        ]
         shared += [text for name, text in parsed[0] if (name, text) in common] if parsed else []
-        updates[f"common_{part}_prompt"] = "\n\n".join(filter(None, shared))
+        common_prompt = "\n\n".join(filter(None, shared))
+        updates[f"common_{part}_prompt"] = (
+            static_image_text(common_prompt) if part == "image" else common_prompt
+        )
         for index, shot in enumerate(shots):
             # Bind the first frame to current timing, never a stale shot number.
             local = "\n\n".join(
@@ -240,13 +274,19 @@ def factor_prompt_context(
                 for name, text in parsed[index]
                 if (name, text) not in common and not (part == "video" and name == "首帧约束")
             )
-            shots[index] = shot.model_copy(update={f"{part}_prompt_body": local})
+            shots[index] = shot.model_copy(
+                update={
+                    f"{part}_prompt_body": static_image_text(local) if part == "image" else local,
+                }
+            )
     return manifest.model_copy(update={**updates, "shots": shots})
 
 
 def effective_prompt(
     body: str, common: str, *, video: bool, duration: int, aspect_ratio: str, fps: int
 ) -> str:
+    if not video:
+        body, common = static_image_text(body), static_image_text(common)
     if not body.strip():
         return ""
     first_frame = (

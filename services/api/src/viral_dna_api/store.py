@@ -49,6 +49,7 @@ from .models import (
 )
 from .platform_skills.contracts import AccountSkillFavorite, SkillVersionSnapshot
 from .production_seeds.contracts import ProductionSeed
+from .project_prompts import ProjectPromptRevision, PromptRevisionConflict
 from .projects.contracts import Project
 from .quality.contracts import ContinuityReport
 from .skill_workflow.contracts import (
@@ -108,6 +109,7 @@ class InMemoryStore:
         self.reference_bindings: dict[UUID, ReferenceBinding] = {}
         self.generation_runs: dict[UUID, GenerationRun] = {}
         self.image_batches: dict[UUID, ImageBatch] = {}
+        self.project_prompt_revisions: dict[UUID, ProjectPromptRevision] = {}
         self.generation_candidates: dict[UUID, GenerationCandidate] = {}
         self.video_provider_tasks: dict[UUID, VideoProviderTask] = {}
         self.video_clip_preparations: dict[UUID, VideoClipPreparation] = {}
@@ -295,6 +297,11 @@ class InMemoryStore:
 
     async def delete_production_project(self, project_id: UUID) -> None:
         async with self._lock:
+            self.project_prompt_revisions = {
+                key: item
+                for key, item in self.project_prompt_revisions.items()
+                if item.project_id != project_id
+            }
             self.image_batches = {
                 key: item
                 for key, item in self.image_batches.items()
@@ -1052,6 +1059,11 @@ class InMemoryStore:
 
     async def delete_project(self, project_id: UUID) -> None:
         async with self._lock:
+            self.project_prompt_revisions = {
+                key: item
+                for key, item in self.project_prompt_revisions.items()
+                if item.project_id != project_id
+            }
             self.projects.pop(project_id, None)
             self.skill_version_snapshots.pop(project_id, None)
 
@@ -1218,6 +1230,24 @@ class InMemoryStore:
 
     async def save_shot_manifest_revision(self, item: ShotManifestRevision) -> ShotManifestRevision:
         return await self._save_workflow("shot_manifest_revisions", item)
+
+    async def list_project_prompt_revisions(self, project_id: UUID):
+        return sorted(
+            (
+                item.model_copy(deep=True)
+                for item in self.project_prompt_revisions.values()
+                if item.project_id == project_id
+            ),
+            key=lambda item: item.revision_number,
+        )
+
+    async def save_project_prompt_revision(self, item: ProjectPromptRevision, expected_id: UUID):
+        async with self._lock:
+            rows = await self.list_project_prompt_revisions(item.project_id)
+            if rows and rows[-1].id != expected_id:
+                raise PromptRevisionConflict("全局提示词已更新，请刷新后核对当前草稿")
+            self.project_prompt_revisions[item.id] = item.model_copy(deep=True)
+            return item
 
     async def list_shot_manifest_revisions(self, project_id: UUID) -> list[ShotManifestRevision]:
         return await self._list_workflow("shot_manifest_revisions", "project_id", project_id)

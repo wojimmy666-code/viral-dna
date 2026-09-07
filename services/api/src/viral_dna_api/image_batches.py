@@ -18,6 +18,7 @@ from .image_generation.selection import (
     resolve_skill_image_request,
 )
 from .models import ImageGenerationCreate, ProductionOriginType, utc_now
+from .project_prompts import prompt_snapshot
 
 ACTIVE = {"queued", "running", "cancellation_requested"}
 SUCCESS = {"completed", "cached"}
@@ -103,13 +104,20 @@ class ImageBatchService:
             raise self.fail("image_batch_not_found", "图片批次不存在", 404)
         return batch
 
-    async def preview(self, project_id, payload: ImageBatchRequest, *, budget_beat_ids=None):
+    async def preview(
+        self, project_id, payload: ImageBatchRequest, *, budget_beat_ids=None, resume_batch=None
+    ):
         p = self.production
         project = await p._require_project(project_id)
         p._require_expected_revision(project, payload.expected_revision_id)
         if project.origin_type != ProductionOriginType.SKILL_RUN:
             raise self.fail("skill_project_required", "当前批量入口只用于 Skill 项目")
         contract = await p._skill_run_contract(project)
+        # New batches always request one image. Only resuming an existing batch
+        # may use its historical count, never mutate a submitted task snapshot.
+        payload = payload.model_copy(
+            update={"candidate_count": resume_batch.candidate_count if resume_batch else 1}
+        )
         try:
             contract, option = await resolve_skill_image_request(
                 contract, payload, getattr(p.image_gateway, "settings_service", None)
@@ -132,12 +140,21 @@ class ImageBatchService:
             if candidate.status not in {"archived", "rejected", "stale"}:
                 by_run.setdefault(candidate.generation_run_id, []).append(candidate.id)
         assets = {asset.id: asset for asset in await p._list_reference_assets(project.id)}
+        prompt_context = await p.get_prompt_context(project.id)
         items = []
         for plan in plans:
             if plan.lifecycle_status == "discarded" or plan.output_mode == "source_video":
                 continue
             bindings = await self.repository.list_reference_bindings(plan.id)
-            for beat in sorted(plan.visual_beats, key=lambda item: item.index):
+            beats = sorted(plan.visual_beats, key=lambda item: item.index)
+            if resume_batch is not None:
+                saved_ids = {item.visual_beat_id for item in resume_batch.items}
+                beats = [beat for beat in beats if beat.id in saved_ids]
+            elif payload.mode == "all":
+                # The explicit button produces one primary picture per shot.
+                # Automatic missing-output recovery still covers required beats.
+                beats = beats[:1]
+            for beat in beats:
                 picture_bindings = p._image_bindings_for_beat(plan, beat, bindings)
                 fingerprint = input_fingerprint(plan, beat, picture_bindings)
                 item = ImageBatchItem(
@@ -146,6 +163,7 @@ class ImageBatchService:
                     shot_index=plan.index,
                     beat_index=beat.index,
                     input_fingerprint=fingerprint,
+                    prompt_snapshot=prompt_snapshot(beat.image_prompt, prompt_context, "image"),
                 )
                 picture_runs = [
                     run
@@ -263,7 +281,8 @@ class ImageBatchService:
                 )
                 raise self.fail(
                     "image_batch_preflight_failed",
-                    f"分镜 {first.shot_index} · 画面 {first.beat_index}：{first.error_message or '已有生成任务，请先等待完成'}",
+                    f"分镜 {first.shot_index} · 画面 {first.beat_index}："
+                    f"{first.error_message or '已有生成任务，请先等待完成'}",
                 )
             await self.repository.save_image_batch(batch)
             self.schedule(batch.id)
@@ -331,6 +350,7 @@ class ImageBatchService:
                         preserve_approval=True,
                         generation_intent="new_variation" if batch.mode == "all" else "standard",
                     ),
+                    frozen_prompt=item.prompt_snapshot,
                 )
             item.status, item.run_id, item.retryable = "running", run.id, False
             batch.updated_at = batch.last_heartbeat_at = utc_now()
@@ -519,6 +539,7 @@ class ImageBatchService:
                     for item in batch.items
                     if item.status not in {"completed", "skipped", "unknown"}
                 },
+                resume_batch=batch,
             )
             fresh = {item.visual_beat_id: item for item in preview.items}
             for index, item in enumerate(batch.items):
@@ -554,7 +575,12 @@ class ImageBatchService:
                         )
                         continue
                 if item.visual_beat_id in fresh:
-                    batch.items[index] = fresh[item.visual_beat_id]
+                    batch.items[index] = fresh[item.visual_beat_id].model_copy(
+                        update={
+                            "prompt_snapshot": item.prompt_snapshot,
+                            "input_fingerprint": item.input_fingerprint,
+                        }
+                    )
                 else:
                     batch.items[index] = item.model_copy(
                         update={

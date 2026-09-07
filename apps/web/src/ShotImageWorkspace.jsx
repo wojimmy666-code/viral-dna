@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
+import { ImageAssetPromptEditor } from "./prompt-references/ImageAssetPromptEditor.jsx";
 import {
   ArrowCounterClockwise,
   ArrowDown,
@@ -43,13 +45,9 @@ import { AutosaveStatus } from "./ui/system/index.js";
 import {
   assetDirectoryLabel,
   assetMentionLabel,
-  assetMentionSearchText,
-  assetMentionToken,
   isUserDeletedCandidate,
   isVisibleImageCandidate,
-  mentionToken,
   normalizePromptMentionDraft,
-  reconcilePromptReferenceRemoval,
   removeMentionFromPrompt,
 } from "./shot-image-ui.js";
 
@@ -312,6 +310,7 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
 }
 
 export function ShotImageWorkspace({
+  globalPromptRef,
   initialCandidateId = "",
   onPreviewCandidate,
   shots,
@@ -364,6 +363,7 @@ export function ShotImageWorkspace({
   onUpdateVisualBeat,
   onAdvance,
   onBatchResults,
+  onAddAssets,
   onNotice,
   request,
   saveState = "saved",
@@ -376,9 +376,9 @@ export function ShotImageWorkspace({
   const [visualChoice, setVisualChoice] = useState("source");
   const [candidateHistoryExpanded, setCandidateHistoryExpanded] = useState(false);
   const [lightboxCandidateId, setLightboxCandidateId] = useState(null);
-  const [mentionMenu, setMentionMenu] = useState(null);
   const [pendingOutputModes, setPendingOutputModes] = useState({});
   const promptRef = useRef(null);
+  const [globalPrompts, setGlobalPrompts] = useState({});
   const navigationHandlers = useRef({});
   const [batchItems, setBatchItems] = useState([]);
   const isSkillMode = project?.origin_type === "skill_run";
@@ -677,7 +677,6 @@ export function ShotImageWorkspace({
           ? "candidate"
           : preferred?.id === displayedCandidateId ? current : hasSourcePreview ? "source" : "candidate"
     ));
-    setMentionMenu(null);
   }, [
     plan?.id,
     plan?.approved_image_candidate_id,
@@ -965,94 +964,6 @@ export function ShotImageWorkspace({
     );
   }
 
-  function updatePrompt(event) {
-    const value = event.target.value;
-    const cursor = event.target.selectionStart ?? value.length;
-    const prefix = value.slice(0, cursor);
-    const match = prefix.match(/@([^@\n,，。；;]*)$/);
-    setDraft((state) => {
-      const references = reconcilePromptReferenceRemoval(
-        value,
-        state.imagePromptMentions,
-        state.referenceBindings,
-        assets,
-      );
-      return {
-        ...state,
-        imagePrompt: value,
-        imagePromptMentions: references.imagePromptMentions,
-        referenceBindings: references.referenceBindings,
-      };
-    });
-    setMentionMenu(match ? { start: cursor - match[1].length - 1, end: cursor, query: match[1] } : null);
-  }
-
-  function insertMention(asset) {
-    if (!mentionMenu) return;
-    setDraft((state) => {
-      const token = assetMentionToken(asset);
-      const nextPrompt = (
-        state.imagePrompt.slice(0, mentionMenu.start)
-        + token
-        + " "
-        + state.imagePrompt.slice(mentionMenu.end)
-      );
-      const hasMention = state.imagePromptMentions.some(
-        (item) => item.reference_asset_id === asset.id,
-      );
-      const hasBinding = state.referenceBindings.some(
-        (item) => item.reference_asset_id === asset.id,
-      );
-      const hasOtherIdentity = state.referenceBindings.some(
-        (item) => item.role === "identity" && item.reference_asset_id !== asset.id,
-      );
-      const defaultRole = DEFAULT_ROLE_BY_TYPE[asset.type] || "layout";
-      const nextState = {
-        ...state,
-        imagePrompt: nextPrompt,
-        imagePromptMentions: hasMention
-          ? state.imagePromptMentions
-          : [
-              ...state.imagePromptMentions,
-              { reference_asset_id: asset.id, label: assetMentionLabel(asset) },
-            ],
-        referenceBindings: hasBinding
-          ? state.referenceBindings
-          : [
-            ...state.referenceBindings,
-            {
-              reference_asset_id: asset.id,
-              role: defaultRole === "identity" && hasOtherIdentity
-                ? "layout"
-                : defaultRole,
-              weight: 1,
-            },
-          ],
-      };
-      const normalized = normalizePromptMentionDraft(
-        nextState.imagePrompt,
-        nextState.imagePromptMentions,
-        assets,
-        nextState.referenceBindings,
-      );
-      return {
-        ...nextState,
-        imagePrompt: normalized.imagePrompt,
-        imagePromptMentions: normalized.imagePromptMentions,
-      };
-    });
-    setMentionMenu(null);
-    requestAnimationFrame(() => promptRef.current?.focus());
-  }
-
-  const mentionAssets = mentionMenu
-    ? assets.filter((asset) => (
-      !mentionMenu.query
-      || assetMentionSearchText(asset).includes(
-        mentionMenu.query.trim().toLocaleLowerCase("zh-CN"),
-      )
-    ))
-    : [];
 
   return (
     <section className={`shot-image-workspace ${isSkillMode ? "is-skill" : ""}`} data-output-mode={outputMode}>
@@ -1091,7 +1002,7 @@ export function ShotImageWorkspace({
 
       {isSkillMode && <ImageBatchToolbar key={project.id} projectId={project.id} request={request} busy={busy}
         settings={generationSettings} aspectRatio={project.output_aspect_ratio}
-        pictureCount={activeShots.filter(item => item.plan.output_mode !== "source_video").reduce((count, item) => count + (item.plan.visual_beats?.length || 1), 0)}
+        pictureCount={activeShots.filter(item => item.plan.output_mode !== "source_video").length}
         onFlush={onFlushDraft} onResults={onBatchResults} onState={setBatchItems} onSelectShot={onSelectShot} />}
       <div className="shot-workspace-grid">
         {isSkillMode ? <SkillShotNavigation shots={activeShots} discarded={discardedShots} selectedId={selectedShotId}
@@ -1598,70 +1509,17 @@ export function ShotImageWorkspace({
               />
             </div>
             <label className="production-field">
-              <span>图片提示词</span>
-              <div className="shot-prompt-editor">
-                <textarea
-                  className="prompt-editor-textarea"
-                  maxLength={8000}
-                  onBlur={() => Promise.resolve(onFlushDraft?.()).catch(() => undefined)}
-                  onChange={updatePrompt}
-                  placeholder="描述画面；输入 @ 可关联人物、产品或场景资产"
-                  ref={promptRef}
-                  rows={8}
-                  value={draft.imagePrompt}
-                />
-                {mentionMenu && (
-                  <div className="shot-mention-menu">
-                    <small>关联参考资产</small>
-                    {mentionAssets.length === 0 ? (
-                      <p>没有匹配的资产</p>
-                    ) : mentionAssets.map((asset) => (
-                      <button
-                        key={asset.id}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => insertMention(asset)}
-                        type="button"
-                      >
-                        <AssetThumbnail asset={asset} resolveUrl={resolveUrl} />
-                        <span>
-                          <strong>{assetMentionToken(asset)}</strong>
-                          <small>{assetDirectoryLabel(asset)} · {asset.type}</small>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              {draft.imagePromptMentions.length > 0 && (
-                <span className="shot-mention-chips">
-                  {draft.imagePromptMentions.map((mention) => (
-                    <button
-                      key={mention.reference_asset_id}
-                      onClick={() => setDraft((state) => ({
-                        ...state,
-                        imagePrompt: removeMentionFromPrompt(
-                          state.imagePrompt,
-                          mention,
-                          assetsById.get(mention.reference_asset_id),
-                        ),
-                        imagePromptMentions: state.imagePromptMentions.filter(
-                          (item) => item.reference_asset_id !== mention.reference_asset_id,
-                        ),
-                        referenceBindings: state.referenceBindings.filter(
-                          (item) => item.reference_asset_id !== mention.reference_asset_id,
-                        ),
-                      }))}
-                      type="button"
-                    >
-                      {mentionToken(
-                        mention,
-                        assetsById.get(mention.reference_asset_id),
-                      )}<X size={11} />
-                    </button>
-                  ))}
-                </span>
-              )}
+              <span>局部图片提示词</span>
+              <ImageAssetPromptEditor
+                key={activeVisualBeat?.id || plan.id}
+                ref={promptRef} assets={assets} draft={draft} setDraft={setDraft}
+                disabled={busy} resolveUrl={resolveUrl} onBlur={onFlushDraft}
+                onAddAssets={onAddAssets}
+                sourceFrame={generationInputMode === "keyframe_edit"}
+              />
             </label>
+            <PromptPreview common={globalPrompts.common_image_prompt} local={draft.imagePrompt} label="图片提示词" />
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" request={request} onChange={setGlobalPrompts} disabled={busy} />
             <fieldset className="shot-reference-field">
               <legend>参考资产绑定</legend>
               {assets.length === 0 ? (

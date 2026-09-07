@@ -31,6 +31,7 @@ from ..models import (
     ProductionRunStatus,
     ProductionStep,
     ProductionTimeline,
+    PromptAssetMention,
     ShotPlan,
     ShotSourceKind,
     ShotVisualBeat,
@@ -51,10 +52,20 @@ from ..production_seeds import (
     SkillProductionSeedBuilder,
     seconds_to_frame,
 )
+from ..project_prompts import (
+    ProjectPromptService,
+    ProjectPromptUpdate,
+    PromptRevisionConflict,
+    local_prompt,
+    production_local_token,
+    prompt_lock,
+)
 from ..projects import ProjectKind, ProjectService, ProjectStage, ProjectStatus
 from ..projects.contracts import Project
+from ..prompt_engine.still_image import static_image_constraints, static_image_text
 from ..video_generation.catalog import VideoModelCatalogError, load_video_model_catalog
 from ..workspace_catalog import AccountContextService
+from .asset_grounding import asset_label, compile_asset_references, select_shot_assets
 from .contracts import (
     GATE_ORDER,
     STAGE_BY_GATE,
@@ -456,6 +467,7 @@ class SkillWorkflowService:
         timeline_reader: ProductionTimelineReader | None = None,
         export_reader: ProductionExportReader | None = None,
         storyboard_author: StoryboardAuthor | None = None,
+        asset_library=None,
     ) -> None:
         self.repository = repository
         self.projects = projects
@@ -466,6 +478,7 @@ class SkillWorkflowService:
         self.timeline_reader = timeline_reader
         self.export_reader = export_reader
         self.storyboard_author = storyboard_author or ReferenceStyleStoryboardAuthor()
+        self.asset_library = asset_library
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._look_test_tasks: dict[UUID, asyncio.Task[LookTest]] = {}
         self._look_test_cancel_events: dict[UUID, dict[str, Event]] = {}
@@ -473,6 +486,238 @@ class SkillWorkflowService:
 
     def _lock(self, project_id: UUID) -> asyncio.Lock:
         return self._locks.setdefault(project_id, asyncio.Lock())
+
+    async def _selected_asset_facts(self, project_id, brief, snapshot):
+        """Fetch metadata by selected IDs only, never enumerate the asset library."""
+        selected = set(brief.selected_asset_usage_ids) if brief else set()
+        usages = [
+            item
+            for item in await self.repository.list_asset_usages(project_id)
+            if item.id in selected
+        ]
+        roles = {item.role: item for item in snapshot.manifest.spec.intake.asset_roles}
+        semaphore = asyncio.Semaphore(6)
+
+        async def describe(usage):
+            async with semaphore:
+                asset = None
+                if self.asset_library is not None:
+                    from ..asset_library import AssetLibraryError
+
+                    try:
+                        asset = await self.asset_library.get_asset(usage.asset_id)
+                    except AssetLibraryError:
+                        pass
+                elif hasattr(self.repository, "get_asset"):
+                    asset = await self.repository.get_asset(usage.asset_id)
+                available = asset is not None and not (
+                    getattr(asset, "deleted_at", None) or getattr(asset, "archived_at", None)
+                )
+                role = roles.get(usage.role)
+                media = str(getattr(asset, "media_kind", "image"))
+                return {
+                    "id": str(usage.id),
+                    "asset_id": str(usage.asset_id),
+                    "name": getattr(asset, "name", "") if available else "",
+                    "folder_name": getattr(asset, "folder_name", None) or "未分类",
+                    "type": str(getattr(asset, "type", "other")),
+                    "role": usage.role,
+                    "media_kind": media,
+                    "fidelity": usage.fidelity.value,
+                    "rights_status": usage.rights_status.value,
+                    "sha256": usage.snapshot_sha256,
+                    "thumbnail_url": getattr(asset, "thumbnail_url", None),
+                    "content_url": getattr(asset, "content_url", None),
+                    "image_eligible": bool(
+                        available
+                        and role
+                        and media == "image"
+                        and getattr(asset, "sha256", None) == usage.snapshot_sha256
+                        and "image" in role.media_types
+                        and usage.fidelity != Fidelity.EXACT
+                        and usage.rights_status == RightsStatus.CONFIRMED
+                        and getattr(asset, "rights_confirmed", False)
+                    ),
+                }
+
+        return list(await asyncio.gather(*(describe(item) for item in usages)))
+
+    async def prompt_assets(self, project_id):
+        project = await self._require_skill_project(project_id)
+        brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
+        snapshot = await self._require_snapshot(project.id)
+        return await self._selected_asset_facts(project.id, brief, snapshot)
+
+    async def add_prompt_asset(self, project_id, asset_id):
+        """Explicit user selection, not an automatic library search."""
+        project = await self._require_skill_project(project_id)
+        if self.asset_library is None:
+            raise _fail(503, "asset_library_unavailable", "资产服务暂不可用")
+        from ..asset_library import AssetLibraryError
+
+        try:
+            asset = await self.asset_library.get_asset(asset_id)
+        except AssetLibraryError as exc:
+            raise _fail(exc.status_code, exc.code, str(exc)) from exc
+        if asset.archived_at or asset.deleted_at or not asset.rights_confirmed:
+            raise _fail(422, "asset_unavailable", "资产已不可用或未确认授权")
+        snapshot = await self._require_snapshot(project.id)
+        roles = [
+            item
+            for item in snapshot.manifest.spec.intake.asset_roles
+            if str(asset.media_kind) in item.media_types and item.fidelity != "exact"
+        ]
+        type_keys = {
+            "product": ("product",),
+            "person": ("person", "identity", "character"),
+            "scene": ("scene", "location"),
+            "clothing": ("wardrobe", "clothing"),
+        }
+        preferred = [
+            item
+            for item in roles
+            if any(
+                key in item.role for key in type_keys.get(str(asset.type), ("style", "reference"))
+            )
+        ]
+        if not roles or str(asset.type) == "logo":
+            raise _fail(422, "asset_role_unsupported", "该素材不能作为当前 Skill 的生成参考")
+        role = (preferred or roles)[0]
+        async with self._lock(project.id):
+            brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
+            if brief is None:
+                raise _fail(409, "brief_missing", "请先保存创作简报")
+            usages = await self.repository.list_asset_usages(project.id)
+            usage = next((item for item in usages if item.asset_id == asset.id), None)
+            if usage is None:
+                usage = AssetUsage(
+                    project_id=project.id,
+                    asset_id=asset.id,
+                    role=role.role,
+                    fidelity=role.fidelity,
+                    rights_status="confirmed",
+                    snapshot_sha256=asset.sha256,
+                )
+                await self.repository.replace_asset_usages(project.id, [*usages, usage])
+            if usage.id not in brief.selected_asset_usage_ids:
+                revisions = await self.repository.list_creative_brief_revisions(project.id)
+                material = brief.model_dump(exclude={"id", "input_hash", "created_at"})
+                material.update(
+                    revision_number=len(revisions) + 1,
+                    selected_asset_usage_ids=[*brief.selected_asset_usage_ids, usage.id],
+                )
+                await self.repository.save_creative_brief_revision(
+                    CreativeBriefRevision(**material, input_hash=content_digest(material))
+                )
+            production_id = project.source_binding.production_project_id
+            if production_id and getattr(self.production_service, "project_assets", None):
+                production = await self.production_service._require_project(production_id)
+                from ..production import _reference_type_for_seed
+
+                seed_ref = ProductionSeedReference(
+                    id=usage.id,
+                    asset_id=asset.id,
+                    name=asset.name,
+                    role=usage.role,
+                    media_kind=str(asset.media_kind),
+                )
+                await self.production_service.project_assets.link_asset(
+                    production, asset.id, _reference_type_for_seed(seed_ref)
+                )
+        return await self.prompt_assets(project.id)
+
+    async def get_prompt_context(self, project_id: UUID):
+        project = await self._require_skill_project(project_id)
+        manifests = await self.repository.list_shot_manifest_revisions(project.id)
+        bibles = await self.repository.list_style_bible_revisions(project.id)
+        draft = factor_prompt_context(manifests[-1], bibles[-1]) if manifests and bibles else None
+        return await ProjectPromptService(self.repository).current(
+            project.id,
+            image=draft.common_image_prompt if draft else "",
+            video=draft.common_video_prompt if draft else "",
+        )
+
+    async def update_prompt_context(self, project_id: UUID, payload: ProjectPromptUpdate):
+        await self._require_skill_project(project_id)
+        async with prompt_lock(self.repository, project_id):
+            current = await self.get_prompt_context(project_id)
+            try:
+                return await ProjectPromptService(self.repository).save(current, payload)
+            except PromptRevisionConflict as exc:
+                raise _fail(409, "prompt_revision_stale", str(exc)) from exc
+
+    async def _current_prompt_manifest(self, project, manifest, bible):
+        draft = factor_prompt_context(manifest, bible)
+        context = await self.get_prompt_context(project.id)
+        plans = []
+        production_id = project.source_binding.production_project_id
+        if production_id and self.production_service is not None:
+            plans = await self.production_service.list_shots(production_id)
+        by_key = {item.plan.stable_shot_key: item.plan for item in plans}
+        video_drafts = {
+            item.plan.id: await self.repository.get_video_generation_draft(item.plan.id)
+            for item in plans
+        }
+        usages = await self.repository.list_asset_usages(project.id)
+        usage_by_asset = {item.asset_id: item.id for item in usages}
+        facts = {UUID(item["id"]): item for item in await self.prompt_assets(project.id)}
+        shots = []
+        for shot in draft.shots:
+            plan = by_key.get(shot.stable_shot_key)
+            image = plan.image_prompt if plan else editable_prompt_body(shot, "image")
+            video = plan.video_prompt if plan else editable_prompt_body(shot, "video")
+            if plan and video_drafts.get(plan.id):
+                video = video_drafts[plan.id].video_prompt
+            image_mentions = plan.image_prompt_mentions if plan else shot.image_prompt_mentions
+            if not plan and not image_mentions:
+                image_mentions = [
+                    PromptAssetMention(
+                        reference_asset_id=UUID(facts[key]["asset_id"]),
+                        label=asset_label(facts[key]),
+                    )
+                    for key in shot.image_asset_usage_ids
+                    if key in facts
+                ]
+            # Legacy projections add tokens for existing ID bindings only, never match text names.
+            missing = [f"@{item.label}" for item in image_mentions if f"@{item.label}" not in image]
+            if missing:
+                image = " ".join(missing) + "\n" + image
+            video_mentions = (
+                video_drafts[plan.id].video_prompt_mentions
+                if plan and video_drafts.get(plan.id)
+                else plan.video_prompt_mentions
+                if plan
+                else shot.video_prompt_mentions
+            )
+            shots.append(
+                shot.model_copy(
+                    update={
+                        "image_prompt_body": local_prompt(image, context, "image"),
+                        "video_prompt_body": local_prompt(video, context, "video"),
+                        "image_prompt_mentions": image_mentions,
+                        "video_prompt_mentions": video_mentions,
+                        "image_asset_usage_ids": [
+                            usage_by_asset[item.reference_asset_id]
+                            for item in image_mentions
+                            if item.reference_asset_id in usage_by_asset
+                        ],
+                    }
+                )
+            )
+        return draft.model_copy(
+            update={
+                "common_image_prompt": context.common_image_prompt,
+                "common_video_prompt": context.common_video_prompt,
+                "production_revision_id": plans[0].current_revision_id if plans else None,
+                "production_prompt_token": production_local_token(
+                    [item.plan for item in plans],
+                    video_drafts,
+                )
+                if plans
+                else None,
+                "shots": shots,
+            }
+        )
 
     async def workspace(self, project_id: UUID) -> SkillProjectWorkspace:
         project = await self._require_skill_project(project_id)
@@ -543,7 +788,9 @@ class SkillWorkflowService:
             look_test=look_test,
             outline=_latest(outlines),
             shot_manifest=(
-                factor_prompt_context(manifests[-1], active_bible).model_copy(
+                (
+                    await self._current_prompt_manifest(project, manifests[-1], active_bible)
+                ).model_copy(
                     update={
                         "creative_approach": creative_approach(
                             manifests[-1],
@@ -1706,7 +1953,7 @@ class SkillWorkflowService:
         *,
         plan_id: UUID | None = None,
     ) -> ShotPlan:
-        prompt = (
+        prompt = static_image_text(
             f"{brief.objective}。代表性视觉测试 {index}。"
             f"风格：{'、'.join(bible.positive_lock)}；"
             f"构图：{bible.composition}；光线：{bible.lighting}。"
@@ -1728,14 +1975,14 @@ class SkillWorkflowService:
             end_seconds=float(index * 3),
             duration_seconds=3,
             image_prompt=prompt,
-            image_negative_constraints=bible.negative_lock,
+            image_negative_constraints=static_image_constraints(bible.negative_lock),
             image_status=WorkflowItemStatus.READY,
             visual_beats=[
                 ShotVisualBeat(
                     index=1,
                     source_origin="skill",
                     image_prompt=prompt,
-                    image_negative_constraints=bible.negative_lock,
+                    image_negative_constraints=static_image_constraints(bible.negative_lock),
                     image_status=WorkflowItemStatus.READY,
                 )
             ],
@@ -2337,6 +2584,7 @@ class SkillWorkflowService:
         gates = await self.repository.list_gate_decisions(run.id)
         if not self._gate_is_approved(gates, SkillGate.STYLE_APPROVED):
             raise _fail(409, "style_gate_required", "请先人工批准风格确认")
+        asset_facts = await self._selected_asset_facts(project.id, brief, snapshot)
         input_hash = content_digest(
             {
                 "brief": brief.input_hash,
@@ -2344,8 +2592,22 @@ class SkillWorkflowService:
                 "skill": snapshot.content_digest,
                 "run_contract": contract.input_hash,
                 "compiler": self.COMPILER_VERSION,
-                "storyboard_policy": "nonempty-checkpoint-v1",
-                "asset_usages": content_digest(await self.repository.list_asset_usages(project.id)),
+                "storyboard_policy": "selected-assets-authoring-v1",
+                "selected_asset_facts": [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"thumbnail_url", "content_url"}
+                    }
+                    for item in asset_facts
+                ],
+                "asset_usages": content_digest(
+                    [
+                        item
+                        for item in await self.repository.list_asset_usages(project.id)
+                        if item.id in brief.selected_asset_usage_ids
+                    ]
+                ),
                 "claims": content_digest(await self.repository.list_claim_evidence(project.id)),
             }
         )
@@ -2393,6 +2655,7 @@ class SkillWorkflowService:
                 input_hash=input_hash,
                 started=started,
                 checkpoint=checkpoint,
+                asset_facts=asset_facts,
             )
         )
         self._storyboard_tasks[run.id] = task
@@ -2412,10 +2675,20 @@ class SkillWorkflowService:
         input_hash: str,
         started: float,
         checkpoint: Artifact | None = None,
+        asset_facts: list[dict] | None = None,
     ) -> None:
         try:
             step = await self._update_storyboard_step(step, 8)
-            usages = await self.repository.list_asset_usages(project.id)
+            usages = [
+                item
+                for item in await self.repository.list_asset_usages(project.id)
+                if item.id in set(brief.selected_asset_usage_ids)
+            ]
+            asset_facts = (
+                asset_facts
+                if asset_facts is not None
+                else (await self._selected_asset_facts(project.id, brief, snapshot))
+            )
             claims = await self.repository.list_claim_evidence(project.id)
             allowed_evidence_refs = {
                 *(str(item.id) for item in usages),
@@ -2433,13 +2706,11 @@ class SkillWorkflowService:
                 run_contract=contract,
                 asset_facts=[
                     {
-                        "id": str(item.id),
-                        "asset_id": str(item.asset_id),
-                        "role": item.role,
-                        "fidelity": item.fidelity.value,
-                        "rights_status": item.rights_status.value,
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"thumbnail_url", "content_url"}
                     }
-                    for item in usages
+                    for item in asset_facts
                 ],
                 approved_claims=[
                     item.model_dump(mode="json")
@@ -2682,21 +2953,11 @@ class SkillWorkflowService:
                     for item in image_usages
                     if item.required_in_shot_keys and shot_key in item.required_in_shot_keys
                 ]
-                rotating_images = [
-                    item
-                    for offset, item in enumerate(image_usages)
-                    if not item.required_in_shot_keys
-                    and offset % max(1, total_shots) in {index - 1, (index - 2) % total_shots}
-                ]
-                selected_images: list[AssetUsage] = []
-                selected_image_ids: set[UUID] = set()
-                for item in [*required_images, *rotating_images]:
-                    if item.id in selected_image_ids:
-                        continue
-                    selected_images.append(item)
-                    selected_image_ids.add(item.id)
-                    if len(selected_images) >= max_assets:
-                        break
+                selected_references = select_shot_assets(
+                    authored_shot.image_references,
+                    asset_facts,
+                    required_ids=[item.id for item in required_images],
+                )
                 selected_videos = [
                     item
                     for item in video_usages
@@ -2772,6 +3033,11 @@ class SkillWorkflowService:
                         actual_cost_micros=(step.actual_cost_micros + rewritten.actual_cost_micros),
                     )
                     creative_spec = creative_spec_from_authored(rewritten.storyboard.shots[0])
+                    selected_references = select_shot_assets(
+                        rewritten.storyboard.shots[0].image_references,
+                        asset_facts,
+                        required_ids=[item.id for item in required_images],
+                    )
                     image_prompt = compile_image_prompt(
                         creative_spec,
                         brand_name=context.brand.name,
@@ -2805,6 +3071,9 @@ class SkillWorkflowService:
                         f"分镜 {index} 提示词质量未达标：{'、'.join(quality.issues)}",
                         retryable=True,
                     )
+                image_prompt, image_mentions = compile_asset_references(
+                    image_prompt, selected_references
+                )
                 shot_material = {
                     "stable_shot_key": shot_key,
                     "order": index,
@@ -2818,14 +3087,15 @@ class SkillWorkflowService:
                     ),
                     "description": f"{authored_shot.title}｜{authored_shot.narrative_purpose}",
                     "image_prompt": image_prompt,
-                    "image_negative_constraints": list(
-                        dict.fromkeys([*bible.negative_lock, *creative_spec.failure_constraints])
+                    "image_negative_constraints": static_image_constraints(
+                        [*bible.negative_lock, *creative_spec.failure_constraints]
                     )[:40],
                     "video_prompt": video_prompt,
                     "video_negative_constraints": list(
                         dict.fromkeys([*bible.negative_lock, *creative_spec.failure_constraints])
                     )[:40],
-                    "image_asset_usage_ids": [item.id for item in selected_images],
+                    "image_asset_usage_ids": [UUID(item["id"]) for item, _ in selected_references],
+                    "image_prompt_mentions": image_mentions,
                     "video_reference_usage_ids": [item.id for item in selected_videos],
                     "exact_overlays": exact_overlays,
                     "continuity_group_ids": ["global", beat_key_map[authored_shot.beat_key]],
@@ -2848,6 +3118,7 @@ class SkillWorkflowService:
             manifest_payload = {
                 "id": uuid4(),
                 "project_id": project.id,
+                "asset_selection_snapshot": asset_facts,
                 "revision_number": len(
                     await self.repository.list_shot_manifest_revisions(project.id)
                 )
@@ -2857,6 +3128,8 @@ class SkillWorkflowService:
                 "fps": brief.fps,
                 "shots": shots,
                 "creative_approach": authored.storyboard.creative_approach,
+                "common_image_prompt": authored.storyboard.common_image_prompt,
+                "common_video_prompt": authored.storyboard.common_video_prompt,
                 "continuity_bible": authored.storyboard.continuity_bible,
                 "edit_plan": {**authored.storyboard.edit_plan, "shot_count": len(shots)},
                 "project_negative_constraints": authored.storyboard.project_negative_constraints,
@@ -3094,6 +3367,8 @@ class SkillWorkflowService:
                     fps=brief.fps,
                     shots=compiled,
                     creative_approach=authored.storyboard.creative_approach,
+                    common_image_prompt=authored.storyboard.common_image_prompt,
+                    common_video_prompt=authored.storyboard.common_video_prompt,
                     continuity_bible=authored.storyboard.continuity_bible,
                     edit_plan={**authored.storyboard.edit_plan, "shot_count": len(compiled)},
                     project_negative_constraints=authored.storyboard.project_negative_constraints,
@@ -3279,16 +3554,7 @@ class SkillWorkflowService:
             brief=brief,
             style_bible=bible,
             run_contract=contract,
-            asset_facts=[
-                {
-                    "id": str(item.id),
-                    "asset_id": str(item.asset_id),
-                    "role": item.role,
-                    "fidelity": item.fidelity.value,
-                    "rights_status": item.rights_status.value,
-                }
-                for item in usages
-            ],
+            asset_facts=await self._selected_asset_facts(project.id, brief, snapshot),
             approved_claims=[
                 item.model_dump(mode="json")
                 for item in claims
@@ -3467,13 +3733,30 @@ class SkillWorkflowService:
             keys = [shot.stable_shot_key for shot in payload.shots]
             if len(keys) != len(set(keys)):
                 raise _fail(422, "shot_key_duplicate", "分镜标识不能重复")
-            draft = factor_prompt_context(current, bible)
+            draft = await self._current_prompt_manifest(project, current, bible)
+            if draft.production_revision_id is not None and (
+                payload.expected_production_revision_id != draft.production_revision_id
+                or payload.expected_production_prompt_token != draft.production_prompt_token
+            ):
+                raise _fail(
+                    409, "storyboard_revision_stale", "分镜已在后续阶段更新，草稿已保留，请刷新核对"
+                )
             old_by_key = {
                 shot.stable_shot_key: shot for revision in revisions for shot in revision.shots
             }
             old_by_key.update({shot.stable_shot_key: shot for shot in draft.shots})
             incoming = [
-                (shot.stable_shot_key, shot.image_prompt_body, shot.video_prompt_body)
+                (
+                    shot.stable_shot_key,
+                    shot.image_prompt_body,
+                    shot.video_prompt_body,
+                    shot.image_prompt_mentions
+                    if shot.image_prompt_mentions is not None
+                    else getattr(old_by_key.get(shot.stable_shot_key), "image_prompt_mentions", []),
+                    shot.video_prompt_mentions
+                    if shot.video_prompt_mentions is not None
+                    else getattr(old_by_key.get(shot.stable_shot_key), "video_prompt_mentions", []),
+                )
                 for shot in payload.shots
             ]
             existing = [
@@ -3481,6 +3764,8 @@ class SkillWorkflowService:
                     shot.stable_shot_key,
                     editable_prompt_body(shot, "image"),
                     editable_prompt_body(shot, "video"),
+                    shot.image_prompt_mentions,
+                    shot.video_prompt_mentions,
                 )
                 for shot in draft.shots
             ]
@@ -3488,7 +3773,7 @@ class SkillWorkflowService:
                 shot.image_prompt_body is not None and shot.video_prompt_body is not None
                 for shot in current.shots
             ):
-                return current
+                return draft
             average = max(1, brief.target_duration_frames // max(1, len(payload.shots)))
             weights = [
                 (
@@ -3522,6 +3807,10 @@ class SkillWorkflowService:
             allowed_durations = contract.video_duration_capabilities_seconds if contract else [4]
             cursor = 0
             shots = []
+            facts = await self.prompt_assets(project.id)
+            allowed_assets = {
+                UUID(item["asset_id"]): item for item in facts if item.get("image_eligible")
+            }
             for index, (edit, duration) in enumerate(zip(payload.shots, durations, strict=True), 1):
                 old = old_by_key.get(edit.stable_shot_key)
                 material = (
@@ -3559,6 +3848,49 @@ class SkillWorkflowService:
                     ]
                 for part in ("image", "video"):
                     body = getattr(edit, f"{part}_prompt_body")
+                    declared = getattr(edit, f"{part}_prompt_mentions")
+                    mentions = (
+                        declared
+                        if declared is not None
+                        else (getattr(old, f"{part}_prompt_mentions") if old else [])
+                    )
+                    mentions = [item for item in mentions if f"@{item.label}" in body]
+                    if part == "image":
+                        for mention in mentions:
+                            if mention.reference_asset_id not in allowed_assets:
+                                raise _fail(
+                                    422,
+                                    "prompt_asset_not_selected",
+                                    f"分镜 {index} 引用了未选择或不可用的图片，请重新选择",
+                                )
+                        material["image_asset_usage_ids"] = list(
+                            dict.fromkeys(
+                                UUID(allowed_assets[item.reference_asset_id]["id"])
+                                for item in mentions
+                            )
+                        )
+                    else:
+                        old_keys = (
+                            {
+                                (item.reference_kind, item.reference_id)
+                                for item in old.video_prompt_mentions
+                            }
+                            if old
+                            else set()
+                        )
+                        for mention in mentions:
+                            if (mention.reference_kind, mention.reference_id) not in old_keys and (
+                                mention.reference_kind != "project_asset"
+                                or mention.reference_id not in allowed_assets
+                            ):
+                                raise _fail(
+                                    422,
+                                    "prompt_asset_not_selected",
+                                    "视频提示词引用不属于当前项目已选素材",
+                                )
+                    material[f"{part}_prompt_mentions"] = mentions
+                    if part == "image":
+                        body = static_image_text(body)
                     material[f"{part}_prompt_body"] = body
                     material[f"{part}_prompt"] = effective_prompt(
                         body,
@@ -3608,6 +3940,27 @@ class SkillWorkflowService:
             )
             material["content_hash"] = content_digest(material)
             saved = ShotManifestRevision.model_validate(material)
+            if project.source_binding.production_project_id and self.production_service is not None:
+                try:
+                    production_revision_id = (
+                        await self.production_service.update_storyboard_prompt_bodies(
+                            project.source_binding.production_project_id,
+                            {
+                                shot.stable_shot_key: {
+                                    "image": shot.image_prompt_body,
+                                    "video": shot.video_prompt_body,
+                                    "image_mentions": shot.image_prompt_mentions,
+                                    "video_mentions": shot.video_prompt_mentions,
+                                }
+                                for shot in shots
+                            },
+                            expected_revision_id=payload.expected_production_revision_id,
+                            expected_prompt_token=payload.expected_production_prompt_token,
+                        )
+                    )
+                except ProductionServiceError as exc:
+                    raise _fail(exc.status_code, exc.code, str(exc)) from exc
+                saved = saved.model_copy(update={"production_revision_id": production_revision_id})
             await self.repository.save_shot_manifest_revision(saved)
             next_by_key = {shot.stable_shot_key: shot for shot in shots}
             for old in current.shots:
@@ -3639,7 +3992,11 @@ class SkillWorkflowService:
             await self._invalidate_gates_from(
                 project.id, SkillGate.STORYBOARD_APPROVED, "分镜提示词或镜头结构已更新"
             )
-            return saved
+            return (
+                await self._current_prompt_manifest(project, saved, bible)
+                if project.source_binding.production_project_id
+                else saved
+            )
 
     async def _sync_storyboard_outline(
         self,
@@ -4922,16 +5279,41 @@ class SkillWorkflowService:
         contract = await self.repository.get_run_contract_revision(run.run_contract_revision_id)
         if brief is None or bible is None or manifest is None or contract is None:
             raise _fail(409, "production_seed_inputs_missing", "ProductionSeed 输入不完整")
+        # Compile a new seed from live context; never rewrite any previous seed.
+        manifest = await self._current_prompt_manifest(project, manifest, bible)
+        live_shots = []
+        for shot in manifest.shots:
+            material = shot.model_dump(mode="python", exclude={"input_hash"})
+            for part in ("image", "video"):
+                material[f"{part}_prompt"] = effective_prompt(
+                    editable_prompt_body(shot, part),
+                    getattr(manifest, f"common_{part}_prompt"),
+                    video=part == "video",
+                    duration=shot.generation_duration_seconds,
+                    aspect_ratio=brief.output_aspect_ratio,
+                    fps=brief.fps,
+                )
+            live_shots.append(ShotManifestShot(**material, input_hash=content_digest(material)))
+        manifest = manifest.model_copy(update={"shots": live_shots})
         snapshot = await self._require_snapshot(project.id)
         role_specs = {item.role: item for item in snapshot.manifest.spec.intake.asset_roles}
-        usages = await self.repository.list_asset_usages(project.id)
+        usages = [
+            item
+            for item in await self.repository.list_asset_usages(project.id)
+            if item.id in brief.selected_asset_usage_ids
+        ]
+        facts_by_id = {
+            item["id"]: item
+            for item in await self._selected_asset_facts(project.id, brief, snapshot)
+        }
         references = [
             ProductionSeedReference(
                 id=item.id,
                 asset_id=item.asset_id,
                 role=item.role,
-                name=item.role,
-                media_kind=role_specs[item.role].media_types[0],
+                name=facts_by_id.get(str(item.id), {}).get("name") or item.role,
+                media_kind=facts_by_id.get(str(item.id), {}).get("media_kind")
+                or role_specs[item.role].media_types[0],
                 sha256=item.snapshot_sha256,
                 fidelity=item.fidelity.value,
                 rights_status=item.rights_status.value,
@@ -4949,10 +5331,15 @@ class SkillWorkflowService:
                         "creative_spec",
                         "prompt_quality",
                         "locked_fields",
+                        "image_prompt_mentions",
+                        "video_prompt_mentions",
                     },
                 ),
                 exact_overlays=shot.exact_overlays,
                 video_reference_usage_ids=shot.video_reference_usage_ids,
+                video_prompt_mentions=[
+                    item.model_dump(mode="json") for item in shot.video_prompt_mentions
+                ],
             )
             for shot in manifest.shots
         ]

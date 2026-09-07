@@ -355,6 +355,13 @@ async def test_preview_per_picture_references_and_multiple_beats(tmp_path, monke
     preview = await env.batch.preview(
         env.project.id, ImageBatchRequest(expected_revision_id=env.project.current_revision_id)
     )
+    assert len(preview.items) == 1
+    assert preview.items[0].visual_beat_id == first.id
+    # Automatic missing-output recovery still covers every required visual beat.
+    preview = await env.batch.preview(
+        env.project.id,
+        ImageBatchRequest(expected_revision_id=env.project.current_revision_id, mode="missing"),
+    )
     assert len(preview.items) == 2
     assert all(item.status == "pending" for item in preview.items)
     assert (
@@ -371,6 +378,94 @@ async def test_preview_per_picture_references_and_multiple_beats(tmp_path, monke
         )
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_batch_fixes_one_image_and_primary_beat_without_changing_defaults(
+    tmp_path, monkeypatch
+):
+    env = await environment(tmp_path, monkeypatch, count=2)
+    defaults = env.service._skill_run_contract.return_value
+    defaults.candidate_count_by_stage = {"shot_image": 4}
+    primary_ids = []
+    for shot in env.shots:
+        first = shot.visual_beats[0].model_copy(update={"end_ratio": 0.5})
+        second = ShotVisualBeat(
+            index=2,
+            title="补充画面",
+            start_ratio=0.5,
+            end_ratio=1,
+            image_prompt="细节特写",
+            source_origin="skill",
+        )
+        await env.store.save_shot_plan(shot.model_copy(update={"visual_beats": [second, first]}))
+        primary_ids.append(first.id)
+    request = ImageBatchRequest(
+        expected_revision_id=env.project.current_revision_id, candidate_count=4
+    )
+    preview = await env.batch.preview(env.project.id, request)
+    assert preview.candidate_count == 1
+    assert [item.visual_beat_id for item in preview.items] == primary_ids
+    baseline = await env.batch.preview(
+        env.project.id, request.model_copy(update={"candidate_count": 1})
+    )
+    assert preview.estimated_cost_micros == baseline.estimated_cost_micros
+    batch = await env.batch.create(env.project.id, request)
+    try:
+        result = await finish(env, batch)
+        assert result.status == "completed", result.model_dump()
+        assert len(env.gateway.calls) == len(env.shots)
+        assert all(call[1]["candidate_count"] == 1 for call in env.gateway.calls)
+        assert defaults.candidate_count_by_stage == {"shot_image": 4}
+        assert request.candidate_count == 4
+    finally:
+        await env.service.shutdown_generation_runs()
+
+
+@pytest.mark.asyncio
+async def test_legacy_batch_resume_preserves_frozen_multi_image_membership(tmp_path, monkeypatch):
+    env = await environment(tmp_path, monkeypatch, count=1)
+    shot = env.shots[0]
+    first = shot.visual_beats[0].model_copy(update={"end_ratio": 0.5})
+    second = ShotVisualBeat(
+        index=2,
+        title="补充画面",
+        start_ratio=0.5,
+        end_ratio=1,
+        image_prompt="细节特写",
+        source_origin="skill",
+    )
+    await env.store.save_shot_plan(shot.model_copy(update={"visual_beats": [first, second]}))
+    preview = await env.batch.preview(
+        env.project.id,
+        ImageBatchRequest(
+            expected_revision_id=env.project.current_revision_id,
+            mode="missing",
+        ),
+    )
+    legacy = preview.model_copy(
+        update={
+            "mode": "all",
+            "candidate_count": 2,
+            "status": "cancelled",
+            "items": [
+                item.model_copy(update={"status": "cancelled", "retryable": True})
+                for item in preview.items
+            ],
+        }
+    )
+    await env.store.save_image_batch(legacy)
+    env.service._skill_run_contract.return_value.candidate_count_by_stage = {"shot_image": 4}
+    try:
+        resumed = await env.batch.resume(env.project.id, legacy.id)
+        result = await finish(env, resumed)
+        assert result.status == "completed", result.model_dump()
+        assert [item.visual_beat_id for item in result.items] == [first.id, second.id]
+        assert result.candidate_count == 2
+        assert len(env.gateway.calls) == 2
+        assert all(call[1]["candidate_count"] == 2 for call in env.gateway.calls)
+    finally:
+        await env.service.shutdown_generation_runs()
 
 
 @pytest.mark.asyncio

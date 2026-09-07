@@ -139,9 +139,9 @@ test("keeps every stylesheet on semantic typography and text-color tokens", () =
 });
 
 test("uses the same global prompt editor role for image and video", () => {
-  assert.match(imageWorkspace, /className="prompt-editor-textarea"/);
+  assert.match(imageWorkspace, /<ImageAssetPromptEditor/);
   assert.match(videoWorkspace, /<VideoPromptReferenceEditor/);
-  assert.match(videoPromptEditor, /className="prompt-editor-textarea"/);
+  assert.match(videoPromptEditor, /<AssetReferenceEditor/);
 
   const rule = cssRule(
     workflowStyles,
