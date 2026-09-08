@@ -69,7 +69,7 @@ export const EXECUTION_LABELS = Object.freeze({
   failed: "失败",
   blocked: "已暂停",
   skipped: "已跳过",
-  stale: "需更新",
+  stale: "输入已更新",
   cancelled: "已取消",
 });
 

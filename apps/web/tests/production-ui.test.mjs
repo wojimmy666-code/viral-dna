@@ -309,7 +309,7 @@ test("normalizes shot constraints and exposes approval status labels", () => {
     ["不要乱码", "保持人物一致"],
   );
   assert.equal(workflowStatusLabel("review_required"), "待确认");
-  assert.equal(workflowStatusLabel("stale"), "已过期");
+  assert.equal(workflowStatusLabel("stale"), "输入已更新");
   assert.equal(workflowStatusClass("approved"), "positive");
   assert.equal(workflowStatusClass("stale"), "warning");
   assert.equal(productionChangeLabel("image_approval_revoked"), "取消采用分镜图片");

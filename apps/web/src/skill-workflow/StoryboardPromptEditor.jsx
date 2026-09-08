@@ -4,6 +4,7 @@ import { AutosaveStatus, InlineMessage } from "../ui/system/index.js";
 import { createStoryboardDraftSession, newStoryboardShot, storyboardDraftIssues } from "./storyboard-draft.js";
 import "./storyboard-prompt-editor.css";
 import { GlobalPromptEditor, PromptPreview } from "../prompt-context/GlobalPromptEditor.jsx";
+import { PromptSectionHeader } from "../prompt-context/PromptSectionHeader.jsx";
 import { AssetReferenceEditor } from "../prompt-references/AssetReferenceEditor.jsx";
 import { PromptAssetPicker } from "../prompt-references/PromptAssetPicker.jsx";
 
@@ -178,9 +179,10 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
           </div>
         </header>
         <div className="storyboard-prompt-columns">
-          {[["image", "局部图片提示词", "描述这一张静态画面的主体、场景与构图…"], ["video", "局部视频提示词", "描述基于分镜图的动作、运镜与声音…"]].map(([part, label, placeholder]) => <div className="storyboard-local-prompt" key={part}><label>
-            <span>{label}</span>
+          {[["image", "局部图片提示词", "描述这一张静态画面的主体、场景与构图…"], ["video", "局部视频提示词", "描述基于分镜图的动作、运镜与声音…"]].map(([part, label, placeholder]) => <div className="storyboard-local-prompt" key={part}><div className="storyboard-prompt-field">
+            <PromptSectionHeader titleId={`prompt-label-${shot.stable_shot_key}-${part}`} title={label} />
             <AssetReferenceEditor label={`分镜 ${index + 1} ${label}`} disabled={disabled} maxLength={8000} placeholder={placeholder} rows={10}
+              labelledBy={`title-${shot.stable_shot_key} prompt-label-${shot.stable_shot_key}-${part}`}
               ref={part === "image" ? (node) => { if (node) fields.current.set(shot.stable_shot_key, node); else fields.current.delete(shot.stable_shot_key); } : undefined}
               onBlur={() => void flush()}
               resolveUrl={resolveUrl} onAddAssets={(insert) => setAssetPicker({insert,part})}
@@ -199,7 +201,7 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
                   : { reference_kind: reference.reference_kind, reference_id: reference.reference_id, label: reference.label, role: reference.role, order: order + 1 }),
               } : item))}
               value={shot[`${part}_prompt_body`]} />
-          </label><PromptPreview common={globalPrompts[`common_${part}_prompt`]} local={shot[`${part}_prompt_body`]} label={label.replace("局部", "")} /></div>)}
+          </div><PromptPreview common={globalPrompts[`common_${part}_prompt`]} local={shot[`${part}_prompt_body`]} label={label.replace("局部", "")} /></div>)}
         </div>
       </article>)}
       <footer className="storyboard-prompt-footer">

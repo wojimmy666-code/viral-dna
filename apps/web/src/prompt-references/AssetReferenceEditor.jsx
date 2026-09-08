@@ -45,7 +45,7 @@ function Thumbnail({ reference, resolveUrl }) {
 export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   value = "", references = [], options = [], onChange, onBlur, onAddAssets, resolveUrl,
   disabled = false, label = "提示词", placeholder = "描述画面；输入 @ 引用项目已选资产", rows = 8,
-  maxLength = 8000, indexOffset = 0,
+  maxLength = 8000, indexOffset = 0, labelledBy,
 }, forwardedRef) {
   const editorRef = useRef(null);
   const wrapperRef = useRef(null);
@@ -55,6 +55,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   const history = useRef([{ value, references }]);
   const historyIndex = useRef(0);
   const caret = useRef(null);
+  const renderedReferences = useRef(null);
   const lastTyping = useRef(0);
   const dismissTimer = useRef(null);
   const [popup, setPopup] = useState(null);
@@ -88,6 +89,16 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       history.current = [{ value, references }]; historyIndex.current = 0;
     }
     local.current = { value, references };
+    // Ordinary typing already updated the DOM. Rebuilding it here scrolls long
+    // editors and can displace the caret/IME while parent autosave echoes input.
+    if (renderedReferences.current === visibleKey && readReferenceDOM(root) === value) {
+      const currentSelection = focused ? offsets(root) : null;
+      if (focused && caret.current && (currentSelection?.start !== caret.current.start || currentSelection?.end !== caret.current.end)) {
+        setSelection(root, Math.min(caret.current.start, value.length), Math.min(caret.current.end, value.length));
+      }
+      caret.current = null;
+      return;
+    }
     const fragment = document.createDocumentFragment();
     for (const segment of referenceSegments(value, visible)) {
       if (!segment.reference) { fragment.append(document.createTextNode(segment.text)); continue; }
@@ -107,11 +118,12 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         token.append(img);
       }
       const text = document.createElement("span");
-      text.textContent = `图片${reference.number} · ${reference.label.split('/').at(-1)}`;
+      text.textContent = `图片${reference.number}`;
       token.append(text); fragment.append(token);
     }
     if (!fragment.childNodes.length) fragment.append(document.createTextNode(""));
     root.replaceChildren(fragment);
+    renderedReferences.current = visibleKey;
     if (focused && selection) setSelection(root, Math.min(selection.start, value.length), Math.min(selection.end, value.length));
     caret.current = null;
   }, [value, visibleKey, renderTick, resolveUrl]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -122,28 +134,46 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       if (!wrapperRef.current?.contains(event.target) && !popupRef.current?.contains(event.target)) setPopup(null);
     }
     document.addEventListener("pointerdown", outside);
-    const dismiss = (event) => { if (!popupRef.current?.contains(event.target)) setPopup(null); };
-    window.addEventListener('resize', dismiss);
-    document.addEventListener('scroll', dismiss, true);
+    const reposition = (event) => {
+      if (popup.kind === 'menu') positionPopup();
+      else if (!popupRef.current?.contains(event.target)) setPopup(null);
+    };
+    window.addEventListener('resize', reposition);
+    document.addEventListener('scroll', reposition, true);
     return () => {
       document.removeEventListener("pointerdown", outside);
-      window.removeEventListener('resize', dismiss);
-      document.removeEventListener('scroll', dismiss, true);
+      window.removeEventListener('resize', reposition);
+      document.removeEventListener('scroll', reposition, true);
     };
   }, [popup]);
 
   useEffect(() => () => clearTimeout(dismissTimer.current), []);
   useEffect(() => {
-    if (popup?.kind === 'menu') document.getElementById(`${popupId}-${activeIndex}`)?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex, popup?.kind, popupId]);
-  useLayoutEffect(() => {
+    if (popup?.kind !== 'menu') return;
+    const list = document.getElementById(popupId);
+    const option = document.getElementById(`${popupId}-${activeIndex}`);
+    if (!list || !option) return;
+    const viewport = list.getBoundingClientRect(), item = option.getBoundingClientRect();
+    // Never scroll ancestors: scrollIntoView can move the page and used to
+    // immediately trigger the document-level popup dismissal listener.
+    if (item.top < viewport.top) list.scrollTop += item.top - viewport.top;
+    else if (item.bottom > viewport.bottom) list.scrollTop += item.bottom - viewport.bottom;
+  }, [activeIndex, popup?.kind, popupId, matching.length]);
+  function positionPopup() {
     if (!popup || !popupRef.current) return;
     const panel = popupRef.current;
     const box = panel.getBoundingClientRect();
-    const left = Math.max(8, Math.min(popup.left, window.innerWidth - box.width - 8));
-    const top = Math.max(8, Math.min(popup.top, window.innerHeight - box.height - 8));
+    const anchor = popup.kind === 'menu' ? editorRef.current?.getBoundingClientRect() : null;
+    const desiredLeft = anchor?.left ?? popup.left;
+    let desiredTop = anchor ? anchor.bottom + 4 : popup.top;
+    if (anchor && desiredTop + box.height > window.innerHeight - 8) desiredTop = anchor.top - box.height - 4;
+    const left = Math.max(8, Math.min(desiredLeft, window.innerWidth - box.width - 8));
+    const top = Math.max(8, Math.min(desiredTop, window.innerHeight - box.height - 8));
     panel.style.left = `${left}px`; panel.style.top = `${top}px`;
-    if (popup.kind === 'menu' && popup.replacing) panel.querySelector('input')?.focus();
+  }
+  useLayoutEffect(() => {
+    positionPopup();
+    if (popup?.kind === 'menu' && popup.replacing) popupRef.current?.querySelector('input')?.focus({ preventScroll: true });
   }, [popup, matching.length]);
 
   function commit(nextValue, nextReferences = local.current.references, position, typing = false) {
@@ -176,6 +206,16 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     dismissTimer.current = setTimeout(() => setPopup((current) => current?.hover ? null : current), 180);
   }
 
+  function dismissReference() {
+    clearTimeout(dismissTimer.current);
+    setPopup((current) => current?.kind === 'reference' ? null : current);
+  }
+
+  function inputReference(target) {
+    const token = target.closest?.('[data-reference-key]');
+    return token && editorRef.current?.contains(token) ? token : null;
+  }
+
   function menu(range, replacing = null) {
     const rect = editorRef.current.getBoundingClientRect();
     setQuery(""); setActiveIndex(0);
@@ -193,7 +233,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       commit(current.value.slice(0, range.start) + token + " " + current.value.slice(range.end),
         [...current.references, reference], { start: range.start + token.length + 1, end: range.start + token.length + 1 });
     }
-    setPopup(null); editorRef.current.focus();
+    setPopup(null); editorRef.current.focus({ preventScroll: true });
   }
 
   function addAsset() {
@@ -276,7 +316,13 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     if (cut && !disabled) commit(value.slice(0, range.start) + value.slice(range.end), references, { start: range.start, end: range.start });
   }
 
-  return <div className={`asset-reference-editor${disabled ? ' disabled' : ''}`} ref={wrapperRef}>
+  return <div className={`asset-reference-editor${disabled ? ' disabled' : ''}`} ref={wrapperRef}
+    onKeyDownCapture={(event) => {
+      if (event.key === 'Escape' && popup) {
+        event.preventDefault(); event.stopPropagation(); clearTimeout(dismissTimer.current);
+        setPopup(null); editorRef.current?.focus({ preventScroll: true });
+      }
+    }}>
     {visible.length > 0 && <div className="asset-reference-rail" aria-label={`${label}已引用图片`}>
       {visible.map((reference) => <button type="button" key={referenceKey(reference)}
         className={selected === referenceKey(reference) ? 'active' : ''}
@@ -286,7 +332,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         <Thumbnail reference={reference} resolveUrl={resolveUrl} /><span>{reference.number}</span>
       </button>)}
     </div>}
-    <div ref={editorRef} className="asset-reference-input" role="textbox" aria-label={label} aria-multiline="true"
+    <div ref={editorRef} className="asset-reference-input" role="textbox" aria-label={label} aria-labelledby={labelledBy} aria-multiline="true"
       aria-disabled={disabled} contentEditable={!disabled} suppressContentEditableWarning tabIndex={0}
       aria-controls={popup?.kind === 'menu' ? popupId : undefined} aria-autocomplete="list"
       aria-activedescendant={popup?.kind === 'menu' && matching[activeIndex] ? `${popupId}-${activeIndex}` : undefined}
@@ -298,10 +344,11 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       onPaste={(event) => { event.preventDefault(); editSelection(event.clipboardData.getData('text/plain')); }}
       onCopy={(event) => copy(event)} onCut={(event) => copy(event, true)}
       onDrop={(event) => event.preventDefault()}
-      onFocus={(event) => { const token = event.target.closest('[data-reference-key]'); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token, true); }}
-      onClick={(event) => { const token = event.target.closest('[data-reference-key]'); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token); }}
-      onMouseOver={(event) => { const token = event.target.closest('[data-reference-key]'); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token, true); }}
-      onMouseOut={(event) => { if (event.target.closest('[data-reference-key]') && !event.relatedTarget?.closest?.('[data-reference-key]')) dismissPreview(); }}
+      onPointerDown={(event) => { if (!inputReference(event.target)) dismissReference(); }}
+      onFocus={(event) => { const token = inputReference(event.target); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token, true); else dismissReference(); }}
+      onClick={(event) => { const token = inputReference(event.target); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token); else dismissReference(); }}
+      onMouseOver={(event) => { const token = inputReference(event.target); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token, true); }}
+      onMouseOut={(event) => { if (inputReference(event.target) && !event.relatedTarget?.closest?.('[data-reference-key]')) dismissPreview(); }}
     />
     {onAddAssets && <button className="asset-reference-add" type="button" disabled={disabled} onClick={addAsset}><Plus size={14} />添加资产</button>}
     {popup && createPortal(<div className="asset-reference-popover" ref={popupRef} style={{ left: popup.left, top: popup.top }}
@@ -309,7 +356,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       onFocus={() => clearTimeout(dismissTimer.current)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) dismissPreview(); }}
       onKeyDown={(event) => { if (event.key === 'Escape') { setPopup(null); editorRef.current?.focus(); } else menuKeyDown(event); }}>
       {popup.kind === 'reference' ? <>
-        <button className="asset-reference-close" aria-label="关闭引用预览" type="button" onClick={() => setPopup(null)}><X size={16} /></button>
+        <button className="asset-reference-close" aria-label="关闭引用预览" type="button" onClick={() => { setPopup(null); editorRef.current?.focus({ preventScroll: true }); }}><X size={16} /></button>
         <div className="asset-reference-preview"><Thumbnail reference={popup.reference} resolveUrl={resolveUrl} /></div>
         <strong>{popup.reference.label}</strong>
         {popup.reference.description && <p>{popup.reference.description}</p>}

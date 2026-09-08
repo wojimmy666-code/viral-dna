@@ -521,13 +521,15 @@ async def test_concurrent_budget_reservations(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_navigation_is_small_no_prompts_or_images(tmp_path, monkeypatch):
+async def test_navigation_is_small_no_prompts_or_candidate_history(tmp_path, monkeypatch):
     env = await environment(tmp_path, monkeypatch, count=11)
     navigation = await env.service.shot_navigation(env.project.id)
     assert len(navigation) == 11
     assert "image_prompt" not in navigation[0]["plan"]
     assert "source_keyframe_url" not in navigation[0]["plan"]
-    assert "image_preview" not in navigation[0]
+    assert navigation[0]["image_preview"] is None
+    assert "generation_runs" not in navigation[0]
+    assert "video_preview" not in navigation[0]
 
 
 @pytest.mark.asyncio

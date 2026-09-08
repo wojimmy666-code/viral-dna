@@ -35,7 +35,7 @@ import {
   timelineTimeToSourceAudioTime,
   timelineTimeToSourceTime,
 } from "./timeline-math.js";
-import { AutosaveStatus } from "../ui/system/index.js";
+import { AutosaveStatus, InlineMessage } from "../ui/system/index.js";
 import "./video-editor.css";
 
 const PREVIEW_MAX_HEIGHT_PX = 600;
@@ -864,6 +864,7 @@ function SubtitleInspector({ cues, onAdd, onChange, onDelete, onSelect, selected
 }
 
 export function VideoEditorWorkspace({
+  upstreamInputsChanged = false,
   workspaceRef = null,
   initialInspectorTab = "clip",
   onTimelineChanged,
@@ -1355,6 +1356,26 @@ export function VideoEditorWorkspace({
     }
   }
 
+  async function synchronizeHandoff() {
+    if (!timelineRef.current || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const savedTimeline = await flushTimelineSave();
+      await request(`/productions/${project.id}/timeline/sync-handoff`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_revision_id: savedTimeline.revision_id }),
+      });
+      await loadTimeline();
+      onNotice({ type: "success", title: "已更新剪辑素材", message: "已创建新时间线版本，旧版本与导出文件仍保留。" });
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function restoreRevision(revision) {
     if (!timelineRef.current || revision.id === timelineRef.current.revision_id) return;
     setBusy(true);
@@ -1426,6 +1447,15 @@ export function VideoEditorWorkspace({
           </button>
         </div>
       </header>
+
+      {(timeline.upstream_inputs_changed || upstreamInputsChanged) && (
+        <InlineMessage role="status">
+          <span>上游内容已更新，当前剪辑和导出仍可继续使用。</span>
+          {timeline.upstream_sync_available && (
+            <button className="text-button" disabled={busy} onClick={synchronizeHandoff} type="button">使用最新分镜</button>
+          )}
+        </InlineMessage>
+      )}
 
       {historyOpen && (
         <div className="timeline-history-panel">

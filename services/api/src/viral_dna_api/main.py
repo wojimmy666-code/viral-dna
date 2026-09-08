@@ -134,6 +134,7 @@ from .models import (
     ReferenceAssetUpdate,
     ReplacementCreate,
     ReplacementVersion,
+    ShotEditingSelectionUpdate,
     ShotImageApprovalRevokeRequest,
     ShotKeyframeSelectRequest,
     ShotLifecycleUpdate,
@@ -153,6 +154,7 @@ from .models import (
     SourceType,
     TimelineClipInspectionRequest,
     TimelineFinalRenderCreate,
+    TimelineHandoffSyncRequest,
     TimelinePreviewCreate,
     TimelineRenderJob,
     TimelineRenderJobList,
@@ -1316,6 +1318,19 @@ async def reorder_production_shots(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+@app.put(
+    f"{API_PREFIX}/production-shots/{{shot_plan_id}}/editing-selection",
+    response_model=ShotPlanDetailResponse,
+)
+async def update_shot_editing_selection(
+    shot_plan_id: UUID, payload: ShotEditingSelectionUpdate
+) -> ShotPlanDetailResponse:
+    try:
+        return await production_service.update_editing_selection(shot_plan_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 @app.post(
     f"{API_PREFIX}/productions/{{project_id}}/shot-output-mode",
     response_model=list[ShotPlanResponse],
@@ -2032,9 +2047,12 @@ async def get_production_candidate_thumbnail(candidate_id: UUID) -> FileResponse
     f"{API_PREFIX}/productions/{{project_id}}/gate-status",
     response_model=ProductionGateStatus,
 )
-async def get_production_gate_status(project_id: UUID) -> ProductionGateStatus:
+async def get_production_gate_status(
+    project_id: UUID,
+    step: Literal["shot_images", "shot_videos"] | None = None,
+) -> ProductionGateStatus:
     try:
-        return await production_service.gate_status(project_id)
+        return await production_service.gate_status(project_id, step=step)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -2071,6 +2089,20 @@ async def update_production_timeline(
 ) -> ProductionTimeline:
     try:
         return await timeline_service.update_timeline(project_id, payload)
+    except TimelineServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/timeline/sync-handoff",
+    response_model=ProductionTimeline,
+)
+async def sync_production_timeline_handoff(
+    project_id: UUID,
+    payload: TimelineHandoffSyncRequest,
+) -> ProductionTimeline:
+    try:
+        return await timeline_service.synchronize_handoff(project_id, payload)
     except TimelineServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

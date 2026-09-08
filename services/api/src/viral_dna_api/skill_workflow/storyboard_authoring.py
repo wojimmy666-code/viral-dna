@@ -17,6 +17,7 @@ from ..ai.router import ModelRouter
 from ..ai.text_model_routing import preferred_text_model_aliases
 from ..models import ModelTask, ModelUsage
 from ..platform_skills.contracts import SkillManifest, SkillShotArchetype
+from ..prompt_engine.punctuation import normalize_prompt_punctuation
 from ..prompt_engine.still_image import (
     contains_video_directives,
     static_image_constraints,
@@ -725,7 +726,7 @@ def compile_video_prompt(
     foley = "、".join(spec.sound.synchronous_foley)
     forbidden_audio = "、".join(spec.sound.forbidden)
     constraints = "；".join(spec.failure_constraints)
-    return (
+    return normalize_prompt_punctuation(
         f"【首帧约束】以当前上传并已采用的第{order:02d}张分镜图作为唯一首帧、主体、场景、构图和明暗关系约束，生成一个{generation_duration_seconds}秒、{aspect_ratio}、{fps}fps的单一连续镜头；不得重新设计首帧中的产品、人物、设备或空间。\n\n"
         f"【统一视觉锁定】{locks}。{spec.lighting}。{spec.color_and_texture}。"
         "全片摄影质感与色彩管理遵循当前 Skill 的风格。\n\n"

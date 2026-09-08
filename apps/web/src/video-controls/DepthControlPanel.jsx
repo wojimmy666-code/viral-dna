@@ -144,6 +144,8 @@ export function DepthControlPanel({
                 disabled={busy}
                 name={`分镜 ${plan.index} 深度视频`}
                 onNotice={onNotice}
+                previewUrl={depthUrl(resolveUrl, plan.id, activeDepth.id, { thumbnail: true })}
+                projectId={plan.project_id}
                 request={request}
                 shotPlanId={plan.id}
                 sourceEntityId={activeDepth.id}

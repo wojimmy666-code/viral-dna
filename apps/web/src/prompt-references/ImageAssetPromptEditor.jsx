@@ -5,7 +5,7 @@ import { assetMentionLabel } from "../shot-image-ui.js";
 const roles = { person: 'identity', product: 'product', wardrobe: 'wardrobe', scene: 'scene', style: 'style', prop: 'layout' };
 const order = { identity: 0, product: 1, wardrobe: 2, scene: 3, style: 4, layout: 5 };
 
-export const ImageAssetPromptEditor = forwardRef(function ImageAssetPromptEditor({ assets, draft, setDraft, disabled, resolveUrl, onBlur, onAddAssets, sourceFrame }, ref) {
+export const ImageAssetPromptEditor = forwardRef(function ImageAssetPromptEditor({ assets, draft, setDraft, disabled, resolveUrl, onBlur, onAddAssets, sourceFrame, labelledBy }, ref) {
   const bindings = draft.referenceBindings || [];
   const mentions = draft.imagePromptMentions || [];
   const eligibleIds = new Set(mentions.map((item) => item.reference_asset_id));
@@ -26,7 +26,7 @@ export const ImageAssetPromptEditor = forwardRef(function ImageAssetPromptEditor
     binding: bindings.find((binding) => binding.reference_asset_id === mention.reference_asset_id),
   }));
   return <AssetReferenceEditor ref={ref} value={draft.imagePrompt} references={references} options={options}
-    label="局部图片提示词" disabled={disabled} resolveUrl={resolveUrl}
+    label="局部图片提示词" labelledBy={labelledBy} disabled={disabled} resolveUrl={resolveUrl}
     onAddAssets={onAddAssets && ((insert) => onAddAssets((asset) => insert({
       key:asset.id, reference_asset_id:asset.id, label:assetMentionLabel(asset),
       thumbnail_url:asset.thumbnail_url, available:true, role:roles[asset.type] || 'layout',

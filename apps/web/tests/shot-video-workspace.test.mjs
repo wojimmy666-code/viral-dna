@@ -12,9 +12,11 @@ import {
 import {
   videoDraftFromDetail,
   videoDraftParameters,
+  mergeHydratedVideoDraft,
 } from "../src/video-generation-controls/useShotVideoGenerationDraft.js";
 import {
   buildVideoPromptHighlightSegments,
+  approvedVisualBeatFramesFromDetail,
   buildManagedAssetReferenceOption,
   buildVideoReferenceSystemConstraints,
   buildVideoReferenceOptions,
@@ -37,6 +39,22 @@ const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
   "utf8",
 );
+test("video workspace hides Skill intent, uses explicit selection and one asset editor", () => {
+  assert.match(workspaceSource, /project\?\.origin_type === "skill_run"/);
+  assert.match(workspaceSource, /!isSkill && <CreativeIntentPanel/);
+  assert.match(workspaceSource, /!isSkill && videoDraft.intent\?\.status === "stale"/);
+  assert.doesNotMatch(workspaceSource, /资产引用与控制|<GenerationReferenceComposer/);
+  assert.match(workspaceSource, /disabled=\{busy \|\| !gate\?\.allowed\}/);
+  assert.match(workspaceSource, /selected_video_count/);
+  assert.doesNotMatch(workspaceSource, /className="shot-video-(?:gate-blockers|selection-hint)"/);
+  assert.match(workspaceSource, /title=\{!gate\?\.allowed \? "请至少选择一个有效的已采用视频参与剪辑"/);
+  assert.match(workspaceSource, /分镜\{plan.index\}/);
+  const list = workspaceSource.slice(workspaceSource.indexOf("export function ShotVideoList"), workspaceSource.indexOf("export function ShotVideoWorkspace"));
+  assert.doesNotMatch(list, /plan.video_prompt/);
+  assert.match(list, /onDrop=/);
+  assert.match(list, /onKeyDown=/);
+  assert.match(list, /eligible_video_shot_ids/);
+});
 const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
   "utf8",
@@ -174,11 +192,11 @@ test("keeps the production workspace on a readable semantic type ramp", () => {
 test("keeps video candidates usable when the shot input has changed", () => {
   assert.match(workspaceSource, /status === "stale" \? "旧输入"/);
   assert.match(workspaceSource, /分镜输入已更新/);
-  assert.match(workspaceSource, /当前候选基于修改前的输入生成，仍可继续使用/);
+  assert.match(workspaceSource, /已有视频仍可继续使用/);
   assert.match(workspaceSource, /plan\.video_status === "stale"/);
   assert.match(candidateLibrarySource, /const oldInput = plan\?\.video_status === "stale"/);
   assert.match(candidateLibrarySource, /可采用.*旧输入/s);
-  assert.match(productionWorkflowSource, /基于修改前的分镜输入生成。确认仍采用当前画面吗/);
+  assert.doesNotMatch(productionWorkflowSource, /基于修改前的分镜输入生成。确认仍采用当前画面吗/);
   assert.match(productionWorkflowSource, /confirm_stale_input: usesOldInput/);
   assert.match(workflowStyles, /\.shot-video-input-version-notice\s*\{/);
   assert.match(workflowStyles, /\.shot-candidate-current-detail > em\.old-input\s*\{/);
@@ -501,6 +519,92 @@ test("automatically binds approved visual beats to prompt mentions", () => {
   assert.deepEqual(restored.inputSources, ["approved_images"]);
 });
 
+function adoptedFramesDetail() {
+  const beats = [1, 2, 3].map(index => ({
+    id: `beat-${index}`, index, title: `画面${index}`, required: index === 1,
+    start_ratio: (index - 1) / 3, end_ratio: index / 3,
+    approved_image_candidate_id: index < 3 ? `adopted-${index}` : null,
+  }));
+  return {
+    plan: { id: "shot", duration_seconds: 3, video_prompt: "保持手写的运镜要求。", visual_beats: [...beats].reverse() },
+    generation_runs: beats.map(beat => ({ kind: "image", visual_beat_id: beat.id,
+      candidates: [{ id: `latest-${beat.index}` }, { id: `adopted-${beat.index}` }],
+    })),
+  };
+}
+
+for (const origin of ["skill_run", "analysis"]) {
+  test(`${origin}: binds all current adopted frames, including optional beats, and repairs legacy drafts`, () => {
+    const detail = adoptedFramesDetail();
+    detail.project = { origin_type: origin };
+    const frames = approvedVisualBeatFramesFromDetail(detail);
+    assert.deepEqual(frames.map(({ candidate }) => candidate?.id || null), ["adopted-1", "adopted-2", null]);
+    const restored = videoDraftFromDetail(detail, {}, {
+      schema_version: "viral-dna-shot-video-draft/v2", video_prompt: "保持手写的运镜要求。",
+      input_plan: { sources: [], references: [] }, video_prompt_mentions: [],
+    });
+    assert.deepEqual(restored.selectedReferences.map(item => item.reference_id), ["adopted-1", "adopted-2"]);
+    assert.deepEqual(restored.videoPromptMentions, restored.selectedReferences);
+    assert.equal(restored.videoPrompt, "@分镜图/图1 @分镜图/图2\n\n保持手写的运镜要求。");
+    const refreshed = videoDraftFromDetail(detail, {}, {
+      ...videoDraftParameters(restored), schema_version: "viral-dna-shot-video-draft/v2",
+    });
+    assert.equal(refreshed.videoPrompt, restored.videoPrompt);
+    assert.deepEqual(refreshed.videoPromptMentions, restored.videoPromptMentions);
+    // A generated candidate is never silently substituted for a missing adoption.
+    detail.generation_runs[0].candidates[1].status = "archived";
+    assert.equal(approvedVisualBeatFramesFromDetail(detail)[0].candidate, null);
+  });
+}
+
+test("refreshing adopted frames merges pending text and bindings without losing prose or exclusions", () => {
+  const detail = adoptedFramesDetail();
+  const generated = videoDraftFromDetail(detail, {});
+  const local = { ...generated, videoPrompt: "  用户刚输入的动作与运镜。  \n\n末行保留空格 ",
+    videoPromptMentions: [], selectedReferences: [], inputSources: [], resolution: "1080P" };
+  const options = { hasPendingLocal: true, preservePrompt: true, referenceFrames: approvedVisualBeatFramesFromDetail(detail) };
+  const merged = mergeHydratedVideoDraft(generated, local, options);
+  assert.equal(merged.videoPrompt, `@分镜图/图1 @分镜图/图2\n\n${local.videoPrompt}`);
+  assert.equal(merged.resolution, "1080P");
+  assert.deepEqual(merged.videoPromptMentions, merged.selectedReferences);
+  assert.deepEqual(videoDraftParameters(merged).input_plan.references, merged.selectedReferences);
+  assert.deepEqual(mergeHydratedVideoDraft(generated, merged, options), merged);
+
+  const excluded = mergeHydratedVideoDraft(generated, { ...merged, autoReferenceExclusions: ["beat-2"] }, options);
+  assert.deepEqual(excluded.selectedReferences.map(item => item.reference_id), ["adopted-1"]);
+  assert.ok(excluded.videoPrompt.endsWith(local.videoPrompt));
+  const restored = reconcileVideoDraftReferences(excluded, { restoreAutomaticReferences: true }, options.referenceFrames);
+  assert.deepEqual(restored.selectedReferences.map(item => item.reference_id), ["adopted-1", "adopted-2"]);
+});
+
+test("re-adoption updates the stable binding in place without erasing inline references", () => {
+  const detail = adoptedFramesDetail();
+  const initial = videoDraftFromDetail(detail, {});
+  const prompt = "以 @分镜图/图1 起始，然后接到 @分镜图/图2。";
+  const changed = structuredClone(detail);
+  changed.plan.visual_beats.find(item => item.id === "beat-1").approved_image_candidate_id = "latest-1";
+  const next = videoDraftFromDetail(changed, {}, {
+    ...videoDraftParameters(initial), schema_version: "viral-dna-shot-video-draft/v2", video_prompt: prompt,
+  });
+  assert.equal(next.videoPrompt, prompt);
+  assert.deepEqual(next.videoPromptMentions.map(item => item.reference_id), ["latest-1", "adopted-2"]);
+  const reversed = changed.plan.visual_beats.map(beat => ({ ...beat, index: beat.index === 3 ? 3 : 3 - beat.index }));
+  changed.plan.visual_beats = reversed;
+  const reordered = videoDraftFromDetail(changed, {}, {
+    ...videoDraftParameters(next), schema_version: "viral-dna-shot-video-draft/v2",
+  });
+  assert.equal(reordered.videoPrompt, "以 @分镜图/图2 起始，然后接到 @分镜图/图1。");
+  assert.deepEqual(reordered.selectedReferences.map(item => item.reference_id), ["adopted-2", "latest-1"]);
+});
+
+test("图1 is not mistaken for the 图10 token when supplementing or removing references", () => {
+  const references = [1, 10].map(index => ({ reference_kind: "approved_image", reference_id: `image-${index}`,
+    visual_beat_id: `beat-${index}`, label: `分镜图/图${index}`, role: "composition", order: index }));
+  const next = synchronizeAutomaticVideoPrompt({ prompt: "以 @分镜图/图10 结束。", mentions: references, selectedReferences: references });
+  assert.equal(next.videoPrompt, "@分镜图/图1\n\n以 @分镜图/图10 结束。");
+  assert.deepEqual(normalizeVideoPromptMentions("以 @分镜图/图10 结束。", references).map(item => item.reference_id), ["image-10"]);
+});
+
 test("keeps automatic frame references at their semantic positions", () => {
   const references = [
     {
@@ -640,7 +744,7 @@ test("remembers removed intent references and clears the exclusion after a manua
 });
 
 test("composes optional video inputs without exposing audio as a generation input", () => {
-  assert.match(workspaceSource, /<GenerationReferenceComposer/);
+  assert.doesNotMatch(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(generationReferenceComposerSource, /ReferencePickerPopover/);
   assert.doesNotMatch(workspaceSource, /image_prompt_mentions/);
   assert.match(generationReferenceComposerSource, /selectedReferenceItems/);
@@ -753,9 +857,9 @@ test("auto-saves changed prompts with the returned revision before generating", 
   assert.match(productionWorkflowSource, /changes\.video_prompt_mentions/);
   assert.match(generationDraftSource, /videoPromptMentions/);
   assert.match(generationDraftSource, /setSaveState\("dirty"\)/);
-  assert.match(workspaceSource, /<AutosaveStatus/);
+  assert.match(workspaceSource, /<PromptSectionHeader[^>]*state=\{draftSaveState\}/);
   assert.match(workspaceSource, /draftSaveState/);
-  assert.match(workspaceSource, /<small>\{videoDraft\.videoPrompt\.length\} 字<\/small>/);
+  assert.match(workspaceSource, /hint=\{`\$\{videoDraft\.videoPrompt\.length\} 字`\}/);
   assert.match(videoPromptReferenceEditorSource, /onBlur=\{onBlur\}/);
   assert.doesNotMatch(workspaceSource, /含人工修改/);
 });
@@ -923,14 +1027,15 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
 
   assert.match(workspaceSource, /<VideoPromptReferenceEditor/);
   assert.match(workspaceSource, /<VideoPromptReferencePolicy/);
-  assert.match(workspaceSource, /<GenerationReferenceComposer/);
+  assert.doesNotMatch(workspaceSource, /<GenerationReferenceComposer/);
   assert.match(workspaceSource, /<CreativeIntentPanel/);
   assert.match(workspaceSource, /compile-intent/);
   assert.match(workspaceSource, /intent_mentions:\s*videoDraft\.intentMentions/);
   assert.match(workspaceSource, /merge_strategy:\s*"replace_all"/);
   assert.match(workspaceSource, /restore-intent-baseline/);
   assert.match(workspaceSource, /className="shot-video-config-disclosure"/);
-  assert.match(workspaceSource, /open=\{referenceSettingsOpen\}/);
+  assert.doesNotMatch(workspaceSource, /资产引用与控制/);
+  assert.match(workspaceSource, /高级控制/);
   assert.match(workspaceSource, /open=\{promptSettingsOpen\}/);
   assert.match(workspaceSource, /reconcileVideoDraftReferences/);
   assert.match(workspaceSource, /videoPromptMentions/);
@@ -1002,7 +1107,7 @@ test("keeps video candidates from every generation batch selectable", () => {
   );
   assert.match(workspaceSource, /plan\.video_status !== "ready"/);
   assert.doesNotMatch(workspaceSource, /videoGenerationRunLabel|可人工调整/);
-  assert.match(workspaceSource, /<strong>资产引用与控制<\/strong><small>\{selectedVideoReferences\.length\} 项<\/small>/);
+  assert.doesNotMatch(workspaceSource, /资产引用与控制/);
 
   const libraryRule = cssRule(".shot-video-candidate-library");
   const thumbRule = cssRule(".shot-video-candidate-library .shot-candidate-thumb");
@@ -1056,7 +1161,7 @@ test("lazy-loads one muted hover preview without changing candidate selection", 
 test("advances after approval and keeps editing controls in the video editor module", () => {
   assert.doesNotMatch(workspaceSource, /VideoPreparationPanel/);
   assert.doesNotMatch(workspaceSource, /gate\?\.prepared_shot_count/);
-  assert.match(workspaceSource, /gate\?\.approved_shot_count/);
+  assert.match(workspaceSource, /gate\?\.selected_video_count/);
   assert.match(workspaceSource, /进入视频剪辑/);
   assert.match(videoEditorSource, /trim_in_seconds/);
   assert.match(videoEditorSource, /trim_out_seconds/);
@@ -1093,7 +1198,7 @@ test("keeps clip review manual inside the independent editor", () => {
 test("submits approved visual beats without a duplicate storyboard preview", () => {
   assert.match(workspaceSource, /approvedVisualBeatFramesFromDetail/);
   assert.match(workspaceSource, /referenceFrames=\{referenceFrames\}/);
-  assert.match(workspaceSource, /请先确认全部必需画面（\$\{approvedReferenceCount\}\/\$\{referenceFrames\.length\}）/);
+  assert.match(workspaceSource, /请先确认全部必需画面（\$\{approvedReferenceCount\}\/\$\{requiredFrames\.length\}）/);
   assert.match(workspaceSource, /!allReferencesApproved/);
   assert.doesNotMatch(workspaceSource, /function approvedImageCandidate/);
   assert.doesNotMatch(workspaceSource, /className="shot-video-preview-grid"/);

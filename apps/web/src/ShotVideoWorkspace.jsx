@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
+import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
+import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import {
   ArrowRight,
+  DotsSixVertical,
   CaretDown,
   CheckCircle,
   DownloadSimple,
@@ -26,11 +29,9 @@ import { ShotVideoGenerationControls } from "./ShotVideoGenerationControls.jsx";
 import { ManagedAssetPicker } from "./managed-assets/ManagedAssetPicker.jsx";
 import { DepthControlPanel } from "./video-controls/DepthControlPanel.jsx";
 import { useDepthControlJob } from "./video-controls/depth/useDepthControlJob.js";
-import { GenerationReferenceComposer } from "./video-inputs/reference-composer/GenerationReferenceComposer.jsx";
 import { VideoPromptReferenceEditor } from "./video-inputs/VideoPromptReferenceEditor.jsx";
 import { VideoPromptReferencePolicy } from "./video-inputs/VideoPromptReferencePolicy.jsx";
 import { VideoEnhancementPanel } from "./video-enhancement/VideoEnhancementPanel.jsx";
-import { AutosaveStatus } from "./ui/system/index.js";
 import {
   CreativeIntentPanel,
   intentRequirementsNeedAssets,
@@ -171,10 +172,22 @@ function VideoCandidatePlayer({
   );
 }
 
-function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
+export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl, busy, gate, onReorderShots, onEditingSelectionChange }) {
+  const draggedId = useRef(null);
+  const [dropId, setDropId] = useState(null);
   const activeShots = shots.filter(
     (item) => item.plan.lifecycle_status !== "discarded",
   );
+  const eligible = new Set(gate?.eligible_video_shot_ids || []);
+  const selected = new Set(gate?.selected_video_shot_ids || []);
+  function move(fromId, toId) {
+    if (busy || !onReorderShots || fromId === toId) return;
+    const ids = activeShots.map(item => item.plan.id);
+    const from = ids.indexOf(fromId), to = ids.indexOf(toId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorderShots(ids);
+  }
   return (
     <aside className="shot-video-list" aria-label="分镜视频列表">
       <header>
@@ -182,15 +195,34 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
         <span>{activeShots.length} 个</span>
       </header>
       <div>
-        {activeShots.map((item) => {
+        {activeShots.map((item, index) => {
           const plan = item.plan;
           return (
-            <button
-              className={selectedShotId === plan.id ? "active" : ""}
+            <div
+              className={`shot-video-row${selectedShotId === plan.id ? " active" : ""}${dropId === plan.id ? " drop-target" : ""}`}
               key={plan.id}
-              onClick={() => onSelectShot(plan.id)}
-              type="button"
+              onDragOver={(event) => {
+                if (busy || !draggedId.current) return;
+                event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropId(plan.id);
+              }}
+              onDrop={(event) => {
+                event.preventDefault(); move(draggedId.current, plan.id); draggedId.current = null; setDropId(null);
+              }}
             >
+              <button className="shot-video-drag" type="button" disabled={busy || !onReorderShots}
+                draggable={!busy && Boolean(onReorderShots)}
+                aria-label={`调整分镜${plan.index}顺序`} title="拖拽排序；也可聚焦后按上下方向键"
+                onDragStart={(event) => { draggedId.current = plan.id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", plan.id); }}
+                onDragEnd={() => { draggedId.current = null; setDropId(null); }}
+                onKeyDown={(event) => {
+                  if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+                  event.preventDefault();
+                  const target = activeShots[index + (event.key === "ArrowUp" ? -1 : 1)];
+                  if (target) move(plan.id, target.plan.id);
+                }}><DotsSixVertical size={16} /></button>
+              <button className="shot-video-select" type="button" disabled={busy}
+                aria-current={selectedShotId === plan.id ? "true" : undefined}
+                onClick={() => onSelectShot(plan.id)}>
               <ShotNavigationThumbnail
                 index={plan.index}
                 resolveUrl={resolveUrl}
@@ -208,18 +240,22 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
               />
               <span className="shot-video-list-copy">
                 <strong>
-                  分镜 {plan.index} · {plan.output_mode === "source_video"
-                    ? "沿用原视频"
-                    : plan.video_prompt || "尚未填写视频提示词"}
+                  分镜{plan.index}
                 </strong>
                 <small>{plan.start_seconds.toFixed(1)}s–{plan.end_seconds.toFixed(1)}s · {plan.duration_seconds.toFixed(1)}s</small>
-              </span>
               {plan.video_status !== "ready" && (
-                <span className={`production-status ${workflowStatusClass(plan.video_status)}`}>
+                <small className={`shot-video-row-status ${workflowStatusClass(plan.video_status)}`}>
                   {videoWorkflowStatusLabel(plan.video_status)}
-                </span>
+                </small>
               )}
-            </button>
+              </span>
+              </button>
+              <label className="shot-video-include" title={eligible.has(plan.id) ? "参与剪辑" : "请先采用一个有效的视频候选"}>
+                <input type="checkbox" aria-label={`分镜${plan.index}参与剪辑`}
+                  checked={selected.has(plan.id)} disabled={busy || !eligible.has(plan.id) || !onEditingSelectionChange}
+                  onChange={(event) => onEditingSelectionChange?.(plan.id, event.target.checked)} />
+              </label>
+            </div>
           );
         })}
       </div>
@@ -228,6 +264,7 @@ function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl }) {
 }
 
 export function ShotVideoWorkspace({
+  upstreamInputsChanged = false,
   globalPromptRef,
   applyPersistedVideoDraft,
   advanced,
@@ -240,6 +277,8 @@ export function ShotVideoWorkspace({
   initialCandidateId = "",
   onPreviewCandidate,
   onAdvance,
+  onReorderShots,
+  onEditingSelectionChange,
   onAddAssets,
   onApprove,
   onArchiveCandidates,
@@ -293,11 +332,12 @@ export function ShotVideoWorkspace({
   const [intentCompileResult, setIntentCompileResult] = useState(null);
   const [intentError, setIntentError] = useState("");
   const [intentErrorCode, setIntentErrorCode] = useState("");
-  const [referenceSettingsOpen, setReferenceSettingsOpen] = useState(false);
+  const promptSettingsRef = useRef(null);
   const [promptSettingsOpen, setPromptSettingsOpen] = useState(true);
   const [globalPrompts, setGlobalPrompts] = useState({});
   const plan = shotDetail?.plan;
   const sourceVideoMode = plan?.output_mode === "source_video";
+  const isSkill = project?.origin_type === "skill_run";
   const depthGeneration = useDepthControlJob({
     expectedRevisionId: project?.current_revision_id,
     onTerminal: async (job) => {
@@ -378,10 +418,12 @@ export function ShotVideoWorkspace({
     () => approvedVisualBeatFramesFromDetail(shotDetail),
     [shotDetail],
   );
-  const approvedReferenceCount = referenceFrames.filter((item) => item.candidate).length;
+  const requiredFrames = referenceFrames.some(({ beat }) => beat.required)
+    ? referenceFrames.filter(({ beat }) => beat.required) : referenceFrames;
+  const approvedReferenceCount = requiredFrames.filter((item) => item.candidate).length;
   const allReferencesApproved = (
-    referenceFrames.length > 0
-    && approvedReferenceCount === referenceFrames.length
+    requiredFrames.length > 0
+    && approvedReferenceCount === requiredFrames.length
   );
   const displayedCandidate = (
     candidates.find((item) => item.id === displayedCandidateId)
@@ -476,7 +518,6 @@ export function ShotVideoWorkspace({
     setIntentCompileResult(null);
     setIntentError("");
     setIntentErrorCode("");
-    setReferenceSettingsOpen(false);
     setPromptSettingsOpen(true);
     setDepthSettingsOpen(false);
   }, [plan?.id]);
@@ -550,7 +591,7 @@ export function ShotVideoWorkspace({
 
   useEffect(() => {
     let cancelled = false;
-    if (!plan?.id || !usesDepthControl) {
+    if (!plan?.id || (!usesDepthControl && !depthSettingsOpen)) {
       setDepthEngineCapabilities([]);
       setDepthEngineLoadError("");
       return () => {
@@ -577,7 +618,7 @@ export function ShotVideoWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [plan?.id, request, usesDepthControl]);
+  }, [plan?.id, request, usesDepthControl, depthSettingsOpen]);
   const managedAssetCompatible = !routeUsesManagedIdentity || !managedAssetBinding || Boolean(
     selectedManagedAssetCapability?.supported
     && selectedManagedAssetCapability.provider === managedAssetBinding.provider
@@ -664,7 +705,7 @@ export function ShotVideoWorkspace({
     ? "正在读取视频模型目录，请稍候"
     : modelCatalogFailed
       ? "视频模型目录读取失败，请重新加载"
-    : videoDraft.intent?.status === "stale"
+    : !isSkill && videoDraft.intent?.status === "stale"
       ? "创作意图使用旧版或已修改的输入，请重新生成引用与提示词"
     : !videoGenerationSettings?.enabled
     ? "视频生成尚未启用"
@@ -705,7 +746,7 @@ export function ShotVideoWorkspace({
       : usesApprovedImages && referenceFrames.length === 0
         ? "当前分镜还没有可用于视频生成的画面"
         : usesApprovedImages && !allReferencesApproved
-          ? `请先确认全部必需画面（${approvedReferenceCount}/${referenceFrames.length}）`
+          ? `请先确认全部必需画面（${approvedReferenceCount}/${requiredFrames.length}）`
           : videoDraft.audioStrategy === "reuse_source" && !sourceAudioAvailable
             ? "原视频没有可用音频，请改为生成新音频或静音"
           : videoDraft.audioStrategy === "generate_native"
@@ -849,7 +890,7 @@ export function ShotVideoWorkspace({
       const unresolvedRequirements = result.unresolved_requirements || [];
       const needsAssets = intentRequirementsNeedAssets(unresolvedRequirements);
       if (needsAssets) {
-        setReferenceSettingsOpen(true);
+        setPromptSettingsOpen(true);
       }
       onNotice?.({
         type: unresolvedRequirements.length ? "warning" : "success",
@@ -918,17 +959,25 @@ export function ShotVideoWorkspace({
         </div>
         <div className="shot-video-gate">
           <span>
-            {gate?.approved_shot_count || 0} / {gate?.required_shot_count || 0} 已采用
+            已选 {gate?.selected_video_count || 0} 个视频
           </span>
-          <button
-            className="primary-button compact"
-            disabled={busy || (!advanced && !gate?.allowed)}
-            onClick={onAdvance}
-            type="button"
+          <span
+            className="shot-video-advance"
+            role="group"
+            title={!gate?.allowed ? "请至少选择一个有效的已采用视频参与剪辑" : undefined}
+            tabIndex={!gate?.allowed ? 0 : undefined}
+            aria-label={!gate?.allowed ? "进入视频剪辑：请至少选择一个有效的已采用视频参与剪辑" : undefined}
           >
-            {advanced ? "继续到视频剪辑" : "确认视频，进入视频剪辑"}
-            <ArrowRight size={16} />
-          </button>
+            <button
+              className="primary-button compact"
+              disabled={busy || !gate?.allowed}
+              onClick={onAdvance}
+              type="button"
+            >
+              {advanced ? "继续到视频剪辑" : "进入视频剪辑"}
+              <ArrowRight size={16} />
+            </button>
+          </span>
         </div>
       </header>
 
@@ -936,12 +985,12 @@ export function ShotVideoWorkspace({
         <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>
       )}
 
-      {!sourceVideoMode && plan.video_status === "stale" && (
+      {(upstreamInputsChanged || plan.video_inputs_changed || plan.video_status === "stale" || globalPromptWasEdited(shotDetail, globalPrompts, "video")) && (
         <div className="shot-video-input-version-notice" role="status">
           <WarningCircle size={18} />
           <div>
             <strong>分镜输入已更新</strong>
-            <span>当前候选基于修改前的输入生成，仍可继续使用；如需匹配最新输入，也可以重新生成。</span>
+            <span>已有视频仍可继续使用；如需匹配最新内容，可重新生成，不影响继续剪辑或导出。</span>
           </div>
         </div>
       )}
@@ -952,6 +1001,10 @@ export function ShotVideoWorkspace({
           resolveUrl={resolveUrl}
           selectedShotId={selectedShotId}
           shots={shots}
+          busy={busy}
+          gate={gate}
+          onReorderShots={onReorderShots}
+          onEditingSelectionChange={onEditingSelectionChange}
         />
 
         <div className="shot-video-editor">
@@ -1046,7 +1099,7 @@ export function ShotVideoWorkspace({
           />}
 
           {!sourceVideoMode && <div className="shot-video-prompt-panel">
-            <CreativeIntentPanel
+            {!isSkill && <CreativeIntentPanel
               assets={assets}
               busy={busy || intentBusy}
               compileResult={intentCompileResult}
@@ -1058,58 +1111,28 @@ export function ShotVideoWorkspace({
               onChange={changeCreativeIntent}
               onCompile={compileCreativeIntent}
               onOpenPrompt={() => setPromptSettingsOpen(true)}
-              onOpenReferences={() => setReferenceSettingsOpen(true)}
+              onOpenReferences={() => {
+                setPromptSettingsOpen(true);
+                requestAnimationFrame(() => promptSettingsRef.current?.scrollIntoView({ block: "nearest" }));
+              }}
               onRequestManagedAssetMention={openManagedAssetPicker}
               onRestore={restoreIntentBaseline}
               referenceFrames={referenceFrames}
               resolveUrl={resolveUrl}
               textModelLabel={textModelLabel}
               videoReferenceBindings={plan?.video_reference_bindings || []}
-            />
+            />}
 
-            <details
+            {(sourceVideoUrl || selectedManagedAssetCapability?.supported || managedAssetBinding) && <details
               className="shot-video-config-disclosure"
-              onToggle={(event) => setReferenceSettingsOpen(event.currentTarget.open)}
-              open={referenceSettingsOpen}
             >
               <summary>
-                <span><strong>资产引用与控制</strong><small>{selectedVideoReferences.length} 项</small></span>
+                <span><strong>高级控制</strong></span>
                 <CaretDown aria-hidden="true" size={17} />
               </summary>
               <div className="shot-video-config-disclosure-body">
-                <GenerationReferenceComposer
-                  assets={assets}
-                  autoReferenceExclusions={videoDraft.autoReferenceExclusions || []}
-                  depthAssets={plan?.depth_control_assets || []}
-                  managedAssetBinding={managedAssetBinding}
-                  model={selectedModel}
-                  onChange={(change) => setVideoDraft((current) => (
-                    reconcileVideoDraftReferences(current, change, referenceFrames)
-                  ))}
-                  onCreateDepth={sourceVideoUrl ? () => {
-                    setVideoDraft((current) => ({
-                      ...current,
-                      inputSources: Array.from(new Set([
-                        ...(current.inputSources || []),
-                        "depth_control",
-                      ])),
-                    }));
-                    setDepthSettingsOpen(true);
-                  } : undefined}
-                  onOpenManagedAssets={() => openManagedAssetPicker()}
-                  onRestoreAutomaticReferences={() => setVideoDraft((current) => (
-                    reconcileVideoDraftReferences(current, {
-                      restoreAutomaticReferences: true,
-                    }, referenceFrames)
-                  ))}
-                  referenceFrames={referenceFrames}
-                  resolveUrl={resolveUrl}
-                  selectedReferences={videoDraft.selectedReferences || []}
-                  selectedSources={videoDraft.inputSources || []}
-                  shotPlanId={plan.id}
-                  videoReferenceBindings={plan?.video_reference_bindings || []}
-                />
-                {usesDepthControl && sourceVideoUrl && (
+                {(selectedManagedAssetCapability?.supported || managedAssetBinding) && <button className="secondary-button compact" type="button" disabled={busy} onClick={() => openManagedAssetPicker()}>托管人物资产</button>}
+                {sourceVideoUrl && (
                   <details
                     className="shot-video-depth-input-details"
                     onToggle={(event) => setDepthSettingsOpen(event.currentTarget.open)}
@@ -1139,10 +1162,11 @@ export function ShotVideoWorkspace({
                   </details>
                 )}
               </div>
-            </details>
+            </details>}
 
             <details
               className="shot-video-config-disclosure"
+              ref={promptSettingsRef}
               onToggle={(event) => {
                 const open = event.currentTarget.open;
                 setPromptSettingsOpen(open);
@@ -1152,24 +1176,12 @@ export function ShotVideoWorkspace({
               }}
               open={promptSettingsOpen}
             >
-              <summary>
-                <span className="shot-video-config-title">
-                  <strong>局部视频提示词</strong>
-                  <small>{videoDraft.videoPrompt.length} 字</small>
-                </span>
-                <span className="shot-video-config-actions">
-                  <AutosaveStatus
-                    onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)}
-                    state={draftSaveState}
-                  />
-                  <CaretDown aria-hidden="true" size={17} />
-                </span>
-              </summary>
+              <PromptSectionHeader as="summary" title="局部视频提示词" hint={`${videoDraft.videoPrompt.length} 字`} state={draftSaveState} onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)} />
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
                   assets={assets}
                   disabled={busy}
-                  onAddAssets={onAddAssets || (() => setReferenceSettingsOpen(true))}
+                  onAddAssets={onAddAssets}
                   depthAssets={plan?.depth_control_assets || []}
                   managedAssetBinding={managedAssetBinding}
                   onBlur={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)}
@@ -1183,6 +1195,9 @@ export function ShotVideoWorkspace({
                   videoPromptMentions={videoDraft.videoPromptMentions || []}
                   videoReferenceBindings={plan?.video_reference_bindings || []}
                 />
+                {(videoDraft.autoReferenceExclusions || []).length > 0 && <button className="text-button" type="button" disabled={busy} onClick={() => setVideoDraft((current) => (
+                  reconcileVideoDraftReferences(current, { restoreAutomaticReferences: true }, referenceFrames)
+                ))}>恢复默认分镜图引用</button>}
                 <VideoPromptReferencePolicy
                   onNotice={onNotice}
                   prompt={videoDraft.videoPrompt}
@@ -1284,11 +1299,6 @@ export function ShotVideoWorkspace({
         </div>
       </div>
 
-      {!gate?.allowed && gate?.blocker_messages?.length > 0 && (
-        <div className="shot-video-gate-blockers">
-          <WarningCircle size={17} />{gate.blocker_messages.join("；")}
-        </div>
-      )}
       {managedAssetPickerOpen && (
         <ManagedAssetPicker
           currentBinding={managedAssetBinding}

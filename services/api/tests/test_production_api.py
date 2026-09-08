@@ -60,6 +60,9 @@ from viral_dna_api.models import (
     VideoClipPreparationUpdate,
     VideoGenerationAudioStrategy,
     VideoGenerationCreate,
+    VideoGenerationInputPlan,
+    VideoGenerationInputSource,
+    VideoGenerationReference,
     VideoQualityStatus,
     VideoStatus,
     WorkflowItemStatus,
@@ -135,8 +138,7 @@ class FakeSourceVideoProcessor(FakeFrameProcessor):
         assert end_seconds > start_seconds >= 0
         await asyncio.to_thread(output_path.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(
-            output_path.write_bytes,
-            b"\x00\x00\x00\x18ftypmp42viral-dna-source-segment"
+            output_path.write_bytes, b"\x00\x00\x00\x18ftypmp42viral-dna-source-segment"
         )
 
 
@@ -231,9 +233,7 @@ def write_fake_video(
     assert duration_seconds > 0
     assert width > 0 and height > 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(
-        b"\x00\x00\x00\x18ftypmp42viral-dna-video-foundation"
-    )
+    output_path.write_bytes(b"\x00\x00\x00\x18ftypmp42viral-dna-video-foundation")
 
 
 class FakeRealImageGateway:
@@ -293,9 +293,7 @@ class FakeRealImageGateway:
         )
         input_path = self.workspace.resolve(run.input_snapshot_relative_path)
         filesystem_input = (
-            Path(chr(92) * 2 + "?" + chr(92) + str(input_path))
-            if os.name == "nt"
-            else input_path
+            Path(chr(92) * 2 + "?" + chr(92) + str(input_path)) if os.name == "nt" else input_path
         )
         input_payload = json.loads(filesystem_input.read_text(encoding="utf-8"))
         input_payload.update(
@@ -362,8 +360,7 @@ class FakeRealImageGateway:
             }
         )
         return run, [
-            candidate.model_copy(update={"generation_run_id": run.id})
-            for candidate in candidates
+            candidate.model_copy(update={"generation_run_id": run.id}) for candidate in candidates
         ]
 
 
@@ -457,9 +454,7 @@ async def seed_updated_prompt_analysis(repository, record, analysis, report):
         }
     )
     next_prompt_shots = list(report.prompt_package.shots)
-    next_prompt_shots[0] = next_prompt_shots[0].model_copy(
-        update={"prompt": next_image_prompt}
-    )
+    next_prompt_shots[0] = next_prompt_shots[0].model_copy(update={"prompt": next_image_prompt})
     next_prompt_package = report.prompt_package.model_copy(
         update={
             "id": uuid4(),
@@ -475,9 +470,7 @@ async def seed_updated_prompt_analysis(repository, record, analysis, report):
     )
     await repository.add_analysis(next_analysis)
     await repository.save_report(next_report)
-    await repository.save_record(
-        record.model_copy(update={"latest_analysis_id": next_analysis.id})
-    )
+    await repository.save_record(record.model_copy(update={"latest_analysis_id": next_analysis.id}))
     return next_analysis, next_report
 
 
@@ -508,9 +501,7 @@ def test_project_default_output_follows_source_video_ratio(
     async def scenario() -> None:
         service, repository = isolated_service(tmp_path, monkeypatch)
         record, video, analysis, _ = await seed_completed_analysis(repository)
-        await repository.save_video(
-            video.model_copy(update={"width": 1920, "height": 1080})
-        )
+        await repository.save_video(video.model_copy(update={"width": 1920, "height": 1080}))
 
         detail = await service.create_project(
             record.id,
@@ -663,9 +654,7 @@ def test_legacy_multi_scene_prompt_expands_into_ordered_visual_beats(
         record, video, analysis, _ = await seed_completed_analysis(repository)
         source_path = tmp_path / "legacy-multi-scene.mp4"
         source_path.write_bytes(b"test-video")
-        await repository.save_video(
-            video.model_copy(update={"stored_path": str(source_path)})
-        )
+        await repository.save_video(video.model_copy(update={"stored_path": str(source_path)}))
         detail = await service.create_project(
             record.id,
             ProductionProjectCreate(base_analysis_id=analysis.id),
@@ -676,8 +665,7 @@ def test_legacy_multi_scene_prompt_expands_into_ordered_visual_beats(
             {
                 **original.model_dump(mode="python"),
                 "image_prompt": (
-                    "第一部分：室内近景，女子背对镜头。"
-                    "第二部分：户外远景，少女坐在木质平台上。"
+                    "第一部分：室内近景，女子背对镜头。第二部分：户外远景，少女坐在木质平台上。"
                 ),
                 "visual_beats": [],
             }
@@ -694,24 +682,19 @@ def test_legacy_multi_scene_prompt_expands_into_ordered_visual_beats(
         assert migrated.visual_beats[0].transition_to_next_type == "model_generated"
         assert migrated.visual_beats[1].transition_to_next_type == "cut"
         assert (
-            migrated.visual_beats[0].source_frame_url
-            != migrated.visual_beats[1].source_frame_url
+            migrated.visual_beats[0].source_frame_url != migrated.visual_beats[1].source_frame_url
         )
         assert (
             migrated.visual_beats[0].source_frame_relative_path
             != migrated.visual_beats[1].source_frame_relative_path
         )
-        assert all(
-            item.source_origin == "auto_extract" for item in migrated.visual_beats
-        )
+        assert all(item.source_origin == "auto_extract" for item in migrated.visual_beats)
         assert all(item.source_frame_sha256 for item in migrated.visual_beats)
         assert (
             migrated.visual_beats[0].source_timestamp_seconds
             < migrated.visual_beats[1].source_timestamp_seconds
         )
-        assert (await service.get_project(detail.project.id)).revision_count == (
-            revision_count + 1
-        )
+        assert (await service.get_project(detail.project.id)).revision_count == (revision_count + 1)
 
     asyncio.run(scenario())
 
@@ -729,17 +712,13 @@ def test_existing_duplicate_visual_beat_frames_are_repaired_once(
         record, video, analysis, _ = await seed_completed_analysis(repository)
         source_path = tmp_path / "duplicate-visual-beats.mp4"
         source_path.write_bytes(b"test-video")
-        await repository.save_video(
-            video.model_copy(update={"stored_path": str(source_path)})
-        )
+        await repository.save_video(video.model_copy(update={"stored_path": str(source_path)}))
         detail = await service.create_project(
             record.id,
             ProductionProjectCreate(base_analysis_id=analysis.id),
         )
         original = (await service.list_shots(detail.project.id))[0].plan
-        duplicate_url = (
-            f"/api/v1/analyses/{analysis.id}/artifacts/shots/shot_001.jpg"
-        )
+        duplicate_url = f"/api/v1/analyses/{analysis.id}/artifacts/shots/shot_001.jpg"
         first = original.visual_beats[0].model_copy(
             update={
                 "index": 1,
@@ -852,9 +831,7 @@ def test_leading_visual_beat_from_previous_shot_is_removed_once(
                 verified_by_model=True,
             ),
         )
-        updated_shot = source_shot.model_copy(
-            update={"source_candidate_ids": [candidate.id]}
-        )
+        updated_shot = source_shot.model_copy(update={"source_candidate_ids": [candidate.id]})
         await repository.save_report(
             report.model_copy(
                 update={
@@ -926,12 +903,15 @@ def test_leading_visual_beat_from_previous_shot_is_removed_once(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("optional,explicit", [(False, False), (True, False), (True, True)])
 def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
-    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
+    optional: bool,
+    explicit: bool,
 ) -> None:
     async def scenario() -> None:
-        service, repository = isolated_service(tmp_path, monkeypatch)
+        service, repository = isolated_service(tmp_path_factory.mktemp("frames"), monkeypatch)
         record, _, analysis, _ = await seed_completed_analysis(repository)
         detail = await service.create_project(
             record.id,
@@ -957,9 +937,7 @@ def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
                 ImageGenerationCreate(
                     expected_revision_id=current.project.current_revision_id,
                     visual_beat_id=beat.id,
-                    input_mode=(
-                        "keyframe_edit" if beat.source_frame_url else "text_to_image"
-                    ),
+                    input_mode=("keyframe_edit" if beat.source_frame_url else "text_to_image"),
                     candidate_count=1,
                 ),
             )
@@ -985,9 +963,17 @@ def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
         approved = await service.get_shot(shot.id)
         assert approved.plan.image_status == WorkflowItemStatus.APPROVED
         assert all(
-            item.approved_image_candidate_id is not None
-            for item in approved.plan.visual_beats
+            item.approved_image_candidate_id is not None for item in approved.plan.visual_beats
         )
+        if optional:
+            updated_beats = [
+                beat.model_copy(update={"required": beat.index == 1})
+                for beat in approved.plan.visual_beats
+            ]
+            await repository.save_shot_plan(
+                approved.plan.model_copy(update={"visual_beats": updated_beats})
+            )
+            approved = await service.get_shot(shot.id)
         for other_shot in (await service.list_shots(detail.project.id))[1:]:
             current = await service.get_project(detail.project.id)
             await service.update_shot(
@@ -1010,21 +996,36 @@ def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
             media_processor=FakeStillVideoProcessor(),
         )
         current = await service.get_project(detail.project.id)
+        expected_beats = (
+            list(reversed(approved.plan.visual_beats)) if explicit else approved.plan.visual_beats
+        )
+        input_plan = VideoGenerationInputPlan(
+            sources=[VideoGenerationInputSource.APPROVED_IMAGES],
+            references=[
+                VideoGenerationReference(
+                    reference_kind="approved_image",
+                    reference_id=beat.approved_image_candidate_id,
+                    visual_beat_id=beat.id,
+                    label=f"分镜图/图{beat.index}",
+                    role="composition",
+                    order=index,
+                ) for index, beat in enumerate(expected_beats, start=1)
+            ] if explicit else [],
+        )
         queued_video = await service.create_video_run(
             shot.id,
             VideoGenerationCreate(
                 expected_revision_id=current.project.current_revision_id,
                 duration_seconds=3,
                 audio_strategy=VideoGenerationAudioStrategy.MUTED,
+                input_plan=input_plan,
             ),
         )
         video_run = await wait_for_generation(service, queued_video.id)
         assert video_run.status == "completed"
         stored_video_run = await repository.get_generation_run(video_run.id)
         assert stored_video_run is not None
-        snapshot_path = service.workspace.resolve(
-            stored_video_run.input_snapshot_relative_path
-        )
+        snapshot_path = service.workspace.resolve(stored_video_run.input_snapshot_relative_path)
         filesystem_snapshot = Path(chr(92) * 2 + "?" + chr(92) + str(snapshot_path))
         snapshot_text = await asyncio.to_thread(
             filesystem_snapshot.read_text,
@@ -1033,7 +1034,7 @@ def test_each_visual_beat_has_independent_images_and_video_uses_all_in_order(
         snapshot = json.loads(snapshot_text)
         assert [item["ordinal"] for item in snapshot["reference_images"]] == [1, 2]
         assert [item["visual_beat_id"] for item in snapshot["reference_images"]] == [
-            str(item.id) for item in approved.plan.visual_beats
+            str(item.id) for item in expected_beats
         ]
 
     asyncio.run(scenario())
@@ -1106,9 +1107,7 @@ def test_optional_reference_stage_is_normalized_for_existing_projects(
             record.id,
             ProductionProjectCreate(base_analysis_id=analysis.id),
         )
-        legacy = created.project.model_copy(
-            update={"active_step": ProductionStep.REFERENCE_ASSETS}
-        )
+        legacy = created.project.model_copy(update={"active_step": ProductionStep.REFERENCE_ASSETS})
         await repository.save_production_project(legacy)
 
         detail = await service.get_project(legacy.id)
@@ -1200,9 +1199,10 @@ def test_production_http_api_revision_reference_and_branch_flow(
         assert asset["rights_note"] == "已取得授权"
         assert "relative_path" not in asset
         assert revision_3 != revision_2
-        assert client.get(f"/api/v1/productions/{project_id}").json()["project"][
-            "active_step"
-        ] == "shot_images"
+        assert (
+            client.get(f"/api/v1/productions/{project_id}").json()["project"]["active_step"]
+            == "shot_images"
+        )
 
         content_response = client.get(asset["content_url"])
         thumbnail_response = client.get(asset["thumbnail_url"])
@@ -1312,9 +1312,7 @@ def test_production_http_api_recycle_bin_and_permanent_delete(
         assert trash_response.status_code == 200, trash_response.text
         assert trash_response.json()["trashed_at"] is not None
         assert client.get(f"/api/v1/productions/{project_id}").status_code == 404
-        assert client.get(
-            f"/api/v1/records/{record.id}/productions"
-        ).json() == []
+        assert client.get(f"/api/v1/records/{record.id}/productions").json() == []
         trashed_projects = client.get(
             f"/api/v1/records/{record.id}/productions",
             params={"lifecycle": "trashed"},
@@ -1332,9 +1330,7 @@ def test_production_http_api_recycle_bin_and_permanent_delete(
         assert client.get(f"/api/v1/productions/{project_id}").status_code == 200
 
         assert client.delete(f"/api/v1/productions/{project_id}").status_code == 200
-        permanent_response = client.delete(
-            f"/api/v1/productions/{project_id}/permanent"
-        )
+        permanent_response = client.delete(f"/api/v1/productions/{project_id}/permanent")
         assert permanent_response.status_code == 204, permanent_response.text
         assert permanent_response.content == b""
 
@@ -1468,10 +1464,7 @@ def test_legacy_simulated_candidates_are_archived_and_never_pass_gate(
             }
         )
         plans = await repository.list_shot_plans(detail.project.id)
-        next_plans = [
-            updated_plan if item.id == updated_plan.id else item
-            for item in plans
-        ]
+        next_plans = [updated_plan if item.id == updated_plan.id else item for item in plans]
         legacy_project, legacy_revision = await service._prepare_revision(
             detail.project,
             ProductionChangeKind.IMAGE_APPROVED,
@@ -1514,10 +1507,9 @@ def test_legacy_simulated_candidates_are_archived_and_never_pass_gate(
         assert repaired.approved_image_count == 0
         assert repaired_shot.plan.image_status == WorkflowItemStatus.READY
         assert repaired_shot.plan.approved_image_candidate_id is None
-        assert {
-            candidate.status
-            for candidate in repaired_shot.generation_runs[0].candidates
-        } == {GenerationCandidateStatus.ARCHIVED}
+        assert {candidate.status for candidate in repaired_shot.generation_runs[0].candidates} == {
+            GenerationCandidateStatus.ARCHIVED
+        }
         assert gate.allowed is False
         assert gate.approved_shot_count == 0
 
@@ -1561,9 +1553,7 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
             2,
         )
 
-        video_response = client.get(
-            f"/api/v1/productions/{project_id}/source-video"
-        )
+        video_response = client.get(f"/api/v1/productions/{project_id}/source-video")
         assert video_response.status_code == 200
         assert video_response.content == b"fake-video-for-range-and-picker"
         assert video_response.headers["content-type"].startswith("video/mp4")
@@ -1598,9 +1588,7 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
         assert approval["shot"]["plan"]["image_status"] == "approved"
         assert approval["candidate"]["status"] == "selected"
         approved_candidate_id = approval["candidate"]["id"]
-        shot_detail = client.get(
-            f"/api/v1/production-shots/{plan['id']}"
-        ).json()
+        shot_detail = client.get(f"/api/v1/production-shots/{plan['id']}").json()
         source_run = shot_detail["generation_runs"][0]
         assert source_run["execution_mode"] == "source_frame"
         assert source_run["input_mode"] == "keyframe_edit"
@@ -1613,27 +1601,20 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
                 "timestamp_seconds": min(timestamp + 0.1, plan["end_seconds"]),
             },
         )
-        assert conflict.status_code == 409
-
-        replaced = client.post(
-            f"/api/v1/production-shots/{plan['id']}/source-keyframe",
-            json={
-                "expected_revision_id": approval["shot"]["current_revision_id"],
-                "timestamp_seconds": min(timestamp + 0.1, plan["end_seconds"]),
-                "confirm_stale": True,
-            },
-        )
+        assert conflict.status_code == 200
+        replaced = conflict
         assert replaced.status_code == 200, replaced.text
         replaced_detail = replaced.json()
-        assert replaced_detail["plan"]["image_status"] == "ready"
-        assert replaced_detail["plan"]["approved_image_candidate_id"] is None
+        assert replaced_detail["plan"]["image_status"] == "approved"
+        assert replaced_detail["plan"]["approved_image_candidate_id"] == approved_candidate_id
+        assert replaced_detail["plan"]["image_inputs_changed"]
         historical_candidate = next(
             candidate
             for run in replaced_detail["generation_runs"]
             for candidate in run["candidates"]
             if candidate["id"] == approved_candidate_id
         )
-        assert historical_candidate["status"] == "ready"
+        assert historical_candidate["status"] == "selected"
 
         branch_response = client.post(
             f"/api/v1/productions/{project_id}/branches",
@@ -1644,9 +1625,7 @@ def test_source_keyframe_selection_direct_approval_and_candidate_invalidation(
         )
         assert branch_response.status_code == 201, branch_response.text
         branch_id = branch_response.json()["project"]["id"]
-        branch_plan = client.get(
-            f"/api/v1/productions/{branch_id}/shots"
-        ).json()[0]["plan"]
+        branch_plan = client.get(f"/api/v1/productions/{branch_id}/shots").json()[0]["plan"]
         assert branch_plan["source_keyframe_origin"] == "video_selection"
         assert branch_plan["source_keyframe_url"].startswith(
             f"/api/v1/production-shots/{branch_plan['id']}/source-keyframe"
@@ -1709,9 +1688,7 @@ def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_
         assert selected["plan"]["video_status"] == "approved"
         assert selected["video_preview"] is None
 
-        detail = client.get(
-            f"/api/v1/production-shots/{first['plan']['id']}"
-        ).json()
+        detail = client.get(f"/api/v1/production-shots/{first['plan']['id']}").json()
         source_run = next(
             run for run in detail["generation_runs"] if run["execution_mode"] == "source_video"
         )
@@ -1731,9 +1708,12 @@ def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_
         source_content = client.get(source_candidate["content_url"])
         assert source_content.status_code == 200
         assert source_content.content == b"fake-source-video"
-        assert client.get(
-            f"/api/v1/generation-candidates/{source_candidate['id']}/thumbnail"
-        ).status_code == 404
+        assert (
+            client.get(
+                f"/api/v1/generation-candidates/{source_candidate['id']}/thumbnail"
+            ).status_code
+            == 404
+        )
         source_run_root = (
             workspace.production_shot_root(
                 record.id,
@@ -1749,6 +1729,9 @@ def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_
         gate = client.get(f"/api/v1/productions/{project_id}/gate-status").json()
         assert gate["approved_shot_count"] == 1
 
+        assert gate["approved_image_count"] == 0
+        assert gate["allowed"] is False  # A retained source clip is not an adopted picture.
+
         switched_response = client.post(
             f"/api/v1/productions/{project_id}/shot-output-mode",
             json={
@@ -1760,17 +1743,13 @@ def test_shot_output_mode_can_use_source_video_and_switch_back_without_deleting_
         )
         assert switched_response.status_code == 200, switched_response.text
         switched = next(
-            item
-            for item in switched_response.json()
-            if item["plan"]["id"] == first["plan"]["id"]
+            item for item in switched_response.json() if item["plan"]["id"] == first["plan"]["id"]
         )
         assert switched["plan"]["output_mode"] == "image_to_video"
         assert switched["plan"]["video_status"] == "ready"
         assert switched["plan"]["approved_video_candidate_id"] is None
 
-        switched_detail = client.get(
-            f"/api/v1/production-shots/{first['plan']['id']}"
-        ).json()
+        switched_detail = client.get(f"/api/v1/production-shots/{first['plan']['id']}").json()
         historical_source = next(
             candidate
             for run in switched_detail["generation_runs"]
@@ -1953,7 +1932,7 @@ def test_batch41_shot_generation_approval_stale_and_gate_flow(
                 "reference_asset_ids": [asset["id"]],
             },
         ).json()
-        assert impact["requires_confirmation"] is True
+        assert impact["requires_confirmation"] is False
         assert impact["impacted_shot_plan_ids"] == [first_shot_id]
 
         rejected_edit = client.patch(
@@ -1963,23 +1942,13 @@ def test_batch41_shot_generation_approval_stale_and_gate_flow(
                 "description": "更新后的人物参考说明",
             },
         )
-        assert rejected_edit.status_code == 409
-        assert rejected_edit.json()["detail"] == (
-            "参考资产修改会使已绑定分镜过期，请确认影响范围后重试"
-        )
-
-        confirmed_edit = client.patch(
-            f"/api/v1/references/{asset['id']}",
-            json={
-                "expected_revision_id": current_revision_id,
-                "confirm_stale": True,
-                "description": "更新后的人物参考说明",
-            },
-        )
+        assert rejected_edit.status_code == 200
+        confirmed_edit = rejected_edit
         assert confirmed_edit.status_code == 200, confirmed_edit.text
         current_revision_id = confirmed_edit.json()["current_revision_id"]
         stale_shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
-        assert stale_shots[0]["plan"]["image_status"] == "stale"
+        assert stale_shots[0]["plan"]["image_status"] == "approved"
+        assert stale_shots[0]["plan"]["image_inputs_changed"]
         assert all(item["plan"]["image_status"] == "approved" for item in stale_shots[1:])
         assert first_candidate_id is not None
         stale_candidate = client.post(
@@ -2002,7 +1971,8 @@ def test_batch41_shot_generation_approval_stale_and_gate_flow(
         )
         assert global_update.status_code == 200, global_update.text
         all_stale = client.get(f"/api/v1/productions/{project_id}/shots").json()
-        assert all(item["plan"]["image_status"] == "stale" for item in all_stale)
+        assert all(item["plan"]["image_status"] == "approved" for item in all_stale)
+        assert all(item["plan"]["image_inputs_changed"] for item in all_stale)
 
 
 def test_single_candidate_approval_can_be_revoked_and_regenerated(
@@ -2035,9 +2005,9 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
         assert len(first_run["candidates"]) == 1
         first_candidate = first_run["candidates"][0]
 
-        revision_id = client.get(
-            f"/api/v1/productions/{project_id}"
-        ).json()["project"]["current_revision_id"]
+        revision_id = client.get(f"/api/v1/productions/{project_id}").json()["project"][
+            "current_revision_id"
+        ]
         selected = client.post(
             f"/api/v1/generation-candidates/{first_candidate['id']}/select",
             json={"expected_revision_id": revision_id},
@@ -2086,9 +2056,7 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
             },
         )
         assert second_queued.status_code == 202, second_queued.text
-        stored_queued = asyncio.run(
-            repository.get_generation_run(UUID(second_queued.json()["id"]))
-        )
+        stored_queued = asyncio.run(repository.get_generation_run(UUID(second_queued.json()["id"])))
         assert stored_queued is not None
         assert stored_queued.request_payload["generation_intent"] == "new_variation"
         assert isinstance(stored_queued.request_payload["seed"], int)
@@ -2102,9 +2070,9 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
         assert stored_first_candidate is not None
         assert stored_first_candidate.status == GenerationCandidateStatus.READY
 
-        revision_id = client.get(
-            f"/api/v1/productions/{project_id}"
-        ).json()["project"]["current_revision_id"]
+        revision_id = client.get(f"/api/v1/productions/{project_id}").json()["project"][
+            "current_revision_id"
+        ]
         selected_again = client.post(
             f"/api/v1/generation-candidates/{second_run['candidates'][0]['id']}/select",
             json={"expected_revision_id": revision_id},
@@ -2120,23 +2088,22 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
         assert approved_again.status_code == 200, approved_again.text
 
         persisted_plan = asyncio.run(repository.get_shot_plan(UUID(shot_id)))
-        persisted_project = asyncio.run(
-            repository.get_production_project(UUID(project_id))
-        )
+        persisted_project = asyncio.run(repository.get_production_project(UUID(project_id)))
         assert persisted_plan is not None
         assert persisted_project is not None
         asyncio.run(
             repository.save_shot_plan(
                 persisted_plan.model_copy(
-                    update={"video_status": WorkflowItemStatus.APPROVED}
+                    update={
+                        "video_status": WorkflowItemStatus.APPROVED,
+                        "approved_video_candidate_id": uuid4(),
+                    }
                 )
             )
         )
         asyncio.run(
             repository.save_production_project(
-                persisted_project.model_copy(
-                    update={"active_step": ProductionStep.SHOT_VIDEOS}
-                )
+                persisted_project.model_copy(update={"active_step": ProductionStep.SHOT_VIDEOS})
             )
         )
         approved_revision_id = approved_again.json()["shot"]["current_revision_id"]
@@ -2149,35 +2116,21 @@ def test_single_candidate_approval_can_be_revoked_and_regenerated(
             },
         )
         assert impact.status_code == 200, impact.text
-        assert impact.json()["requires_confirmation"] is True
+        assert impact.json()["requires_confirmation"] is False
         assert impact.json()["stale_candidate_ids"] == []
-        assert impact.json()["stale_stage_ids"] == [
-            "shot_videos",
-            "editing",
-            "export",
-        ]
+        assert impact.json()["stale_stage_ids"] == []
 
         blocked_revoke = client.post(
             f"/api/v1/production-shots/{shot_id}/image-approval/revoke",
             json={"expected_revision_id": approved_revision_id},
         )
-        assert blocked_revoke.status_code == 409
-        assert blocked_revoke.json()["detail"] == (
-            "取消采用会使该分镜的后续视频或合成结果过期，请确认影响后重试"
-        )
-        confirmed_revoke = client.post(
-            f"/api/v1/production-shots/{shot_id}/image-approval/revoke",
-            json={
-                "expected_revision_id": approved_revision_id,
-                "confirm_downstream_stale": True,
-            },
-        )
+        assert blocked_revoke.status_code == 200
+        confirmed_revoke = blocked_revoke
         assert confirmed_revoke.status_code == 200, confirmed_revoke.text
-        assert confirmed_revoke.json()["shot"]["plan"]["video_status"] == "stale"
-        project_after_revoke = client.get(
-            f"/api/v1/productions/{project_id}"
-        ).json()["project"]
-        assert project_after_revoke["active_step"] == "shot_images"
+        assert confirmed_revoke.json()["shot"]["plan"]["video_status"] == "approved"
+        assert confirmed_revoke.json()["shot"]["plan"]["video_inputs_changed"]
+        project_after_revoke = client.get(f"/api/v1/productions/{project_id}").json()["project"]
+        assert project_after_revoke["active_step"] == "shot_videos"
 
 
 def test_shot_structure_add_reorder_discard_and_restore(
@@ -2217,9 +2170,7 @@ def test_shot_structure_add_reorder_discard_and_restore(
         revision_id = duplicate["current_revision_id"]
         shots = client.get(f"/api/v1/productions/{project_id}/shots").json()
         active_ids = [
-            item["plan"]["id"]
-            for item in shots
-            if item["plan"]["lifecycle_status"] == "active"
+            item["plan"]["id"] for item in shots if item["plan"]["lifecycle_status"] == "active"
         ]
         reordered_ids = [active_ids[-1], *active_ids[:-1]]
         reordered = client.put(
@@ -2242,9 +2193,9 @@ def test_shot_structure_add_reorder_discard_and_restore(
             if item["plan"]["lifecycle_status"] == "active"
         ] == list(range(1, 7))
 
-        revision_id = client.get(
-            f"/api/v1/productions/{project_id}"
-        ).json()["project"]["current_revision_id"]
+        revision_id = client.get(f"/api/v1/productions/{project_id}").json()["project"][
+            "current_revision_id"
+        ]
         discarded = client.post(
             f"/api/v1/production-shots/{duplicate_id}/discard",
             json={"expected_revision_id": revision_id},
@@ -2255,10 +2206,10 @@ def test_shot_structure_add_reorder_discard_and_restore(
             item["plan"] for item in discarded_body if item["plan"]["id"] == duplicate_id
         )
         assert discarded_plan["lifecycle_status"] == "discarded"
-        assert len([
-            item for item in discarded_body
-            if item["plan"]["lifecycle_status"] == "active"
-        ]) == 5
+        assert (
+            len([item for item in discarded_body if item["plan"]["lifecycle_status"] == "active"])
+            == 5
+        )
         project_detail = client.get(f"/api/v1/productions/{project_id}").json()
         assert project_detail["shot_count"] == 5
         assert project_detail["discarded_shot_count"] == 1
@@ -2282,15 +2233,14 @@ def test_shot_structure_add_reorder_discard_and_restore(
         )
         assert restored.status_code == 200, restored.text
         restored_active = [
-            item["plan"] for item in restored.json()
-            if item["plan"]["lifecycle_status"] == "active"
+            item["plan"] for item in restored.json() if item["plan"]["lifecycle_status"] == "active"
         ]
         assert len(restored_active) == 6
         assert restored_active[-1]["id"] == duplicate_id
 
-        revision_id = client.get(
-            f"/api/v1/productions/{project_id}"
-        ).json()["project"]["current_revision_id"]
+        revision_id = client.get(f"/api/v1/productions/{project_id}").json()["project"][
+            "current_revision_id"
+        ]
         blank = client.post(
             f"/api/v1/productions/{project_id}/shots",
             json={
@@ -2321,9 +2271,7 @@ def test_prompt_asset_mentions_are_stable_and_auto_bind_references(
         ).json()
         project_id = created["project"]["id"]
         revision_id = created["project"]["current_revision_id"]
-        shot_id = client.get(
-            f"/api/v1/productions/{project_id}/shots"
-        ).json()[0]["plan"]["id"]
+        shot_id = client.get(f"/api/v1/productions/{project_id}/shots").json()[0]["plan"]["id"]
 
         asset_response = client.post(
             f"/api/v1/productions/{project_id}/references",
@@ -2376,7 +2324,7 @@ def test_prompt_asset_mentions_are_stable_and_auto_bind_references(
         stored_run = asyncio.run(repository.get_generation_run(UUID(run["id"])))
         assert stored_run is not None
         input_snapshot = service.workspace.resolve(stored_run.input_snapshot_relative_path)
-        filesystem_input = Path(chr(92) * 2 + '?' + chr(92) + str(input_snapshot))
+        filesystem_input = Path(chr(92) * 2 + "?" + chr(92) + str(input_snapshot))
         input_payload = json.loads(filesystem_input.read_text(encoding="utf-8"))
         assert input_payload["image_prompt_mentions"] == [
             {"asset_id": asset["id"], "label": "主角参考图"}
@@ -2425,9 +2373,7 @@ def test_visual_beat_saves_prompt_mentions_and_bindings_atomically(
         )
         assert asset_response.status_code == 201, asset_response.text
         asset = asset_response.json()
-        revision_count = len(
-            asyncio.run(repository.list_production_revisions(UUID(project_id)))
-        )
+        revision_count = len(asyncio.run(repository.list_production_revisions(UUID(project_id))))
 
         updated = client.patch(
             f"/api/v1/production-shots/{shot_id}/visual-beats/{visual_beat_id}",
@@ -2446,29 +2392,22 @@ def test_visual_beat_saves_prompt_mentions_and_bindings_atomically(
         assert updated.status_code == 200, updated.text
         body = updated.json()
         expected_label = f"{asset.get('folder_name') or '未分类'}/小喵酱"
-        beat = next(
-            item
-            for item in body["plan"]["visual_beats"]
-            if item["id"] == visual_beat_id
-        )
-        assert beat["image_prompt"] == (
-            f"@{expected_label}\n双马尾女性站在画面中央。"
-        )
+        beat = next(item for item in body["plan"]["visual_beats"] if item["id"] == visual_beat_id)
+        assert beat["image_prompt"] == (f"@{expected_label}\n双马尾女性站在画面中央。")
         assert beat["image_prompt_mentions"] == [
             {"reference_asset_id": asset["id"], "label": expected_label}
         ]
         assert len(body["reference_bindings"]) == 1
         assert body["reference_bindings"][0]["reference_asset_id"] == asset["id"]
-        assert len(
-            asyncio.run(repository.list_production_revisions(UUID(project_id)))
-        ) == revision_count + 1
+        assert (
+            len(asyncio.run(repository.list_production_revisions(UUID(project_id))))
+            == revision_count + 1
+        )
 
         reopened = client.get(f"/api/v1/production-shots/{shot_id}")
         assert reopened.status_code == 200, reopened.text
         reopened_beat = next(
-            item
-            for item in reopened.json()["plan"]["visual_beats"]
-            if item["id"] == visual_beat_id
+            item for item in reopened.json()["plan"]["visual_beats"] if item["id"] == visual_beat_id
         )
         assert reopened_beat["image_prompt"] == beat["image_prompt"]
         assert reopened_beat["image_prompt_mentions"] == beat["image_prompt_mentions"]
@@ -2485,9 +2424,7 @@ def test_visual_beat_saves_prompt_mentions_and_bindings_atomically(
         assert removed.status_code == 200, removed.text
         removed_body = removed.json()
         removed_beat = next(
-            item
-            for item in removed_body["plan"]["visual_beats"]
-            if item["id"] == visual_beat_id
+            item for item in removed_body["plan"]["visual_beats"] if item["id"] == visual_beat_id
         )
         assert removed_beat["image_prompt"] == "双马尾女性站在画面中央。"
         assert removed_beat["image_prompt_mentions"] == []
@@ -2521,9 +2458,9 @@ def test_create_shot_from_source_video_range(
             json={"base_analysis_id": str(analysis.id), "name": "视频选段新增分镜"},
         ).json()
         project_id = created["project"]["id"]
-        first_shot_id = client.get(
-            f"/api/v1/productions/{project_id}/shots"
-        ).json()[0]["plan"]["id"]
+        first_shot_id = client.get(f"/api/v1/productions/{project_id}/shots").json()[0]["plan"][
+            "id"
+        ]
         response = client.post(
             f"/api/v1/productions/{project_id}/shots",
             json={
@@ -2590,10 +2527,7 @@ def test_image_candidate_soft_delete_restore_and_approval_protection(
             actor_account_id=uuid4(),
         )
         assert deleted.candidates[0].status == GenerationCandidateStatus.ARCHIVED
-        assert (
-            deleted.candidates[0].archive_reason
-            == GenerationCandidateArchiveReason.USER_DELETED
-        )
+        assert deleted.candidates[0].archive_reason == GenerationCandidateArchiveReason.USER_DELETED
         content, _ = await service.resolve_candidate_content(run.candidates[1].id)
         assert content.is_file()
 
@@ -2893,9 +2827,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
             assert len(video_run.candidates) == (2 if index == 0 else 1)
             candidate = video_run.candidates[0]
             assert candidate.status == "ready", video_run.model_dump(mode="json")
-            content_path, content_type = await service.resolve_candidate_content(
-                candidate.id
-            )
+            content_path, content_type = await service.resolve_candidate_content(candidate.id)
             thumbnail_path, thumbnail_type = await service.resolve_candidate_content(
                 candidate.id,
                 thumbnail=True,
@@ -2923,35 +2855,15 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     ShotPlanUpdate(
                         expected_revision_id=approved.shot.current_revision_id,
                         confirm_stale=True,
-                        video_prompt=(
-                            "镜头缓慢向人物推进，人物自然抬手展示产品，结尾停顿。"
-                        ),
+                        video_prompt=("镜头缓慢向人物推进，人物自然抬手展示产品，结尾停顿。"),
                     ),
                 )
-                assert stale.plan.video_status == WorkflowItemStatus.STALE
+                assert stale.plan.video_status == WorkflowItemStatus.APPROVED
+                assert stale.plan.video_inputs_changed
+                assert stale.plan.approved_video_candidate_id == candidate.id
                 stale_gate = await service.gate_status(detail.project.id)
-                assert "有 1 个分镜使用旧输入，尚未确认采用" in (
-                    stale_gate.blocker_messages
-                )
-
-                with pytest.raises(ProductionServiceError) as stale_confirmation:
-                    await service.approve_candidate(
-                        candidate.id,
-                        CandidateApprovalRequest(
-                            expected_revision_id=stale.current_revision_id,
-                            decision=ApprovalDecision.APPROVED,
-                        ),
-                    )
-                assert stale_confirmation.value.code == "stale_input_confirmation_required"
-
-                approved = await service.approve_candidate(
-                    candidate.id,
-                    CandidateApprovalRequest(
-                        expected_revision_id=stale.current_revision_id,
-                        decision=ApprovalDecision.APPROVED,
-                        confirm_stale_input=True,
-                    ),
-                )
+                assert "有 1 个分镜使用旧输入，尚未确认采用" not in (stale_gate.blocker_messages)
+                approved = approved.model_copy(update={"shot": stale})
                 assert approved.shot.plan.video_status == WorkflowItemStatus.APPROVED
 
             # The last shot intentionally skips the legacy preparation record. An
@@ -3020,9 +2932,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 alternative = alternative_run.candidates[0]
 
                 history_detail = await service.get_shot(shot.plan.id)
-                video_runs = [
-                    run for run in history_detail.generation_runs if run.kind == "video"
-                ]
+                video_runs = [run for run in history_detail.generation_runs if run.kind == "video"]
                 assert len(video_runs) == 2
                 assert sum(len(run.candidates) for run in video_runs) == 3
                 assert history_detail.plan.video_status == WorkflowItemStatus.APPROVED
@@ -3034,9 +2944,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 assert old_candidate.status == GenerationCandidateStatus.SELECTED
 
                 await repository.save_generation_candidate(
-                    old_candidate.model_copy(
-                        update={"status": GenerationCandidateStatus.ARCHIVED}
-                    )
+                    old_candidate.model_copy(update={"status": GenerationCandidateStatus.ARCHIVED})
                 )
                 repaired_history = await service.get_shot(shot.plan.id)
                 repaired_old = next(
@@ -3056,14 +2964,8 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                         reason="动作节奏暂不符合当前选择",
                     ),
                 )
-                assert (
-                    rejected_alternative.candidate.status
-                    == GenerationCandidateStatus.REJECTED
-                )
-                assert (
-                    rejected_alternative.shot.plan.approved_video_candidate_id
-                    == candidate.id
-                )
+                assert rejected_alternative.candidate.status == GenerationCandidateStatus.REJECTED
+                assert rejected_alternative.shot.plan.approved_video_candidate_id == candidate.id
                 rejected_history = await service.get_shot(shot.plan.id)
                 retained_rejected = next(
                     item
@@ -3081,13 +2983,8 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                             candidate_ids=[candidate.id, alternative.id],
                         )
                     )
-                assert (
-                    protected_archive.value.code
-                    == "approved_video_candidate_archive_forbidden"
-                )
-                unchanged_alternative = await repository.get_generation_candidate(
-                    alternative.id
-                )
+                assert protected_archive.value.code == "approved_video_candidate_archive_forbidden"
+                unchanged_alternative = await repository.get_generation_candidate(alternative.id)
                 assert unchanged_alternative is not None
                 assert unchanged_alternative.status == GenerationCandidateStatus.REJECTED
 
@@ -3106,9 +3003,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                     == GenerationCandidateArchiveReason.USER_DELETED
                 )
                 assert archived.candidates[0].archived_by_account_id == actor_account_id
-                archived_content, _ = await service.resolve_candidate_content(
-                    alternative.id
-                )
+                archived_content, _ = await service.resolve_candidate_content(alternative.id)
                 assert archived_content.is_file()
                 archived_history = await service.get_shot(shot.plan.id)
                 archived_alternative = next(
@@ -3150,10 +3045,7 @@ def test_batch451_video_generation_review_revoke_and_gate_flow(
                 assert switched.candidate.status == GenerationCandidateStatus.SELECTED
                 switched_detail = await service.get_shot(shot.plan.id)
                 assert switched_detail.video_preparation is not None
-                assert (
-                    switched_detail.video_preparation.status
-                    == VideoClipPreparationStatus.STALE
-                )
+                assert switched_detail.video_preparation.status == VideoClipPreparationStatus.STALE
                 old_candidate = await repository.get_generation_candidate(candidate.id)
                 assert old_candidate is not None
                 assert old_candidate.status == GenerationCandidateStatus.READY

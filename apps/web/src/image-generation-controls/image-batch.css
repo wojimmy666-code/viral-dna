@@ -7,11 +7,15 @@
 .image-batch-problems { min-width: 0; color: var(--text-secondary); font-size: var(--type-body-size); }
 .image-batch-problems > div { display: flex; gap: var(--space-3); flex-wrap: wrap; padding-block: var(--space-2); overflow-wrap: anywhere; }
 .shot-image-workspace.is-skill .shot-workspace-grid { grid-template-columns: 232px minmax(0, 1fr) minmax(280px, 340px); }
-.skill-shot-list { display: grid; gap: var(--space-1); padding: var(--space-2); max-height: min(72vh, 800px); overflow: auto; }
-.skill-shot-row { border-radius: var(--radius-control); padding: var(--space-2); }
+.skill-shot-list { display: grid; align-content: start; grid-auto-rows: max-content; gap: var(--space-1); padding: var(--space-2); max-height: min(72vh, 800px); overflow: auto; }
+.skill-shot-row { border-radius: var(--radius-control); padding: var(--space-1) var(--space-2); }
 .skill-shot-row.active { background: var(--accent-soft); }
-.skill-shot-select { width: 100%; min-height: 44px; display: flex; flex-direction: column; gap: var(--space-1); align-items: stretch; text-align: start; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; }
-.skill-shot-select > span { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.skill-shot-select { width: 100%; min-height: 44px; display: flex; gap: var(--space-2); align-items: center; text-align: start; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; }
+.skill-shot-copy { min-width: 0; display: grid; gap: 0; }
+.skill-shot-select .shot-navigation-thumbnail { width: 44px; height: 44px; }
+.shot-navigation-image-badge { position: absolute; right: 2px; bottom: 2px; width: 15px; height: 15px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border-default); background: var(--surface-panel); color: var(--text-secondary); }
+.shot-navigation-image-badge.approved { color: var(--status-success-text); border-color: var(--status-success-text); }
+.skill-shot-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-control); }
 .skill-shot-select strong { font-size: var(--type-body-size); font-weight: var(--type-weight-semibold); }
 .skill-shot-select small { font-size: var(--type-caption-size); color: var(--text-secondary); }
 .skill-shot-row .skill-shot-actions { display: flex; justify-content: flex-end; gap: var(--space-1); }
@@ -31,4 +35,11 @@
 .image-batch-choice select { width: 100%; min-height: var(--control-height); padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); color: var(--text-primary); font: inherit; }
 .image-batch-choice span { color: var(--text-secondary); font-size: var(--type-caption-size); }
 .image-batch-cost-consent { display: flex; align-items: center; gap: var(--space-2); flex-basis: 100%; }
+.image-batch-dialog { box-sizing: border-box; width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: var(--space-4); border: 1px solid var(--border-default); border-radius: var(--radius-overlay); background: var(--surface-panel); color: var(--text-primary); overflow-y: auto; }
+.image-batch-dialog::backdrop { background: rgb(0 0 0 / 35%); }
+.image-batch-dialog h2 { margin: 0 0 var(--space-4); font-size: var(--type-heading-size); font-weight: var(--type-weight-semibold); }
+.image-batch-dialog .image-batch-choice { flex: 1 1 220px; min-width: 0; }
+.image-batch-dialog p { font-size: var(--type-body-size); overflow-wrap: anywhere; }
+.image-batch-hint { color: var(--text-secondary); }
+.image-batch-dialog footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 @media (max-width: 640px) { .image-batch-choice { flex: 1 1 180px; } }

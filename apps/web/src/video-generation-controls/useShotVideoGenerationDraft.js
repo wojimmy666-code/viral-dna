@@ -3,6 +3,7 @@ import { normalizeVideoDuration } from "../production-ui.js";
 import {
   approvedVisualBeatFramesFromDetail,
   normalizeVideoGenerationReferences,
+  reconcileVideoDraftReferences,
   requiredSourceForVideoMention,
   stripLegacyVideoReferencePolicies,
   synchronizeAutomaticVideoPrompt,
@@ -119,6 +120,24 @@ function localVideoDraftParameters(draft) {
     lockedReferenceKeys: [...(draft.lockedReferenceKeys || [])],
     removedIntentReferenceKeys: [...(draft.removedIntentReferenceKeys || [])],
   };
+}
+
+export function mergeHydratedVideoDraft(generated, localDraft, {
+  hasPendingLocal = false, preservePrompt = false, referenceFrames = [],
+} = {}) {
+  if (!localDraft || (!hasPendingLocal && !preservePrompt)) return generated;
+  const merged = {
+    ...generated,
+    ...(hasPendingLocal ? localVideoDraftParameters(localDraft) : {}),
+    ...(preservePrompt ? {
+      videoPrompt: localDraft.videoPrompt,
+      videoPromptMentions: localDraft.videoPromptMentions,
+      negativeConstraints: localDraft.negativeConstraints,
+    } : {}),
+  };
+  // A pending local prompt must not undo newly adopted frame bindings from
+  // hydration. Reconcile the merged state without replacing the user's prose.
+  return reconcileVideoDraftReferences(merged, {}, referenceFrames);
 }
 
 export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
@@ -411,24 +430,24 @@ export function useShotVideoGenerationDraft({ request, onNotice }) {
       negativeConstraints: generated.negativeConstraints,
     });
     const preservePrompt = promptDirtyRef.current.has(shotPlanId);
-    const next = localDraft && (hasPendingLocal || preservePrompt)
-      ? {
-          ...generated,
-          ...(hasPendingLocal ? localVideoDraftParameters(localDraft) : {}),
-          ...(preservePrompt
-            ? {
-                videoPrompt: localDraft.videoPrompt,
-                videoPromptMentions: localDraft.videoPromptMentions,
-                negativeConstraints: localDraft.negativeConstraints,
-              }
-            : {}),
-        }
-      : generated;
+    const next = mergeHydratedVideoDraft(generated, localDraft, {
+      hasPendingLocal, preservePrompt,
+      referenceFrames: approvedVisualBeatFramesFromDetail(detail),
+    });
+    if (hasPendingLocal) {
+      const parameters = videoDraftParameters(next);
+      if (!sameParameters(pendingRef.current.get(shotPlanId), parameters)) {
+        pendingRef.current.set(shotPlanId, parameters);
+        // A previous save may already be in flight. Queue the reconciled
+        // bindings as well instead of leaving them dirty until the next blur.
+        scheduleSave(shotPlanId, false);
+      }
+    }
     activeShotIdRef.current = shotPlanId;
     applyLocalDraft(next, shotPlanId);
     setSaveState(hasPendingLocal ? "saving" : "saved");
     return next;
-  }, [applyLocalDraft]);
+  }, [applyLocalDraft, scheduleSave]);
 
   const flushVideoDraft = useCallback(async (shotPlanId = activeShotIdRef.current) => {
     if (saveTimerRef.current) {

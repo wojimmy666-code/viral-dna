@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from ..prompt_engine.punctuation import normalize_prompt_punctuation
 from ..prompt_engine.still_image import (
     static_image_constraints,
     static_image_style,
@@ -173,7 +174,7 @@ def common_style_prompt(bible: StyleBibleRevision, *, video: bool) -> str:
     if not video:
         sections = [(name, static_image_style(value)) for name, value in sections]
     prompt = "\n".join(f"【{name}】{style_text(value)}" for name, value in sections if value)
-    return prompt if video else static_image_text(prompt)
+    return normalize_prompt_punctuation(prompt) if video else static_image_text(prompt)
 
 
 def prompt_sections(prompt: str) -> list[tuple[str, str]]:
@@ -198,10 +199,11 @@ def prompt_sections(prompt: str) -> list[tuple[str, str]]:
 def editable_prompt_body(shot: Any, part: str) -> str:
     value = getattr(shot, f"{part}_prompt_body", None)
     body = value if value is not None else getattr(shot, f"{part}_prompt")
-    return static_image_text(body) if part == "image" else body
+    return static_image_text(body) if part == "image" else normalize_prompt_punctuation(body)
 
 
 def local_body_from_prompt(prompt: str, common: str, *, video: bool) -> str:
+    prompt, common = normalize_prompt_punctuation(prompt), normalize_prompt_punctuation(common)
     shared = set(prompt_sections(common))
     return "\n\n".join(
         text
@@ -217,10 +219,15 @@ def factor_prompt_context(
     manifest = manifest.model_copy(
         update={
             "common_image_prompt": static_image_text(manifest.common_image_prompt),
+            "common_video_prompt": normalize_prompt_punctuation(manifest.common_video_prompt),
             "shots": [
                 shot.model_copy(
                     update={
                         "image_prompt": static_image_text(shot.image_prompt),
+                        "video_prompt": normalize_prompt_punctuation(shot.video_prompt),
+                        "video_prompt_body": normalize_prompt_punctuation(shot.video_prompt_body)
+                        if shot.video_prompt_body is not None
+                        else None,
                         "image_prompt_body": static_image_text(shot.image_prompt_body)
                         if shot.image_prompt_body is not None
                         else None,
@@ -298,7 +305,7 @@ def effective_prompt(
         if video
         else ""
     )
-    return "\n\n".join(filter(None, [first_frame, common, body]))
+    return normalize_prompt_punctuation("\n\n".join(filter(None, [first_frame, common, body])))
 
 
 def allocate_frames(weights: Sequence[int], total: int) -> list[int]:

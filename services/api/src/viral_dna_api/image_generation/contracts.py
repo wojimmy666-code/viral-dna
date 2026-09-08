@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
@@ -85,6 +86,7 @@ class AdapterRequest:
     seed: int | None
     capability: ImageGenerationCapability
     cancel_event: Event | None = None
+    on_image: Callable[[int, GeneratedImage], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

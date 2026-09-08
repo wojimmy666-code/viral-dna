@@ -48,7 +48,7 @@
   margin-top: var(--space-3);
 }
 
-.storyboard-prompt-columns label {
+.storyboard-prompt-field {
   display: grid;
   gap: var(--space-2);
   min-width: 0;

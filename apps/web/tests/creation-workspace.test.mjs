@@ -10,7 +10,7 @@ import * as PhosphorIcons from "@phosphor-icons/react";
 import { CREATION_STEPS, mainCreationStep, productionNavigation, readWorkspaceLocation, rememberWorkspaceLocation, savedWorkspaceLocation, sourceCapabilities, workspaceSearch } from "../src/creation-workspace/workspace-ui.js";
 import { SKILL_WORKFLOW_STAGES, resolveSkillSection, skillCreationNavigation, skillImageGenerationSettings, skillSectionEnabled } from "../src/skill-workflow/skill-workflow-ui.js";
 import { imageModelOptions } from "../src/image-generation-controls/image-generation-ui.js";
-import { resolveImageExecutionMode } from "../src/production-ui.js";
+import { productionGateStatusPath, resolveImageExecutionMode } from "../src/production-ui.js";
 
 function skillWorkspace(approvedCount, currentStage = SKILL_WORKFLOW_STAGES[approvedCount]?.id || "export") {
   return {
@@ -34,6 +34,17 @@ test("source projects unlock editing and export without imposing Skill gates", (
   const editing = productionNavigation({ active_step: "editing" });
   assert.ok(editing.every((step) => step.enabled));
   assert.equal(editing.find((step) => step.id === "editing").complete, false);
+});
+
+test("image entry has a stage-specific query and adopted-picture summary", () => {
+  assert.equal(productionGateStatusPath("p", "shot_images"), "/productions/p/gate-status?step=shot_images");
+  assert.equal(productionGateStatusPath("p", "shot_videos"), "/productions/p/gate-status?step=shot_videos");
+  assert.equal(productionNavigation({active_step: "shot_videos"}, {current_step: "shot_videos", selected_video_count: 1})[2].status, "已选 1 个视频");
+  const gate = { current_step: "shot_images", approved_image_count: 1, approved_shot_count: 0, required_shot_count: 15 };
+  const images = productionNavigation({ active_step: "shot_images" }, gate);
+  assert.equal(images.find((item) => item.id === "shot_images").status, "已采用 1 张");
+  const videos = productionNavigation({ active_step: "shot_videos" }, gate);
+  assert.equal(videos.find((item) => item.id === "shot_videos").status, "");
 });
 
 test("a completed execution cannot bypass any Skill human approval", () => {

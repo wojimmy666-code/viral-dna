@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ImageSquare, PlayCircle } from "@phosphor-icons/react";
+import { Check, ImageSquare, PlayCircle } from "@phosphor-icons/react";
 
 function uniqueSources(sources) {
   const urls = new Set();
@@ -14,8 +14,10 @@ function uniqueSources(sources) {
 export function ShotNavigationThumbnail({
   className = "",
   index,
+  showIndex = true,
   resolveUrl,
   sources,
+  showImageStatus = false,
 }) {
   const availableSources = useMemo(() => uniqueSources(sources), [sources]);
   const sourceSignature = availableSources
@@ -51,9 +53,15 @@ export function ShotNavigationThumbnail({
           <ImageSquare size={19} />
         </span>
       )}
-      <span className="shot-navigation-index-badge" aria-hidden="true">
+      {showIndex && <span className="shot-navigation-index-badge" aria-hidden="true">
         {String(index).padStart(2, "0")}
-      </span>
+      </span>}
+      {showImageStatus && resolvedSource && source.kind === "approved_image" && (
+        <span className="shot-navigation-image-badge approved"
+          role="img" aria-label="已采用图片" title="已采用图片">
+          <Check size={11} weight="bold" />
+        </span>
+      )}
       {isVideo && (
         <span className="shot-navigation-video-badge" aria-hidden="true">
           <PlayCircle size={14} weight="fill" />

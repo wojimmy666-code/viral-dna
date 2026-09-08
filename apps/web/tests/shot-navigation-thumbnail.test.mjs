@@ -54,8 +54,10 @@ test("uses phase-aware thumbnail fallback order in both shot lists", () => {
   assert.ok(videoSourcePosition > approvedImagePosition);
 });
 
-test("overlays the shot number instead of consuming another list column", () => {
+test("keeps the optional number overlay for source-video navigation", () => {
   assert.match(thumbnailSource, /shot-navigation-index-badge/);
+  assert.match(thumbnailSource, /showIndex = true/);
+  assert.match(thumbnailSource, /showIndex && <span/);
   assert.doesNotMatch(imageWorkspaceSource, /<span className="shot-navigation-index">/);
   assert.doesNotMatch(videoWorkspaceSource, /<span className="shot-video-index">/);
   assert.match(
@@ -66,4 +68,21 @@ test("overlays the shot number instead of consuming another list column", () => 
     cssRule(".shot-navigation-item"),
     /grid-template-columns:\s*auto minmax\(0, 1fr\) auto/,
   );
+});
+
+test("Skill navigation uses image summaries with only the adopted marker and no repeated number or time", () => {
+  const source = readFileSync(new URL('../src/image-generation-controls/SkillShotNavigation.jsx', import.meta.url), 'utf8');
+  assert.match(source, /image_preview.thumbnail_url/);
+  assert.match(source, /showImageStatus/);
+  assert.doesNotMatch(source, /source_keyframe|start_seconds|end_seconds/);
+  assert.match(source, /generationRuns: shotDetail\?\.plan.id === plan.id \? shotDetail.generation_runs : undefined/);
+  assert.match(imageWorkspaceSource, /shotDetail=\{detailReady \? shotDetail : null\}/);
+  assert.match(thumbnailSource, /已采用图片/);
+  assert.match(source, /showIndex=\{false\}/);
+  assert.doesNotMatch(thumbnailSource, /最新生成，未采用|<Circle\b/);
+  assert.match(thumbnailSource, /showImageStatus && resolvedSource && source.kind === "approved_image"/);
+  const styles = readFileSync(new URL('../src/image-generation-controls/image-batch.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.skill-shot-list\s*\{[^}]*align-content: start;[^}]*grid-auto-rows: max-content/);
+  assert.match(styles, /\.skill-shot-row\s*\{[^}]*padding: var\(--space-1\) var\(--space-2\)/);
+  assert.match(styles, /\.skill-shot-select\s*\{[^}]*min-height: 44px/);
 });

@@ -1353,6 +1353,9 @@ export function SkillProjectWorkspace({
   const preparation = (
           <div className="skill-preparation-panel">
             <SectionHeader title={stage.label} />
+            {run.upstream_update_messages?.length > 0 && (
+              <InlineMessage tone="info">上游内容已更新，已有结果仍可继续使用；是否更新由你决定。</InlineMessage>
+            )}
             {stage.id !== "storyboard_design" && <StageAxes state={state} />}
             {!(stage.id === "storyboard_design" && workspace.shot_manifest) && <StageSummary stage={stage} workspace={workspace} />}
 
@@ -1468,6 +1471,7 @@ export function SkillProjectWorkspace({
     videoGenerationSettings={lockedVideoSettings}
     workflow={{
       section: selectedStage,
+      upstreamInputsChanged: run.upstream_update_messages?.length > 0,
       busy,
       canNavigate: (section) => skillSectionEnabled(workspace, section),
       onSectionChange: setSelectedStage,
@@ -1488,7 +1492,7 @@ export function SkillProjectWorkspace({
       preparation,
       referenceContent: <SkillProjectReferences usages={workspace.asset_usages} request={request} resolveUrl={resolveUrl} />,
       stageTools: editingStage || selectedStage === "export" ? stageTools : null,
-      message: error ? <ErrorState message={error} /> : null,
+      message: <>{error && <ErrorState message={error} />}{selectedStage === "export" && run.upstream_update_messages?.length > 0 && <InlineMessage role="status">上游内容已更新，现有成片仍可继续使用和下载。</InlineMessage>}</>,
       subnavigation: subSections.length > 0 && <nav className="creation-subnav" aria-label={preparationStage ? "创作方案准备" : "剪辑内容"}>
         {subSections.map((item, index) => {
           const itemStage = SKILL_WORKFLOW_STAGES.find((entry) => entry.id === item.id);

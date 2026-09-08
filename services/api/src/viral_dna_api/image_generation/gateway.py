@@ -510,7 +510,13 @@ class ImageGenerationGateway:
         run_id: UUID | None = None,
         cancel_event: Any | None = None,
         reserve_cost: Any | None = None,
+        on_candidate: Any | None = None,
     ) -> tuple[GenerationRun, list[GenerationCandidate]]:
+        gateway_started = time.perf_counter()
+        timing: dict[str, Any] = {
+            "schema_version": "viral-dna-image-timing/v1",
+            "phase": "preparing",
+        }
         try:
             selected_input_mode = ImageGenerationInputMode(input_mode)
         except ValueError as exc:
@@ -594,12 +600,15 @@ class ImageGenerationGateway:
                     "参考资产文件已发生变化，请重新上传",
                 )
         source_sha256 = _sha256_file(source_path) if source_path is not None else None
+        detection_started = time.perf_counter()
+        timing["input_preparation_ms"] = round((detection_started - gateway_started) * 1000)
         identity, adapter = await self._adapter(
             selected_mode,
             settings,
             candidate_count=candidate_count,
             model_alias=model_alias,
         )
+        timing["adapter_detection_ms"] = round((time.perf_counter() - detection_started) * 1000)
         try:
             validate_identity_generation(
                 state=identity_policy,
@@ -749,6 +758,65 @@ class ImageGenerationGateway:
                 identity.estimated_cost_micros if identity.cost_estimate_known else None
             )
         _write_atomic(input_path, _canonical_json(input_payload) + b"\n")
+        streamed_candidates: dict[int, GenerationCandidate] = {}
+
+        def save_timing(phase: str) -> None:
+            timing.update(
+                phase=phase, elapsed_ms=round((time.perf_counter() - gateway_started) * 1000)
+            )
+            _write_atomic(
+                run_root / "gateway-timing.json",
+                _canonical_json({"request_id": str(run_id), **timing}) + b"\n",
+            )
+
+        def read_codex_timing() -> dict[str, Any] | None:
+            if selected_mode != ImageExecutionMode.LOCAL_TOOL:
+                return None
+            path = _filesystem_path(run_root / "tool-output" / "timing.json")
+            try:
+                if path.stat().st_size > 512 * 1024:
+                    return None
+                value = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError):
+                return None
+            if (
+                isinstance(value, dict)
+                and value.get("request_id") == str(run_id)
+                and value.get("schema_version") == "viral-dna-image-timing/v1"
+            ):
+                return value
+            return None
+
+        async def receive_image(ordinal: int, image: GeneratedImage) -> None:
+            if ordinal in streamed_candidates:
+                return
+            publish_started = time.perf_counter()
+            candidate = await asyncio.to_thread(
+                _save_candidate,
+                self.workspace,
+                run_root,
+                run_id,
+                ordinal,
+                image,
+                request_fingerprint=fingerprint,
+                provider=identity.provider,
+                model=identity.model,
+                target_width=width,
+                target_height=height,
+                reference_roles={item.role for item in references},
+            )
+            streamed_candidates[ordinal] = candidate
+            # Do not expose an unreviewed semantic-QA result as ready.
+            if on_candidate is not None and not settings.semantic_quality_enabled:
+                await on_candidate(candidate)
+            timing.setdefault(
+                "first_candidate_ms", round((time.perf_counter() - gateway_started) * 1000)
+            )
+            timing["candidate_publication_ms"] = timing.get("candidate_publication_ms", 0) + round(
+                (time.perf_counter() - publish_started) * 1000
+            )
+            save_timing("image_published")
+
         adapter_request = AdapterRequest(
             request_id=run_id,
             run_root=run_root,
@@ -766,7 +834,11 @@ class ImageGenerationGateway:
             seed=request.seed,
             capability=identity.capability,
             cancel_event=cancel_event,
+            on_image=receive_image,
         )
+        slot_started = time.perf_counter()
+        adapter_started = None
+        save_timing("waiting_for_slot")
         try:
             if cancel_event is not None and cancel_event.is_set():
                 raise ImageGenerationError(409, "generation_cancelled", "图片生成任务已取消")
@@ -778,9 +850,15 @@ class ImageGenerationGateway:
                 )
                 async with semaphore:
                     async with self.process_slot_limiter.acquire(concurrency):
+                        adapter_started = time.perf_counter()
+                        timing["slot_wait_ms"] = round((adapter_started - slot_started) * 1000)
+                        save_timing("generating")
                         result = await adapter.generate(adapter_request)
             else:
+                adapter_started = time.perf_counter()
+                timing["slot_wait_ms"] = 0
                 result = await adapter.generate(adapter_request)
+            timing["adapter_execution_ms"] = round((time.perf_counter() - adapter_started) * 1000)
             if cancel_event is not None and cancel_event.is_set():
                 raise ImageGenerationError(409, "generation_cancelled", "图片生成任务已取消")
             if not result.images:
@@ -789,23 +867,30 @@ class ImageGenerationGateway:
                     "generation_candidates_missing",
                     "图片生成任务没有返回候选",
                 )
-            candidates = [
-                _save_candidate(
-                    self.workspace,
-                    run_root,
-                    run_id,
-                    index,
-                    image,
-                    request_fingerprint=fingerprint,
-                    provider=identity.provider,
-                    model=identity.model,
-                    target_width=width,
-                    target_height=height,
-                    reference_roles={item.role for item in references},
-                )
-                for index, image in enumerate(result.images, start=1)
-            ]
+            for index, image in enumerate(result.images, start=1):
+                await receive_image(index, image)
+            candidates = [streamed_candidates[index] for index in range(1, len(result.images) + 1)]
         except ImageGenerationError as exc:
+            if adapter_started is not None:
+                timing["adapter_execution_ms"] = round(
+                    (time.perf_counter() - adapter_started) * 1000
+                )
+            save_timing("failed")
+            if settings.semantic_quality_enabled:
+                for ordinal, candidate in streamed_candidates.items():
+                    report = dict(candidate.quality_report)
+                    report.update(
+                        {
+                            "status": "warning",
+                            "summary": (
+                                f"{report.get('summary', '')}；任务中断，语义质检未完成，请人工检查"
+                            ),
+                            "semantic_quality": {"status": "skipped_generation_failed"},
+                        }
+                    )
+                    candidate = candidate.model_copy(update={"quality_report": report})
+                    _update_candidate_quality_metadata(self.workspace, candidate)
+                    streamed_candidates[ordinal] = candidate
             run = self._failed_run(
                 project,
                 shot,
@@ -819,7 +904,11 @@ class ImageGenerationGateway:
                 started=started,
                 error=exc,
             )
-            return run, []
+            failure_summary = {**run.execution_summary, "timing": dict(timing)}
+            if codex_timing := read_codex_timing():
+                failure_summary["codex_timing"] = codex_timing
+            run = run.model_copy(update={"execution_summary": failure_summary})
+            return run, list(streamed_candidates.values())
 
         actual_cost, cost_source = self._actual_cost(
             identity,
@@ -827,6 +916,7 @@ class ImageGenerationGateway:
             len(candidates),
         )
         semantic_outcomes: list[SemanticQualityOutcome] = []
+        quality_started = time.perf_counter()
         if settings.semantic_quality_enabled:
             remaining_budget = (
                 None
@@ -870,7 +960,10 @@ class ImageGenerationGateway:
                 )
                 _update_candidate_quality_metadata(self.workspace, reviewed)
                 reviewed_candidates.append(reviewed)
+                if on_candidate is not None:
+                    await on_candidate(reviewed)
             candidates = reviewed_candidates
+        timing["semantic_quality_ms"] = round((time.perf_counter() - quality_started) * 1000)
 
         semantic_estimated_cost = sum(
             outcome.estimated_cost_micros
@@ -890,6 +983,12 @@ class ImageGenerationGateway:
                 "semantic_quality_cost_micros": semantic_actual_cost,
             }
         execution_summary = dict(identity.execution_summary)
+        save_timing("completed")
+        execution_summary["timing"] = dict(timing)
+        if isinstance(result.usage.get("timing"), dict):
+            execution_summary["codex_timing"] = result.usage["timing"]
+        elif codex_timing := read_codex_timing():
+            execution_summary["codex_timing"] = codex_timing
         execution_summary["identity_policy"] = input_payload["identity_policy"]
         execution_summary["input_manifest"] = input_payload["input_manifest"]
         execution_summary["semantic_quality"] = {

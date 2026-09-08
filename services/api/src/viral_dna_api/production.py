@@ -110,6 +110,7 @@ from .models import (
     ReferenceRole,
     SceneBoundaryCandidate,
     Shot,
+    ShotEditingSelectionUpdate,
     ShotEvidence,
     ShotImageApprovalRevokeRequest,
     ShotKeyframeSelectRequest,
@@ -181,6 +182,7 @@ from .prompt_engine.compiler import sanitize_still_image_prompt
 from .prompt_engine.still_image import static_image_constraints
 from .quality.continuity_service import ContinuityService
 from .storage_errors import IncompatibleShotPlanSchemaError
+from .upstream_changes import changed_beat, changed_plan, generated_before_input_change
 from .video_generation import (
     OrderedReferenceFrame,
     VideoGenerationGateway,
@@ -263,8 +265,6 @@ def _step_after_reference_change(
     *,
     affects_bound_shots: bool = False,
 ) -> ProductionStep:
-    if affects_bound_shots:
-        return ProductionStep.SHOT_IMAGES
     return _normalize_optional_preparation_step(project.active_step)
 
 
@@ -452,6 +452,11 @@ class ProductionRepository(Protocol):
         candidate_id: UUID,
     ) -> GenerationCandidate | None: ...
 
+    async def save_generation_candidate(
+        self,
+        candidate: GenerationCandidate,
+    ) -> GenerationCandidate: ...
+
     async def list_generation_candidates(
         self,
         generation_run_id: UUID,
@@ -461,6 +466,8 @@ class ProductionRepository(Protocol):
         self,
         generation_run_ids: set[UUID],
     ) -> list[GenerationCandidate]: ...
+
+    async def list_image_navigation_candidates(self, project_id: UUID) -> list[dict]: ...
 
     async def save_video_clip_preparation(
         self,
@@ -734,14 +741,8 @@ def _sync_shot_visual_beats(
 ) -> ShotPlan:
     ordered = sorted(beats, key=lambda item: item.index)
     primary = ordered[0]
-    video_status = plan.video_status
-    if invalidate_video and video_status in {
-        WorkflowItemStatus.GENERATING,
-        WorkflowItemStatus.REVIEW_REQUIRED,
-        WorkflowItemStatus.APPROVED,
-        WorkflowItemStatus.STALE,
-    }:
-        video_status = WorkflowItemStatus.STALE
+    if invalidate_video:
+        plan = changed_plan(plan)
     return plan.model_copy(
         update={
             "revision_id": revision_id,
@@ -757,7 +758,11 @@ def _sync_shot_visual_beats(
             "image_negative_constraints": primary.image_negative_constraints,
             "approved_image_candidate_id": primary.approved_image_candidate_id,
             "image_status": _visual_beat_image_status(ordered),
-            "video_status": video_status,
+            "image_inputs_changed": any(item.image_inputs_changed for item in ordered),
+            "image_inputs_updated_at": max(
+                (item.image_inputs_updated_at for item in ordered if item.image_inputs_updated_at),
+                default=plan.image_inputs_updated_at,
+            ),
             "updated_at": utc_now(),
         }
     )
@@ -2148,20 +2153,7 @@ class ProductionService:
                     output_height=height,
                 )
             plans = await self.repository.list_shot_plans(project.id)
-            if (
-                output_changed
-                and any(
-                    item.image_status == WorkflowItemStatus.APPROVED
-                    or item.video_status == WorkflowItemStatus.APPROVED
-                    for item in plans
-                )
-                and not payload.confirm_stale
-            ):
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "输出规格修改会使全部已审批分镜过期，请确认影响范围后重试",
-                )
+            # Input changes are advisory; existing adopted outputs remain usable.
             if "budget_limit_micros" in fields:
                 updates["budget_limit_micros"] = payload.budget_limit_micros
             updates["updated_at"] = utc_now()
@@ -2172,7 +2164,7 @@ class ProductionService:
             next_plans = plans
             changed_plans: list[ShotPlan] = []
             if output_changed:
-                next_plans, changed_plans = self._mark_plans_stale(
+                next_plans, changed_plans = await self._mark_plans_stale(
                     plans,
                     {item.id for item in plans},
                     revision_id,
@@ -2506,18 +2498,7 @@ class ProductionService:
             impacted_ids = {
                 item.shot_plan_id for item in all_bindings if item.reference_asset_id == asset.id
             }
-            if (
-                any(
-                    item.id in impacted_ids and item.image_status == WorkflowItemStatus.APPROVED
-                    for item in plans
-                )
-                and not payload.confirm_stale
-            ):
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "参考资产修改会使已绑定分镜过期，请确认影响范围后重试",
-                )
+            # Input changes are advisory; existing adopted outputs remain usable.
             updated_asset = await self.project_assets.update_reference(
                 project.id,
                 asset.id,
@@ -2528,7 +2509,7 @@ class ProductionService:
                 include_archived=True,
             )
             revision_id = uuid4()
-            next_plans, changed_plans = self._mark_plans_stale(
+            next_plans, changed_plans = await self._mark_plans_stale(
                 plans,
                 impacted_ids,
                 revision_id,
@@ -2584,25 +2565,14 @@ class ProductionService:
             impacted_ids = {
                 item.shot_plan_id for item in all_bindings if item.reference_asset_id == asset.id
             }
-            if (
-                any(
-                    item.id in impacted_ids and item.image_status == WorkflowItemStatus.APPROVED
-                    for item in plans
-                )
-                and not confirm_stale
-            ):
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "移出参考资产会使已绑定分镜过期，请确认影响范围后重试",
-                )
+            # Input changes are advisory; existing adopted outputs remain usable.
             archived = await self.project_assets.unlink_reference(project.id, asset.id)
             snapshot_assets = await self._list_reference_assets(
                 project.id,
                 include_archived=True,
             )
             revision_id = uuid4()
-            next_plans, changed_plans = self._mark_plans_stale(
+            next_plans, changed_plans = await self._mark_plans_stale(
                 plans,
                 impacted_ids,
                 revision_id,
@@ -2708,25 +2678,14 @@ class ProductionService:
             impacted_ids = {
                 item.shot_plan_id for item in all_bindings if item.reference_asset_id == asset.id
             }
-            if (
-                any(
-                    item.id in impacted_ids and item.image_status == WorkflowItemStatus.APPROVED
-                    for item in plans
-                )
-                and not payload.confirm_stale
-            ):
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "参考资产修改会使已绑定分镜过期，请确认影响范围后重试",
-                )
+            # Input changes are advisory; existing adopted outputs remain usable.
             await asyncio.to_thread(
                 self._write_asset_metadata,
                 project,
                 updated_asset,
             )
             revision_id = uuid4()
-            next_plans, changed_plans = self._mark_plans_stale(
+            next_plans, changed_plans = await self._mark_plans_stale(
                 plans,
                 impacted_ids,
                 revision_id,
@@ -2787,25 +2746,14 @@ class ProductionService:
             impacted_ids = {
                 item.shot_plan_id for item in all_bindings if item.reference_asset_id == asset.id
             }
-            if (
-                any(
-                    item.id in impacted_ids and item.image_status == WorkflowItemStatus.APPROVED
-                    for item in plans
-                )
-                and not confirm_stale
-            ):
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "归档参考资产会使已绑定分镜过期，请确认影响范围后重试",
-                )
+            # Input changes are advisory; existing adopted outputs remain usable.
             await asyncio.to_thread(
                 self._write_asset_metadata,
                 project,
                 archived,
             )
             revision_id = uuid4()
-            next_plans, changed_plans = self._mark_plans_stale(
+            next_plans, changed_plans = await self._mark_plans_stale(
                 plans,
                 impacted_ids,
                 revision_id,
@@ -2891,7 +2839,7 @@ class ProductionService:
             if candidate.status == GenerationCandidateStatus.SELECTED
         ]
         candidate = approved or max(
-            selected or available,
+            (selected or available) if kind == GenerationKind.VIDEO else available,
             key=lambda item: (item.created_at, item.ordinal),
         )
         stage = kind.value
@@ -3143,8 +3091,9 @@ class ProductionService:
                     continue
                 beats = list(plan.visual_beats)
                 primary = min(beats, key=lambda item: item.index) if beats else None
+                image_changed = incoming["image"] != view.image_prompt or refs_changed
                 beats = [
-                    beat.model_copy(
+                    (changed_beat(beat) if image_changed else beat).model_copy(
                         update={
                             "image_prompt": incoming["image"],
                             "image_prompt_mentions": image_mentions,
@@ -3154,7 +3103,7 @@ class ProductionService:
                     else beat
                     for beat in beats
                 ]
-                plan = plan.model_copy(
+                plan = changed_plan(plan).model_copy(
                     update={
                         "revision_id": revision_id,
                         "image_prompt": incoming["image"],
@@ -3162,6 +3111,7 @@ class ProductionService:
                         "video_prompt": incoming["video"],
                         "video_prompt_mentions": video_mentions,
                         "visual_beats": beats,
+                        "image_inputs_changed": any(beat.image_inputs_changed for beat in beats),
                         "updated_at": utc_now(),
                     }
                 )
@@ -3206,6 +3156,7 @@ class ProductionService:
     async def shot_navigation(self, project_id: UUID) -> list[dict]:
         project = await self._require_project(project_id)
         project, plans = await self._ensure_project_shots(project)
+        previews = await self._image_navigation_previews(project.id, plans)
         fields = {
             "id",
             "index",
@@ -3227,9 +3178,45 @@ class ProductionService:
                 "plan": plan.model_dump(mode="json", include=fields),
                 "current_revision_id": str(project.current_revision_id),
                 "visual_beat_count": len(plan.visual_beats),
+                "image_preview": previews.get(plan.id),
             }
             for plan in plans
         ]
+
+    async def _image_navigation_previews(self, project_id: UUID, plans: list[ShotPlan]):
+        # Only small image metadata crosses the repository boundary: no run
+        # prompts, video tasks, quality reports or full candidate histories.
+        rows = await self.repository.list_image_navigation_candidates(project_id)
+        by_shot: dict[str, list[dict]] = {}
+        for row in rows:
+            if row["status"] not in {"archived", "rejected"} and row["thumbnail_relative_path"]:
+                by_shot.setdefault(str(row["shot_plan_id"]), []).append(row)
+        previews = {}
+        for plan in plans:
+            available = by_shot.get(str(plan.id), [])
+            approved = next(
+                (
+                    row
+                    for row in available
+                    if str(row["id"]) == str(plan.approved_image_candidate_id)
+                ),
+                None,
+            )
+            generated = [
+                row for row in available if row["execution_mode"] in {"local_tool", "remote_api"}
+            ]
+            candidate = approved or max(
+                generated, key=lambda row: (str(row["created_at"]), row["ordinal"]), default=None
+            )
+            if candidate:
+                previews[plan.id] = {
+                    "thumbnail_url": f"/api/v1/generation-candidates/{candidate['id']}/thumbnail",
+                    "kind": "approved_image" if approved else "candidate_image",
+                    "candidate_id": str(candidate["id"]),
+                    "updated_at": str(candidate["created_at"]),
+                    "execution_mode": candidate["execution_mode"],
+                }
+        return previews
 
     async def create_shot(
         self,
@@ -3675,6 +3662,44 @@ class ProductionService:
             )
         return await self.list_shots(project_id)
 
+    async def update_editing_selection(
+        self, shot_plan_id: UUID, payload: ShotEditingSelectionUpdate
+    ) -> ShotPlanDetailResponse:
+        initial = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(initial.project_id)
+        async with lock:
+            plan = await self._require_shot(shot_plan_id)
+            project = await self._require_project(plan.project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            if plan.lifecycle_status != ShotLifecycleStatus.ACTIVE:
+                raise _fail(409, "shot_inactive", "已舍弃分镜不能参与剪辑")
+            plan = await self._input_compatible_plan(plan)
+            if payload.include_in_editing and not await self._has_valid_approved_video_output(
+                project, plan
+            ):
+                raise _fail(409, "editing_video_unavailable", "请先采用一个有效的视频候选")
+            if plan.include_in_editing != payload.include_in_editing:
+                revision_id = uuid4()
+                updated = plan.model_copy(
+                    update={
+                        "include_in_editing": payload.include_in_editing,
+                        "revision_id": revision_id,
+                        "updated_at": utc_now(),
+                    }
+                )
+                plans = await self.repository.list_shot_plans(project.id)
+                project, revision = await self._prepare_revision(
+                    project.model_copy(update={"updated_at": utc_now()}),
+                    ProductionChangeKind.VIDEO_EDITING_SELECTION_CHANGED,
+                    f"分镜 {plan.index} {'参与' if payload.include_in_editing else '不参与'}剪辑",
+                    revision_id=revision_id,
+                    shot_plans=[updated if item.id == plan.id else item for item in plans],
+                )
+                await self.repository.save_production_bundle(
+                    project, revision, shot_plans=[updated]
+                )
+        return await self.get_shot(shot_plan_id)
+
     async def get_shot(self, shot_plan_id: UUID) -> ShotPlanDetailResponse:
         plan = await self._require_shot(shot_plan_id)
         project = await self._require_project(plan.project_id)
@@ -3684,6 +3709,8 @@ class ProductionService:
             raise _fail(409, "revision_required", "创作方案尚无当前版本")
         await self._restore_legacy_archived_video_candidates(project, plan)
         runs = await self.repository.list_generation_runs(project.id, plan.id)
+        context = await self.get_prompt_context(project.id)
+        plan = await self._global_input_notices(plan, context, runs)
         preparation = await self.repository.get_video_clip_preparation(plan.id)
         if preparation is not None:
             preparation = _apply_video_preparation_policy(preparation)
@@ -3699,9 +3726,14 @@ class ProductionService:
                 }
             )
         return ShotPlanDetailResponse(
-            plan=self._local_prompt_view(plan, await self.get_prompt_context(project.id)),
+            plan=self._local_prompt_view(plan, context),
+            current_global_prompts={
+                "common_image_prompt": context.common_image_prompt,
+                "common_video_prompt": context.common_video_prompt,
+            },
             reference_bindings=await self.repository.list_reference_bindings(plan.id),
             current_revision_id=project.current_revision_id,
+            image_preview=(await self._image_navigation_previews(project.id, [plan])).get(plan.id),
             generation_runs=[await self._run_response(run) for run in reversed(runs)],
             approval_events=await self.repository.list_approval_events(
                 project.id,
@@ -3786,17 +3818,10 @@ class ProductionService:
                     else item
                     for item in plan.depth_control_assets
                 ]
-                has_prior_video = plan.approved_video_candidate_id is not None
-                updated = plan.model_copy(
+                updated = changed_plan(plan).model_copy(
                     update={
                         "revision_id": revision_id,
                         "depth_control_assets": [*prior_assets, asset],
-                        "video_status": (
-                            WorkflowItemStatus.STALE
-                            if has_prior_video
-                            else WorkflowItemStatus.DRAFT
-                        ),
-                        "approved_video_candidate_id": None,
                         "updated_at": now,
                     }
                 )
@@ -3805,7 +3830,7 @@ class ProductionService:
                 next_project = project.model_copy(
                     update={
                         "status": ProductionProjectStatus.ACTIVE,
-                        "active_step": ProductionStep.SHOT_VIDEOS,
+                        "active_step": project.active_step,
                         "updated_at": now,
                     }
                 )
@@ -3875,17 +3900,10 @@ class ProductionService:
                     else item
                     for item in plan.depth_control_assets
                 ]
-                has_prior_video = plan.approved_video_candidate_id is not None
-                updated = plan.model_copy(
+                updated = changed_plan(plan).model_copy(
                     update={
                         "revision_id": revision_id,
                         "depth_control_assets": [*prior_assets, asset],
-                        "video_status": (
-                            WorkflowItemStatus.STALE
-                            if has_prior_video
-                            else WorkflowItemStatus.DRAFT
-                        ),
-                        "approved_video_candidate_id": None,
                         "updated_at": utc_now(),
                     }
                 )
@@ -3894,7 +3912,7 @@ class ProductionService:
                 next_project = project.model_copy(
                     update={
                         "status": ProductionProjectStatus.ACTIVE,
-                        "active_step": ProductionStep.SHOT_VIDEOS,
+                        "active_step": project.active_step,
                         "updated_at": utc_now(),
                     }
                 )
@@ -3948,16 +3966,10 @@ class ProductionService:
                 for item in plan.depth_control_assets
             ]
             revision_id = uuid4()
-            updated = plan.model_copy(
+            updated = changed_plan(plan).model_copy(
                 update={
                     "revision_id": revision_id,
                     "depth_control_assets": assets,
-                    "video_status": (
-                        WorkflowItemStatus.STALE
-                        if plan.approved_video_candidate_id is not None
-                        else WorkflowItemStatus.DRAFT
-                    ),
-                    "approved_video_candidate_id": None,
                     "updated_at": now,
                 }
             )
@@ -4002,18 +4014,12 @@ class ProductionService:
                 staged_deletion = await self.depth_controls.stage_content_deletion(target)
             except DepthControlServiceError as exc:
                 raise _fail(exc.status_code, exc.code, str(exc)) from exc
-            updated = plan.model_copy(
+            updated = changed_plan(plan).model_copy(
                 update={
                     "revision_id": revision_id,
                     "depth_control_assets": [
                         item for item in plan.depth_control_assets if item.id != asset_id
                     ],
-                    "video_status": (
-                        WorkflowItemStatus.STALE
-                        if plan.approved_video_candidate_id is not None
-                        else WorkflowItemStatus.DRAFT
-                    ),
-                    "approved_video_candidate_id": None,
                     "updated_at": utc_now(),
                 }
             )
@@ -4443,7 +4449,7 @@ class ProductionService:
         next_project = project.model_copy(
             update={
                 "status": ProductionProjectStatus.ACTIVE,
-                "active_step": ProductionStep.SHOT_IMAGES,
+                "active_step": project.active_step,
                 "updated_at": utc_now(),
             }
         )
@@ -4650,22 +4656,7 @@ class ProductionService:
                 }
                 & fields.keys()
             )
-            downstream = plan.video_status in {
-                WorkflowItemStatus.GENERATING,
-                WorkflowItemStatus.REVIEW_REQUIRED,
-                WorkflowItemStatus.APPROVED,
-                WorkflowItemStatus.STALE,
-            }
-            if (
-                downstream
-                and (image_inputs_changed or structural_changed)
-                and not payload.confirm_stale
-            ):
-                raise _fail(
-                    409,
-                    "downstream_stale_confirmation_required",
-                    "修改画面会让当前分镜视频及下游结果过期，请确认后重试",
-                )
+            # Input changes are advisory; existing adopted outputs remain usable.
 
             plans: list[ShotPlan] | None = None
             all_bindings: list[ReferenceBinding] | None = None
@@ -4749,15 +4740,7 @@ class ProductionService:
                     )
                 )
             if image_inputs_changed:
-                next_prompt = str(fields.get("image_prompt", beat.image_prompt)).strip()
-                fields.update(
-                    {
-                        "approved_image_candidate_id": None,
-                        "image_status": (
-                            WorkflowItemStatus.READY if next_prompt else WorkflowItemStatus.DRAFT
-                        ),
-                    }
-                )
+                beat = changed_beat(beat)
             fields["updated_at"] = utc_now()
             updated_beat = beat.model_copy(update=fields)
             beats = [updated_beat if item.id == beat.id else item for item in plan.visual_beats]
@@ -4831,18 +4814,6 @@ class ProductionService:
             beat = _visual_beat(plan, visual_beat_id)
             if len(plan.visual_beats) <= 1:
                 raise _fail(409, "last_visual_beat", "一个分镜至少需要保留一个画面")
-            downstream = plan.video_status in {
-                WorkflowItemStatus.GENERATING,
-                WorkflowItemStatus.REVIEW_REQUIRED,
-                WorkflowItemStatus.APPROVED,
-                WorkflowItemStatus.STALE,
-            }
-            if downstream and not payload.confirm_stale:
-                raise _fail(
-                    409,
-                    "downstream_stale_confirmation_required",
-                    "删除画面会让当前分镜视频及下游结果过期，请确认后重试",
-                )
             beats = _retime_visual_beats([item for item in plan.visual_beats if item.id != beat.id])
             revision_id = uuid4()
             updated_plan = _sync_shot_visual_beats(
@@ -5169,16 +5140,6 @@ class ProductionService:
                     "locks",
                 }
             )
-            requires_confirmation = (
-                image_changed and plan.image_status == WorkflowItemStatus.APPROVED
-            ) or (video_changed and plan.video_status == WorkflowItemStatus.APPROVED)
-            if requires_confirmation and not payload.confirm_stale:
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "该修改会使已审批结果过期，请确认影响范围后重试",
-                )
-
             plans = await self.repository.list_shot_plans(project.id)
             all_bindings = await self._all_bindings(plans)
             current_bindings = [item for item in all_bindings if item.shot_plan_id == plan.id]
@@ -5274,10 +5235,6 @@ class ProductionService:
             )
             next_plans = [updated if item.id == updated.id else item for item in plans]
             next_active_step = project.active_step
-            if image_changed:
-                next_active_step = ProductionStep.SHOT_IMAGES
-            elif video_changed:
-                next_active_step = ProductionStep.SHOT_VIDEOS
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
@@ -5329,24 +5286,6 @@ class ProductionService:
                 for item in payload.updates
             ):
                 raise _fail(409, "shot_discarded", "已舍弃分镜需要先恢复后才能修改")
-
-            impacted_approved = any(
-                (
-                    plans_by_id[item.shot_plan_id].image_status == WorkflowItemStatus.APPROVED
-                    and self._image_fields_changed(item)
-                )
-                or (
-                    plans_by_id[item.shot_plan_id].video_status == WorkflowItemStatus.APPROVED
-                    and self._video_fields_changed(item)
-                )
-                for item in payload.updates
-            )
-            if impacted_approved and not payload.confirm_stale:
-                raise _fail(
-                    409,
-                    "stale_confirmation_required",
-                    "批量修改会使已审批结果过期，请确认影响范围后重试",
-                )
 
             revision_id = uuid4()
             all_bindings = await self._all_bindings(plans)
@@ -5450,18 +5389,10 @@ class ProductionService:
                 changed_plans.append(updated)
 
             next_plans = [plans_by_id[item.id] for item in plans]
-            any_image_change = any(self._image_fields_changed(item) for item in payload.updates)
-            any_video_change = any(self._video_fields_changed(item) for item in payload.updates)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": (
-                        ProductionStep.SHOT_IMAGES
-                        if any_image_change
-                        else ProductionStep.SHOT_VIDEOS
-                        if any_video_change
-                        else project.active_step
-                    ),
+                    "active_step": project.active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -5505,70 +5436,20 @@ class ProductionService:
             requested = set(payload.shot_plan_ids)
             impacted = [item for item in plans if item.id in requested]
 
-        downstream_only = payload.change_type in {
-            "candidate_selection",
-            "image_approval_revoke",
-        }
-        stale_stages = (
-            [
-                ProductionStep.SHOT_VIDEOS,
-                ProductionStep.EDITING,
-                ProductionStep.EXPORT,
-            ]
-            if downstream_only
-            else [
-                ProductionStep.SHOT_IMAGES,
-                ProductionStep.SHOT_VIDEOS,
-                ProductionStep.EDITING,
-                ProductionStep.EXPORT,
-            ]
-        )
-        stale_candidates = (
-            []
-            if payload.change_type == "image_approval_revoke"
-            else [
-                item.approved_image_candidate_id
-                for item in impacted
-                if item.approved_image_candidate_id is not None
-            ]
-        )
-        downstream_result_statuses = {
-            WorkflowItemStatus.GENERATING,
-            WorkflowItemStatus.REVIEW_REQUIRED,
-            WorkflowItemStatus.APPROVED,
-            WorkflowItemStatus.STALE,
-        }
-        downstream_stage_active = project.active_step in {
-            ProductionStep.SHOT_VIDEOS,
-            ProductionStep.EDITING,
-            ProductionStep.EXPORT,
-        }
-        requires_confirmation = (
-            (
-                any(item.video_status in downstream_result_statuses for item in impacted)
-                or (bool(impacted) and downstream_stage_active)
-            )
-            if downstream_only
-            else any(
-                item.image_status == WorkflowItemStatus.APPROVED
-                or item.video_status == WorkflowItemStatus.APPROVED
-                for item in impacted
-            )
-        )
         count = len(impacted)
         return ChangeImpactResponse(
             impacted_shot_plan_ids=[item.id for item in impacted],
             impacted_shot_ids=[item.source_shot_id for item in impacted],
-            stale_candidate_ids=stale_candidates,
-            stale_stage_ids=stale_stages if count else [],
-            requires_confirmation=requires_confirmation,
+            stale_candidate_ids=[],
+            stale_stage_ids=[],
+            requires_confirmation=False,
             summary=(
-                f"将重新打开 {count} 个分镜的图片审核，并使其后续结果过期"
+                f"将取消 {count} 个分镜的图片采用，已有下游结果仍可使用"
                 if count and payload.change_type == "image_approval_revoke"
                 else (
-                    f"将影响 {count} 个分镜，并使其后续结果过期"
+                    f"将更新 {count} 个分镜的输入，已有结果仍可使用；是否重新生成由你决定"
                     if count
-                    else "当前修改不会使已生成结果过期"
+                    else "当前修改不影响已有结果"
                 )
             ),
         )
@@ -5641,21 +5522,6 @@ class ProductionService:
                         f"到 {plan.end_seconds:.3f}s 之间"
                     ),
                 )
-            has_reviewed_output = (
-                beat.approved_image_candidate_id is not None
-                or beat.image_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                    WorkflowItemStatus.STALE,
-                }
-            )
-            if has_reviewed_output and not payload.confirm_stale:
-                raise _fail(
-                    409,
-                    "keyframe_change_confirmation_required",
-                    "替换关键帧会保留旧图片候选，但会使当前采用状态和后续结果过期，请确认后重试",
-                )
             timestamp = min(
                 max(timestamp, plan.start_seconds),
                 max(plan.start_seconds, plan.end_seconds - 0.001),
@@ -5702,12 +5568,7 @@ class ProductionService:
                 filesystem_destination,
             )
 
-            candidate_updates = await self._reset_selected_image_candidates(
-                project,
-                plan,
-                visual_beat_id=beat.id,
-            )
-            updated_beat = beat.model_copy(
+            updated_beat = changed_beat(beat).model_copy(
                 update={
                     "source_frame_url": (
                         f"/api/v1/production-shots/{plan.id}/visual-beats/{beat.id}/source-frame"
@@ -5718,12 +5579,6 @@ class ProductionService:
                     "source_frame_sha256": source_sha256,
                     "source_frame_warning": None,
                     "source_origin": "video_selection",
-                    "image_status": (
-                        WorkflowItemStatus.READY
-                        if beat.image_prompt.strip()
-                        else WorkflowItemStatus.DRAFT
-                    ),
-                    "approved_image_candidate_id": None,
                     "updated_at": utc_now(),
                 }
             )
@@ -5738,7 +5593,7 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": project.active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -5753,7 +5608,6 @@ class ProductionService:
                 next_project,
                 revision,
                 shot_plans=[updated_plan],
-                generation_candidates=candidate_updates,
             )
         return await self.get_shot(shot_plan_id)
 
@@ -5777,12 +5631,6 @@ class ProductionService:
             has_downstream_impact = replacing_approved and self._image_choice_has_downstream_impact(
                 project, plan
             )
-            if has_downstream_impact and not payload.confirm_downstream_stale:
-                raise _fail(
-                    409,
-                    "downstream_stale_confirmation_required",
-                    "改用当前关键帧会使该分镜的后续视频或合成结果过期，请确认影响后重试",
-                )
             gateway_plan = _shot_for_visual_beat(plan, beat)
             source_path = self._resolve_source_keyframe(project, gateway_plan)
             if source_path is None:
@@ -5833,19 +5681,7 @@ class ProductionService:
                 invalidate_video=has_downstream_impact,
             ).model_copy(update={"output_mode": ShotOutputMode.IMAGE_TO_VIDEO})
             current_preparation = await self.repository.get_video_clip_preparation(plan.id)
-            updated_preparation = (
-                current_preparation.model_copy(
-                    update={
-                        "revision_id": revision_id,
-                        "status": VideoClipPreparationStatus.STALE,
-                        "blocker_messages": ["起始图片已经更换，需要重新生成视频并完成剪辑准备"],
-                        "warning_messages": [],
-                        "updated_at": utc_now(),
-                    }
-                )
-                if current_preparation is not None and has_downstream_impact
-                else None
-            )
+            updated_preparation = None
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
             preparations = await self.repository.list_video_clip_preparations(project.id)
@@ -5857,7 +5693,7 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": project.active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -6241,7 +6077,7 @@ class ProductionService:
             raise _fail(
                 409,
                 "video_stage_not_active",
-                "请先完成全部必需分镜图片并进入分段视频阶段",
+                "请先采用至少一张分镜图并进入分镜视频阶段",
             )
         if not plan.video_prompt.strip():
             raise _fail(409, "video_prompt_required", "请先填写视频提示词")
@@ -6476,8 +6312,8 @@ class ProductionService:
             payload = payload.model_copy(update={"seed": secrets.randbelow(2_147_483_648)})
         if not beat.image_prompt.strip():
             raise _fail(409, "image_prompt_required", "请先填写图片提示词")
-        if beat.image_status == WorkflowItemStatus.APPROVED and not payload.preserve_approval:
-            raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
+        if beat.approved_image_candidate_id is not None:
+            payload = payload.model_copy(update={"preserve_approval": True})
         bindings = await self.repository.list_reference_bindings(plan.id)
         bindings = self._image_bindings_for_beat(plan, beat, bindings)
         assets = await self._list_reference_assets(project.id)
@@ -7050,8 +6886,8 @@ class ProductionService:
                 )
             if not beat.image_prompt.strip():
                 raise _fail(409, "image_prompt_required", "请先填写图片提示词")
-            if beat.image_status == WorkflowItemStatus.APPROVED and not payload.preserve_approval:
-                raise _fail(409, "image_already_approved", "已采用画面需要先取消采用再重新生成")
+            if beat.approved_image_candidate_id is not None:
+                payload = payload.model_copy(update={"preserve_approval": True})
 
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
             bindings = await self.repository.list_reference_bindings(plan.id)
@@ -7083,10 +6919,32 @@ class ProductionService:
             snapshot_fingerprint = input_fingerprint(plan, beat, bindings)
         # Provider latency must not hold the project edit/revision lock.
         gateway_options = {}
+        published_candidate_ids: list[UUID] = []
+
+        async def publish_candidate(candidate: GenerationCandidate) -> None:
+            async with lock:
+                current = await self._require_run(run_id)
+                if cancellation.is_set() or current.status not in {
+                    ProductionRunStatus.QUEUED,
+                    ProductionRunStatus.RUNNING,
+                }:
+                    return
+                # Save media only: no revision, approval, prompt, or run-status
+                # replacement while the user continues working in the editor.
+                await self.repository.save_generation_candidate(candidate)
+                published_candidate_ids.append(candidate.id)
+            if payload.image_batch_id is not None:
+                await self.image_batches.update_item(
+                    payload.image_batch_id,
+                    beat.id,
+                    candidate_ids=list(published_candidate_ids),
+                )
+
         if isinstance(self.image_gateway, ImageGenerationGateway):
             gateway_options["reserve_cost"] = lambda cost: self._reserve_image_cost(
                 project.id, run_id, cost
             )
+            gateway_options["on_candidate"] = publish_candidate
         try:
             run, candidates = await self.image_gateway.generate(
                 generation_project,
@@ -7154,9 +7012,23 @@ class ProductionService:
                     "simulated_generation_forbidden",
                     "模拟占位图不能作为图片生成结果，请先配置真实生图引擎",
                 )
+            # A streamed candidate may already have been selected, adopted or
+            # archived. Completion must not overwrite those intervening actions.
+            existing_candidates = {
+                item.id: item for item in await self.repository.list_generation_candidates(run_id)
+            }
+            candidates = [
+                existing_candidates[item.id].model_copy(
+                    update={"quality_report": item.quality_report}
+                )
+                if item.id in existing_candidates
+                else item
+                for item in candidates
+            ]
             prior_candidate_updates = (
                 []
                 if preserve_selection
+                or any(item.status == GenerationCandidateStatus.SELECTED for item in candidates)
                 else await self._reset_selected_image_candidates(
                     project,
                     plan,
@@ -7266,9 +7138,7 @@ class ProductionService:
                 payload,
                 identity.capability,
             )
-            target_beats = [item for item in plan.visual_beats if item.required] or list(
-                plan.visual_beats
-            )
+            target_beats = sorted(plan.visual_beats, key=lambda item: item.index)
             reference_frames: list[OrderedReferenceFrame] = []
             if payload.input_plan.includes(VideoGenerationInputSource.APPROVED_IMAGES):
                 approved_mentions = {
@@ -7276,12 +7146,24 @@ class ProductionService:
                     for item in payload.input_plan.references
                     if item.reference_kind == VideoPromptReferenceKind.APPROVED_IMAGE
                 }
+                current_candidates = {
+                    beat.approved_image_candidate_id
+                    for beat in target_beats
+                    if beat.approved_image_candidate_id is not None
+                }
+                if approved_mentions.keys() - current_candidates:
+                    raise _fail(
+                        409,
+                        "video_prompt_reference_not_approved",
+                        "本次引用的分镜图已失效或不属于当前分镜，请核对后重试",
+                    )
                 approved_targets = sorted(
                     (
                         beat
                         for beat in target_beats
-                        if not approved_mentions
-                        or beat.approved_image_candidate_id in approved_mentions
+                        if beat.approved_image_candidate_id is not None
+                        and (not approved_mentions
+                             or beat.approved_image_candidate_id in approved_mentions)
                     ),
                     key=lambda beat: (
                         approved_mentions.get(beat.approved_image_candidate_id).order
@@ -7978,8 +7860,11 @@ class ProductionService:
                 summary = f"选择分镜 {plan.index} 画面 {beat.index} 的图片候选 {candidate.ordinal}"
                 updated_beat = beat.model_copy(
                     update={
-                        "image_status": WorkflowItemStatus.REVIEW_REQUIRED,
-                        "approved_image_candidate_id": None,
+                        "image_status": (
+                            WorkflowItemStatus.APPROVED
+                            if beat.approved_image_candidate_id
+                            else WorkflowItemStatus.REVIEW_REQUIRED
+                        ),
                         "updated_at": utc_now(),
                     }
                 )
@@ -8117,17 +8002,6 @@ class ProductionService:
                 or is_user_deleted_candidate(candidate)
             ):
                 raise _fail(409, "candidate_unavailable", "已归档候选不能审批")
-            if (
-                run.kind == GenerationKind.VIDEO
-                and target_status == WorkflowItemStatus.STALE
-                and payload.decision == ApprovalDecision.APPROVED
-                and not payload.confirm_stale_input
-            ):
-                raise _fail(
-                    409,
-                    "stale_input_confirmation_required",
-                    "该候选基于修改前的分镜输入生成，请确认后再采用",
-                )
             shot_runs = [
                 item
                 for item in await self.repository.list_generation_runs(
@@ -8140,22 +8014,7 @@ class ProductionService:
             image_downstream_impact = (
                 replacing_image_approval and self._image_choice_has_downstream_impact(project, plan)
             )
-            video_downstream_impact = replacing_video_approval and project.active_step in {
-                ProductionStep.EDITING,
-                ProductionStep.EXPORT,
-            }
-            requires_downstream_confirmation = image_downstream_impact or video_downstream_impact
-            invalidate_preparation = image_downstream_impact or replacing_video_approval
-            if requires_downstream_confirmation and not payload.confirm_downstream_stale:
-                raise _fail(
-                    409,
-                    "downstream_stale_confirmation_required",
-                    (
-                        "改用该历史视频会使本分镜的剪辑或导出结果过期，请确认影响后重试"
-                        if replacing_video_approval
-                        else "改用该历史候选会使本分镜的后续视频或合成结果过期，请确认影响后重试"
-                    ),
-                )
+            invalidate_preparation = replacing_video_approval
             if (
                 run.kind == GenerationKind.VIDEO
                 and payload.decision == ApprovalDecision.REJECTED
@@ -8278,11 +8137,12 @@ class ProductionService:
                 )
             if run.kind == GenerationKind.IMAGE:
                 assert beat is not None
-                active_step = ProductionStep.SHOT_IMAGES
+                active_step = project.active_step
                 updated_beat = beat.model_copy(
                     update={
                         "image_status": next_status,
                         "approved_image_candidate_id": approved_candidate_id,
+                        "image_inputs_changed": generated_before_input_change(run, beat, "image"),
                         "updated_at": utc_now(),
                     }
                 )
@@ -8306,12 +8166,9 @@ class ProductionService:
                 plan_updates = {
                     "video_status": next_status,
                     "approved_video_candidate_id": approved_candidate_id,
+                    "video_inputs_changed": generated_before_input_change(run, plan, "video"),
                 }
-                active_step = (
-                    project.active_step
-                    if preserving_video_approval_on_reject
-                    else ProductionStep.SHOT_VIDEOS
-                )
+                active_step = project.active_step
                 updated_plan = plan.model_copy(
                     update={
                         "revision_id": revision_id,
@@ -8446,12 +8303,6 @@ class ProductionService:
             has_downstream_impact = (
                 plan.video_status in downstream_result_statuses or downstream_stage_active
             )
-            if has_downstream_impact and not payload.confirm_downstream_stale:
-                raise _fail(
-                    409,
-                    "downstream_stale_confirmation_required",
-                    "取消采用会使该分镜的后续视频或合成结果过期，请确认影响后重试",
-                )
 
             revision_id = uuid4()
             event = ApprovalEvent(
@@ -8492,28 +8343,12 @@ class ProductionService:
             )
             plans = await self.repository.list_shot_plans(project.id)
             next_plans = [updated_plan if item.id == plan.id else item for item in plans]
-            current_preparation = await self.repository.get_video_clip_preparation(plan.id)
-            updated_preparation = (
-                current_preparation.model_copy(
-                    update={
-                        "revision_id": revision_id,
-                        "status": VideoClipPreparationStatus.STALE,
-                        "blocker_messages": ["起始图片已取消采用，需要重新生成视频并完成剪辑准备"],
-                        "warning_messages": [],
-                        "updated_at": utc_now(),
-                    }
-                )
-                if current_preparation is not None and has_downstream_impact
-                else None
-            )
-            preparations = await self.repository.list_video_clip_preparations(project.id)
-            next_preparations = [item for item in preparations if item.shot_plan_id != plan.id]
-            if updated_preparation is not None:
-                next_preparations.append(updated_preparation)
+            updated_preparation = None
+            next_preparations = await self.repository.list_video_clip_preparations(project.id)
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_IMAGES,
+                    "active_step": project.active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -8587,16 +8422,6 @@ class ProductionService:
                     "approved_video_candidate_unavailable",
                     "当前已采用视频已归档或退回，无法重新打开审核",
                 )
-            has_downstream_impact = project.active_step in {
-                ProductionStep.EDITING,
-                ProductionStep.EXPORT,
-            }
-            if has_downstream_impact and not payload.confirm_downstream_stale:
-                raise _fail(
-                    409,
-                    "downstream_stale_confirmation_required",
-                    "取消采用会使剪辑或导出结果过期，请确认影响后重试",
-                )
 
             revision_id = uuid4()
             event = ApprovalEvent(
@@ -8653,7 +8478,7 @@ class ProductionService:
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": ProductionStep.SHOT_VIDEOS,
+                    "active_step": project.active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -8753,31 +8578,43 @@ class ProductionService:
         if not targets:
             return False
         for beat in targets:
-            candidate_id = beat.approved_image_candidate_id
-            if beat.image_status != WorkflowItemStatus.APPROVED or candidate_id is None:
+            if not await self._has_valid_approved_image_beat(project, plan, beat):
                 return False
-            candidate = await self.repository.get_generation_candidate(candidate_id)
-            if (
-                candidate is None
-                or candidate.kind != GenerationKind.IMAGE
-                or candidate.status != GenerationCandidateStatus.SELECTED
-            ):
-                return False
-            run = await self.repository.get_generation_run(candidate.generation_run_id)
-            if not (
-                run is not None
-                and run.project_id == project.id
-                and run.shot_plan_id == plan.id
-                and run.kind == GenerationKind.IMAGE
-                and _run_matches_visual_beat(run, plan, beat.id)
-                and run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
-                and not _is_simulated_image_run(run)
-            ):
-                return False
-            try:
-                await self.resolve_candidate_content(candidate.id)
-            except ProductionServiceError:
-                return False
+        return True
+
+    async def _has_valid_approved_image_beat(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        beat: ShotVisualBeat,
+    ) -> bool:
+        """Validate actual adoption and readable media, independently of required flags."""
+        candidate_id = beat.approved_image_candidate_id
+        if beat.image_status != WorkflowItemStatus.APPROVED or candidate_id is None:
+            return False
+        candidate = await self.repository.get_generation_candidate(candidate_id)
+        if (
+            candidate is None
+            or candidate.kind != GenerationKind.IMAGE
+            or candidate.status
+            not in {GenerationCandidateStatus.SELECTED, GenerationCandidateStatus.READY}
+        ):
+            return False
+        run = await self.repository.get_generation_run(candidate.generation_run_id)
+        if not (
+            run is not None
+            and run.project_id == project.id
+            and run.shot_plan_id == plan.id
+            and run.kind == GenerationKind.IMAGE
+            and _run_matches_visual_beat(run, plan, beat.id)
+            and run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+            and not _is_simulated_image_run(run)
+        ):
+            return False
+        try:
+            await self.resolve_candidate_content(candidate.id)
+        except ProductionServiceError:
+            return False
         return True
 
     async def _has_valid_approved_video_output(
@@ -8792,7 +8629,8 @@ class ProductionService:
         if (
             candidate is None
             or candidate.kind != GenerationKind.VIDEO
-            or candidate.status != GenerationCandidateStatus.SELECTED
+            or candidate.status
+            not in {GenerationCandidateStatus.SELECTED, GenerationCandidateStatus.READY}
         ):
             return False
         run = await self.repository.get_generation_run(candidate.generation_run_id)
@@ -8810,27 +8648,52 @@ class ProductionService:
             return False
         return True
 
-    async def gate_status(self, project_id: UUID) -> ProductionGateStatus:
+    async def _editing_video_selection(
+        self, project: ProductionProject, plans: list[ShotPlan]
+    ) -> tuple[list[ShotPlan], list[ShotPlan]]:
+        eligible = []
+        for plan in sorted(plans, key=lambda item: item.index):
+            if plan.lifecycle_status != ShotLifecycleStatus.ACTIVE:
+                continue
+            plan = await self._input_compatible_plan(plan)
+            if await self._has_valid_approved_video_output(project, plan):
+                eligible.append(plan)
+        return eligible, [plan for plan in eligible if plan.include_in_editing]
+
+    async def gate_status(
+        self,
+        project_id: UUID,
+        *,
+        step: ProductionStep | str | None = None,
+    ) -> ProductionGateStatus:
         project = await self._require_project(project_id)
         project, plans = await self._ensure_project_shots(project)
+        # A read-only image-stage view remains valid after the project advances.
+        # The mutating advance endpoint always validates the actual project step.
+        current_step = ProductionStep(step) if step is not None else project.active_step
         required = [
             item
             for item in plans
             if item.lifecycle_status == ShotLifecycleStatus.ACTIVE and item.required
         ]
-        video_stage = project.active_step in {
+        video_stage = current_step in {
             ProductionStep.SHOT_VIDEOS,
             ProductionStep.EDITING,
             ProductionStep.EXPORT,
         }
         prepared: list[ShotPlan] = []
         quality_warnings: list[ShotPlan] = []
+        approved_image_count = 0
+        eligible_videos: list[ShotPlan] = []
+        selected_videos: list[ShotPlan] = []
         if video_stage:
-            approved = [
-                item
-                for item in required
-                if await self._has_valid_approved_video_output(project, item)
+            required = [
+                item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
             ]
+            eligible_videos, selected_videos = await self._editing_video_selection(
+                project, required
+            )
+            approved = eligible_videos
             for item in approved:
                 preparation = await self.repository.get_video_clip_preparation(item.id)
                 if preparation is not None:
@@ -8857,50 +8720,60 @@ class ProductionService:
                         or quality_report.get("warnings")
                     ):
                         quality_warnings.append(item)
-            stale = [item for item in required if item.video_status == WorkflowItemStatus.STALE]
-            next_step = (
-                ProductionStep.EDITING
-                if project.active_step == ProductionStep.SHOT_VIDEOS
-                else None
-            )
-            pending_label = "必需分镜视频"
-        else:
-            approved = [
+            stale = [
                 item
                 for item in required
-                if (
-                    await self._has_valid_approved_video_output(project, item)
-                    if item.output_mode == ShotOutputMode.SOURCE_VIDEO
-                    else await self._has_valid_approved_image_output(project, item)
-                )
+                if item.video_inputs_changed or item.video_status == WorkflowItemStatus.STALE
             ]
+            next_step = (
+                ProductionStep.EDITING if current_step == ProductionStep.SHOT_VIDEOS else None
+            )
+        else:
+            # Image entry counts adopted pictures across ALL active shots/beats.
+            # This deliberately does not reuse the stricter per-video input check.
+            required = [
+                item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
+            ]
+            approved = []
+            for plan in required:
+                count = sum(
+                    [
+                        await self._has_valid_approved_image_beat(project, plan, beat)
+                        for beat in plan.visual_beats
+                    ]
+                )
+                approved_image_count += count
+                if count or (
+                    plan.output_mode == ShotOutputMode.SOURCE_VIDEO
+                    and await self._has_valid_approved_video_output(project, plan)
+                ):
+                    # Preserve the legacy output/shot summary; only the separate
+                    # picture count controls entry, never a retained video.
+                    approved.append(plan)
             stale = [
                 item
                 for item in required
                 if item.output_mode != ShotOutputMode.SOURCE_VIDEO
-                and item.image_status == WorkflowItemStatus.STALE
+                and (item.image_inputs_changed or item.image_status == WorkflowItemStatus.STALE)
             ]
             next_step = ProductionStep.SHOT_VIDEOS
-            pending_label = "必需分镜输出"
         blockers: list[str] = []
-        if not required:
-            blockers.append("创作方案没有必需分镜")
-        pending = len(required) - len(approved)
-        if pending:
-            blockers.append(f"仍有 {pending} 个{pending_label}未审批")
-        if stale:
-            blockers.append(
-                f"有 {len(stale)} 个分镜使用旧输入，尚未确认采用"
-                if video_stage
-                else f"有 {len(stale)} 个分镜结果已过期"
-            )
+        if video_stage:
+            if not selected_videos:
+                blockers.append("请至少选择一个有效的已采用视频参与剪辑")
+        elif not approved_image_count:
+            blockers.append("请至少采用一张分镜图")
         return ProductionGateStatus(
             project_id=project.id,
-            current_step=project.active_step,
+            current_step=current_step,
             next_step=next_step,
             allowed=bool(required) and not blockers,
             required_shot_count=len(required),
             approved_shot_count=len(approved),
+            approved_image_count=approved_image_count,
+            eligible_video_shot_ids=[item.id for item in eligible_videos],
+            selected_video_shot_ids=[item.id for item in selected_videos],
+            selected_video_count=len(selected_videos),
             prepared_shot_count=len(prepared),
             quality_warning_shot_count=len(quality_warnings),
             stale_shot_count=len(stale),
@@ -8922,7 +8795,7 @@ class ProductionService:
             raise _fail(
                 404,
                 "editing_handoff_missing",
-                "尚未生成剪辑交接清单，请先确认全部必需视频并进入视频剪辑",
+                "尚未生成剪辑交接清单，请先选择已采用视频并进入视频剪辑",
             )
         try:
             manifest = EditingHandoffManifest.model_validate_json(
@@ -8937,6 +8810,11 @@ class ProductionService:
         if manifest.project_id != project.id:
             raise _fail(409, "editing_handoff_mismatch", "剪辑交接清单与当前创作方案不匹配")
         return manifest
+
+    async def get_current_editing_handoff(self, project_id: UUID) -> EditingHandoffManifest:
+        """Preview latest adopted clips; reading must not replace a saved timeline."""
+        project = await self._require_project(project_id)
+        return await self._build_editing_handoff(project, project.current_revision_id)
 
     async def _build_editing_handoff(
         self,
@@ -8963,11 +8841,11 @@ class ProductionService:
             ),
             key=lambda item: item.index,
         )
+        _, plans = await self._editing_video_selection(project, plans)
         clips: list[EditingHandoffClip] = []
         timeline_cursor = 0.0
         for plan in plans:
-            if not await self._has_valid_approved_video_output(project, plan):
-                continue
+            plan = await self._input_compatible_plan(plan)
             preparation = await self.repository.get_video_clip_preparation(plan.id)
             if preparation is not None:
                 preparation = _apply_video_preparation_policy(preparation)
@@ -8982,13 +8860,11 @@ class ProductionService:
                 plan.approved_video_candidate_id
             )
             if candidate is None:
-                if plan.required:
-                    raise _fail(
-                        409,
-                        "editing_handoff_candidate_missing",
-                        f"分镜 {plan.index} 的已采用视频不存在",
-                    )
-                continue
+                raise _fail(
+                    409,
+                    "editing_handoff_candidate_missing",
+                    f"分镜 {plan.index} 的已采用视频不存在",
+                )
 
             candidate_duration = (
                 candidate.source_range.duration_seconds
@@ -9202,9 +9078,9 @@ class ProductionService:
                 next_project,
                 ProductionChangeKind.WORKFLOW_ADVANCED,
                 (
-                    "所有必需分镜视频已审批，推进到视频剪辑"
+                    "已选择分镜视频，进入视频剪辑"
                     if payload.target_step == ProductionStep.EDITING
-                    else "所有必需分镜图片已审批，推进到分段视频"
+                    else "已采用分镜图，进入分镜视频"
                 ),
                 revision_id=revision_id,
             )
@@ -9601,28 +9477,10 @@ class ProductionService:
                         next_beats.append(old_beat)
                         continue
                     changed_beat_ids.append(beat.id)
-                    reviewed = (
-                        old_beat.approved_image_candidate_id is not None
-                        or old_beat.image_status
-                        in {
-                            WorkflowItemStatus.REVIEW_REQUIRED,
-                            WorkflowItemStatus.APPROVED,
-                            WorkflowItemStatus.STALE,
-                        }
-                    )
                     next_beats.append(
-                        beat.model_copy(
+                        changed_beat(old_beat).model_copy(
                             update={
-                                "approved_image_candidate_id": None,
-                                "image_status": (
-                                    WorkflowItemStatus.STALE
-                                    if reviewed
-                                    else (
-                                        WorkflowItemStatus.READY
-                                        if beat.image_prompt.strip()
-                                        else WorkflowItemStatus.DRAFT
-                                    )
-                                ),
+                                **{field: getattr(beat, field) for field in source_fields},
                                 "updated_at": utc_now(),
                             }
                         )
@@ -9630,13 +9488,6 @@ class ProductionService:
                 if not changed_beat_ids:
                     next_plans.append(original_plan)
                     continue
-                for beat_id in changed_beat_ids:
-                    for candidate in await self._reset_selected_image_candidates(
-                        project,
-                        original_plan,
-                        visual_beat_id=beat_id,
-                    ):
-                        candidate_updates_by_id[candidate.id] = candidate
                 updated_plan = _sync_shot_visual_beats(
                     original_plan,
                     next_beats,
@@ -9648,19 +9499,10 @@ class ProductionService:
 
             if not changed_plans:
                 return project, plans
-            downstream_steps = {
-                ProductionStep.SHOT_VIDEOS,
-                ProductionStep.EDITING,
-                ProductionStep.EXPORT,
-            }
             next_project = project.model_copy(
                 update={
                     "status": ProductionProjectStatus.ACTIVE,
-                    "active_step": (
-                        ProductionStep.SHOT_IMAGES
-                        if project.active_step in downstream_steps
-                        else project.active_step
-                    ),
+                    "active_step": project.active_step,
                     "updated_at": utc_now(),
                 }
             )
@@ -10081,6 +9923,216 @@ class ProductionService:
             )
         return plans
 
+    async def _global_input_notices(self, plan, context, runs):
+        """Compare the active result with its frozen globals, without rewriting it."""
+
+        async def differs(part, target, target_runs):
+            candidate_id = getattr(target, f"approved_{part}_candidate_id")
+            candidate = (
+                await self.repository.get_generation_candidate(candidate_id)
+                if candidate_id
+                else None
+            )
+            run = next(
+                (
+                    item
+                    for item in target_runs
+                    if candidate and item.id == candidate.generation_run_id
+                ),
+                None,
+            )
+            if run is None and candidate_id is None:
+                run = max(
+                    (
+                        item
+                        for item in target_runs
+                        if item.status
+                        in {
+                            ProductionRunStatus.COMPLETED,
+                            ProductionRunStatus.CACHED,
+                        }
+                    ),
+                    key=lambda item: item.created_at,
+                    default=None,
+                )
+            if run is None:
+                return False
+            frozen = run.request_payload.get("prompt_snapshot")
+            if frozen is not None:
+                return frozen.get("global_prompt", "") != getattr(context, f"common_{part}_prompt")
+            return context.created_at > run.created_at
+
+        beats = []
+        for beat in plan.visual_beats:
+            changed = await differs(
+                "image",
+                beat,
+                [
+                    item
+                    for item in runs
+                    if item.kind == GenerationKind.IMAGE
+                    and _run_matches_visual_beat(item, plan, beat.id)
+                ],
+            )
+            beats.append(
+                beat.model_copy(
+                    update={
+                        "image_inputs_changed": beat.image_inputs_changed or changed,
+                    }
+                )
+            )
+        video_changed = await differs(
+            "video", plan, [item for item in runs if item.kind == GenerationKind.VIDEO]
+        )
+        return plan.model_copy(
+            update={
+                "visual_beats": beats,
+                "image_inputs_changed": plan.image_inputs_changed
+                or any(beat.image_inputs_changed for beat in beats),
+                "video_inputs_changed": plan.video_inputs_changed or video_changed,
+            }
+        )
+
+    async def _input_compatible_plan(self, plan: ShotPlan) -> ShotPlan:
+        """Read-only repair of legacy automatic invalidation, using human history.
+
+        Never infer adoption from merely having a generated candidate. Explicit
+        revocations, deleted files, foreign candidates and simulated outputs stay blocked.
+        The next normal edit persists this projection; historical revisions are untouched.
+        """
+        image_stale = plan.image_status == WorkflowItemStatus.STALE or any(
+            beat.image_status == WorkflowItemStatus.STALE for beat in plan.visual_beats
+        )
+        video_stale = plan.video_status == WorkflowItemStatus.STALE
+        # Older preview selection/regeneration also cleared the adoption pointer
+        # without a revocation event. Only old records lacking freshness fields
+        # are eligible for this additional read-only repair.
+        legacy_images = {
+            beat.id
+            for beat in plan.visual_beats
+            if "image_inputs_changed" not in plan.model_fields_set
+            and beat.approved_image_candidate_id is None
+        }
+        legacy_video = (
+            "video_inputs_changed" not in plan.model_fields_set
+            and plan.approved_video_candidate_id is None
+        )
+        if not image_stale and not video_stale and not legacy_images and not legacy_video:
+            return plan
+        events = sorted(
+            await self.repository.list_approval_events(plan.project_id, plan.id),
+            key=lambda event: (event.created_at, event.decision != ApprovalDecision.APPROVED),
+            reverse=True,
+        )
+        if not events and not image_stale and not video_stale:
+            return plan
+        project = await self._require_project(plan.project_id)
+
+        async def previously_adopted(kind, beat=None):
+            rejected = set()
+            for event in events:
+                if event.target_kind != kind:
+                    continue
+                candidate = await self.repository.get_generation_candidate(event.candidate_id)
+                if candidate is None:
+                    return None
+                run = await self.repository.get_generation_run(candidate.generation_run_id)
+                if not run or run.project_id != project.id or run.shot_plan_id != plan.id:
+                    continue
+                if beat is not None and not _run_matches_visual_beat(run, plan, beat.id):
+                    continue
+                if event.decision == ApprovalDecision.REVOKED:
+                    return None
+                if event.decision == ApprovalDecision.REJECTED:
+                    rejected.add(candidate.id)
+                    continue
+                if event.decision != ApprovalDecision.APPROVED or candidate.id in rejected:
+                    return None
+                if (
+                    candidate.kind != kind
+                    or candidate.status
+                    not in {
+                        GenerationCandidateStatus.SELECTED,
+                        GenerationCandidateStatus.READY,
+                    }
+                    or run.status not in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
+                ):
+                    return None
+                if kind == GenerationKind.IMAGE and _is_simulated_image_run(run):
+                    return None
+                if kind == GenerationKind.VIDEO and (
+                    (run.execution_mode == ImageExecutionMode.SOURCE_VIDEO)
+                    != (plan.output_mode == ShotOutputMode.SOURCE_VIDEO)
+                ):
+                    # A deliberate route switch is not an upstream invalidation.
+                    return None
+                if candidate.source_range is not None:
+                    if candidate.source_range.source_video_id != project.video_id:
+                        return None
+                    try:
+                        await self.resolve_source_video_reference(
+                            project.video_id, candidate.source_range.source_sha256
+                        )
+                    except ProductionServiceError:
+                        return None
+                    return candidate.id
+                try:
+                    resolved = self.workspace.resolve(candidate.relative_path).resolve()
+                    root = (
+                        self.workspace.production_shot_root(project.record_id, project.id, plan.id)
+                        / ("images" if kind == GenerationKind.IMAGE else "videos")
+                        / str(run.id)
+                    )
+                    resolved.relative_to(root.resolve())
+                    if not _filesystem_path(resolved).is_file():
+                        return None
+                except (OSError, ValueError, WorkspaceError):
+                    return None
+                return candidate.id
+            return None
+
+        original_updated_at = plan.updated_at
+        beats = []
+        for beat in plan.visual_beats:
+            beat_stale = image_stale and (
+                plan.image_status == WorkflowItemStatus.STALE
+                or beat.image_status == WorkflowItemStatus.STALE
+            )
+            if beat_stale or beat.id in legacy_images:
+                candidate_id = await previously_adopted(GenerationKind.IMAGE, beat)
+                if candidate_id is None and not beat_stale:
+                    beats.append(beat)
+                    continue
+                beat = beat.model_copy(
+                    update={
+                        "image_status": WorkflowItemStatus.APPROVED
+                        if candidate_id
+                        else WorkflowItemStatus.REVIEW_REQUIRED,
+                        "approved_image_candidate_id": candidate_id,
+                        "image_inputs_changed": True,
+                        "image_inputs_updated_at": beat.image_inputs_updated_at or plan.updated_at,
+                    }
+                )
+            beats.append(beat)
+        plan = _sync_shot_visual_beats(plan, beats, revision_id=plan.revision_id).model_copy(
+            update={"updated_at": original_updated_at}
+        )
+        if video_stale or legacy_video:
+            candidate_id = await previously_adopted(GenerationKind.VIDEO)
+            if candidate_id is None and not video_stale:
+                return plan
+            plan = plan.model_copy(
+                update={
+                    "video_status": WorkflowItemStatus.APPROVED
+                    if candidate_id
+                    else WorkflowItemStatus.REVIEW_REQUIRED,
+                    "approved_video_candidate_id": candidate_id,
+                    "video_inputs_changed": True,
+                    "video_inputs_updated_at": plan.video_inputs_updated_at or plan.updated_at,
+                }
+            )
+        return plan
+
     async def _ensure_project_shots(
         self,
         project: ProductionProject,
@@ -10091,6 +10143,7 @@ class ProductionService:
         except IncompatibleShotPlanSchemaError:
             plans = []
             incompatible_schema = True
+        plans = [await self._input_compatible_plan(plan) for plan in plans]
         if plans and project.origin_type == ProductionOriginType.SKILL_RUN:
             return project, plans  # Skill shots have no legacy source-video frame repairs.
         if plans:
@@ -10615,8 +10668,8 @@ class ProductionService:
             }
         )
 
-    @staticmethod
-    def _mark_plans_stale(
+    async def _mark_plans_stale(
+        self,
         plans: list[ShotPlan],
         impacted_ids: set[UUID],
         revision_id: UUID,
@@ -10627,32 +10680,9 @@ class ProductionService:
             if plan.id not in impacted_ids:
                 next_plans.append(plan)
                 continue
-            image_status = (
-                WorkflowItemStatus.STALE
-                if plan.image_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                    WorkflowItemStatus.STALE,
-                }
-                or plan.approved_image_candidate_id is not None
-                else plan.image_status
-            )
-            video_status = (
-                WorkflowItemStatus.STALE
-                if plan.video_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                    WorkflowItemStatus.STALE,
-                }
-                else plan.video_status
-            )
-            updated = plan.model_copy(
+            updated = changed_plan(await self._input_compatible_plan(plan), image=True).model_copy(
                 update={
                     "revision_id": revision_id,
-                    "image_status": image_status,
-                    "video_status": video_status,
                     "updated_at": utc_now(),
                 }
             )
@@ -10734,66 +10764,16 @@ class ProductionService:
                 raise _fail(422, "invalid_shot_plan", "必需分镜不能为 null")
             updates["required"] = payload.required
 
-        next_image_prompt = str(updates.get("image_prompt", plan.image_prompt))
-        if image_changed:
-            has_prior_result = (
-                plan.approved_image_candidate_id is not None
-                or plan.image_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.STALE,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                }
-            )
-            updates["image_status"] = (
-                WorkflowItemStatus.STALE
-                if has_prior_result
-                else (
-                    WorkflowItemStatus.READY
-                    if next_image_prompt.strip()
-                    else WorkflowItemStatus.DRAFT
-                )
-            )
-            if not has_prior_result:
-                updates["approved_image_candidate_id"] = None
-            updates["video_status"] = (
-                WorkflowItemStatus.STALE
-                if plan.video_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                    WorkflowItemStatus.STALE,
-                }
-                else WorkflowItemStatus.DRAFT
-            )
-        elif video_changed:
-            next_video_prompt = str(updates.get("video_prompt", plan.video_prompt))
-            has_prior_result = (
-                plan.approved_video_candidate_id is not None
-                or plan.video_status
-                in {
-                    WorkflowItemStatus.APPROVED,
-                    WorkflowItemStatus.REVIEW_REQUIRED,
-                    WorkflowItemStatus.STALE,
-                }
-            )
-            updates["video_status"] = (
-                WorkflowItemStatus.STALE
-                if has_prior_result
-                else (
-                    WorkflowItemStatus.READY
-                    if next_video_prompt.strip()
-                    else WorkflowItemStatus.DRAFT
-                )
-            )
-            if not has_prior_result:
-                updates["approved_video_candidate_id"] = None
         updated_plan = ShotPlan.model_validate({**plan.model_dump(mode="python"), **updates})
+        if image_changed or video_changed:
+            updated_plan = changed_plan(updated_plan, image=image_changed)
         if image_changed and updated_plan.visual_beats:
             primary = updated_plan.visual_beats[0]
             beat_updates: dict[str, object] = {
                 "image_status": updated_plan.image_status,
                 "approved_image_candidate_id": updated_plan.approved_image_candidate_id,
+                "image_inputs_changed": updated_plan.image_inputs_changed,
+                "image_inputs_updated_at": updated_plan.image_inputs_updated_at,
                 "updated_at": utc_now(),
             }
             for field_name in (
@@ -11775,7 +11755,7 @@ class ProductionService:
             plan = None
         if plan is None:
             raise _fail(404, "shot_plan_not_found", "分镜创作计划不存在")
-        return plan
+        return await self._input_compatible_plan(plan)
 
     @staticmethod
     def _ensure_shot_active(plan: ShotPlan) -> None:
@@ -11901,6 +11881,22 @@ class ProductionService:
             raise _fail(404, "production_not_found", "创作方案不存在")
         if project.trashed_at is not None and not include_trashed:
             raise _fail(404, "production_not_found", "创作方案不存在")
+        if project.active_step not in {ProductionStep.EDITING, ProductionStep.EXPORT}:
+            # A saved handoff is evidence the user already reached editing before
+            # an old automatic invalidation rolled the stage backwards.
+            path = (
+                self.workspace.production_paths(project.record_id, project.id).timelines
+                / "editing-handoff.json"
+            )
+            try:
+                if _filesystem_path(path).is_file():
+                    handoff = EditingHandoffManifest.model_validate_json(
+                        _filesystem_path(path).read_text("utf-8-sig")
+                    )
+                    if handoff.project_id == project.id:
+                        project = project.model_copy(update={"active_step": ProductionStep.EDITING})
+            except (OSError, ValidationError):
+                pass  # A missing/invalid snapshot cannot manufacture stage progress.
         return _normalize_optional_preparation_project(project)
 
     async def _skill_run_contract(self, project: ProductionProject) -> Any | None:

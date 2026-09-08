@@ -325,13 +325,11 @@ class ShotVideoGenerationDraftService:
 
 
 def current_default_input_plan(plan: ShotPlan | None = None) -> VideoGenerationInputPlan:
-    """Use every approved required visual beat as the default ordered video input."""
+    """Use every adopted visual beat as the default ordered video input."""
     if plan is None:
         return VideoGenerationInputPlan()
     beats = sorted(plan.visual_beats, key=lambda item: item.index)
-    required = [item for item in beats if item.required]
-    targets = required or beats
-    approved_targets = [beat for beat in targets if beat.approved_image_candidate_id is not None]
+    approved_targets = [beat for beat in beats if beat.approved_image_candidate_id is not None]
     references = [
         VideoGenerationReference(
             reference_kind=VideoPromptReferenceKind.APPROVED_IMAGE,

@@ -907,6 +907,24 @@ class InMemoryStore:
             key=lambda candidate: (candidate.created_at, candidate.ordinal),
         )
 
+    async def list_image_navigation_candidates(self, project_id: UUID) -> list[dict]:
+        runs = {
+            run.id: run for run in self.generation_runs.values() if run.project_id == project_id
+        }
+        return [
+            {
+                "id": str(candidate.id),
+                "shot_plan_id": str(runs[candidate.generation_run_id].shot_plan_id),
+                "status": candidate.status.value,
+                "thumbnail_relative_path": candidate.thumbnail_relative_path,
+                "created_at": candidate.created_at.isoformat(),
+                "ordinal": candidate.ordinal,
+                "execution_mode": runs[candidate.generation_run_id].execution_mode.value,
+            }
+            for candidate in self.generation_candidates.values()
+            if candidate.generation_run_id in runs and candidate.kind == "image"
+        ]
+
     async def save_video_clip_preparation(
         self,
         preparation: VideoClipPreparation,

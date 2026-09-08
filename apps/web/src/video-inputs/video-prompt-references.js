@@ -152,11 +152,9 @@ export function isAutomaticVideoReference(item = {}) {
 export function approvedVisualBeatFramesFromDetail(detail) {
   const beats = [...(detail?.plan?.visual_beats || [])]
     .sort((left, right) => left.index - right.index);
-  const requiredBeats = beats.filter((item) => item.required);
-  const targets = requiredBeats.length > 0 ? requiredBeats : beats;
   const firstBeatId = beats[0]?.id;
   const imageRuns = (detail?.generation_runs || []).filter((run) => run.kind === "image");
-  return targets.map((beat) => {
+  return beats.map((beat) => {
     const runs = imageRuns.filter((run) => (
       run.visual_beat_id === beat.id
       || (!run.visual_beat_id && beat.id === firstBeatId)
@@ -164,7 +162,8 @@ export function approvedVisualBeatFramesFromDetail(detail) {
     const candidate = beat.approved_image_candidate_id
       ? runs
         .flatMap((run) => run.candidates || [])
-        .find((item) => item.id === beat.approved_image_candidate_id) || null
+        .find((item) => item.id === beat.approved_image_candidate_id
+          && !["archived", "rejected"].includes(item.status)) || null
       : null;
     return { beat, candidate };
   });
@@ -545,20 +544,21 @@ export function synchronizeAutomaticVideoPrompt({
   prompt = "",
   mentions = [],
   selectedReferences = [],
+  preserveFormatting = false,
 } = {}) {
   const references = normalizeVideoGenerationReferences(selectedReferences);
-  const selectedKeys = new Set(references.map(videoReferenceKey));
+  const byKey = new Map(references.map((item) => [videoReferenceKey(item), item]));
+  const byStableKey = new Map(references.map((item) => [videoReferenceStableKey(item), item]));
   const selectedTokens = references.map(videoMentionToken).filter(Boolean);
+  // Previous bindings identify tokens before a beat is renumbered or its
+  // adopted candidate changes. Replace atomically so 图1/图10 and swapped
+  // labels cannot rewrite one another or erase an in-sentence reference.
+  const knownReferences = [...references, ...mentions];
+  const previousByKey = new Map(knownReferences.map((item) => [videoReferenceKey(item), item]));
   const knownTokens = new Set([
     ...selectedTokens,
     ...(mentions || []).map(videoMentionToken).filter(Boolean),
   ]);
-  const removedTokens = new Set(
-    (mentions || [])
-      .filter((item) => !selectedKeys.has(videoReferenceKey(item)))
-      .map(videoMentionToken)
-      .filter(Boolean),
-  );
   const declarationOnly = (line) => {
     let remainder = String(line || "");
     for (const token of [...knownTokens].sort((left, right) => right.length - left.length)) {
@@ -567,16 +567,27 @@ export function synchronizeAutomaticVideoPrompt({
     return remainder.trim() === "" && String(line || "").trim() !== "";
   };
   const lines = String(prompt || "").split("\n");
-  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
-  while (lines.length > 0 && declarationOnly(lines[0])) lines.shift();
-  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
-  let body = lines.join("\n");
-  for (const token of removedTokens) body = body.replaceAll(token, "");
-  body = body
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/^[ \t]*\n+/u, "")
-    .trim();
-  const tokenLine = selectedTokens.filter((token) => !body.includes(token)).join(" ");
+  let start = 0;
+  while (start < lines.length && lines[start].trim() === "") start += 1;
+  let end = start;
+  while (end < lines.length && declarationOnly(lines[end])) end += 1;
+  // Only the leading automatic declaration is managed; the user's body,
+  // including whitespace in an unsaved draft, remains authoritative.
+  if (end > start) {
+    while (end < lines.length && lines[end].trim() === "") end += 1;
+  } else end = 0;
+  let body = buildVideoPromptHighlightSegments(lines.slice(end).join("\n"), knownReferences)
+    .map((segment) => {
+      if (segment.type !== "mention") return segment.text;
+      const previous = previousByKey.get(segment.referenceKey);
+      const current = byStableKey.get(videoReferenceStableKey(previous)) || byKey.get(segment.referenceKey);
+      return current ? videoMentionToken(current) : "";
+    }).join("");
+  if (!preserveFormatting) body = body.replace(/[ \t]+\n/g, "\n").trim();
+  const present = new Set(buildVideoPromptHighlightSegments(body, references)
+    .filter((segment) => segment.type === "mention").map((segment) => segment.referenceKey));
+  const tokenLine = references.filter((item) => !present.has(videoReferenceKey(item)))
+    .map(videoMentionToken).filter(Boolean).join(" ");
   const videoPrompt = [tokenLine, body].filter(Boolean).join("\n\n");
   return {
     videoPrompt,
@@ -648,6 +659,7 @@ export function reconcileVideoDraftReferences(
     }
     : synchronizeAutomaticVideoPrompt({
       prompt: draft.videoPrompt, mentions: draft.videoPromptMentions, selectedReferences,
+      preserveFormatting: true,
     });
   const inputSources = new Set(change.inputSources || draft.inputSources || []);
   for (const reference of removedReferences) {
@@ -676,28 +688,9 @@ export function reconcileVideoDraftReferences(
 }
 
 export function normalizeVideoPromptMentions(prompt, mentions = [], options = []) {
-  const optionByKey = new Map(options.map((item) => [videoReferenceKey(item), item]));
-  const nextMentions = [];
-  for (const mention of mentions) {
-    const option = optionByKey.get(videoReferenceKey(mention));
-    const canonical = option
-      ? {
-          reference_kind: option.reference_kind,
-          reference_id: option.reference_id,
-          label: option.label,
-          role: option.role,
-          ...(option.visual_beat_id ? { visual_beat_id: option.visual_beat_id } : {}),
-          ...(option.automatic ? { automatic: true } : {}),
-          ...(option.scope ? { scope: option.scope } : {}),
-          ...(option.origin ? { origin: option.origin } : {}),
-          ...(option.locked ? { locked: true } : {}),
-        }
-      : mention;
-    if (!promptContainsVideoMention(prompt, canonical)) continue;
-    nextMentions.push({
-      ...canonical,
-      order: nextMentions.length + 1,
-    });
-  }
-  return nextMentions;
+  const canonical = normalizeVideoGenerationReferences(mentions, options);
+  const present = new Set(buildVideoPromptHighlightSegments(prompt, canonical)
+    .filter((segment) => segment.type === "mention").map((segment) => segment.referenceKey));
+  return canonical.filter((item) => present.has(videoReferenceKey(item)))
+    .map((item, index) => ({ ...item, order: index + 1 }));
 }

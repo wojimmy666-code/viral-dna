@@ -104,7 +104,7 @@ export function ImageGenerationCommandBar({
             <ImageSquare size={18} weight="fill" />
           </span>
           <span className="shot-image-model-copy">
-            <strong>{selectedModel?.label || "选择生图模型"}</strong>
+            <strong>{selectedModel?.alias === LOCAL_IMAGE_MODEL_ALIAS ? "image-2" : selectedModel?.label || "选择生图模型"}</strong>
           </span>
           {!compatibility.compatible && <WarningCircle size={17} weight="fill" />}
           <CaretUp size={16} />

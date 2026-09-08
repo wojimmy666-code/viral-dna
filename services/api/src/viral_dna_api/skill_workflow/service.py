@@ -885,11 +885,12 @@ class SkillWorkflowService:
                 SkillGate.BRIEF_APPROVED,
                 "创作简报已更新",
             )
-        await self.projects.bind_skill_run(
-            project.id,
-            stage=ProjectStage.CREATIVE_BRIEF,
-            status=ProjectStatus.DRAFT,
-        )
+        if not revisions:
+            await self.projects.bind_skill_run(
+                project.id,
+                stage=ProjectStage.CREATIVE_BRIEF,
+                status=ProjectStatus.DRAFT,
+            )
         return item
 
     async def replace_asset_usages(
@@ -3723,13 +3724,6 @@ class SkillWorkflowService:
                     "storyboard_revision_stale",
                     "分镜已在其他页面更新，当前草稿已保留；请刷新后核对再修改",
                 )
-            if (
-                current.style_bible_revision_id != bible.id
-                or current.outline_revision_id != outline.id
-            ):
-                raise _fail(
-                    409, "storyboard_revision_stale", "风格或大纲已更新，请重新生成分镜后再编辑"
-                )
             keys = [shot.stable_shot_key for shot in payload.shots]
             if len(keys) != len(set(keys)):
                 raise _fail(422, "shot_key_duplicate", "分镜标识不能重复")
@@ -4092,14 +4086,10 @@ class SkillWorkflowService:
         outlines = await self.repository.list_outline_revisions(project.id)
         bibles = await self.repository.list_style_bible_revisions(project.id)
         brief = _latest(await self.repository.list_creative_brief_revisions(project.id))
-        outline = _latest(outlines)
-        bible = _latest(bibles)
+        outline = next((item for item in outlines if item.id == payload.outline_revision_id), None)
+        bible = next((item for item in bibles if item.id == payload.style_bible_revision_id), None)
         if outline is None or bible is None or brief is None:
             raise _fail(409, "storyboard_inputs_missing", "分镜编辑缺少当前大纲、风格或简报")
-        if payload.outline_revision_id != outline.id or payload.style_bible_revision_id != bible.id:
-            raise _fail(409, "storyboard_revision_stale", "分镜必须绑定当前大纲和风格版本")
-        if payload.fps != brief.fps:
-            raise _fail(422, "storyboard_fps_invalid", "分镜帧率必须与创作简报一致")
         previous_keys = {item.stable_shot_key for item in current[-1].shots} if current else set()
         incoming_keys = [item.stable_shot_key for item in payload.shots]
         if len(incoming_keys) != len(set(incoming_keys)):
@@ -4722,10 +4712,11 @@ class SkillWorkflowService:
         run = await self.repository.get_skill_run(run_id)
         if run is None:
             raise _fail(404, "skill_run_not_found", "Skill 运行不存在")
+        run, gates = await self._upstream_compatible_run(run)
         return SkillRunDetail(
             run=run,
             steps=await self.repository.list_skill_step_runs(run.id),
-            gates=await self.repository.list_gate_decisions(run.id),
+            gates=gates,
         )
 
     async def run_metrics(self, run_id: UUID) -> SkillRunMetrics:
@@ -5143,7 +5134,7 @@ class SkillWorkflowService:
                 artifact = artifacts_by_id.get(artifact_id)
                 if artifact is not None and not artifact.stale:
                     await self.repository.save_skill_artifact(
-                        artifact.model_copy(update={"stale": True, "selected": False})
+                        artifact.model_copy(update={"stale": True})
                     )
         ordered = sorted(affected, key=str)
         return DependencyImpactResponse(
@@ -5202,11 +5193,6 @@ class SkillWorkflowService:
             if issues:
                 raise _fail(422, "storyboard_draft_incomplete", "；".join(issues[:8]))
             if (
-                manifest.outline_revision_id != outline.id
-                or manifest.style_bible_revision_id != bible.id
-            ):
-                raise _fail(409, "storyboard_revision_stale", "分镜方案未绑定当前大纲与风格")
-            if (
                 outline.id not in payload.related_revision_ids
                 or manifest.id not in payload.related_revision_ids
             ):
@@ -5215,14 +5201,32 @@ class SkillWorkflowService:
             production_id = project.source_binding.production_project_id
             if production_id is None:
                 raise _fail(409, "production_required", "尚未创建后半程创作方案")
-            plans = await self.repository.list_shot_plans(production_id)
-            field = "image_status" if gate == SkillGate.IMAGES_APPROVED else "video_status"
-            if not plans or any(
-                getattr(item, field) != WorkflowItemStatus.APPROVED
-                for item in plans
-                if item.required
-            ):
-                raise _fail(409, "production_candidates_unapproved", "仍有必需分镜尚未采用")
+            if gate == SkillGate.IMAGES_APPROVED:
+                if self.production_service is None:
+                    raise _fail(
+                        503, "production_service_unavailable", "暂时无法核验已采用图片，请稍后重试"
+                    )
+                image_gate = await self.production_service.gate_status(
+                    production_id,
+                    step=ProductionStep.SHOT_IMAGES,
+                )
+                if not image_gate.allowed:
+                    raise _fail(409, "production_candidates_unapproved", "请至少采用一张分镜图")
+                return
+            if self.production_service is None:
+                raise _fail(
+                    503, "production_service_unavailable", "暂时无法核验已选视频，请稍后重试"
+                )
+            video_gate = await self.production_service.gate_status(
+                production_id, step=ProductionStep.SHOT_VIDEOS
+            )
+            if not video_gate.allowed:
+                raise _fail(
+                    409,
+                    "production_candidates_unapproved",
+                    "；".join(video_gate.blocker_messages)
+                    or "请至少选择一个有效的已采用视频参与剪辑",
+                )
         elif gate == SkillGate.PICTURE_LOCKED:
             revisions = await self.repository.list_timeline_v3_revisions(project.id)
             if not revisions or revisions[-1].picture_lock_revision_id is None:
@@ -5795,41 +5799,22 @@ class SkillWorkflowService:
         run = max(runs, key=lambda item: item.updated_at, default=None)
         if run is None:
             return
-        decisions = await self.repository.list_gate_decisions(run.id)
-        invalidated = False
-        first_index = GATE_ORDER.index(first_gate)
-        for gate in GATE_ORDER[first_index:]:
-            if not self._gate_is_approved(decisions, gate):
-                continue
-            decision = GateDecision(
-                project_id=project_id,
-                skill_run_id=run.id,
-                gate=gate,
-                decision=GateDecisionValue.REQUEST_REVISION,
-                actor_type=GateActorType.SYSTEM,
-                note=note,
-                created_at=self._next_gate_timestamp(decisions),
-            )
-            await self.repository.save_gate_decision(decision)
-            decisions.append(decision)
-            invalidated = True
-        if not invalidated:
-            return
+        # Keep human approvals bound to their original snapshots. An upstream
+        # edit is not a synthetic rejection and must not restart downstream work.
         updated_run = run.model_copy(
             update={
-                "current_stage": STAGE_BY_GATE[first_gate],
-                "execution_status": ExecutionStatus.RUNNING,
-                "completed_at": None,
-                "last_error": None,
+                "upstream_update_messages": list(
+                    dict.fromkeys(
+                        [
+                            *run.upstream_update_messages,
+                            note,
+                        ]
+                    )
+                ),
                 "updated_at": utc_now(),
             }
         )
         await self.repository.save_skill_run(updated_run)
-        await self.projects.bind_skill_run(
-            project_id,
-            stage=ProjectStage(STAGE_BY_GATE[first_gate].value),
-            status=ProjectStatus.RUNNING,
-        )
 
     async def _require_skill_project(self, project_id: UUID) -> Project:
         project = await self.repository.get_project(project_id)
@@ -5849,8 +5834,37 @@ class SkillWorkflowService:
         run = await self.repository.get_skill_run(run_id)
         if run is None:
             raise _fail(404, "skill_run_not_found", "Skill 运行不存在")
+        run, _ = await self._upstream_compatible_run(run)
         project = await self._require_skill_project(run.project_id)
         return run, project
+
+    async def _upstream_compatible_run(self, run: SkillRun):
+        decisions = await self.repository.list_gate_decisions(run.id)
+        notices = [item for item in decisions if item.is_upstream_advisory]
+        if not notices:
+            return run, decisions
+        effective = [item for item in decisions if not item.is_upstream_advisory]
+        next_gate = next(
+            (gate for gate in GATE_ORDER if not self._gate_is_approved(effective, gate)),
+            GATE_ORDER[-1],
+        )
+        stages = list(SkillWorkflowStage)
+        restored_stage = STAGE_BY_GATE[next_gate]
+        if stages.index(restored_stage) < stages.index(run.current_stage):
+            restored_stage = run.current_stage
+        return run.model_copy(
+            update={
+                "current_stage": restored_stage,
+                "upstream_update_messages": list(
+                    dict.fromkeys(
+                        [
+                            *run.upstream_update_messages,
+                            *(item.note for item in notices),
+                        ]
+                    )
+                ),
+            }
+        ), effective
 
     async def _run_contract(self, run: SkillRun) -> RunContractRevision:
         contract = await self.repository.get_run_contract_revision(run.run_contract_revision_id)
@@ -5880,7 +5894,7 @@ class SkillWorkflowService:
     @staticmethod
     def _gate_is_approved(decisions: list[GateDecision], gate: SkillGate) -> bool:
         latest = max(
-            (item for item in decisions if item.gate == gate),
+            (item for item in decisions if item.gate == gate and not item.is_upstream_advisory),
             key=lambda item: item.created_at,
             default=None,
         )

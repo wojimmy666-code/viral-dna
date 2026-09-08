@@ -57,7 +57,39 @@ test('one atomic editor owns IME, undo, clipboard and accessible thumbnail UI', 
   assert.match(source, /selection.setBaseAndExtent/);
   assert.match(source, /aria-activedescendant/);
   assert.match(source, /else menuKeyDown\(event\)/);
-  assert.match(source, /scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(source, /list\.scrollTop \+= item/);
+  assert.doesNotMatch(source, /\.scrollIntoView\(/);
+  assert.match(source, /popup.kind === 'menu'\) positionPopup\(\)/);
   assert.match(source, /history.current\[index\]/);
   assert.match(image, /item.binding \? \{ \.\.\.item.binding \}/);
+});
+
+test('rich prompt editors are never wrapped in a native label that activates the first thumbnail', () => {
+  for (const path of ['ShotImageWorkspace.jsx', 'skill-workflow/StoryboardPromptEditor.jsx', 'ShotVideoWorkspace.jsx']) {
+    const source = readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8');
+    for (const label of source.matchAll(/<label\b[\s\S]*?<\/label>/g)) {
+      assert.doesNotMatch(label[0], /<(?:ImageAssetPromptEditor|AssetReferenceEditor|VideoPromptReferenceEditor)\b/, path);
+    }
+  }
+  const editor = readFileSync(new URL('../src/prompt-references/AssetReferenceEditor.jsx', import.meta.url), 'utf8');
+  assert.match(editor, /aria-labelledby=\{labelledBy\}/);
+  assert.match(editor, /onPointerDown=\{\(event\) => \{ if \(!inputReference\(event.target\)\) dismissReference\(\)/);
+});
+
+test('preview grid and image both constrain intrinsic image dimensions', () => {
+  const css = readFileSync(new URL('../src/prompt-references/asset-reference-editor.css', import.meta.url), 'utf8');
+  const preview = css.match(/\.asset-reference-preview\s*\{([^}]+)\}/)[1];
+  const image = css.match(/\.asset-reference-preview img\s*\{([^}]+)\}/)[1];
+  assert.match(preview, /grid-template:\s*minmax\(0, 1fr\)\s*\/\s*minmax\(0, 1fr\)/);
+  assert.match(image, /min-height:\s*0/);
+  assert.match(image, /min-width:\s*0/);
+  assert.match(image, /object-fit:\s*contain/);
+});
+
+test('inline chips show only an image number and inherit prose typography', () => {
+  const source = readFileSync(new URL('../src/prompt-references/AssetReferenceEditor.jsx', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../src/prompt-references/asset-reference-editor.css', import.meta.url), 'utf8');
+  assert.match(source, /text.textContent = `图片\$\{reference.number\}`/);
+  assert.match(source, /token.title = reference.label/);
+  assert.match(css, /\.asset-reference-token \{[^}]*border: 1px solid var\(--border-default\)[^}]*font: inherit/);
 });

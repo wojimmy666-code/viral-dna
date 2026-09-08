@@ -1672,6 +1672,29 @@ class SQLiteStore:
             key=lambda candidate: (candidate.created_at, candidate.ordinal),
         )
 
+    async def list_image_navigation_candidates(self, project_id: UUID) -> list[dict]:
+        def read():
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "SELECT c.record_key AS id, "
+                    "json_extract(r.payload, '$.shot_plan_id') AS shot_plan_id, "
+                    "json_extract(c.payload, '$.status') AS status, "
+                    "json_extract(c.payload, '$.thumbnail_relative_path') "
+                    "AS thumbnail_relative_path, "
+                    "json_extract(c.payload, '$.created_at') AS created_at, "
+                    "json_extract(c.payload, '$.ordinal') AS ordinal, "
+                    "json_extract(r.payload, '$.execution_mode') AS execution_mode "
+                    "FROM generation_runs r JOIN generation_candidates c "
+                    "ON json_extract(c.payload, '$.generation_run_id') = r.record_key "
+                    "WHERE json_extract(r.payload, '$.project_id') = ? "
+                    "AND json_extract(c.payload, '$.kind') = 'image'",
+                    (str(project_id),),
+                )
+                keys = [column[0] for column in cursor.description]
+                return [dict(zip(keys, row, strict=True)) for row in cursor.fetchall()]
+
+        return await asyncio.to_thread(read)
+
     async def save_video_clip_preparation(
         self,
         preparation: VideoClipPreparation,

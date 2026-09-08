@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
+import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
+import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import { ImageAssetPromptEditor } from "./prompt-references/ImageAssetPromptEditor.jsx";
 import {
   ArrowCounterClockwise,
@@ -20,7 +22,6 @@ import {
   X,
 } from "@phosphor-icons/react";
 import {
-  REFERENCE_ROLE_OPTIONS,
   duplicateVisualBeatSourceIds,
   estimateImageGenerationCostMicros,
   generationFailureGuidance,
@@ -41,7 +42,6 @@ import { ImageGenerationCommandBar } from "./image-generation-controls/ImageGene
 import { ShotNavigationThumbnail } from "./ShotNavigationThumbnail.jsx";
 import { ImageBatchToolbar } from "./image-generation-controls/ImageBatchToolbar.jsx";
 import { SkillShotNavigation } from "./image-generation-controls/SkillShotNavigation.jsx";
-import { AutosaveStatus } from "./ui/system/index.js";
 import {
   assetDirectoryLabel,
   assetMentionLabel,
@@ -59,6 +59,7 @@ const DEFAULT_ROLE_BY_TYPE = Object.freeze({
   style: "style",
   prop: "layout",
 });
+const ASSET_TYPE_LABELS = { person: "人物", product: "产品", wardrobe: "服装", clothing: "服装", scene: "场景", style: "风格", prop: "道具", logo: "标志", other: "其他" };
 
 function seconds(value) {
   return Number(value || 0).toFixed(1);
@@ -310,6 +311,7 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
 }
 
 export function ShotImageWorkspace({
+  upstreamInputsChanged = false,
   globalPromptRef,
   initialCandidateId = "",
   onPreviewCandidate,
@@ -330,7 +332,6 @@ export function ShotImageWorkspace({
   setGenerationResolution,
   onGenerationModelChange,
   project,
-  advanced,
   busy,
   error,
   resolveUrl,
@@ -790,15 +791,6 @@ export function ShotImageWorkspace({
     });
   }
 
-  function changeBindingRole(assetId, role) {
-    setDraft((state) => ({
-      ...state,
-      referenceBindings: state.referenceBindings.map((item) => (
-        item.reference_asset_id === assetId ? { ...item, role } : item
-      )),
-    }));
-  }
-
   function moveShot(shotId, offset) {
     const currentIndex = activeShots.findIndex((item) => item.plan.id === shotId);
     const targetIndex = currentIndex + offset;
@@ -975,14 +967,14 @@ export function ShotImageWorkspace({
           </p>
         </div>
         <div className="shot-gate-summary">
-          <span>{gate?.approved_shot_count || 0} / {gate?.required_shot_count || shots.length} 已确认</span>
+          <span>已采用 {gate?.approved_image_count || 0} 张</span>
           <button
             className="primary-button compact"
-            disabled={busy || (!advanced && !gate?.allowed)}
+            disabled={busy || !gate?.allowed}
             onClick={onAdvance}
             type="button"
           >
-            {advanced ? "继续到分镜视频" : "确认图片，进入分镜视频"}
+            进入分镜视频
             <ArrowRight size={15} />
           </button>
         </div>
@@ -1006,7 +998,7 @@ export function ShotImageWorkspace({
         onFlush={onFlushDraft} onResults={onBatchResults} onState={setBatchItems} onSelectShot={onSelectShot} />}
       <div className="shot-workspace-grid">
         {isSkillMode ? <SkillShotNavigation shots={activeShots} discarded={discardedShots} selectedId={selectedShotId}
-          busy={busy} items={batchItems} handlers={navigationHandlers} /> : <aside className="shot-navigation-panel">
+          busy={busy} items={batchItems} handlers={navigationHandlers} resolveUrl={resolveUrl} shotDetail={detailReady ? shotDetail : null} /> : <aside className="shot-navigation-panel">
           <div className="shot-panel-title">
             <div><strong>分镜列表</strong><small>{activeShots.length} 个有效镜头</small></div>
             <button
@@ -1066,7 +1058,6 @@ export function ShotImageWorkspace({
                           : approvedImageLabel
                             ? `图片 · ${approvedImageLabel}`
                             : "图片"}
-                        {` · ${seconds(shot.start_seconds)}s — ${seconds(shot.end_seconds)}s`}
                       </small>
                     </span>
                   </button>
@@ -1119,7 +1110,7 @@ export function ShotImageWorkspace({
                       { kind: "source_keyframe", url: item.plan.source_keyframe_url },
                     ]}
                   />
-                  <span className="shot-discarded-copy">原分镜 · {seconds(item.plan.start_seconds)}s—{seconds(item.plan.end_seconds)}s</span>
+                  <span className="shot-discarded-copy">分镜 {item.plan.index}</span>
                   <button disabled={busy} onClick={() => onRestoreShot(item.plan.id)} type="button"><ArrowCounterClockwise size={13} />恢复</button>
                 </div>
               ))}
@@ -1140,17 +1131,35 @@ export function ShotImageWorkspace({
             <>
               <div className="shot-canvas-heading">
                 <div>
-                  <small>分镜 {plan.index}</small>
-                  <strong>
-                    {seconds(plan.start_seconds)}s — {seconds(plan.end_seconds)}s
-                    {!sourceVideoMode && activeVisualBeat ? ` · 画面 ${activeVisualBeat.index}` : ""}
-                  </strong>
+                  {!sourceVideoMode && visualBeats.length === 1 ? (
+                    <strong>分镜 {plan.index}</strong>
+                  ) : (
+                    <>
+                      <small>分镜 {plan.index}</small>
+                      <strong>
+                        {seconds(plan.start_seconds)}s — {seconds(plan.end_seconds)}s
+                        {!sourceVideoMode && activeVisualBeat ? ` · 画面 ${activeVisualBeat.index}` : ""}
+                      </strong>
+                    </>
+                  )}
                 </div>
-                {!sourceVideoMode && (
-                  <span className={"workflow-pill " + workflowStatusClass(plan.image_status)}>
-                    {workflowStatusLabel(plan.image_status)}
-                  </span>
-                )}
+                <div className="shot-canvas-actions">
+                  {!sourceVideoMode && plan.image_status !== "ready" && (
+                    <span className={"workflow-pill " + workflowStatusClass(plan.image_status)}>
+                      {workflowStatusLabel(plan.image_status)}
+                    </span>
+                  )}
+                  {!sourceVideoMode && visualBeats.length === 1 && (
+                    <button
+                      className="text-button compact"
+                      disabled={busy}
+                      onClick={onCreateVisualBeat}
+                      type="button"
+                    >
+                      <Plus size={14} />新增画面
+                    </button>
+                  )}
+                </div>
               </div>
               {sourceVideoMode ? (
                 <article className="shot-source-video-passthrough">
@@ -1184,7 +1193,7 @@ export function ShotImageWorkspace({
                 </article>
               ) : (
                 <>
-                  {activeVisualBeat && (
+                  {activeVisualBeat && visualBeats.length > 1 && (
                 <section className="visual-beat-editor" aria-label="分镜内画面顺序">
                   <header>
                     <div>
@@ -1256,10 +1265,10 @@ export function ShotImageWorkspace({
                   </div>
                 </section>
               )}
-              {plan.image_status === "stale" && (
-                <div className="shot-stale-warning">
+              {(upstreamInputsChanged || activeVisualBeat?.image_inputs_changed || plan.image_inputs_changed || plan.image_status === "stale" || globalPromptWasEdited(shotDetail, globalPrompts, "image")) && (
+                <div className="shot-video-input-version-notice" role="status">
                   <WarningCircle size={17} weight="fill" />
-                  上游输入已经修改，旧审批图仍保留，但必须重新生成并确认。
+                  上游内容已更新，已有图片仍可继续使用；如需匹配最新内容，可重新生成。
                 </div>
               )}
               <div
@@ -1277,9 +1286,7 @@ export function ShotImageWorkspace({
                     <div>
                       <strong>{hasSourcePreview ? "当前关键帧" : "已采用图片"}</strong>
                     </div>
-                    {(approvedIsSource || visualChoice === "source") && (
-                      <span>{approvedIsSource ? "已采用" : "已选择"}</span>
-                    )}
+                    {approvedIsSource && <span>已采用</span>}
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
@@ -1316,9 +1323,7 @@ export function ShotImageWorkspace({
                     <div>
                       <strong>AI 生成图</strong>
                     </div>
-                    {(displayedCandidateIsApproved || visualChoice === "candidate") && (
-                      <span>{displayedCandidateIsApproved ? "已采用" : "已选择"}</span>
-                    )}
+                    {displayedCandidateIsApproved && <span>已采用</span>}
                   </figcaption>
                   <div className="shot-media-frame">
                     <MediaPreview
@@ -1349,7 +1354,7 @@ export function ShotImageWorkspace({
                   <header className="shot-candidate-library-heading">
                     <div>
                       <strong>AI 图片候选</strong>
-                      <small>共 {candidates.length} 张，点击缩略图切换当前采用目标</small>
+                      <small>共 {candidates.length} 张，点击缩略图切换预览</small>
                     </div>
                     {historicalCandidateCount > 0 && (
                       <button
@@ -1388,6 +1393,8 @@ export function ShotImageWorkspace({
                         disabled={busy}
                         name={`分镜 ${plan.index} 生成图片`}
                         onNotice={onNotice}
+                        previewUrl={resolveUrl(displayedCandidate.thumbnail_url || displayedCandidate.content_url)}
+                        projectId={plan.project_id}
                         request={request}
                         shotPlanId={plan.id}
                         sourceEntityId={displayedCandidate.id}
@@ -1501,23 +1508,17 @@ export function ShotImageWorkspace({
         {detailReady && plan && !sourceVideoMode && (
           <aside className="shot-inspector-panel">
           <div className="shot-inspector-form">
-            <div className="shot-panel-title">
-              <strong>分镜配置</strong>
-              <AutosaveStatus
-                onRetry={() => Promise.resolve(onRetryDraftSave?.()).catch(() => undefined)}
-                state={saveState}
-              />
-            </div>
-            <label className="production-field">
-              <span>局部图片提示词</span>
+            <div className="production-field local-prompt-editor">
+              <PromptSectionHeader title="局部图片提示词" titleId={`image-prompt-label-${activeVisualBeat?.id || plan.id}`} state={saveState} onRetry={() => Promise.resolve(onRetryDraftSave?.()).catch(() => undefined)} />
               <ImageAssetPromptEditor
                 key={activeVisualBeat?.id || plan.id}
+                labelledBy={`image-prompt-label-${activeVisualBeat?.id || plan.id}`}
                 ref={promptRef} assets={assets} draft={draft} setDraft={setDraft}
                 disabled={busy} resolveUrl={resolveUrl} onBlur={onFlushDraft}
                 onAddAssets={onAddAssets}
                 sourceFrame={generationInputMode === "keyframe_edit"}
               />
-            </label>
+            </div>
             <PromptPreview common={globalPrompts.common_image_prompt} local={draft.imagePrompt} label="图片提示词" />
             <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" request={request} onChange={setGlobalPrompts} disabled={busy} />
             <fieldset className="shot-reference-field">
@@ -1541,47 +1542,15 @@ export function ShotImageWorkspace({
                           <AssetThumbnail asset={asset} resolveUrl={resolveUrl} />
                           <span>
                             <strong>{asset.name}</strong>
-                            <small>{asset.type}</small>
+                            <small>{ASSET_TYPE_LABELS[asset.type] || "参考素材"}</small>
                           </span>
                         </label>
-                        {binding && (
-                          <select
-                            aria-label={asset.name + "参考角色"}
-                            onChange={(event) => changeBindingRole(asset.id, event.target.value)}
-                            value={binding.role}
-                          >
-                            {REFERENCE_ROLE_OPTIONS.map((option) => (
-                              <option
-                                disabled={
-                                  option.id === "identity"
-                                  && identityPolicy.primaryBinding
-                                  && identityPolicy.primaryBinding.reference_asset_id !== asset.id
-                                }
-                                key={option.id}
-                                value={option.id}
-                              >
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        )}
                       </div>
                     );
                   })}
                 </div>
               )}
             </fieldset>
-            <label className="shot-required-check">
-              <input
-                checked={draft.required}
-                onChange={(event) => setDraft((state) => ({ ...state, required: event.target.checked }))}
-                type="checkbox"
-              />
-              <span>
-                <strong>必需分镜</strong>
-                <small>未确认时阻止进入分段视频</small>
-              </span>
-            </label>
           </div>
           </aside>
         )}

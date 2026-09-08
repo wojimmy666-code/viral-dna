@@ -551,6 +551,8 @@ export function VideoCandidateLibrary({
             disabled={interactionBusy}
             name={`分镜 ${plan.index} 生成视频`}
             onNotice={onNotice}
+            previewUrl={resolveUrl(displayedCandidate.thumbnail_url)}
+            projectId={plan.project_id}
             request={request}
             shotPlanId={plan.id}
             sourceEntityId={displayedCandidate.id}

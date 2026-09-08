@@ -224,6 +224,7 @@ class ProductionChangeKind(StrEnum):
     VIDEO_APPROVAL_REVOKED = "video_approval_revoked"
     VIDEO_REJECTED = "video_rejected"
     VIDEO_PREPARATION_CHANGED = "video_preparation_changed"
+    VIDEO_EDITING_SELECTION_CHANGED = "video_editing_selection_changed"
     ANALYSIS_PROMPTS_SYNCED = "analysis_prompts_synced"
     WORKFLOW_ADVANCED = "workflow_advanced"
     BRANCH_CREATED = "branch_created"
@@ -905,7 +906,7 @@ class ImageGenerationSettingsUpdate(BaseModel):
         max_length=160,
         pattern=r"^[a-zA-Z0-9_./:-]+$",
     )
-    local_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
+    local_reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "medium"
     local_proxy_mode: Literal["system", "manual", "disabled"] = "system"
     local_proxy_url: str | None = Field(default=None, max_length=500)
     local_windows_sandbox_mode: Literal["auto", "elevated", "unelevated"] = "auto"
@@ -958,7 +959,7 @@ class ImageGenerationSettingsResponse(BaseModel):
     semantic_quality_enabled: bool = False
     local_model_policy: str = "latest_flagship"
     local_model: str | None = None
-    local_reasoning_effort: str = "xhigh"
+    local_reasoning_effort: str = "medium"
     local_windows_sandbox_mode: Literal["auto", "elevated", "unelevated"] = "auto"
     local_proxy_mode: Literal["system", "manual", "disabled"] = "system"
     local_proxy_url: str | None = None
@@ -1019,7 +1020,7 @@ class LocalCodexDiscoveryResponse(BaseModel):
     recommended_adapter_id: str = "codex_imagegen_v1"
     recommended_model_policy: Literal["latest_flagship"] = "latest_flagship"
     recommended_model: str = "gpt-5.6-sol"
-    recommended_reasoning_effort: Literal["xhigh"] = "xhigh"
+    recommended_reasoning_effort: Literal["medium"] = "medium"
     model_catalog_version: str
     wrapper_path: str
     can_auto_configure: bool = False
@@ -1031,7 +1032,7 @@ class LocalCodexDiscoveryResponse(BaseModel):
 class LocalCodexAutoConfigureRequest(BaseModel):
     model_policy: Literal["latest_flagship", "pinned", "balanced"] = "latest_flagship"
     model: str | None = Field(default=None, max_length=160)
-    reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "xhigh"
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "medium"
     default_candidate_count: int = Field(default=1, ge=1, le=4)
     proxy_mode: Literal["system", "manual", "disabled"] = "system"
     proxy_url: str | None = Field(default=None, max_length=500)
@@ -2103,6 +2104,8 @@ class ShotVisualBeat(BaseModel):
     required: bool = True
     image_status: WorkflowItemStatus = WorkflowItemStatus.DRAFT
     approved_image_candidate_id: UUID | None = None
+    image_inputs_changed: bool = False
+    image_inputs_updated_at: datetime | None = None
     transition_to_next_type: Literal[
         "cut",
         "dissolve",
@@ -2261,6 +2264,12 @@ class ShotPlan(BaseModel):
     video_status: WorkflowItemStatus = WorkflowItemStatus.DRAFT
     approved_image_candidate_id: UUID | None = None
     approved_video_candidate_id: UUID | None = None
+    # Default eligibility follows adoption; an explicit exclusion survives re-adoption.
+    include_in_editing: bool = True
+    image_inputs_changed: bool = False
+    video_inputs_changed: bool = False
+    image_inputs_updated_at: datetime | None = None
+    video_inputs_updated_at: datetime | None = None
     visual_beats: list[ShotVisualBeat] = Field(default_factory=list, max_length=20)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -2389,6 +2398,8 @@ class ShotPlan(BaseModel):
                     required=self.required,
                     image_status=self.image_status,
                     approved_image_candidate_id=self.approved_image_candidate_id,
+                    image_inputs_changed=self.image_inputs_changed,
+                    image_inputs_updated_at=self.image_inputs_updated_at,
                     created_at=self.created_at,
                     updated_at=self.updated_at,
                 )
@@ -3175,6 +3186,11 @@ class ShotLifecycleUpdate(BaseModel):
     insert_after_shot_plan_id: UUID | None = None
 
 
+class ShotEditingSelectionUpdate(BaseModel):
+    expected_revision_id: UUID
+    include_in_editing: bool
+
+
 class ShotPlanReorder(BaseModel):
     expected_revision_id: UUID
     ordered_shot_plan_ids: list[UUID] = Field(min_length=1, max_length=200)
@@ -3698,6 +3714,7 @@ class GenerationRunResponse(BaseModel):
 
 
 class ShotPlanDetailResponse(ShotPlanResponse):
+    current_global_prompts: dict[str, str] = Field(default_factory=dict)
     generation_runs: list[GenerationRunResponse] = Field(default_factory=list)
     approval_events: list[ApprovalEvent] = Field(default_factory=list)
     video_preparation: VideoClipPreparationResponse | None = None
@@ -3734,6 +3751,10 @@ class ProductionGateStatus(BaseModel):
     allowed: bool
     required_shot_count: int = Field(ge=0)
     approved_shot_count: int = Field(ge=0)
+    approved_image_count: int = Field(default=0, ge=0)
+    eligible_video_shot_ids: list[UUID] = Field(default_factory=list)
+    selected_video_shot_ids: list[UUID] = Field(default_factory=list)
+    selected_video_count: int = Field(default=0, ge=0)
     prepared_shot_count: int = Field(default=0, ge=0)
     quality_warning_shot_count: int = Field(default=0, ge=0)
     stale_shot_count: int = Field(ge=0)
@@ -3973,6 +3994,8 @@ class ProductionTimeline(BaseModel):
     schema_version: Literal["viral-dna-timeline/v2"] = "viral-dna-timeline/v2"
     project_id: UUID
     source_handoff_revision_id: UUID
+    upstream_inputs_changed: bool = False
+    upstream_sync_available: bool = False
     revision_id: UUID
     revision_number: int = Field(ge=1)
     output_aspect_ratio: str = Field(min_length=3, max_length=20)
@@ -4018,6 +4041,10 @@ class TimelineUpdateRequest(BaseModel):
 
 
 class TimelineClipInspectionRequest(BaseModel):
+    expected_revision_id: UUID
+
+
+class TimelineHandoffSyncRequest(BaseModel):
     expected_revision_id: UUID
 
 

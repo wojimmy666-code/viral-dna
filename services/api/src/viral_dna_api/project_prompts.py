@@ -12,6 +12,7 @@ from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, Field
 
+from .prompt_engine.punctuation import normalize_prompt_punctuation
 from .prompt_engine.still_image import static_image_text
 
 
@@ -44,6 +45,7 @@ def sections(value: str) -> list[str]:
 
 def local_prompt(value: str, context: ProjectPromptRevision, part: str) -> str:
     """Only exact known shared blocks are removed; ambiguous/manual prose stays local."""
+    value = normalize_prompt_punctuation(value)
     if part == "image":
         value = static_image_text(value)
     shared = {
@@ -53,7 +55,9 @@ def local_prompt(value: str, context: ProjectPromptRevision, part: str) -> str:
             getattr(context, f"common_{part}_prompt"),
             *getattr(context, f"known_{part}_prompts"),
         )
-        for text in sections(static_image_text(source) if part == "image" else source)
+        for text in sections(
+            static_image_text(source) if part == "image" else normalize_prompt_punctuation(source)
+        )
     }
     parsed = sections(value)
     technical = {
@@ -78,7 +82,9 @@ def local_prompt(value: str, context: ProjectPromptRevision, part: str) -> str:
 def compose_prompt(local: str, common: str, part: str) -> str:
     if part == "image":
         local, common = static_image_text(local), static_image_text(common)
-    return "\n\n".join(text.strip() for text in (common, local) if text.strip())
+    return normalize_prompt_punctuation(
+        "\n\n".join(text.strip() for text in (common, local) if text.strip())
+    )
 
 
 def production_local_token(plans, drafts) -> str:
@@ -113,7 +119,10 @@ def prompt_snapshot(value: str, context: ProjectPromptRevision, part: str) -> di
 def extract_shared(prompts: list[str], part: str) -> str:
     if not prompts:
         return ""
-    parsed = [sections(static_image_text(text) if part == "image" else text) for text in prompts]
+    parsed = [
+        sections(static_image_text(text) if part == "image" else normalize_prompt_punctuation(text))
+        for text in prompts
+    ]
     common = set(parsed[0]).intersection(*(set(items) for items in parsed[1:]))
     return "\n\n".join(
         text for text in parsed[0] if text in common and re.match(r"【全片[^】]*】", text)
@@ -170,6 +179,12 @@ class ProjectPromptService:
                     )
                     for part in ("image", "video")
                 }
+                | {
+                    "common_image_prompt": static_image_text(current.common_image_prompt),
+                    "common_video_prompt": normalize_prompt_punctuation(
+                        current.common_video_prompt
+                    ),
+                }
             )
         image = static_image_text(image)
         digest = hashlib.sha256((image + "\0" + video).encode("utf-8")).hexdigest()
@@ -177,7 +192,7 @@ class ProjectPromptService:
             id=uuid5(NAMESPACE_URL, f"viraldna:prompts:{scope_id}:{digest}"),
             project_id=scope_id,
             common_image_prompt=image,
-            common_video_prompt=video,
+            common_video_prompt=normalize_prompt_punctuation(video),
             original_image_prompt=image,
             original_video_prompt=video,
             created_at=datetime(2000, 1, 1, tzinfo=UTC),
@@ -188,7 +203,7 @@ class ProjectPromptService:
             raise PromptRevisionConflict("全局提示词已在其他页面更新，当前草稿已保留，请刷新后核对")
         image, video = (
             static_image_text(payload.common_image_prompt),
-            payload.common_video_prompt.strip(),
+            normalize_prompt_punctuation(payload.common_video_prompt.strip()),
         )
         if (image, video) == (current.common_image_prompt, current.common_video_prompt):
             return current

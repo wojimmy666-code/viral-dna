@@ -22,6 +22,7 @@ from .models import (
     TimelineChangeKind,
     TimelineClip,
     TimelineClipInspectionRequest,
+    TimelineHandoffSyncRequest,
     TimelinePreviewCreate,
     TimelineRenderJob,
     TimelineRenderStatus,
@@ -36,6 +37,7 @@ from .models import (
     utc_now,
 )
 from .notifications import NotificationPublisher
+from .production import ProductionServiceError
 from .production_media import ProductionVideoInspectionError, ProductionVideoInspector
 from .timeline_render import TimelinePreviewRenderer, TimelineRenderError, preview_dimensions
 from .workspace import WorkspaceError, WorkspaceManager
@@ -128,18 +130,39 @@ class TimelineService:
         async with lock:
             timeline = await asyncio.to_thread(self._read_current_timeline, project)
             if timeline is not None:
-                timeline = await self._synchronize_timeline_with_handoff(project, timeline)
-                clips = []
-                for clip in timeline.clips:
-                    if clip.editing_guidance is None:
-                        plan = await self.repository.get_shot_plan(clip.shot_plan_id)
-                        if plan and plan.editing_guidance is not None:
-                            clip = clip.model_copy(
-                                update={"editing_guidance": plan.editing_guidance}
-                            )
-                    clips.append(clip)
-                return timeline.model_copy(update={"clips": clips})
+                try:
+                    handoff = await self._latest_handoff(project.id)
+                    changed = timeline.source_handoff_revision_id != handoff.revision_id
+                    timeline = timeline.model_copy(
+                        update={
+                            "upstream_inputs_changed": changed,
+                            "upstream_sync_available": changed,
+                        }
+                    )
+                except ProductionServiceError:
+                    # Missing newer inputs cannot invalidate an already saved timeline.
+                    timeline = timeline.model_copy(
+                        update={
+                            "upstream_inputs_changed": True,
+                            "upstream_sync_available": False,
+                        }
+                    )
+                return timeline
             return await self._initialize_timeline(project)
+
+    async def _latest_handoff(self, project_id):
+        provider = getattr(self.handoff_provider, "get_current_editing_handoff", None)
+        return await (provider or self.handoff_provider.get_editing_handoff)(project_id)
+
+    async def synchronize_handoff(self, project_id: UUID, payload: TimelineHandoffSyncRequest):
+        project = await self._require_project(project_id)
+        async with self._project_locks.setdefault(project_id, asyncio.Lock()):
+            current = await self._require_current_timeline(project)
+            self._require_revision(current, payload.expected_revision_id)
+            try:
+                return await self._synchronize_timeline_with_handoff(project, current)
+            except ProductionServiceError as exc:
+                raise _fail(exc.status_code, exc.code, str(exc)) from exc
 
     async def update_timeline(
         self,
@@ -465,7 +488,7 @@ class TimelineService:
                 f"恢复时间线版本 {source.revision_number}",
                 source.revision_id,
             )
-            return await self._synchronize_timeline_with_handoff(project, saved)
+            return saved
 
     async def create_preview(
         self,
@@ -628,7 +651,7 @@ class TimelineService:
         project: ProductionProject,
         current: ProductionTimeline,
     ) -> ProductionTimeline:
-        handoff = await self.handoff_provider.get_editing_handoff(project.id)
+        handoff = await self._latest_handoff(project.id)
         if current.source_handoff_revision_id == handoff.revision_id:
             return current
 
@@ -749,6 +772,8 @@ class TimelineService:
         next_timeline = current.model_copy(
             update={
                 "source_handoff_revision_id": handoff.revision_id,
+                "upstream_inputs_changed": False,
+                "upstream_sync_available": False,
                 "revision_id": uuid4(),
                 "revision_number": current.revision_number + 1,
                 "clips": next_clips,
@@ -783,7 +808,9 @@ class TimelineService:
         )
 
     async def _initialize_timeline(self, project: ProductionProject) -> ProductionTimeline:
-        handoff = await self.handoff_provider.get_editing_handoff(project.id)
+        # A first timeline must consume the current selected subset. Only an
+        # existing saved timeline is frozen until explicit handoff sync.
+        handoff = await self._latest_handoff(project.id)
         clips: list[TimelineClip] = []
         subtitles: list[TimelineSubtitleCue] = []
         seen_cues: set[str] = set()
@@ -1241,7 +1268,12 @@ class TimelineService:
         if project is None:
             raise _fail(404, "production_missing", "创作方案不存在")
         if project.active_step not in {ProductionStep.EDITING, ProductionStep.EXPORT}:
-            raise _fail(409, "timeline_not_available", "请先完成分段视频并进入视频剪辑")
+            try:
+                await self.handoff_provider.get_editing_handoff(project.id)
+            except ProductionServiceError as exc:
+                raise _fail(
+                    409, "timeline_not_available", "请先完成分段视频并进入视频剪辑"
+                ) from exc
         return project
 
     async def _require_current_timeline(
@@ -1251,7 +1283,7 @@ class TimelineService:
         timeline = await asyncio.to_thread(self._read_current_timeline, project)
         if timeline is None:
             return await self._initialize_timeline(project)
-        return await self._synchronize_timeline_with_handoff(project, timeline)
+        return timeline
 
     @staticmethod
     def _require_revision(timeline: ProductionTimeline, expected_revision_id: UUID) -> None:

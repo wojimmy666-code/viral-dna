@@ -31,8 +31,10 @@ export function productionNavigation(project = {}, gate = null) {
     ...step,
     enabled: index <= reached || (step.id === "export" && stage === "editing"),
     complete: index < reached,
-    status: index < reached ? "已完成" : step.id === stage && gate && ["shot_images", "shot_videos"].includes(stage)
-      ? `已采用 ${gate.approved_shot_count || 0}/${gate.required_shot_count || 0}` : "",
+    status: index < reached ? "已完成" : step.id === stage && gate?.current_step === stage && ["shot_images", "shot_videos"].includes(stage)
+      ? stage === "shot_images"
+        ? `已采用 ${gate.approved_image_count || 0} 张`
+        : `已选 ${gate.selected_video_count || 0} 个视频` : "",
   }));
 }
 

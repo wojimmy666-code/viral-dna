@@ -198,6 +198,7 @@ def _run_process(
     timeout_seconds: int,
     proxy_url: str | None = None,
     cancel_event: Event | None = None,
+    stop_event: Event | None = None,
 ) -> tuple[int, str, str]:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     process = subprocess.Popen(
@@ -216,7 +217,9 @@ def _run_process(
     )
     deadline = time.monotonic() + timeout_seconds
     while True:
-        if cancel_event is not None and cancel_event.is_set():
+        if (cancel_event is not None and cancel_event.is_set()) or (
+            stop_event is not None and stop_event.is_set()
+        ):
             _kill_process_tree(process)
             process.communicate()
             raise ImageGenerationError(
@@ -466,6 +469,48 @@ class LocalToolImageAdapter:
         self.timeout_seconds = timeout_seconds
         self.proxy_url = proxy_url
 
+    async def _publish_progress(
+        self, request: AdapterRequest, output_root: Path, published: dict[int, str]
+    ) -> None:
+        if request.on_image is None or (request.cancel_event and request.cancel_event.is_set()):
+            return
+
+        def read_images() -> list[tuple[int, str, GeneratedImage]]:
+            path = output_root / "progress.json"
+            if not path.is_file() or path.stat().st_size > MAX_RESULT_JSON_BYTES:
+                return []
+            try:
+                progress = _parse_json_document(path.read_text("utf-8"), field_name="生图进度")
+                candidates = progress.get("candidates")
+                if (
+                    progress.get("protocol_version") != self.identity.protocol_version
+                    or progress.get("request_id") != str(request.request_id)
+                    or not isinstance(candidates, list)
+                    or len(candidates) > request.candidate_count
+                ):
+                    return []
+                images = []
+                for ordinal, candidate in enumerate(candidates, start=1):
+                    if ordinal in published:
+                        continue
+                    if not isinstance(candidate, dict):
+                        return []
+                    image = _validate_image(
+                        _safe_output_path(output_root, candidate.get("path")), candidate
+                    )
+                    images.append((ordinal, str(candidate.get("sha256")), image))
+                return images
+            except (OSError, ValueError, ImageGenerationError):
+                # Progress is optional. The final manifest still undergoes strict
+                # validation, so malformed/foreign progress never becomes media.
+                return []
+
+        for ordinal, checksum, image in await asyncio.to_thread(read_images):
+            if request.cancel_event and request.cancel_event.is_set():
+                break
+            await request.on_image(ordinal, image)
+            published[ordinal] = checksum
+
     async def generate(self, request: AdapterRequest) -> AdapterResult:
         filesystem_run_root = _filesystem_path(request.run_root)
         input_root = filesystem_run_root / "tool-inputs"
@@ -524,7 +569,8 @@ class LocalToolImageAdapter:
                 "inputs": inputs,
             },
         )
-        return_code, _stdout, stderr = await asyncio.to_thread(
+        stop_event = Event()
+        process_task = asyncio.create_task(asyncio.to_thread(
             _run_process,
             [
                 str(self.executable),
@@ -541,7 +587,18 @@ class LocalToolImageAdapter:
             timeout_seconds=self.timeout_seconds,
             proxy_url=self.proxy_url,
             cancel_event=request.cancel_event,
-        )
+            stop_event=stop_event,
+        ))
+        published: dict[int, str] = {}
+        try:
+            while not process_task.done():
+                await asyncio.wait({process_task}, timeout=0.25)
+                await self._publish_progress(request, output_root, published)
+            return_code, _stdout, stderr = await process_task
+        finally:
+            if not process_task.done():
+                stop_event.set()
+                await asyncio.gather(process_task, return_exceptions=True)
         if return_code != 0:
             if self.identity.adapter_id == CODEX_IMAGEGEN_ADAPTER_ID:
                 known_error = _codex_windows_sandbox_error(stderr)
@@ -583,6 +640,15 @@ class LocalToolImageAdapter:
                 502,
                 "local_tool_candidates_excess",
                 "本机工具返回候选数量超限",
+            )
+        if any(
+            ordinal > len(raw_candidates)
+            or not isinstance(raw_candidates[ordinal - 1], dict)
+            or raw_candidates[ordinal - 1].get("sha256") != checksum
+            for ordinal, checksum in published.items()
+        ):
+            raise ImageGenerationError(
+                502, "local_tool_output_changed", "最终结果与已发布图片不一致，已完成图片保留",
             )
         images = tuple(
             _validate_image(_safe_output_path(output_root, item.get("path")), item)

@@ -659,6 +659,7 @@ class SkillRun(BaseModel):
     completed_at: datetime | None = None
     cancel_requested_at: datetime | None = None
     last_error: str | None = Field(default=None, max_length=2000)
+    upstream_update_messages: list[str] = Field(default_factory=list)
 
 
 class SkillRunCreate(BaseModel):
@@ -773,6 +774,26 @@ class GateDecision(BaseModel):
     note: str = Field(default="", max_length=1000)
     related_revision_ids: list[UUID] = Field(default_factory=list, max_length=100)
     created_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def is_upstream_advisory(self) -> bool:
+        return (
+            self.actor_type == GateActorType.SYSTEM
+            and self.decision == GateDecisionValue.REQUEST_REVISION
+            and self.note
+            in {
+                "创作简报已更新",
+                "素材用途或授权已更新",
+                "事实声明证据已更新",
+                "Look Test 采用结果已更新",
+                "分镜提示词或镜头结构已更新",
+                "大纲已更新",
+                "分镜提示词或时长已更新",
+                "画面锁定版本已更新",
+                "声音、混音或字幕版本已更新",
+                "交付清单已更新",
+            }
+        )
 
     @model_validator(mode="after")
     def system_cannot_approve(self) -> GateDecision:

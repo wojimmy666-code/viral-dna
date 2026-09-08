@@ -272,10 +272,10 @@ class ImageGenerationSettingsService:
             local_model_policy = "latest_flagship"
         local_reasoning_effort = get_config_value(
             "VIRAL_DNA_IMAGE_LOCAL_REASONING_EFFORT",
-            "xhigh",
+            "medium",
         )
         if local_reasoning_effort not in {"low", "medium", "high", "xhigh"}:
-            local_reasoning_effort = "xhigh"
+            local_reasoning_effort = "medium"
         local_adapter_id = get_config_value(
             "VIRAL_DNA_IMAGE_LOCAL_ADAPTER_ID",
             "viral_dna_json_v1",
@@ -759,7 +759,7 @@ class ImageGenerationSettingsService:
                 local_executable_path=sys.executable,
                 local_fixed_args=fixed_args,
                 local_timeout_seconds=1200,
-                local_concurrency=1,
+                local_concurrency=2,
                 local_protocol_version=LOCAL_TOOL_PROTOCOL_VERSION,
                 local_cost_source=GenerationCostSource.SUBSCRIPTION_QUOTA.value,
                 local_unit_cost_micros=None,

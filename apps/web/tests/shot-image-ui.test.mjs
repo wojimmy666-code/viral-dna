@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { globalPromptWasEdited } from "../src/prompt-context/input-freshness.js";
+
+test("global prompt notices are part-specific and do not flag hydration or a reverted edit", () => {
+  const detail = { current_global_prompts: { common_image_prompt: "柔光", common_video_prompt: "慢推" } };
+  assert.equal(globalPromptWasEdited(detail, {}, "image"), false);
+  assert.equal(globalPromptWasEdited({}, { common_image_prompt: "暖光" }, "image"), false);
+  assert.equal(globalPromptWasEdited(detail, { common_image_prompt: "暖光", common_video_prompt: "慢推" }, "image"), true);
+  assert.equal(globalPromptWasEdited(detail, { common_image_prompt: "暖光", common_video_prompt: "慢推" }, "video"), false);
+  assert.equal(globalPromptWasEdited(detail, { common_image_prompt: "柔光" }, "image"), false);
+});
 
 import {
   assetMentionLabel,
@@ -38,6 +48,14 @@ const imageControlStyles = readFileSync(
   new URL("../src/image-generation-controls/image-generation-controls.css", import.meta.url),
   "utf8",
 );
+
+test("image entry is a one-adopted-picture action without a required-shot checkbox", () => {
+  assert.doesNotMatch(shotImageSource, /必需分镜|未确认时阻止|shot-required-check|draft\.required/);
+  assert.match(shotImageSource, /已采用 \{gate\?\.approved_image_count \|\| 0\} 张/);
+  assert.match(shotImageSource, /disabled=\{busy \|\| !gate\?\.allowed\}/);
+  assert.doesNotMatch(shotImageSource, /确认图片，进入|advanced/);
+  assert.match(productionWorkflowSource, /gate=\{gate\?\.current_step === "shot_images" \? gate : null\}/);
+});
 
 test("shows directory and asset name while keeping the reference id stable", () => {
   const asset = {
@@ -138,7 +156,7 @@ test("routes image prompt references and bindings through one visual-beat save",
 });
 
 test("auto-saves image prompt edits without a manual save action", () => {
-  assert.match(shotImageSource, /<AutosaveStatus/);
+  assert.match(shotImageSource, /<PromptSectionHeader[^>]*state=\{saveState\}/);
   assert.match(shotImageSource, /<ImageAssetPromptEditor[\s\S]*onBlur=\{onFlushDraft\}/);
   assert.doesNotMatch(shotImageSource, /保存草稿不会自动生成|type="submit">[\s\S]{0,120}保存/);
   assert.match(productionWorkflowSource, /const SHOT_IMAGE_AUTOSAVE_DELAY_MS = 700/);
@@ -146,6 +164,21 @@ test("auto-saves image prompt edits without a manual save action", () => {
   assert.match(productionWorkflowSource, /setTargetSaveState\(target\.key, "dirty"\)/);
   assert.match(productionWorkflowSource, /const persistedShotDetail = await flushShotDraft\(\)/);
   assert.match(productionWorkflowSource, /onRetryDraftSave=\{retryShotDraftSave\}/);
+});
+
+test("hides the ready badge without hiding generation and failure states", () => {
+  assert.match(shotImageSource, /!sourceVideoMode && plan.image_status !== "ready" &&/);
+  assert.match(shotImageSource, /workflowStatusLabel\(plan.image_status\)/);
+});
+
+test("single visual beat is compact in the shared image workspace, independent of project origin", () => {
+  const heading = shotImageSource.slice(shotImageSource.indexOf('<div className="shot-canvas-heading">'), shotImageSource.indexOf('<article className="shot-source-video-passthrough">'));
+  assert.match(heading, /!sourceVideoMode && visualBeats.length === 1 \? \(\s*<strong>分镜 \{plan.index\}<\/strong>/);
+  assert.match(heading, /!sourceVideoMode && visualBeats.length === 1 && \([\s\S]*onClick=\{onCreateVisualBeat\}/);
+  assert.doesNotMatch(heading, /isSkillMode|generationRuns|candidate_count/);
+  assert.match(shotImageSource, /activeVisualBeat && visualBeats.length > 1 && \(\s*<section className="visual-beat-editor"/);
+  assert.match(productionWorkflowSource, /beats\[index \+ 1\] \|\| beats\[index - 1\] \|\| null/);
+  assert.match(productionWorkflowSource, /refreshProject\(detail.project.id, shotDetail.plan.id, nextSelected\?\.id\)/);
 });
 
 test("passes the selected visual beat into the image workspace", () => {

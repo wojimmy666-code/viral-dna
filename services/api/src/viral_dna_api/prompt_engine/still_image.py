@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .punctuation import normalize_prompt_punctuation
+
 VIDEO_SECTIONS = {
     "连续性锁定",
     "主体一致性",
@@ -109,7 +111,7 @@ def static_image_text(value: str | None) -> str:
             body = "".join(fragments).strip("，、；; \n")
         if body:
             blocks.append(label + body)
-    return "\n".join(blocks).strip()
+    return normalize_prompt_punctuation("\n".join(blocks).strip())
 
 
 def static_image_constraints(values: list[str]) -> list[str]:

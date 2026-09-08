@@ -22,6 +22,11 @@ export function referenceAssetsContinueLabel(referenceCount) {
     : "跳过，进入分镜图片";
 }
 
+export function productionGateStatusPath(projectId, section) {
+  const query = ["shot_images", "shot_videos"].includes(section) ? `?step=${section}` : "";
+  return `/productions/${projectId}/gate-status${query}`;
+}
+
 export const REFERENCE_TYPE_OPTIONS = Object.freeze([
   { id: "person", label: "人物" },
   { id: "product", label: "产品" },
@@ -37,6 +42,7 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   reference_changed: "更新参考资产",
   shot_plan_changed: "更新分镜计划",
   shot_structure_changed: "调整分镜结构",
+  video_editing_selection_changed: "调整参与剪辑的视频",
   source_keyframe_changed: "更换分镜关键帧",
   image_candidate_selected: "选择图片候选",
   image_candidates_archived: "删除图片候选",
@@ -151,7 +157,7 @@ export function workflowStatusLabel(value) {
     generating: "生成中",
     review_required: "待确认",
     approved: "已确认",
-    stale: "已过期",
+    stale: "输入已更新",
     failed: "失败",
   }[value] || "待配置";
 }

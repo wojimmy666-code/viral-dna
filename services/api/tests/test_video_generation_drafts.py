@@ -31,6 +31,7 @@ from viral_dna_api.store import InMemoryStore
 from viral_dna_api.video_generation.drafts import (
     ShotVideoGenerationDraftError,
     ShotVideoGenerationDraftService,
+    current_default_input_plan,
 )
 
 
@@ -55,6 +56,28 @@ def make_shot() -> ShotPlan:
         end_seconds=4,
         duration_seconds=4,
     )
+
+
+def test_default_input_includes_optional_adopted_frames_but_not_unadopted_candidates() -> None:
+    shot = make_shot()
+    beats = [
+        ShotVisualBeat(
+            index=index,
+            required=index == 1,
+            start_ratio=(index - 1) / 3,
+            end_ratio=index / 3,
+            approved_image_candidate_id=uuid4() if index < 3 else None,
+        )
+        for index in range(1, 4)
+    ]
+    shot = shot.model_copy(update={"visual_beats": list(reversed(beats))})
+    result = current_default_input_plan(shot)
+    assert [ref.reference_id for ref in result.references] == [
+        beat.approved_image_candidate_id for beat in beats[:2]
+    ]
+    assert [ref.visual_beat_id for ref in result.references] == [beat.id for beat in beats[:2]]
+    assert [ref.order for ref in result.references] == [1, 2]
+    assert all(ref.automatic for ref in result.references)
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from viral_dna_api.models import (
     ProductionStep,
     TimelineChangeKind,
     TimelineClipUpdate,
+    TimelineHandoffSyncRequest,
     TimelinePreviewCreate,
     TimelineRenderStatus,
     TimelineRestoreRequest,
@@ -435,7 +436,23 @@ async def test_timeline_syncs_replaced_video_without_losing_editor_choices(
         }
     )
 
-    synced = await service.get_timeline(project.id)
+    before_read = timeline_path.read_bytes()
+    unchanged = await service.get_timeline(project.id)
+    assert unchanged.revision_id == customized.revision_id
+    assert unchanged.clips == staged.clips
+    assert unchanged.last_preview_job_id == staged.last_preview_job_id
+    assert unchanged.last_export_job_id == staged.last_export_job_id
+    assert unchanged.upstream_inputs_changed and unchanged.upstream_sync_available
+    assert timeline_path.read_bytes() == before_read
+    with pytest.raises(TimelineServiceError) as conflict:
+        await service.synchronize_handoff(
+            project.id, TimelineHandoffSyncRequest(expected_revision_id=original.revision_id)
+        )
+    assert conflict.value.status_code == 409
+    assert timeline_path.read_bytes() == before_read
+    synced = await service.synchronize_handoff(
+        project.id, TimelineHandoffSyncRequest(expected_revision_id=unchanged.revision_id)
+    )
     loaded_again = await service.get_timeline(project.id)
     synced_first = next(clip for clip in synced.clips if clip.shot_plan_id == first.shot_plan_id)
     synced_second = next(clip for clip in synced.clips if clip.shot_plan_id == second.shot_plan_id)
@@ -468,9 +485,9 @@ async def test_timeline_syncs_replaced_video_without_losing_editor_choices(
     restored_first = next(
         clip for clip in restored.clips if clip.shot_plan_id == first.shot_plan_id
     )
-    assert restored.revision_number == 5
-    assert restored.source_handoff_revision_id == provider.manifest.revision_id
-    assert restored_first.candidate_id == replacement_id
+    assert restored.revision_number == 4
+    assert restored.source_handoff_revision_id == original.source_handoff_revision_id
+    assert restored_first.candidate_id == first.candidate_id
     assert [clip.shot_plan_id for clip in restored.clips] == [
         first.shot_plan_id,
         second.shot_plan_id,

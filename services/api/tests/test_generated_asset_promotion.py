@@ -154,6 +154,79 @@ def test_generated_image_promotion_is_idempotent_and_survives_source_cleanup(
     assert "一名人物站在湖边" in serialized
 
 
+def test_candidate_membership_is_independent_and_promotion_preserves_chosen_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, repository, workspace_root = _test_client(tmp_path, monkeypatch)
+    plan, first, _, _ = _seed_image_candidate(repository, workspace_root)
+    second = first.model_copy(update={"id": uuid4(), "ordinal": 2})
+    third = first.model_copy(update={"id": uuid4(), "ordinal": 3})
+    for candidate in (second, third):
+        repository.generation_candidates[candidate.id] = candidate
+
+    def target(candidate):
+        return {"kind": "image_candidate", "source_entity_id": str(candidate.id)}
+
+    with client:
+        first_response = client.post(
+            "/api/v1/assets/from-generated-artifact",
+            json={**target(first), "shot_plan_id": str(plan.id), "name": "第一张图片"},
+        )
+        assert first_response.status_code == 200
+        workspace_id = first_response.json()["asset"]["workspace_id"]
+        statuses = [
+            client.post("/api/v1/assets/generated-artifact-status", json=target(candidate))
+            for candidate in (first, second, third)
+        ]
+        assert all(response.status_code == 200 for response in statuses)
+        assert [response.json()["promoted"] for response in statuses] == [True, False, False]
+
+        folder_response = client.post(
+            f"/api/v1/workspaces/{workspace_id}/asset-folders", json={"name": "滤芯产品"}
+        )
+        assert folder_response.status_code == 201
+        folder_id = folder_response.json()["id"]
+        payload = {
+            **target(second),
+            "shot_plan_id": str(plan.id),
+            "name": "空气滤芯正面",
+            "folder_id": folder_id,
+            "asset_type": "product",
+            "description": "保留真实产品结构",
+            "tags": ["滤芯", "产品"],
+        }
+        promoted = client.post("/api/v1/assets/from-generated-artifact", json=payload)
+        assert promoted.status_code == 200
+        asset = promoted.json()["asset"]
+        assert asset["name"] == payload["name"]
+        assert asset["folder_id"] == folder_id
+        assert asset["type"] == "product"
+        assert asset["description"] == payload["description"]
+        assert asset["tags"] == payload["tags"]
+
+        retried = client.post("/api/v1/assets/from-generated-artifact", json=payload)
+        assert retried.status_code == 200
+        assert retried.json()["already_existed"] is True
+        assert retried.json()["asset"]["id"] == asset["id"]
+        assert len(repository.assets) == 2
+        statuses = [
+            client.post("/api/v1/assets/generated-artifact-status", json=target(candidate))
+            for candidate in (first, second, third)
+        ]
+        assert [response.json()["promoted"] for response in statuses] == [True, True, False]
+
+        invalid_folder = client.post(
+            "/api/v1/assets/from-generated-artifact",
+            json={**payload, **target(third), "folder_id": str(uuid4())},
+        )
+        assert invalid_folder.status_code == 404
+        assert len(repository.assets) == 2
+        assert client.post(
+            "/api/v1/assets/generated-artifact-status", json=target(third)
+        ).json()["promoted"] is False
+
+
 def test_generated_video_and_depth_control_keep_media_metadata(
     tmp_path: Path,
     monkeypatch,

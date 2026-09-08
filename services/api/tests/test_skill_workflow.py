@@ -221,14 +221,10 @@ def test_preflight_enforces_skill_inputs_and_manual_gate() -> None:
         )
         ready = await service.preflight(project.id)
         assert ready.can_start
-        assert "image_reference_count_unsupported" not in {
-            item.code for item in ready.issues
-        }
+        assert "image_reference_count_unsupported" not in {item.code for item in ready.issues}
         assert "asset_role_limit_exceeded" not in {item.code for item in ready.issues}
         assert "video_reference_unsupported" not in {item.code for item in ready.issues}
-        assert "video_reference_pipeline_unavailable" not in {
-            item.code for item in ready.issues
-        }
+        assert "video_reference_pipeline_unavailable" not in {item.code for item in ready.issues}
 
         run = await service.start_run(
             project.id,
@@ -300,10 +296,7 @@ def test_preflight_enforces_skill_inputs_and_manual_gate() -> None:
         # 15 seconds at the reference pacing suggests 14 shots; the Skill's old
         # minimum of 15 must not force a filler shot or reject this result.
         assert len(storyboard_workspace.shot_manifest.shots) == 14
-        assert all(
-            item.prompt_quality.passed
-            for item in storyboard_workspace.shot_manifest.shots
-        )
+        assert all(item.prompt_quality.passed for item in storyboard_workspace.shot_manifest.shots)
         assert storyboard_workspace.shot_manifest.authoring_model
         completed_steps = await store.list_skill_step_runs(run.run.id)
         completed_compile = next(
@@ -325,6 +318,7 @@ def test_preflight_enforces_skill_inputs_and_manual_gate() -> None:
             },
         )
         next_brief_payload["objective"] = "Launch the updated product story"
+        before_edit = await service.run_detail(run.run.id)
         await service.put_brief(
             project.id,
             CreativeBriefInput.model_validate(next_brief_payload),
@@ -334,10 +328,11 @@ def test_preflight_enforces_skill_inputs_and_manual_gate() -> None:
             (item for item in decisions if item.gate == SkillGate.BRIEF_APPROVED),
             key=lambda item: item.created_at,
         )
-        assert latest_g0.decision == "request_revision"
-        assert latest_g0.actor_type == "system"
-        with pytest.raises(SkillWorkflowServiceError) as stale_gate:
-            await service.compile_style(run.run.id)
-        assert stale_gate.value.code == "brief_gate_required"
+        assert latest_g0.decision == "approve"
+        assert latest_g0.actor_type != "system"
+        assert service._gate_is_approved(decisions, SkillGate.BRIEF_APPROVED)
+        refreshed = await service.run_detail(run.run.id)
+        assert "创作简报已更新" in refreshed.run.upstream_update_messages
+        assert refreshed.run.current_stage == before_edit.run.current_stage
 
     asyncio.run(scenario())

@@ -39,6 +39,7 @@ import {
   normalizeReferenceTags,
   productionDefaultsForSource,
   productionChangeLabel,
+  productionGateStatusPath,
   referenceAssetsContinueLabel,
   referenceTypeLabel,
 } from "./production-ui.js";
@@ -1772,14 +1773,15 @@ export function ProductionHub({
         : item
     )));
     if (projectId) {
-      request(`/productions/${projectId}/gate-status`)
+      const refreshId = projectRefreshRequestId.current;
+      request(productionGateStatusPath(projectId, activeSection))
         .then((nextGate) => {
-          if (String(nextGate?.project_id || "") === projectId) setGate(nextGate);
+          if (refreshId === projectRefreshRequestId.current && String(nextGate?.project_id || "") === projectId) setGate(nextGate);
         })
         .catch(() => undefined);
     }
     Promise.resolve(onProjectsChanged?.()).catch(() => undefined);
-  }, [onProjectsChanged, request]);
+  }, [activeSection, onProjectsChanged, request]);
   const {
     flushShotDraft,
     hydrateShotDraft,
@@ -1794,26 +1796,6 @@ export function ProductionHub({
     request,
   });
   const referencePreviewUrl = useObjectUrl(referenceFile);
-  const imageGate = useMemo(() => {
-    const requiredShots = shots.filter(
-      (item) => item.plan.lifecycle_status !== "discarded" && item.plan.required !== false,
-    );
-    const approvedCount = requiredShots.filter(
-      (item) => (
-        item.plan.output_mode === "source_video"
-          ? item.plan.video_status === "approved"
-          : item.plan.image_status === "approved"
-      ),
-    ).length;
-    return {
-      allowed: requiredShots.length > 0 && approvedCount === requiredShots.length,
-      required_shot_count: requiredShots.length,
-      approved_shot_count: approvedCount,
-      blocker_messages: approvedCount === requiredShots.length
-        ? []
-        : [`仍有 ${requiredShots.length - approvedCount} 个必需分镜输出未确认`],
-    };
-  }, [shots]);
 
   useEffect(() => {
     const nextSettings = imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS;
@@ -1929,6 +1911,16 @@ export function ProductionHub({
   }, [activeSection, selectedProjectId]);
 
   useEffect(() => {
+    if (activeSection !== "shot_images" || !selectedProjectId || contentLoading) return;
+    if (gate?.project_id === selectedProjectId && gate?.current_step === "shot_images") return;
+    let active = true;
+    request(productionGateStatusPath(selectedProjectId, "shot_images"))
+      .then((nextGate) => { if (active) setGate(nextGate); })
+      .catch((error) => { if (active) { setGate(null); setActionError(error.message); } });
+    return () => { active = false; };
+  }, [activeSection, selectedProjectId, contentLoading, request]);
+
+  useEffect(() => {
     if (
       !navigationTarget?.token
       || !navigationTarget.projectId
@@ -1956,6 +1948,7 @@ export function ProductionHub({
     const runId = activeGenerationRun.id;
     const projectId = selectedProjectId;
     const shotPlanId = selectedShotId;
+    let candidateSignature = (activeGenerationRun.candidates || []).map(item => item.id).join(",");
 
     async function pollGenerationRun() {
       try {
@@ -1963,6 +1956,15 @@ export function ProductionHub({
         if (disposed) return;
         setShotDetail((current) => upsertGenerationRun(current, run));
         if (ACTIVE_GENERATION_RUN_STATUSES.has(run.status)) {
+          const nextSignature = (run.candidates || []).map(item => item.id).join(",");
+          if (run.kind === "image" && nextSignature !== candidateSignature) {
+            const navigation = await readOnce(request, `/productions/${projectId}/shots/navigation`);
+            if (disposed) return;
+            const preview = navigation.find(item => item.plan.id === shotPlanId)?.image_preview;
+            setShots(current => current.map(item => item.plan.id === shotPlanId
+              ? { ...item, image_preview: preview } : item));
+            candidateSignature = nextSignature;
+          }
           timer = window.setTimeout(pollGenerationRun, 1000);
           return;
         }
@@ -2013,7 +2015,7 @@ export function ProductionHub({
       request(`/productions/${projectId}/references`),
       section === "revisions" ? readOnce(request, `/productions/${projectId}/revisions`) : Promise.resolve([]),
       request(`/productions/${projectId}/shots${workflow && section !== "shot_videos" ? "/navigation" : ""}`),
-      request(`/productions/${projectId}/gate-status`),
+      request(productionGateStatusPath(projectId, section)),
       imageGenerationSettings ? Promise.resolve(imageGenerationSettings) : readOnce(request, "/settings/image-generation"),
     ]);
     if (!canHydrateShot()) return nextDetail;
@@ -2322,11 +2324,13 @@ export function ProductionHub({
   async function reorderShots(orderedShotPlanIds) {
     if (!detail?.project) return;
     await executeAction(async () => {
+      await flushWorkspace();
+      const latest = await request(`/productions/${detail.project.id}`);
       await request(`/productions/${detail.project.id}/shots/order`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          expected_revision_id: detail.project.current_revision_id,
+          expected_revision_id: latest.project.current_revision_id,
           ordered_shot_plan_ids: orderedShotPlanIds,
         }),
       });
@@ -2425,14 +2429,6 @@ export function ProductionHub({
         activeBeat.image_status,
       )
     );
-    if (
-      hasReviewedOutput
-      && !window.confirm(
-        "更换关键帧会归档当前图片候选，并使后续视频结果过期。是否继续？",
-      )
-    ) {
-      return;
-    }
     await executeAction(async () => {
       await request(
         "/production-shots/" + shotDetail.plan.id + "/source-keyframe",
@@ -2502,13 +2498,13 @@ export function ProductionHub({
     const projectId = selectedProjectId;
     const selection = shotRequestId.current;
     const refreshId = projectRefreshRequestId.current;
-    const nextShots = await readOnce(request, `/productions/${projectId}/shots/navigation`);
+    const [nextShots, nextGate] = await Promise.all([
+      readOnce(request, `/productions/${projectId}/shots/navigation`),
+      request(productionGateStatusPath(projectId, "shot_images")),
+    ]);
     if (refreshId !== projectRefreshRequestId.current) return;
     setShots(nextShots);
-    const required = nextShots.filter((item) => item.plan.required !== false && item.plan.lifecycle_status !== "discarded");
-    const approved = required.filter((item) => item.plan.image_status === "approved").length;
-    setGate({ allowed: required.length > 0 && approved === required.length, required_shot_count: required.length,
-      approved_shot_count: approved, blocker_messages: [] });
+    setGate(nextGate);
     if (nextShots[0]?.current_revision_id) setDetail((current) => current?.project.id === projectId
       ? { ...current, project: { ...current.project, current_revision_id: nextShots[0].current_revision_id } } : current);
     if (!shotIds.includes(selectedShotId)) return;
@@ -2828,6 +2824,23 @@ export function ProductionHub({
     });
   }
 
+  async function changeEditingSelection(shotPlanId, includeInEditing) {
+    if (!detail?.project) return;
+    await executeAction(async () => {
+      await flushWorkspace();
+      const latest = await request(`/productions/${detail.project.id}`);
+      await request(`/production-shots/${shotPlanId}/editing-selection`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision_id: latest.project.current_revision_id,
+          include_in_editing: includeInEditing,
+        }),
+      });
+      await refreshProject(detail.project.id, selectedShotId, selectedVisualBeatId, "shot_videos");
+    });
+  }
+
   async function deleteVisualBeat(visualBeatId) {
     if (!shotDetail?.plan || (shotDetail.plan.visual_beats || []).length <= 1) return;
     const beats = shotDetail.plan.visual_beats || [];
@@ -2838,7 +2851,7 @@ export function ProductionHub({
     );
     if (
       hasDownstream
-      && !window.confirm("删除画面会使当前分段视频及下游结果过期。是否继续？")
+      && !window.confirm("删除此画面？已有视频和剪辑仍会保留。")
     ) return;
     await executeAction(async () => {
       await request(
@@ -2888,6 +2901,9 @@ export function ProductionHub({
   async function advanceWorkflow() {
     await executeAction(async () => {
       await flushWorkspace();
+      const imageGate = await request(productionGateStatusPath(detail.project.id, "shot_images"));
+      setGate(imageGate);
+      if (!imageGate.allowed) throw new Error(imageGate.blocker_messages?.join("；") || "请至少采用一张分镜图");
       if (workflow && !workflow.imagesApproved && await workflow.onAdvance("shot_images") === false) return;
       const latest = await request(`/productions/${detail.project.id}`);
       if (!["shot_videos", "editing", "export"].includes(latest.project.active_step)) await request(`/productions/${detail.project.id}/advance`, {
@@ -2899,12 +2915,12 @@ export function ProductionHub({
         }),
       });
       await Promise.all([
-        refreshProject(detail.project.id, selectedShotId),
+        refreshProject(detail.project.id, selectedShotId, selectedVisualBeatId, "shot_videos"),
         onProjectsChanged(),
       ]);
       setActiveSection("shot_videos");
       updateLocation({ section: "shot_videos" }, { replace: false });
-      onNotice("图片阶段已完成，已进入分镜视频");
+      onNotice("已进入分镜视频");
     });
   }
 
@@ -2926,12 +2942,6 @@ export function ProductionHub({
     const promptChanges = videoPromptChangesFromDraft(shotDetail, videoDraft);
     const promptChanged = Object.keys(promptChanges).length > 0;
     const confirmStale = promptChanged && shotDetail.plan.video_status === "approved";
-    if (
-      confirmStale
-      && !window.confirm("生成前会自动保存当前提示词，并使已采用视频过期。是否继续？")
-    ) {
-      return;
-    }
     if (
       costUnknown
       && !window.confirm("该模型需要按 Provider 实际用量结算，提交前无法给出可靠金额。是否继续？")
@@ -2958,7 +2968,6 @@ export function ProductionHub({
           ...current,
           project: {
             ...current.project,
-            active_step: "shot_videos",
             current_revision_id: expectedRevisionId,
           },
         }) : current);
@@ -3016,12 +3025,6 @@ export function ProductionHub({
 
   async function updateManagedAssetBinding(binding) {
     if (!shotDetail?.plan || !detail?.project) return false;
-    if (
-      shotDetail.plan.video_status === "approved"
-      && !window.confirm("更改演员身份会使当前已采用视频过期。是否继续？")
-    ) {
-      return false;
-    }
     let savedBinding = false;
     await executeAction(async () => {
       const updated = await request(`/production-shots/${shotDetail.plan.id}`, {
@@ -3289,18 +3292,6 @@ export function ProductionHub({
       replacingApproved
       && ["editing", "export"].includes(detail.project.active_step)
     );
-    if (
-      hasDownstreamImpact
-      && !window.confirm("改用该视频会使剪辑或导出结果过期。是否继续？")
-    ) {
-      return;
-    }
-    if (
-      usesOldInput
-      && !window.confirm("该候选基于修改前的分镜输入生成。确认仍采用当前画面吗？")
-    ) {
-      return;
-    }
     await executeAction(async () => {
       await request(`/generation-candidates/${candidateId}/approvals`, {
         method: "POST",
@@ -3348,7 +3339,7 @@ export function ProductionHub({
     );
     if (
       hasDownstreamImpact
-      && !window.confirm("取消采用会使剪辑或导出结果过期。是否继续？")
+      && !window.confirm("取消采用此视频？已有剪辑和导出仍会保留。")
     ) {
       return;
     }
@@ -3377,6 +3368,9 @@ export function ProductionHub({
   async function advanceToEditing() {
     await executeAction(async () => {
       await flushWorkspace();
+      const videoGate = await request(productionGateStatusPath(detail.project.id, "shot_videos"));
+      setGate(videoGate);
+      if (!videoGate.allowed) throw new Error(videoGate.blocker_messages?.join("；") || "请至少选择一个有效的已采用视频参与剪辑");
       if (workflow && !workflow.videosApproved && await workflow.onAdvance("shot_videos") === false) return;
       const latest = await request(`/productions/${detail.project.id}`);
       if (!["editing", "export"].includes(latest.project.active_step)) await request(`/productions/${detail.project.id}/advance`, {
@@ -3396,7 +3390,7 @@ export function ProductionHub({
       onNotice({
         type: "success",
         title: "已进入视频剪辑",
-        message: "已采用的视频已加入初始时间线，可继续裁剪和调整轨道。",
+        message: "首次进入时按所选视频建立时间线；已有时间线保持不变，可主动使用最新分镜更新。",
       });
     });
   }
@@ -3930,16 +3924,14 @@ export function ProductionHub({
             {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onContinue={() => void changeSection("shot_images")} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
             {activeSection === "shot_images" && (
               <ShotImageWorkspace
+                upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 onAddAssets={openAssetPicker}
                 globalPromptRef={globalPromptRef}
-                advanced={workflow ? workflow.imagesApproved : ["shot_videos", "editing", "export"].includes(
-                  detail.project.active_step,
-                )}
                 assets={assets}
                 busy={busy}
                 draft={shotDraft}
                 error={actionError}
-                gate={detail.project.active_step === "shot_images" ? gate : imageGate}
+                gate={gate?.current_step === "shot_images" ? gate : null}
                 generationCandidateCount={generationCandidateCount}
                 generationEngine={generationEngine}
                 generationInputMode={generationInputMode}
@@ -3996,16 +3988,19 @@ export function ProductionHub({
             )}
             {activeSection === "shot_videos" && (
               <ShotVideoWorkspace
+                upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 onAddAssets={openAssetPicker}
                 globalPromptRef={globalPromptRef}
                 advanced={workflow ? workflow.videosApproved : ["editing", "export"].includes(detail.project.active_step)}
                 assets={assets}
                 busy={busy}
                 error={actionError}
-                gate={gate}
+                gate={gate?.current_step === "shot_videos" ? gate : null}
                 initialCandidateId={focusedCandidateId}
                 onPreviewCandidate={(candidateId) => { setFocusedCandidateId(candidateId); updateLocation({ shotId: selectedShotId, candidateId }); }}
                 onAdvance={advanceToEditing}
+                onReorderShots={reorderShots}
+                onEditingSelectionChange={changeEditingSelection}
                 onApprove={approveVideoCandidate}
                 onArchiveCandidates={archiveVideoCandidates}
                 onCancelRun={cancelVideoGeneration}
@@ -4052,6 +4047,7 @@ export function ProductionHub({
             )}
             {["editing", "audio_caption"].includes(activeSection) && (
               <VideoEditorWorkspace
+                upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 workspaceRef={editorRef}
                 onTimelineChanged={workflow?.onTimelineChanged}
                 initialInspectorTab={activeSection === "audio_caption" ? "audio" : "clip"}

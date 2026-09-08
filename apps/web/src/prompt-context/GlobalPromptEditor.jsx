@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { AutosaveStatus } from "../ui/system/index.js";
+import { PromptSectionHeader } from "./PromptSectionHeader.jsx";
 import { combinePrompt, createGlobalPromptSession } from "./global-prompt-session.js";
 import "./prompt-context.css";
 
@@ -85,9 +85,9 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
   const parts = part === "both" ? ["image", "video"] : [part];
   return <div className="global-prompt-editor">
     <details onToggle={event => { if (!event.currentTarget.open) void flush(); }}>
-      <summary><span>全局{part === "both" ? "" : part === "image" ? "图片" : "视频"}提示词 <small>适用于全部分镜</small></span><AutosaveStatus state={state?.status || "loading"} onRetry={() => void flush()} /></summary>
+      <PromptSectionHeader as="summary" quiet title={`全局${part === "both" ? "" : part === "image" ? "图片" : "视频"}提示词`} hint="适用于全部分镜" state={state?.status || "loading"} onRetry={() => void flush()} />
       <div className={`global-prompt-fields ${parts.length === 2 ? "is-paired" : ""}`}>
-        {parts.map(type => <label key={type}><span>全局{type === "image" ? "图片" : "视频"}提示词</span><textarea aria-label={`全局${type === "image" ? "图片" : "视频"}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ""} placeholder="可留空；只填写整片共同要求" onBlur={() => void flush()} onChange={event => edit(type, event.target.value)} /></label>)}
+        {parts.map(type => <label key={type}>{parts.length === 2 && <span>{type === "image" ? "图片" : "视频"}提示词</span>}<textarea aria-label={`全局${type === "image" ? "图片" : "视频"}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ""} placeholder="可留空；只填写整片共同要求" onBlur={() => void flush()} onChange={event => edit(type, event.target.value)} /></label>)}
       </div>
     </details>
     {(error || state?.error) && <div className="prompt-context-error" role="alert"><span>{error || state.error}</span>{!recovery && <><button className="text-button" type="button" onClick={() => state ? void flush() : setReload(value => value + 1)}>重试保存</button><button className="text-button" type="button" onClick={() => setReload(value => value + 1)}>重新加载并核对</button></>}</div>}

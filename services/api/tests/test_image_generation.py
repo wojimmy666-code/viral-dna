@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -1051,7 +1052,7 @@ def test_codex_discovery_is_read_only_and_recommends_latest_flagship(
     assert result.auth_status == "authenticated"
     assert result.imagegen_status == "installed_unverified"
     assert result.recommended_model == "gpt-5.6-sol"
-    assert result.recommended_reasoning_effort == "xhigh"
+    assert result.recommended_reasoning_effort == "medium"
     assert result.requires_smoke_test is True
     assert result.warnings == []
 
@@ -1104,6 +1105,7 @@ def test_codex_auto_configuration_persists_wrapper_and_model_policy(
     )
     assert saved.execution_mode == ImageExecutionMode.LOCAL_TOOL
     assert saved.local_adapter_id == "codex_imagegen_v1"
+    assert saved.local_concurrency == 2
     assert saved.local_model_policy == "latest_flagship"
     assert saved.local_model == "gpt-5.6-sol"
     assert saved.local_reasoning_effort == "xhigh"
@@ -1262,6 +1264,7 @@ def test_codex_sandbox_preflight_uses_selected_mode_without_model_call(
     assert "exec" not in argv
     assert argv[argv.index("--permission-profile") + 1] == ":workspace"
     assert 'windows.sandbox="unelevated"' in argv
+    assert not any("viraldna_imagegen_https" in arg for arg in argv)
 
 
 def test_codex_sandbox_service_reports_delivery_and_never_generates(
@@ -1362,6 +1365,8 @@ def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None
             "gpt-5.6-sol",
             "--reasoning-effort",
             "xhigh",
+            "--codex-runner",
+            "exec",
             "generate",
             "--request",
             str(request_path),
@@ -1380,9 +1385,28 @@ def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None
     assert manifest["tool_id"] == "openai-codex-imagegen"
     assert manifest["usage"]["model"] == "gpt-5.6-sol"
     assert manifest["usage"]["cost_source"] == "subscription_quota"
+    assert manifest["usage"]["model_transport"] == "https"
+    assert manifest["usage"]["model_provider"] == "viraldna_imagegen_https"
     assert manifest["candidates"][0]["path"] == "codex-candidate.png"
     argv = json.loads((run_root / "codex-exec-argv.json").read_text("utf-8"))
     assert "--ignore-user-config" in argv
+    overrides = tomllib.loads(
+        "\n".join(argv[index + 1] for index, arg in enumerate(argv) if arg == "--config")
+    )
+    assert overrides["model_provider"] == "viraldna_imagegen_https"
+    assert overrides["model_providers"] == {
+        "viraldna_imagegen_https": {
+            "name": "OpenAI",
+            "wire_api": "responses",
+            "requires_openai_auth": True,
+            "supports_websockets": False,
+        },
+    }
+    assert overrides["model_reasoning_effort"] == "xhigh"
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert not any("responses_websockets" in arg for arg in argv)
+    assert not (run_root / ".codex" / "config.toml").exists()
 
 
 def test_codex_imagegen_wrapper_captures_standard_generated_image_output(
@@ -1421,6 +1445,8 @@ def test_codex_imagegen_wrapper_captures_standard_generated_image_output(
             sys.executable,
             "--codex-fixed-arg",
             str(fake_codex),
+            "--codex-runner",
+            "exec",
             "generate",
             "--request",
             str(request_path),
@@ -1444,6 +1470,8 @@ def test_codex_imagegen_wrapper_captures_standard_generated_image_output(
     assert (output_root / "codex-stdout.log").is_file()
     assert (output_root / "codex-stderr.log").is_file()
     assert manifest["usage"]["artifact_capture"] == "codex_event_or_generated_images"
+    assert manifest["usage"]["model_transport"] == "https"
+    assert not (tmp_path / "codex-home" / "config.toml").exists()
 
 
 def test_gateway_recovers_existing_codex_image_without_new_generation(

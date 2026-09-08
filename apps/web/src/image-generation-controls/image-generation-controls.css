@@ -101,6 +101,8 @@
 }
 
 .shot-image-model-copy strong {
+  display: block;
+  max-width: 100%;
   font-size: var(--type-label-size);
   font-weight: var(--type-weight-semibold);
 }
