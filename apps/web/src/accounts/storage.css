@@ -1,0 +1,35 @@
+.storage-management { font-size: var(--type-body-size); color: var(--text-primary); }
+.storage-management h2, .storage-quota-form h2 { font-size: var(--type-heading-size); font-weight: var(--type-weight-semibold); margin: 0; }
+.storage-strip, .storage-summary-line, .storage-history-heading, .storage-pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.storage-strip { justify-content: flex-start; font-size: var(--type-caption-size); color: var(--text-secondary); margin-block: var(--space-3); }
+.storage-strip a { color: var(--accent); }
+.storage-overview, .storage-sync-section { padding-block: var(--space-4); border-bottom: 1px solid var(--border-default); margin-bottom: var(--space-4); }
+.storage-overview progress { width: 100%; height: 8px; accent-color: var(--accent); margin-top: var(--space-3); }
+.storage-management summary, .storage-server-config summary { cursor: pointer; color: var(--text-secondary); font-size: var(--type-caption-size); padding-block: var(--space-2); overflow-wrap: anywhere; }
+.storage-management p { line-height: var(--type-leading-copy); }
+.storage-connection-form, .storage-quota-form { max-width: 560px; padding-block: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+.storage-connection-form fieldset, .storage-quota-form fieldset { display: flex; flex-direction: column; gap: var(--space-3); border: 0; margin: 0; padding: 0; min-width: 0; }
+.storage-address { color: var(--text-secondary); overflow-wrap: anywhere; }
+.storage-confirmation { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding-block: var(--space-3); }
+.storage-tabs { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-block: var(--space-3); }
+.storage-tabs [aria-pressed="true"] { color: var(--accent); background: var(--surface-subtle); }
+.storage-history-row { display: flex; align-items: flex-start; gap: var(--space-3); padding-block: var(--space-3); border-bottom: 1px solid var(--border-default); }
+.storage-history-thumb { width: 72px; height: 64px; flex-shrink: 0; display: grid; place-items: center; background: var(--surface-subtle); border-radius: var(--radius-control); overflow: hidden; color: var(--text-secondary); font-size: var(--type-caption-size); }
+.storage-history-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.storage-history-info { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.storage-history-info strong { font-weight: var(--type-weight-semibold); }
+.storage-history-info p { margin-block: var(--space-1); }
+.storage-history-info pre { font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.storage-history-info video { display: block; max-width: 100%; max-height: 360px; object-fit: contain; }
+.storage-history-preview { display: block; max-width: 100%; max-height: 360px; object-fit: contain; margin-block: var(--space-2); }
+.storage-history-row:has(> .storage-confirmation) { flex-wrap: wrap; }
+.storage-history-row > .storage-confirmation { flex-basis: 100%; }
+.storage-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+.storage-pagination { margin-top: var(--space-4); }
+.storage-jobs { margin-top: var(--space-3); }
+@media (max-width: 760px) {
+  .storage-history-row { flex-wrap: wrap; }
+  .storage-row-actions { width: 100%; }
+  .storage-management button, .storage-management a, .storage-quota-form button { min-height: 44px; display: inline-flex; align-items: center; }
+  .storage-management input:not([type="checkbox"]) { font-size: var(--type-heading-size); }
+}

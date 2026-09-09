@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { StorageUsageStrip } from "./accounts/StorageManagement.jsx";
 import {
   Archive,
   ArrowClockwise,
@@ -855,9 +856,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           </div>
           <div className="asset-title-row">
             <h1>资产库</h1>
-            <span className="asset-local-status"><HardDrive size={14} weight="fill" /> 当前仅本地</span>
+            <span className="asset-local-status"><HardDrive size={14} weight="fill" /> 账户资产</span>
           </div>
-          <p>集中管理人物、产品、服装和场景参考；后续可无缝扩展云端副本。</p>
+          <p>集中管理人物、产品、服装和场景参考。</p>
         </div>
         <button className="primary-button compact" onClick={openUpload} type="button">
           <UploadSimple size={17} weight="bold" />
@@ -865,6 +866,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
         </button>
       </section>
 
+      <StorageUsageStrip />
       <section className="asset-library-shell">
         <aside className="asset-folder-rail" aria-label="资产目录">
           <div className="asset-rail-heading">

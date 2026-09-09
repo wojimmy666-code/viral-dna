@@ -382,7 +382,7 @@ export function UserSettingsPage({
                 <div><dt>数据位置</dt><dd>{session?.auth_mode === "password" ? "账户专属存储" : "本地工作区"}</dd></div>
                 {session?.auth_mode !== "password" && <div><dt>工作区路径</dt><dd>{workspace?.root_path || "尚未读取"}</dd></div>}
                 <div><dt>账户数据</dt><dd>仅当前账户可见</dd></div>
-                <div><dt>云端同步</dt><dd>接口已预留，当前版本未启用</dd></div>
+                <div><dt>服务器同步</dt><dd>{session?.auth_mode === "password" ? <a href="/account/storage">存储管理与生成历史</a> : "启用独立账户后可连接服务器"}</dd></div>
               </dl>
               {session?.auth_mode !== "password" && <div className="device-workspace-editor">
                 <label className="settings-field">

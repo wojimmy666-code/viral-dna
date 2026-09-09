@@ -1,178 +1,64 @@
 # ViralDNA
 
-ViralDNA 是一个面向短视频创作者和内容团队的 AI 单视频逆向拆解工作台。
+面向短视频创作者与内容团队的分析和视频创作工作台：既可从原视频分析创建方案，也可从平台 Skill、品牌／产品方向及所选资产开始创作。
 
-第一阶段聚焦一个完整闭环：导入视频文件或公开链接，生成逐镜头拆解、爆点分析、元素清单、复刻提示词，以及人物/服装/场景替换后的新提示词。
+## 当前能力
+
+- 原视频导入、链接采集、媒体证据、逐分镜分析和复刻方案。
+- Skill 简报、风格、大纲分镜，以及两种入口共用的图片、视频、剪辑和导出流程。
+- 图片／视频全局与局部提示词、项目已选资产引用、版本化候选与人工采用。
+- 独立个人／企业账户与单 admin 后台；企业成员共享数据，项目同一时刻仅一个编辑会话。
+- 账户级资产与生成历史存储、增量同步、回收站及手动容量管理：个人默认 2 GB，企业共享 10 GB。
+
+代码与本地隔离测试通过，不表示已经部署到真实服务器。实际资产上传需要兼容的 HTTPS 目标、明确的目标账户确认和服务器验收；真实模型调用另需配置与授权。
 
 ## 仓库结构
 
 ```text
-apps/web                 React + Vite 桌面端工作台
-services/api             FastAPI 分析任务与报告 API
-docs                     产品、架构、执行计划与 UI 参考
+apps/web       React + Vite 工作台
+services/api   FastAPI、账户、任务、媒体和存储
+scripts        本地启动、运行工具与检查
+docs           按用途分类的功能、架构、部署和验收文档
 ```
 
-## 当前状态
+## 本地运行
 
-当前已完成 Phase 1 单视频分析闭环、Phase 2 Batch 4.7 分析记录生命周期，以及 Batch 4.6 的生成、剪辑、预览与最终导出链路；Batch 4.8 质量、安全与成本已经启动：
+Windows 环境要求 Node.js 20.19+、Python 3.11+；媒体处理需要 FFmpeg／ffprobe。运行前先确认没有应继续保留的真实任务：启动器发现旧 API 时可能受控重启。
 
-- 视频文件流式上传，以及抖音、小红书、TikTok、Instagram 公热视频真实下载。
-- `yt-dlp` 平台解析、白名单校验、下载限制、可操作错误码和按平台隔离的本机登录状态。
-- 上传或采集视频的 ffprobe 探测、SHA-256、H.264/AAC 代理和 WAV 音频。
-- FFmpeg scene score 真实分镜、逐镜头关键帧、Contact Sheet 和 manifest。
-- SQLite 持久化、分析状态机和受限的媒体产物 API。
-- 链接任务使用真实 `media_evidence` 报告，不再默认回退模拟数据。
-- faster-whisper 本地 ASR，输出句级和词级时间戳。
-- RapidOCR 本地画面文字识别，以及 FFmpeg 独立文本字幕轨抽取。
-- ASR、独立字幕、画面 OCR 和镜头边界统一写入 `timeline.json`。
-- 每个镜头提取开始、中间、结束三张 VLM 证据帧。
-- Provider 无关的模型目录、质量档位、冻结模型计划和百炼 `qwen3.7-plus` 适配器。
-- 逐镜头主体、动作、场景、摄影、构图、灯光、色彩和复刻提示词。
-- 模型调用 Token、价格快照、缓存、重试、预算上限和微元成本账本。
-- 报告按 `analysis_id` 版本化，并提供成本和逐调用查询 API。
-- 单视频报告工作台，以及真实媒体证据和模拟报告的明确区分。
-- 独立个人/企业账户与单 admin 后台；企业成员共享项目、资产，项目同一时刻仅一个编辑会话，其他成员只读。
-- GUI 可分别连接抖音、小红书、TikTok 和 Instagram，自动检测本机浏览器 Profile，或导入 Netscape `cookies.txt`；Cookie 不进入工作区、日志和 API 响应。
-- 视频源文件、分析产物、报告与导出文件按分析记录统一归档。
-- 分析记录可搜索、按状态筛选、按一级目录归类、重命名并重复打开。
-- 历史记录重复打开不触发模型；只有手动“重新分析”才创建新分析版本。
-- 报告 JSON/Markdown、提示词包、替换版提示词包、转写和字幕由服务端归档后下载。
-- 面向用户的报告与导出结果统一转换为简体中文，原始证据仍保留以便审计。
-- Windows `scripts/start.bat` 一键启动 API 8000 和 Web 4174。
-- 创作方案、参考资产、分镜图片和分段视频均可版本化保存并人工确认。
-- 国内视频模型配置、逐分镜生成成本、候选审核和剪辑准备已接入。
-- 已确认片段可进入受控时间线，调整顺序、启用状态、裁剪、时长、音量、字幕和基础转场。
-- 时间线每次保存创建不可变快照，可查看历史并从旧版本恢复为新版本。
-- FFmpeg 可生成带原音轨映射、字幕和基础转场的低清预览；任务进度与结果进入账户消息中心。
-- 最终导出可冻结时间线版本，生成 720P、1080P 或方案尺寸的 H.264/AAC 成片，并选择烧录、内嵌或无字幕模式。
-- 高清成片完成后会校验时长、尺寸、编码、音轨、字幕、文件大小和 SHA-256，并归档视频、字幕、封面与交付清单。
-- Batch 4.8.1 已建立零费用黄金样本回归基础，可检查分镜数量、绝对时间、提示词关键语义、运镜阶段和转场类型漂移。
-
-当前剪辑能力见 [Batch 4.6.1～4.6.5 执行验收](./docs/Phase2_Batch4.6.1-4.6.5_剪辑时间线与低清预览执行验收.md)，最终交付能力见 [Batch 4.6.6 执行验收](./docs/Phase2_Batch4.6.6_最终高清渲染与导出执行验收.md)。
-Batch 4.8 的正式执行顺序见 [质量、安全与成本执行计划](./docs/Phase2_Batch4.8_质量安全与成本执行计划.md)。
-
-## 本地开发
-
-环境要求：Node.js 20.19+、Python 3.11+。
-
-### Windows 一键启动
-
-双击 `scripts/start.bat` 即可启动 API（8000）和 Web（4174），服务就绪后会自动打开浏览器。首次运行缺少依赖时，脚本会自动安装。启动器会核对运行中 API 的工作区 Schema、进程启动时间和本地源码更新时间；发现旧 ViralDNA 进程时会受控重启，其他程序占用 8000 端口时则停止并明确报错，不会误杀其他服务。
-
-命令行验收时可禁止自动打开浏览器：
-
-```bat
-scripts\start.bat --no-browser
+```powershell
+.\scripts\start.bat --no-browser
 ```
 
-### Web
+默认前端为 `http://127.0.0.1:4174`，API 健康检查为 `http://127.0.0.1:8000/health`。完整安装、停止和手工启动步骤见 [本地环境与启动](docs/deployment/本地环境与启动.md)，不要将开发服务器直接作为公网生产服务。
 
-```bash
-npm install
-npm run dev:web
+首次在部署本机打开 `/login`，设置 admin 并明确旧数据归属，不需要初始化码。前端为中国大陆 11 位手机号登录，密码至少 8 位，不要求复杂度组合；后台入口为 `/admin/login`。详见 [账户初始化](docs/deployment/账户初始化.md)。
+
+平台 Provider 凭据和模型目录由独立 admin 后台维护，用户设置只管理生成偏好，不在用户页面填写 API Key。已有工作区与账户数据路径不得通过重新初始化或切换免登录模式绕过。
+
+## 文档入口
+
+- [全部文档与维护规则](docs/README.md)
+- [当前创作流程](docs/features/创作流程与生成规则.md)
+- [账户与企业协作](docs/features/accounts/account-system-implementation.md)
+- [部署流程](docs/deployment/README.md)
+- [服务器同步与容量配置](docs/deployment/资产同步与容量配置.md)
+- [架构与技术协议](docs/architecture/README.md)
+- [设计规范](docs/design/README.md)、[验收记录](docs/qa/README.md)
+- [规划与待核对事项](docs/roadmap/README.md)、[历史归档](docs/archive/README.md)
+
+历史 Phase／Batch 文档记录当时边界，不能作为当前功能、价格或部署状态的依据。部署与备份操作只在 `docs/deployment/` 维护。
+
+## 开发检查
+
+```powershell
+node scripts/check-docs.mjs
+npm run check:design
+npm run test:web
+npm run build:web
 ```
 
-### API
+后端依赖和测试配置见 [services/api/pyproject.toml](services/api/pyproject.toml)；账户／存储检查入口见对应功能文档。测试使用隔离数据，不自动提交付费任务或上传真实资产。
 
-```bash
-python -m venv .venv
-.venv/Scripts/python -m pip install -e "services/api[dev,local-ai]"
-.venv/Scripts/python -m uvicorn viral_dna_api.main:app --app-dir services/api/src --reload --port 8000
-```
+## GitHub 约定
 
-Web 开发服务器默认将 `/api` 代理到 `http://127.0.0.1:8000`。
-
-### 账户初始化
-
-默认需要登录。首次在部署本机打开应用，直接设置 `admin` 密码，并明确将现有工作区归属到一个个人或企业账户；不需要初始化码，没有默认密码，也不会自动清空或转移旧数据。后台入口为 `/admin/login`，前端入口为 `/login`。
-
-个人和企业使用独立手机号登录（中国大陆 11 位），不能切换空间；后台仍用 `admin`。密码至少 8 个字符，不强制字母、数字或特殊字符组合。新账户由后台创建，企业成员由负责人邀请。完整启用步骤、数据位置、备份和编辑锁规则见 [独立账户与企业协作](./docs/account-system-implementation.md)。
-
-### 跨分镜连续性质检
-
-创作方案在“分段视频”进入“视频剪辑”前会执行零费用连续性规则检查，核对相邻分镜的人物、产品、服装、场景及锁定的镜头事实。人物或产品引用漂移会阻止推进；有意变化可记录原因后豁免。未执行 VLM 视觉验证时，界面会明确显示“仅规则检查”，不会显示为视觉验证通过。采用视频变化只会使相邻边界过期。
-
-实现与验收边界见 [Batch 4.8 质量、安全与成本执行计划](./docs/Phase2_Batch4.8_质量安全与成本执行计划.md)。
-
-### 工作区与分析记录
-
-旧版默认工作区是仓库下的 `storage/`，已有自定义路径保持不变。账户模式下，工作区由服务端固定绑定到登录账户，界面不提供修改路径或切换空间。仅显式启用的本机 `local_bootstrap` 开发模式保留旧版路径设置；API Key 不写入用户工作区。
-
-工作区使用以下核心结构：
-
-```text
-<workspace>/
-├─ .viraldna/
-│  ├─ workspace.json
-│  └─ workspace.db
-├─ records/<record_id>/
-│  ├─ source/
-│  ├─ analyses/<analysis_id>/
-│  └─ exports/<analysis_id>/
-└─ temp/
-```
-
-左侧“分析记录”支持：
-
-- 搜索记录并按目录、状态和更新时间筛选。
-- 创建或重命名一级目录，重命名记录并移动目录。
-- 重复打开历史报告、视频与分析版本，不重复调用模型。
-- 手动重新分析，并将新任务保存为同一记录下的新版本。
-- 将报告、提示词包、替换版提示词包、转写与字幕保存到 `exports/` 后下载。
-
-旧版 `storage/viral_dna.db` 和分析产物会采用复制、校验、登记的方式兼容迁移；迁移过程不会删除旧文件。
-
-### 通过 GUI 配置平台登录状态
-
-公开链接仍然优先匿名采集。只有平台返回登录或人机验证要求时，采集器才会按当前平台的使用策略读取登录状态并重试：
-
-1. 点击左侧“系统 → 平台连接”。
-2. 选择抖音、小红书、TikTok 或 Instagram。
-3. 优先选择已经登录的 Chrome、Edge、Firefox 或 Brave Profile；如果浏览器安全保护阻止读取，则导入浏览器扩展导出的 Netscape 格式 `cookies.txt`。
-4. 检查连接状态；也可粘贴同平台公开视频链接执行在线验证。
-5. 返回“新建分析”。链接输入框会显示对应平台状态；登录失效后可更新连接并重试原任务，不会重复创建分析记录。
-
-平台连接按默认账户和当前设备隔离。导入的文件只保留对应平台域名，内容由 Windows DPAPI 加密后保存在本机应用数据目录；元数据只记录平台、来源、Profile 名称、Cookie 数量、健康状态和时间，不记录 Cookie 值。旧的 `VIRAL_DNA_YTDLP_COOKIE_FILE` 会在首次启动时按域名拆分迁移，之后无需继续手工配置 `.env.local`。
-
-Chrome/Edge 新版 App-Bound Encryption 或正在运行的浏览器进程可能阻止第三方读取 Cookie。这类限制不会被绕过，GUI 会提示关闭后台进程后重试或改用 `cookies.txt`。
-
-完整设计、错误码和人工验收步骤见 [平台连接与本机 Cookie 凭证执行验收](./docs/Phase1_平台连接与本机Cookie凭证执行验收.md)。
-
-### 通过 GUI 配置阿里云百炼 VLM
-
-VLM 默认关闭，因此既有媒体证据流程不会产生模型费用。启用真实逐镜头视觉分析不再需要手工编辑 `.env.local`：
-
-1. 启动项目后点击左侧“模型与设置”。
-2. 选择阿里云百炼、分析主模型和质量档位。
-3. 填写 API Key，点击“验证并保存”。
-
-浏览器不会持久化 API Key，后端也不会在接口响应或日志中返回密钥。保存时，本地 API 只向 DashScope 官方 HTTPS 地址发送一次 `max_tokens=1` 的最小验证请求，可能产生极小费用；验证失败不会改写现有配置。验证成功后配置写入已被 Git 忽略的本机 `.env.local`，新分析立即生效，无需重启 API。
-
-手动选择模型会将其设为各分析任务的首选路由；选择“自动”则跟随 `quality`、`balanced` 或 `economy` 档位。每个分析任务仍会冻结模型与价格快照，并按 Provider 返回的 Token 用量以微元精度记账。
-
-模型与价格目录分别位于：
-
-- `services/api/src/viral_dna_api/ai/model_catalog.toml`
-- `services/api/src/viral_dna_api/ai/model_pricing.toml`
-
-相关查询接口：
-
-- `GET /api/v1/settings/model`
-- `PUT /api/v1/settings/model`
-- `GET /api/v1/analyses/{analysis_id}/report`
-- `GET /api/v1/analyses/{analysis_id}/model-runs`
-- `GET /api/v1/analyses/{analysis_id}/cost`
-
-## 文档
-
-- [项目定位与长期技术方案](./docs/ViralDNA_项目定位与技术方案.md)
-- [Phase 1 执行计划](./docs/Phase1_执行计划.md)
-- [Phase 1 架构与接口设计](./docs/Phase1_架构与接口设计.md)
-- [Batch 2 真实媒体证据层执行与验收](./docs/Phase1_Batch2_真实媒体证据层执行计划.md)
-- [Batch 2.5 链接采集层执行与验收](./docs/Phase1_Batch2.5_链接采集层执行与验收.md)
-- [Batch 3.1 证据时间线与 Provider 执行计划](./docs/Phase1_Batch3.1_证据时间线与Provider执行计划.md)
-- [Batch 3.2 本地语音与字幕识别执行验收](./docs/Phase1_Batch3.2_本地语音与字幕识别执行验收.md)
-- [Batch 3.3 VLM 网关与模型计费执行计划](./docs/Phase1_Batch3.3_VLM网关与模型计费执行计划.md)
-- [Batch 3.4 工作区与分析记录执行计划](./docs/Phase1_Batch3.4_工作区与分析记录执行计划.md)
-- [平台连接与本机 Cookie 凭证执行验收](./docs/Phase1_平台连接与本机Cookie凭证执行验收.md)
-- [UI 风格参考](./docs/UI模板.png)
+遵守 [AGENTS.md](AGENTS.md)：默认在 `main` 开发；GitHub 交互使用 SSH，`origin` 保持 `git@github.com:wojimmy666-code/viral-dna.git`。提交在本地完成，只有收到明确推送指令才允许 push。

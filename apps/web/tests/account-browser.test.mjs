@@ -62,7 +62,9 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
   const html = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/fixture.css"><div id="root"></div><script type="module" src="/fixture.js"></script></html>';
   const user = { user_id: "user-1", account_id: "account-1", auth_mode: "password", role: "owner", account_kind: "enterprise", account_name: "企业账户", display_name: "负责人", csrf_token: "user-csrf" };
   const admin = { admin_id: "admin-1", auth_mode: "password", principal_type: "platform_admin", display_name: "admin", csrf_token: "admin-csrf" };
-  const state = { lease: null, requests: [], rejectWrite: false, initialized: false };
+  const state = { lease: null, requests: [], rejectWrite: false, initialized: false,
+    quota: 10000000000, storageConnection: {}, historyTrashed: false, storageFailed: false,
+    historyDeleted: false };
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://fixture").pathname;
     if (!path.startsWith("/api/")) {
@@ -84,6 +86,33 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     const cookieName = isAdmin ? "test_admin=active" : "test_user=active";
     if (!request.headers.cookie?.includes(cookieName)) return send({ detail: { code: "login_required", message: "请先登录" } }, 401);
     if (path.endsWith("/session")) return send(isAdmin ? admin : user);
+    const quota = () => ({ used_bytes: 8500000000, limit_bytes: state.quota, reserved_bytes: 1000000, available_bytes: state.quota - 8501000000 });
+    if (path === "/api/v1/admin/storage/server") return send({ url: "https://server.example.com" });
+    if (path === "/api/v1/admin/accounts/account-1/storage") {
+      if (request.method === "PATCH") state.quota = body.limit_bytes;
+      return send({ ...quota(), audit: [{ id: "audit-1", created_at: 1700000000, details: JSON.stringify({ previous: 10000000000, next: state.quota, note: "测试扩容" }) }] });
+    }
+    if (path === "/api/v1/account/storage") return send({ ...quota(), connection: state.storageConnection, server_url: "https://server.example.com", secret_store_available: true, jobs: [], inventory_state: "ready" });
+    if (path === "/api/v1/account/storage/remote-usage") return state.storageFailed ? send({ detail: { code: "storage_device_expired", message: "请重新连接服务器" } }, 409) : send(quota());
+    if (path === "/api/v1/account/storage/connection") {
+      state.storageConnection = request.method === "DELETE" ? {} : { account_id: "remote-account", account_kind: "enterprise", account_name: "服务器企业账户", server_url: "https://server.example.com", confirmed: false };
+      return send(state.storageConnection);
+    }
+    if (path === "/api/v1/account/storage/connection/confirm") { state.storageConnection.confirmed = true; return send(state.storageConnection); }
+    if (path === "/api/v1/account/storage/sync") return send({ started: true });
+    if (path === "/api/v1/account/storage/history") {
+      const query = new URL(request.url, "http://fixture").searchParams;
+      const show = !state.historyDeleted && query.get("kind") === "image" && (query.get("trash") === "true") === state.historyTrashed;
+      return send({ total: show ? 1 : 0, items: show ? [{ key: "candidate:fixture", kind: "image", created_at: 1700000000, size_bytes: 1230000,
+        metadata: { project_name: "电影感产品故事 · 黄色滤芯的多角度产品画面", model: "本机 ImageGen", prompt_snapshot: "产品特写，柔和光照。" }, content_url: "/api/v1/account/storage/entries/fixture/content" }] : [] });
+    }
+    if (path.endsWith("/entries/fixture/content")) { response.setHeader("Content-Type", "image/png"); response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jG3cAAAAASUVORK5CYII=", "base64")); return; }
+    if (path.includes("/account/storage/entries/candidate")) {
+      if (path.endsWith("/trash")) state.historyTrashed = true;
+      if (path.endsWith("/restore")) state.historyTrashed = false;
+      if (request.method === "DELETE") state.historyDeleted = true;
+      return send({ done: true });
+    }
     if (path.endsWith("/auth/logout")) {
       response.setHeader("Set-Cookie", `${isAdmin ? "test_admin" : "test_user"}=; Path=/; Max-Age=0`); state.lease = null; return send({ logged_out: true });
     }
@@ -101,7 +130,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     }
     if (path.endsWith("/admin/accounts")) {
       if (request.method === "POST") return send({ activation_token: "one-time-activation", username: body.username });
-      return send({ items: [{ id: "account-1", kind: "enterprise", name: "企业账户", status: "active", member_count: 2 }] });
+      return send({ items: [{ id: "account-1", kind: "enterprise", name: "企业账户", status: "active", member_count: 2, storage: quota() }] });
     }
     return send({});
   });
@@ -259,6 +288,69 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       await evaluate("document.querySelector('.account-create-form').requestSubmit()");
       await ready("document.querySelector('.account-activation-link')");
       assert.equal(state.requests.find(item => item.path.endsWith('/admin/accounts') && item.method === 'POST').body.username, '13900000001');
+    });
+    await t.test("admin can inspect and increase shared storage quota", async () => {
+      await load("/admin/accounts");
+      await ready("[...document.querySelectorAll('button')].some(b=>b.textContent==='用户与容量')");
+      await evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='用户与容量').click()");
+      await ready("document.querySelector('.storage-quota-form input[type=number]')?.value==='10'");
+      await evaluate("(()=>{const input=document.querySelector('.storage-quota-form input[type=number]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'20');input.dispatchEvent(new Event('input',{bubbles:true}));})()");
+      await evaluate("document.querySelector('.storage-quota-form:has(input[type=number])').requestSubmit()");
+      await ready("document.querySelector('.storage-quota-form:has(input[type=number])').textContent.includes('20 GB')");
+      assert.equal(state.quota, 20000000000);
+      await screenshot("storage-admin", 1280);
+    });
+    await t.test("storage needs target confirmation, survives remote failure and fits narrow screens", async () => {
+      state.quota = 10000000000;
+      await load("/login"); await ready("document.querySelector('input[name=username]')");
+      await fill("username", "13800000001"); await fill("password", "12345678");
+      await evaluate("document.querySelector('.account-login-panel form').requestSubmit()");
+      await ready("document.querySelector('.account-session-bar')");
+      for (const width of [1440, 1024, 390]) {
+        await load("/account/storage", width);
+        await ready("document.querySelector('.storage-history-row')");
+        assert.equal(await evaluate("document.documentElement.scrollWidth>innerWidth"), false);
+        assert.equal(await evaluate("document.querySelector('.storage-history-info details').open"), false);
+        assert.equal(await evaluate("document.querySelector('.storage-sync-section .primary-button').disabled"), true);
+        await screenshot("storage-history", width);
+      }
+      await evaluate("document.querySelector('.storage-sync-section details').open=true");
+      await evaluate("(()=>{for (const [selector,value] of [['input[type=tel]','13800000009'],['input[type=password]','12345678']]){const input=document.querySelector('.storage-connection-form '+selector);Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));}})()");
+      await evaluate("document.querySelector('.storage-connection-form').requestSubmit()");
+      await ready("document.querySelector('.storage-confirmation')?.textContent.includes('确认目标账户')");
+      assert.equal(state.storageConnection.confirmed, false);
+      assert.equal(state.requests.some(item=>item.path==='/api/v1/account/storage/sync'), false);
+      await evaluate("document.querySelector('.storage-confirmation button').click()");
+      await ready("!document.querySelector('.storage-sync-section .primary-button').disabled");
+      await evaluate("document.querySelector('.storage-sync-section .primary-button').click()");
+      await ready("document.body.textContent.includes('已开始后台同步')");
+      state.storageFailed = true;
+      await evaluate("document.querySelector('.account-management-heading button').click()");
+      await ready("document.body.textContent.includes('服务器容量暂不可用')");
+      assert.ok(await evaluate("Boolean(document.querySelector('.account-session-bar'))"));
+      assert.equal(await evaluate("document.documentElement.scrollWidth>innerWidth"), false);
+      await screenshot("storage-remote-error", 390);
+    });
+    await t.test("history deletion requires the recycle bin and explicit confirmation", async () => {
+      await evaluate("[...document.querySelectorAll('.storage-row-actions button')].find(b=>b.textContent==='移入回收站').click()");
+      await ready("document.body.textContent.includes('暂无此类记录')");
+      await evaluate("document.querySelector('.storage-history-heading input[type=checkbox]').click()");
+      await ready("document.querySelector('.storage-history-row')");
+      await evaluate("[...document.querySelectorAll('.storage-row-actions button')].find(b=>b.textContent==='永久删除').click()");
+      assert.equal(state.historyDeleted, false);
+      await ready("document.querySelector('.storage-confirmation')?.textContent.includes('不可撤销') || document.querySelector('.storage-confirmation')?.textContent.includes('不能撤销')");
+      await evaluate("[...document.querySelectorAll('.storage-tabs button')].find(b=>b.textContent==='生成视频').click()");
+      await ready("!document.querySelector('.storage-confirmation')");
+      assert.equal(state.historyDeleted, false);
+      await evaluate("[...document.querySelectorAll('.storage-tabs button')].find(b=>b.textContent==='生成图片').click()");
+      await ready("document.querySelector('.storage-history-row')");
+      await evaluate("document.querySelector('.storage-history-info details').open=true");
+      assert.equal(await evaluate("Boolean(document.querySelector('.storage-history-preview'))"), true);
+      await evaluate("[...document.querySelectorAll('.storage-row-actions button')].find(b=>b.textContent==='永久删除').click()");
+      await ready("document.querySelector('.storage-history-row .storage-confirmation')?.textContent.includes('电影感产品故事')");
+      await evaluate("[...document.querySelectorAll('.storage-confirmation button')].find(b=>b.textContent==='确认永久删除').click()");
+      await ready("document.body.textContent.includes('回收站中没有此类文件')");
+      assert.equal(state.historyDeleted, true);
     });
   } finally {
     await client?.send("Browser.close").catch(() => {}); client?.close();

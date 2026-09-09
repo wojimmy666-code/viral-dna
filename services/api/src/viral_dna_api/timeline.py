@@ -318,7 +318,20 @@ class TimelineService:
             self._require_revision(current, expected_revision_id)
             revision_id = uuid4()
             destination = self._timeline_root(project) / "audio" / f"{revision_id}{suffix}"
-            await asyncio.to_thread(self._write_bytes_atomic, destination, content)
+            durable = getattr(self.repository, "durable_storage", None)
+            if durable:
+                await durable.reserve_auxiliary(f"audio:{revision_id}", len(content))
+            try:
+                await asyncio.to_thread(self._write_bytes_atomic, destination, content)
+                if durable:
+                    await durable.capture_file(
+                        f"audio:{revision_id}", "audio", self.workspace.relative(destination),
+                        {"source_id": str(revision_id), "project_id": str(project.id),
+                         "project_name": project.name},
+                    )
+            finally:
+                if durable:
+                    await durable.release_auxiliary(f"audio:{revision_id}")
             track = TimelineBackgroundAudioTrack(
                 source_relative_path=self.workspace.relative(destination),
                 source_url=(

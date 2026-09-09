@@ -292,7 +292,17 @@ class TimelineExportService:
                 request_fingerprint=fingerprint,
                 output_filename=_safe_download_name(project, timeline),
             )
-            await asyncio.to_thread(self._write_job, project, job)
+            durable = getattr(self.repository, "durable_storage", None)
+            if durable:
+                await durable.reserve_auxiliary(
+                    f"export:{job.id}", max(64_000_000, int(timeline.duration_seconds * 8_000_000))
+                )
+            try:
+                await asyncio.to_thread(self._write_job, project, job)
+            except BaseException:
+                if durable:
+                    await durable.release_auxiliary(f"export:{job.id}")
+                raise
 
         await self._publish_notification(project, job)
         task = asyncio.create_task(self._run_export(project, timeline, job))
@@ -554,6 +564,10 @@ class TimelineExportService:
         finally:
             self._cancellations.discard(job.id)
             await asyncio.to_thread(self._write_job, project, job)
+            durable = getattr(self.repository, "durable_storage", None)
+            if durable:
+                await durable.capture_export(project, job)
+                await durable.release_auxiliary(f"export:{job.id}")
             await self._publish_notification(project, job)
 
     async def _apply_exact_overlays(

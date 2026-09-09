@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { accountRequest } from "./account-client.js";
 import { PHONE_INPUT_PROPS, pastePhone, phoneError } from "./account-form.js";
+import { AdminStorageQuota, AdminSyncServer } from "./StorageManagement.jsx";
+import { formatStorage } from "./storage-ui.js";
 
 const statusText = { active: "已启用", disabled: "已停用", pending: "待激活" };
 export function AccountManagement({ admin, session }) {
@@ -69,6 +71,8 @@ export function AccountManagement({ admin, session }) {
     {!admin && <form className="account-name-form" onSubmit={event => { event.preventDefault(); void run(async () => { await accountRequest("/account", { method: "PATCH", body: { name } }); setNotice("企业名称已更新"); }); }}><label className="account-field"><span>企业名称</span><input value={name} required maxLength={120} onChange={e => setName(e.target.value)} /></label><button className="secondary-button" disabled={busy}>更新名称</button></form>}
     {error && <p className="account-error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
+    {admin && <AdminSyncServer />}
+    {admin && selected && <AdminStorageQuota key={selected.id} accountId={selected.id} accountName={selected.name} onUpdated={refresh} />}
     {activation && <section className="account-activation-link"><h2>激活／重置链接</h2><p>链接 72 小时内有效，仅可使用一次。请单独发送给本人。</p><input aria-label="激活链接" value={activation} readOnly onFocus={event => event.target.select()} /><div className="account-actions"><button className="secondary-button" onClick={async () => { try { await navigator.clipboard.writeText(activation); setNotice("链接已复制"); } catch { setError("请选中链接后手动复制"); } }}>复制链接</button><button className="text-button" onClick={() => setActivation("")}>关闭</button></div></section>}
     {creating && <form className="account-create-form" onSubmit={create}><fieldset disabled={busy}><h2>{admin ? "新建独立账户" : "邀请企业成员"}</h2>
       {admin && <><label className="account-field"><span>账户类型</span><select value={draft.kind} onChange={e => setDraft({ ...draft, kind: e.target.value })}><option value="personal">个人账户</option><option value="enterprise">企业账户</option></select></label><label className="account-field"><span>{draft.kind === "enterprise" ? "企业名称" : "账户名称"}</span><input name="name" required maxLength={120} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label></>}
@@ -77,7 +81,7 @@ export function AccountManagement({ admin, session }) {
       <p className="account-help">每个账户使用独立手机号，由本人通过激活链接设置至少 8 位密码。</p><div className="account-actions"><button className="primary-button" type="submit">{busy ? "处理中…" : admin ? "创建并生成激活链接" : "生成邀请链接"}</button><button className="secondary-button" type="button" onClick={() => setCreating(false)}>取消</button></div>
     </fieldset></form>}
     {confirmation && <div className="account-edit-notice"><span>{admin ? `确认${confirmation.status === "disabled" ? "启用" : "停用"}“${confirmation.name}”？` : `确认移除“${confirmation.display_name}”？其企业项目和资产将保留。`}</span><button className="secondary-button" disabled={busy} onClick={confirmAction}>确认</button><button className="text-button" disabled={busy} onClick={() => setConfirmation(null)}>取消</button></div>}
-    {loading ? <p role="status">正在读取…</p> : admin ? <div className="account-table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>成员</th><th>状态</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}><td>{item.name}</td><td>{item.kind === "enterprise" ? "企业" : "个人"}</td><td>{item.member_count}</td><td>{statusText[item.status]}</td><td><div className="account-actions"><button className="text-button" disabled={busy} onClick={() => openMembers(item)}>查看用户</button><button className="text-button" disabled={busy} onClick={() => setConfirmation(item)}>{item.status === "disabled" ? "启用" : "停用"}</button></div></td></tr>)}</tbody></table></div> : null}
+    {loading ? <p role="status">正在读取…</p> : admin ? <div className="account-table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>成员</th><th>状态</th><th>存储用量 / 容量</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}><td>{item.name}</td><td>{item.kind === "enterprise" ? "企业" : "个人"}</td><td>{item.member_count}</td><td>{statusText[item.status]}</td><td>{item.storage ? `${formatStorage(item.storage.used_bytes)} / ${formatStorage(item.storage.limit_bytes)}` : "—"}</td><td><div className="account-actions"><button className="text-button" disabled={busy} onClick={() => openMembers(item)}>用户与容量</button><button className="text-button" disabled={busy} onClick={() => setConfirmation(item)}>{item.status === "disabled" ? "启用" : "停用"}</button></div></td></tr>)}</tbody></table></div> : null}
     {admin && selected && <details className="account-details">
       <summary>账户设置 · {selected.name}</summary>
       <form className="account-create-form" onSubmit={event => {

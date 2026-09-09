@@ -481,6 +481,7 @@ class StorageManager:
         self.repository = repository
         self.workspace = workspace
         self._account_drivers: dict[UUID | None, dict[UUID, StorageDriver]] = {}
+        self.durable_storage = None
 
     @property
     def _drivers(self) -> dict[UUID, StorageDriver]:
@@ -649,8 +650,9 @@ class StorageManager:
             last_verified_at=utc_now(),
         )
         await self.repository.save_storage_bundle(storage_object, replica)
+        if self.durable_storage:
+            await self.durable_storage.after_object(storage_object, replica)
         return storage_object
-
 
     async def save_object(
         self,
@@ -691,6 +693,8 @@ class StorageManager:
             state=ObjectReplicaState.UPLOADING,
             checksum=digest,
         )
+        if self.durable_storage:
+            await self.durable_storage.before_object(storage_object)
         try:
             info = await driver.put(object_key, payload, expected_sha256=digest)
             replica = replica.model_copy(
@@ -704,7 +708,13 @@ class StorageManager:
             await self.repository.save_storage_bundle(storage_object, replica)
         except Exception:
             await driver.delete_replica(object_key)
+            if self.durable_storage and self.durable_storage.enabled:
+                await asyncio.to_thread(
+                    self.durable_storage.catalog.release, f"object:{storage_object.id}"
+                )
             raise
+        if self.durable_storage:
+            await self.durable_storage.after_object(storage_object, replica)
         return storage_object
 
     async def get_object(self, object_id: UUID) -> StorageObject:

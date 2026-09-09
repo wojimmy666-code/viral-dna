@@ -6,6 +6,7 @@ import {
   setAccountSession, setProjectEditing,
 } from "./account-client.js";
 import { AccountManagement } from "./AccountManagement.jsx";
+import { StorageManagement } from "./StorageManagement.jsx";
 import {
   PASSWORD_MIN_LENGTH, PHONE_INPUT_PROPS,
   passwordError, pastePhone, phoneError, setupRequestBody,
@@ -272,6 +273,7 @@ export function AccountRoot({ children }) {
       <div className="account-menu" ref={menuElement}><button className="text-button" aria-expanded={menu} onClick={() => setMenu(!menu)} title={session.display_name}><span className="account-menu-name">{session.display_name}</span></button>
         {menu && <div className="account-menu-panel">
           {admin && <Link to="/admin/accounts" onClick={event => accountNavigate(event, "/admin/accounts")}>账户管理</Link>}
+          {!admin && <Link to="/account/storage" onClick={event => accountNavigate(event, "/account/storage")}>存储管理与生成历史</Link>}
           {!admin && session.account_kind === "enterprise" && session.role === "owner" && <Link to="/account/members" onClick={event => accountNavigate(event, "/account/members")}>企业成员</Link>}
           <button className="text-button" onClick={() => { setPasswordOpen(true); setMenu(false); }}>修改密码</button>
           <button className="text-button" onClick={logout}><SignOut size={16} />退出登录</button>
@@ -285,7 +287,7 @@ export function AccountRoot({ children }) {
       <div className="account-actions"><button type="submit" className="primary-button">修改并重新登录</button><button type="button" className="secondary-button" onClick={() => setPasswordOpen(false)}>取消</button></div>
     </form>}
     {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? "编辑权已失效，请先备份当前修改，再刷新重试。" : lease.occupied ? `${lease.display_name} 正在编辑，当前为只读查看。` : "当前为只读查看。"}</span>{lease.lost ? <><button className="text-button" onClick={copyDraft}>复制未提交内容</button><button className="text-button" onClick={downloadDraft}>下载备份</button></> : <button className="text-button" onClick={acquire}>进入编辑</button>}</div>}
-    {management ? <AccountManagement admin={admin} session={session} /> : <>
+    {location.pathname === "/account/storage" && !admin ? <StorageManagement session={session} /> : management ? <AccountManagement admin={admin} session={session} /> : <>
       {projectId && (!held || lease?.loading) && <main className="account-loading" role="status">正在检查项目编辑状态…</main>}
       {editingReady && <div ref={content} inert={!!lease?.lost}>{children}</div>}
       {projectId && held && !lease.loading && !lease.editable && !lease.lost && <ReadOnlyProject projectId={projectId} />}

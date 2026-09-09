@@ -2,10 +2,10 @@
 
 ## 验收基线
 
-- 参考图：`docs/UI模板.png`
-- 桌面实现截图：`docs/qa/implementation-report-1696x931-final.png`
-- 平板截图：`docs/qa/implementation-tablet-820x900.png`
-- 手机截图：`docs/qa/implementation-mobile-390x844.png`
+- 参考图：`docs/design/UI模板.png`
+- 桌面实现截图：`docs/qa/screenshots/implementation-report-1696x931-final.png`
+- 平板截图：`docs/qa/screenshots/implementation-tablet-820x900.png`
+- 手机截图：`docs/qa/screenshots/implementation-mobile-390x844.png`
 - 对照状态：示例视频分析完成，报告“总览”已打开，元素替换后的 Prompt v2 已生成
 - 桌面参考尺寸：1696 × 931
 - 桌面实现尺寸：1696 × 931
@@ -52,7 +52,7 @@ final result: passed
 
 - 选定方案：方案 B，高密度单列记录列表。
 - 视觉参考：`docs/design/analysis-records-option-b-reference.png`。
-- 实现对照：`docs/design/analysis-records-option-b-implementation.png`，并在本地 Chrome 中复核最终标题收敛版本。
+- 实现对照：`docs/qa/screenshots/analysis-records-option-b-implementation.png`，并在本地 Chrome 中复核最终标题收敛版本。
 - 桌面视口：1426 × 773；平板视口：768 × 900；手机视口：390 × 844。
 
 ### 问题与修正
@@ -89,9 +89,9 @@ final result: passed
 
 ### 验收基线
 
-- 视觉问题来源：`docs/qa/source-shot-preview-fixed-height.png`，1167 × 1090；该截图记录了横版关键帧被放入固定竖向高容器后产生大面积留白的问题。
-- 浏览器实现截图：`docs/qa/implementation-shot-preview-16x9-scrolled.png`，1439 × 735。
-- 默认画幅截图：`docs/qa/implementation-create-project-default-16x9.png`，1439 × 735。
+- 视觉问题来源：`docs/qa/screenshots/source-shot-preview-fixed-height.png`，1167 × 1090；该截图记录了横版关键帧被放入固定竖向高容器后产生大面积留白的问题。
+- 浏览器实现截图：`docs/qa/screenshots/implementation-shot-preview-16x9-scrolled.png`，1439 × 735。
+- 默认画幅截图：`docs/qa/screenshots/implementation-create-project-default-16x9.png`，1439 × 735。
 - Chrome CSS 视口：1440 × 735；截图密度按 1 CSS px 对应约 1 图像 px 检查。来源截图是用户提供的局部问题截图，因此以相同组件状态做定性对照，不对浏览器外围区域做像素级比较。
 - 实现状态：1280 × 720、16:9 的真实分析记录；现有创作方案输出为 16:9、1920 × 1080；分镜 1 已打开，AI 图片为空状态。
 

@@ -133,8 +133,17 @@ class AccountAuthenticationMiddleware:
                     account_access.reset(token)
             admin = path.startswith("/api/v1/admin/")
             cookie = request.cookies.get(ADMIN_COOKIE if admin else USER_COOKIE, "")
-            session = await asyncio.to_thread(repo.session, cookie, admin=admin)
-            if scope["method"] not in {"GET", "HEAD"}:
+            transfer_token = request.headers.get("authorization", "")
+            transfer = path.startswith(
+                "/api/v1/account/storage/transfer/"
+            ) and transfer_token.startswith("Bearer ")
+            if transfer:
+                if request.url.scheme != "https":
+                    raise AccountError(403, "https_required", "服务器同步必须使用 HTTPS")
+                session = await asyncio.to_thread(repo.storage_token_session, transfer_token[7:])
+            else:
+                session = await asyncio.to_thread(repo.session, cookie, admin=admin)
+            if not transfer and scope["method"] not in {"GET", "HEAD"}:
                 check_csrf(request, cookie)
             scope.setdefault("state", {})["authenticated_session"] = session
             scope["state"]["authenticated_admin"] = admin
@@ -401,7 +410,20 @@ def create_account_router(account_context, repository) -> APIRouter:
 
     @router.get("/admin/accounts")
     async def list_accounts():
-        return {"items": await asyncio.to_thread(account_repository().accounts)}
+        def with_storage():
+            from ..account_storage.catalog import StorageCatalog
+
+            repository = account_repository()
+            access = {str(item.account_id): item for item in repository.runtime_accounts()}
+            items = repository.accounts()
+            for item in items:
+                owner = access[item["id"]]
+                item["storage"] = StorageCatalog(
+                    owner.workspace_root, item["id"], item["kind"]
+                ).usage()
+            return items
+
+        return {"items": await asyncio.to_thread(with_storage)}
 
     @router.post("/admin/accounts")
     async def create_account(payload: AccountInput, request: Request):

@@ -24,6 +24,9 @@ from .account_preferences import (
     UserPreferencesService,
     create_user_preferences_router,
 )
+from .account_storage.routes import create_storage_router
+from .account_storage.service import AccountStorageService
+from .account_storage.sync import ServerSyncService
 from .accounts.authorization import create_project_authorizer
 from .accounts.http import (
     AccountAuthenticationMiddleware,
@@ -317,6 +320,8 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         await skill_presentation_service.shutdown()
+        await server_sync_service.shutdown()
+        await durable_storage_service.shutdown()
         await timeline_export_service.shutdown()
         await timeline_service.shutdown()
         await production_service.shutdown_generation_runs()
@@ -330,6 +335,8 @@ async def initialize_account_runtime():
     await platform_connection_service.initialize()
     await notification_service.initialize()
     await project_asset_service.bootstrap_legacy_references()
+    durable_storage_service.start_inventory()
+    server_sync_service.ensure_worker()
     await record_service.bootstrap(recover_interrupted=True)
     await project_service.bootstrap_analysis_projects()
     await production_service.recover_generation_runs()
@@ -426,6 +433,11 @@ pipeline = HybridAnalysisPipeline(
 )
 notification_service = create_notification_service(account_context_service)
 storage_manager = StorageManager(store, workspace_manager)
+durable_storage_service = AccountStorageService(store, workspace_manager, storage_manager)
+server_sync_service = ServerSyncService(durable_storage_service)
+durable_storage_service.sync = server_sync_service
+store.durable_storage = durable_storage_service
+storage_manager.durable_storage = durable_storage_service
 media_staging_secret_store = MediaStagingSecretStore(
     default_account_catalog_path().parent / "secrets"
 )
@@ -462,6 +474,7 @@ depth_control_service = DepthControlService(
     notification_publisher=notification_service,
 )
 asset_library_service = AssetLibraryService(store, storage_manager, account_context_service)
+durable_storage_service.asset_lock = asset_library_service._lock
 generated_asset_promotion_service = GeneratedAssetPromotionService(
     repository=store,
     account_context=account_context_service,
@@ -607,6 +620,9 @@ app.include_router(
     prefix=API_PREFIX,
 )
 app.include_router(create_identity_router(account_context_service), prefix=API_PREFIX)
+app.include_router(
+    create_storage_router(durable_storage_service, server_sync_service), prefix=API_PREFIX
+)
 app.include_router(create_user_preferences_router(user_preferences_service), prefix=API_PREFIX)
 app.include_router(create_category_profile_router(category_profile_service), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)

@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS project_edit_leases (
  editor_id TEXT NOT NULL, token_hash TEXT NOT NULL, generation INTEGER NOT NULL,
  expires_at REAL NOT NULL, PRIMARY KEY(account_id,project_id)
 );
+CREATE TABLE IF NOT EXISTS auth_storage_tokens (
+ token_hash TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES auth_accounts(id),
+ user_id TEXT NOT NULL REFERENCES auth_users(id),device_id TEXT NOT NULL,
+ expires_at REAL NOT NULL,created_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_audit (
  id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL,
  account_id TEXT, subject_id TEXT, created_at REAL NOT NULL
@@ -173,6 +177,75 @@ class AccountRepository:
     def initialized(self) -> bool:
         with self.connect() as db:
             return db.execute("SELECT 1 FROM auth_admins").fetchone() is not None
+
+    def issue_storage_token(self, access, device_id: str):
+        if access.role != "owner":
+            raise AccountError(403, "owner_required", "请由账户负责人连接同步设备")
+        token = "vdst_" + secrets.token_urlsafe(48)
+        now = time.time()
+        with self.connect(write=True) as db:
+            db.execute(
+                "DELETE FROM auth_storage_tokens WHERE account_id=? AND device_id=?",
+                (str(access.account_id), device_id),
+            )
+            db.execute(
+                "INSERT INTO auth_storage_tokens VALUES(?,?,?,?,?,?)",
+                (
+                    token_hash(token),
+                    str(access.account_id),
+                    str(access.user_id),
+                    device_id,
+                    now + 30 * 86400,
+                    now,
+                ),
+            )
+            self.audit(
+                db,
+                str(access.user_id),
+                "storage_device_connected",
+                str(access.account_id),
+                device_id,
+            )
+        return {
+            "token": token,
+            "expires_at": now + 30 * 86400,
+            "account_id": str(access.account_id),
+            "account_name": access.account_name,
+            "account_kind": access.account_kind,
+        }
+
+    def storage_token_session(self, token: str):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT t.* FROM auth_storage_tokens t JOIN auth_accounts a ON a.id=t.account_id "
+                "JOIN auth_users u ON u.id=t.user_id WHERE t.token_hash=? AND t.expires_at>? "
+                "AND a.status='active' AND u.status='active' AND u.role='owner'",
+                (token_hash(token), time.time()),
+            ).fetchone()
+            if row is None:
+                raise AccountError(
+                    401, "storage_device_expired", "服务器连接已失效，请重新登录连接"
+                )
+            account = db.execute(
+                "SELECT * FROM auth_accounts WHERE id=?", (row["account_id"],)
+            ).fetchone()
+            user = db.execute("SELECT * FROM auth_users WHERE id=?", (row["user_id"],)).fetchone()
+        return {
+            "access": self.access(account, user),
+            "username": user["username"],
+            "csrf_token": "",
+            "storage_device_id": row["device_id"],
+        }
+
+    def revoke_storage_token(self, access, device_id: str):
+        with self.connect(write=True) as db:
+            db.execute(
+                "DELETE FROM auth_storage_tokens WHERE account_id=? AND device_id=?",
+                (str(access.account_id), device_id),
+            )
+            self.audit(
+                db, str(access.user_id), "storage_device_revoked", str(access.account_id), device_id
+            )
 
     def bootstrap(
         self,
@@ -363,6 +436,7 @@ class AccountRepository:
                 (name or row["name"], status or row["status"], time.time(), account_id),
             )
             if status == "disabled":
+                db.execute("DELETE FROM auth_storage_tokens WHERE account_id=?", (account_id,))
                 db.execute(
                     "DELETE FROM auth_sessions WHERE principal_id IN "
                     "(SELECT id FROM auth_users WHERE account_id=?)",
@@ -423,6 +497,7 @@ class AccountRepository:
             db.execute("UPDATE auth_users SET status='disabled' WHERE id=?", (user_id,))
             db.execute("DELETE FROM auth_sessions WHERE principal_id=?", (user_id,))
             db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM auth_storage_tokens WHERE user_id=?", (user_id,))
             db.execute("DELETE FROM auth_invitations WHERE user_id=?", (user_id,))
             self.audit(db, actor, "member_removed", account_id, user_id)
 
@@ -477,6 +552,7 @@ class AccountRepository:
                 (time.time(), token_hash(token)),
             )
             db.execute("DELETE FROM auth_sessions WHERE principal_id=?", (row["user_id"],))
+            db.execute("DELETE FROM auth_storage_tokens WHERE user_id=?", (row["user_id"],))
             db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (row["user_id"],))
             self.audit(db, row["user_id"], "password_set", row["account_id"], row["user_id"])
 
@@ -607,6 +683,8 @@ class AccountRepository:
             db.execute("DELETE FROM auth_sessions WHERE principal_id=?", (user_id,))
             db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (user_id,))
             self.audit(db, user_id, "password_changed")
+            if not admin:
+                db.execute("DELETE FROM auth_storage_tokens WHERE user_id=?", (user_id,))
 
     def lease(
         self,

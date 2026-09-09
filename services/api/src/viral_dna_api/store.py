@@ -1366,6 +1366,7 @@ class WorkspaceStore:
         self._switch_lock = asyncio.Lock()
         self._backend = self._new_backend(workspace_manager.database_path)
         self._account_backends = {}
+        self.durable_storage = None
 
     def _new_backend(self, database_path: Path):
         if self._memory_mode:
@@ -1386,12 +1387,99 @@ class WorkspaceStore:
 
                 workspace_manager.initialize(access.workspace_root)
                 self._account_backends[key] = FencedRepository(
-                    self._new_backend(workspace_manager.database_path))
+                    self._new_backend(workspace_manager.database_path)
+                )
             return self._account_backends[key]
         return self._backend
 
     def __getattr__(self, name: str):
-        return getattr(self.backend, name)
+        target = getattr(self.backend, name)
+        if self.durable_storage and name.startswith(("save_", "delete_", "add_")):
+
+            async def guarded(*args, **kwargs):
+                async with self.durable_storage.mutation():
+                    return await target(*args, **kwargs)
+
+            return guarded
+        return target
+
+    async def save_generation_run(self, run):
+        admitted = False
+        if self.durable_storage:
+            admitted = await self.durable_storage.before_run(run)
+        try:
+            saved = await self.backend.save_generation_run(run)
+        except BaseException:
+            if admitted:
+                await self.durable_storage.rollback_run(run)
+            raise
+        if self.durable_storage:
+            await self.durable_storage.after_run(saved)
+        return saved
+
+    async def save_generation_candidate(self, candidate):
+        saved = await self.backend.save_generation_candidate(candidate)
+        if self.durable_storage:
+            await self.durable_storage.capture_candidate(saved)
+        return saved
+
+    async def save_production_bundle(self, project, revision, **kwargs):
+        if self.durable_storage:
+            async with self.durable_storage.mutation():
+                return await self._save_durable_bundle(project, revision, **kwargs)
+        return await self.backend.save_production_bundle(project, revision, **kwargs)
+
+    async def _save_durable_bundle(self, project, revision, **kwargs):
+        admitted = []
+        try:
+            if self.durable_storage:
+                for run in kwargs.get("generation_runs") or []:
+                    if await self.durable_storage.before_run(run):
+                        admitted.append(run)
+            saved = await self.backend.save_production_bundle(project, revision, **kwargs)
+        except BaseException:
+            for run in admitted:
+                await self.durable_storage.rollback_run(run)
+            raise
+        if self.durable_storage:
+            for shot in kwargs.get("shot_plans") or []:
+                await self.durable_storage.capture_shot_media(shot)
+            for candidate in kwargs.get("generation_candidates") or []:
+                await self.durable_storage.capture_candidate(candidate)
+            for run in kwargs.get("generation_runs") or []:
+                await self.durable_storage.after_run(run)
+        return saved
+
+    async def save_shot_plan(self, shot):
+        if self.durable_storage:
+            async with self.durable_storage.mutation():
+                saved = await self.backend.save_shot_plan(shot)
+                await self.durable_storage.capture_shot_media(saved)
+                return saved
+        return await self.backend.save_shot_plan(shot)
+
+    async def save_asset(self, asset):
+        if self.durable_storage:
+            async with self.durable_storage.mutation():
+                saved = await self.backend.save_asset(asset)
+                await self.durable_storage.capture_asset(saved)
+                return saved
+        return await self.backend.save_asset(asset)
+
+    async def save_asset_folder(self, folder):
+        saved = await self.backend.save_asset_folder(folder)
+        if self.durable_storage and self.durable_storage.enabled:
+            # Folder-only renames must update the next incremental manifest too.
+            for asset in await self.backend.list_assets():
+                if asset.deleted_at is None:
+                    await self.durable_storage.capture_asset(asset)
+        return saved
+
+    async def save_video_enhancement_job(self, job):
+        saved = await self.backend.save_video_enhancement_job(job)
+        if self.durable_storage:
+            await self.durable_storage.capture_enhancement(saved)
+        return saved
 
     async def switch_workspace(self, path: str) -> None:
         from .access_context import account_access
@@ -1425,6 +1513,8 @@ class WorkspaceStore:
 
     async def save_video(self, video: Video) -> Video:
         saved = await self.backend.save_video(video)
+        if self.durable_storage:
+            await self.durable_storage.capture_video_source(saved)
         if video.record_id is not None:
             record = await self.backend.get_record(video.record_id)
             if record is not None and record.status != video.status:
