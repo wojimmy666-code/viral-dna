@@ -153,6 +153,7 @@ from .models import (
     VideoProviderTaskResponse,
     VideoProviderTaskStatus,
     VideoQualityStatus,
+    VideoStageEnterRequest,
     WorkflowItemStatus,
 )
 from .notifications import NotificationPublisher
@@ -3626,15 +3627,26 @@ class ProductionService:
                 if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
             }
             requested_ids = payload.ordered_shot_plan_ids
-            if set(requested_ids) != set(active_by_id):
+            scope_ids = {
+                item.id for item in self._video_stage_plans(project, plans)
+            } if payload.scope == "shot_videos" else set(active_by_id)
+            if set(requested_ids) != scope_ids:
                 raise _fail(
                     422,
                     "shot_order_incomplete",
-                    "排序必须包含当前全部有效分镜，且不能包含已舍弃分镜",
+                    "排序必须包含当前范围的全部有效分镜，且不能包含其他或已舍弃分镜",
                 )
             current_ids = [
                 item.id for item in sorted(active_by_id.values(), key=lambda item: item.index)
             ]
+            # Move participants through their existing slots, keeping excluded
+            # shots and their relative order intact for the image workspace.
+            if payload.scope == "shot_videos":
+                ordered = iter(requested_ids)
+                requested_ids = [
+                    next(ordered) if item_id in scope_ids else item_id
+                    for item_id in current_ids
+                ]
             if requested_ids == current_ids:
                 return await self.list_shots(project.id)
             revision_id = uuid4()
@@ -3673,6 +3685,7 @@ class ProductionService:
             self._require_expected_revision(project, payload.expected_revision_id)
             if plan.lifecycle_status != ShotLifecycleStatus.ACTIVE:
                 raise _fail(409, "shot_inactive", "已舍弃分镜不能参与剪辑")
+            self._require_video_stage_member(project, plan)
             plan = await self._input_compatible_plan(plan)
             if payload.include_in_editing and not await self._has_valid_approved_video_output(
                 project, plan
@@ -5901,7 +5914,10 @@ class ProductionService:
         shot_plan_id: UUID,
         payload: VideoGenerationCreate,
     ) -> GenerationRunResponse:
-        run = await self._enqueue_video_run(shot_plan_id, payload)
+        plan = await self._require_shot(shot_plan_id)
+        lock = await self._project_lock(plan.project_id)
+        async with lock:
+            run = await self._enqueue_video_run(shot_plan_id, payload)
         self._schedule_video_run(run.id)
         return await self._run_response(run)
 
@@ -6067,6 +6083,7 @@ class ProductionService:
         project = await self._require_project(plan.project_id)
         self._require_generation_revision(project, plan, payload)
         payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
+        self._require_video_stage_member(project, plan)
         await self._validate_skill_video_contract(project, payload)
         allowed_video_steps = {
             ProductionStep.SHOT_VIDEOS,
@@ -6657,13 +6674,15 @@ class ProductionService:
                     "上游提交结果不明确；为避免重复扣费，请先在 Provider 控制台核对任务",
                 )
             video_payload = VideoGenerationCreate.model_validate(payload_data)
-            run = await self._enqueue_video_run(
-                source.shot_plan_id,
-                video_payload,
-                retry_of_run_id=source.id,
-                retry_count=source.retry_count + 1,
-                frozen_prompt=source.request_payload.get("prompt_snapshot"),
-            )
+            lock = await self._project_lock(project.id)
+            async with lock:
+                run = await self._enqueue_video_run(
+                    source.shot_plan_id,
+                    video_payload,
+                    retry_of_run_id=source.id,
+                    retry_count=source.retry_count + 1,
+                    frozen_prompt=source.request_payload.get("prompt_snapshot"),
+                )
             self._schedule_video_run(run.id)
         else:
             image_payload = ImageGenerationCreate.model_validate(payload_data)
@@ -7112,6 +7131,7 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(plan.project_id)
             self._require_generation_revision(project, plan, payload)
+            self._require_video_stage_member(project, plan)
             if project.active_step not in {
                 ProductionStep.SHOT_VIDEOS,
                 ProductionStep.EDITING,
@@ -8648,13 +8668,52 @@ class ProductionService:
             return False
         return True
 
+    @staticmethod
+    def _video_stage_plans(
+        project: ProductionProject, plans: list[ShotPlan]
+    ) -> list[ShotPlan]:
+        scope = (
+            set(project.video_stage_shot_ids) if project.video_stage_shot_ids is not None else None
+        )
+        return [
+            plan for plan in sorted(plans, key=lambda item: item.index)
+            if plan.lifecycle_status == ShotLifecycleStatus.ACTIVE
+            and (scope is None or plan.id in scope)
+        ]
+
+    @staticmethod
+    def _require_video_stage_member(project: ProductionProject, plan: ShotPlan) -> None:
+        if project.video_stage_shot_ids is not None and plan.id not in project.video_stage_shot_ids:
+            raise _fail(
+                409, "shot_outside_video_stage",
+                "该分镜未选入本次视频阶段，请先在分镜图片中采用图片并重新进入分镜视频",
+            )
+
+    async def _image_stage_selection(
+        self, project: ProductionProject, plans: list[ShotPlan]
+    ) -> tuple[list[ShotPlan], int]:
+        selected = []
+        picture_count = 0
+        for plan in sorted(plans, key=lambda item: item.index):
+            if plan.lifecycle_status != ShotLifecycleStatus.ACTIVE:
+                continue
+            count = sum([
+                await self._has_valid_approved_image_beat(project, plan, beat)
+                for beat in plan.visual_beats
+            ])
+            picture_count += count
+            if count or (
+                plan.output_mode == ShotOutputMode.SOURCE_VIDEO
+                and await self._has_valid_approved_video_output(project, plan)
+            ):
+                selected.append(plan)
+        return selected, picture_count
+
     async def _editing_video_selection(
         self, project: ProductionProject, plans: list[ShotPlan]
     ) -> tuple[list[ShotPlan], list[ShotPlan]]:
         eligible = []
-        for plan in sorted(plans, key=lambda item: item.index):
-            if plan.lifecycle_status != ShotLifecycleStatus.ACTIVE:
-                continue
+        for plan in self._video_stage_plans(project, plans):
             plan = await self._input_compatible_plan(plan)
             if await self._has_valid_approved_video_output(project, plan):
                 eligible.append(plan)
@@ -8687,9 +8746,7 @@ class ProductionService:
         eligible_videos: list[ShotPlan] = []
         selected_videos: list[ShotPlan] = []
         if video_stage:
-            required = [
-                item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
-            ]
+            required = self._video_stage_plans(project, plans)
             eligible_videos, selected_videos = await self._editing_video_selection(
                 project, required
             )
@@ -8734,22 +8791,7 @@ class ProductionService:
             required = [
                 item for item in plans if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
             ]
-            approved = []
-            for plan in required:
-                count = sum(
-                    [
-                        await self._has_valid_approved_image_beat(project, plan, beat)
-                        for beat in plan.visual_beats
-                    ]
-                )
-                approved_image_count += count
-                if count or (
-                    plan.output_mode == ShotOutputMode.SOURCE_VIDEO
-                    and await self._has_valid_approved_video_output(project, plan)
-                ):
-                    # Preserve the legacy output/shot summary; only the separate
-                    # picture count controls entry, never a retained video.
-                    approved.append(plan)
+            approved, approved_image_count = await self._image_stage_selection(project, required)
             stale = [
                 item
                 for item in required
@@ -9032,12 +9074,62 @@ class ProductionService:
             ],
         )
 
+    async def enter_video_stage(
+        self, project_id: UUID, payload: VideoStageEnterRequest
+    ) -> ProductionProjectDetail:
+        initial = await self._require_project(project_id)
+        await self._ensure_project_shots(initial)
+        lock = await self._project_lock(project_id)
+        async with lock:
+            project = await self._require_project(project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            plans = [
+                await self._input_compatible_plan(plan)
+                for plan in await self.repository.list_shot_plans(project.id)
+            ]
+            selected, picture_count = await self._image_stage_selection(project, plans)
+            if not picture_count:
+                raise _fail(409, "workflow_gate_blocked", "请至少采用一张分镜图")
+            selected_ids = [plan.id for plan in selected]
+            already_entered = project.active_step in {
+                ProductionStep.SHOT_VIDEOS, ProductionStep.EDITING, ProductionStep.EXPORT,
+            }
+            # Repeated entry is idempotent; refreshing a page never calls this.
+            if not already_entered or project.video_stage_shot_ids != selected_ids:
+                next_project = project.model_copy(update={
+                    "video_stage_shot_ids": selected_ids,
+                    "active_step": (
+                        project.active_step if already_entered else ProductionStep.SHOT_VIDEOS
+                    ),
+                    "status": project.status if already_entered else ProductionProjectStatus.ACTIVE,
+                    "updated_at": utc_now(),
+                })
+                next_project, revision = await self._prepare_revision(
+                    next_project,
+                    ProductionChangeKind.VIDEO_STAGE_SELECTION_CHANGED if already_entered
+                    else ProductionChangeKind.WORKFLOW_ADVANCED,
+                    f"选入 {len(selected_ids)} 个分镜，进入分镜视频",
+                )
+                await self.repository.save_production_bundle(next_project, revision)
+        return await self.get_project(project_id)
+
     async def advance(
         self,
         project_id: UUID,
         payload: ProductionAdvanceRequest,
     ) -> ProductionProjectDetail:
         initial_project = await self._require_project(project_id)
+        video_steps = {
+            ProductionStep.SHOT_VIDEOS, ProductionStep.EDITING, ProductionStep.EXPORT,
+        }
+        if (
+            payload.target_step == ProductionStep.SHOT_VIDEOS
+            and initial_project.active_step not in video_steps
+        ):
+            return await self.enter_video_stage(
+                project_id,
+                VideoStageEnterRequest(expected_revision_id=payload.expected_revision_id),
+            )
         await self._ensure_project_shots(initial_project)
         lock = await self._project_lock(project_id)
         async with lock:
@@ -9048,6 +9140,11 @@ class ProductionService:
                     "分段视频" if payload.target_step == ProductionStep.SHOT_VIDEOS else "视频剪辑"
                 )
                 raise _fail(409, "workflow_already_advanced", f"当前方案已进入{label}阶段")
+            if project.active_step in {ProductionStep.EDITING, ProductionStep.EXPORT}:
+                raise _fail(
+                    409, "unsupported_target_step",
+                    "已进入剪辑或导出；如需调整参与分镜，请从分镜图片重新进入分镜视频",
+                )
             expected_target = (
                 ProductionStep.EDITING
                 if project.active_step == ProductionStep.SHOT_VIDEOS

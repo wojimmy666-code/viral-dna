@@ -1,3 +1,5 @@
+import { accountStorageKey } from "../accounts/account-client.js";
+
 export const CREATION_STEPS = Object.freeze([
   { id: "project_setup", label: "创作方案" },
   { id: "shot_images", label: "分镜图片" },
@@ -65,14 +67,14 @@ export function savedWorkspaceLocation(recordId, search = "") {
   const explicit = readWorkspaceLocation(search);
   if (explicit.section || explicit.productionId) return explicit;
   try {
-    return readWorkspaceLocation(globalThis.sessionStorage?.getItem(`viraldna:studio:${recordId}`) || "");
+    return readWorkspaceLocation(globalThis.sessionStorage?.getItem(accountStorageKey(`viraldna:studio:${recordId}`)) || "");
   } catch {
     return explicit;
   }
 }
 
 export function rememberWorkspaceLocation(recordId, search) {
-  try { globalThis.sessionStorage?.setItem(`viraldna:studio:${recordId}`, search); } catch { /* URL remains usable when storage is unavailable. */ }
+  try { globalThis.sessionStorage?.setItem(accountStorageKey(`viraldna:studio:${recordId}`), search); } catch { /* URL remains usable when storage is unavailable. */ }
 }
 
 export function sourceCapabilities(project, sourceMedia = {}) {

@@ -476,7 +476,18 @@ class MediaStagingService:
         while not self._closed:
             await asyncio.sleep(900)
             try:
-                await self.cleanup_expired()
+                from ..access_context import account_access
+                from ..accounts.runtime import account_repository, password_auth_enabled
+
+                if not password_auth_enabled():
+                    await self.cleanup_expired()
+                    continue
+                for access in await asyncio.to_thread(account_repository().runtime_accounts):
+                    context_token = account_access.set(access)
+                    try:
+                        await self.cleanup_expired()
+                    finally:
+                        account_access.reset(context_token)
             except Exception:
                 # Cleanup is best effort; upload/generation paths must remain available.
                 continue

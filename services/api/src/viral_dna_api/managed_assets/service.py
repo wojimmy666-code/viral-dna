@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
+from ..access_context import account_access
+from ..accounts.runtime import account_repository
 from ..models import (
     ManagedAssetKind,
     ManagedAssetMediaType,
@@ -121,10 +123,15 @@ def _service_error(exc: VolcArkAssetApiError) -> ManagedAssetServiceError:
 
 class ManagedAssetCatalogService:
     def settings(self) -> ManagedAssetSettingsState:
+        access = account_access.get()
+        project_name = (
+            account_repository().managed_asset_project(str(access.account_id))
+            if access else get_config_value(PROJECT_ENV, "default").strip() or "default"
+        )
         region = get_config_value(REGION_ENV, "cn-beijing").strip() or "cn-beijing"
         if region not in ALLOWED_REGIONS:
             region = "cn-beijing"
-        return ManagedAssetSettingsState(
+        state = ManagedAssetSettingsState(
             access_key=(
                 get_config_value(ACCESS_KEY_ENV, "").strip()
                 or get_config_value("VOLCENGINE_ACCESS_KEY", "").strip()
@@ -134,9 +141,12 @@ class ManagedAssetCatalogService:
                 or get_config_value("VOLCENGINE_SECRET_KEY", "").strip()
             ),
             region=region,
-            project_name=get_config_value(PROJECT_ENV, "default").strip() or "default",
+            project_name=project_name or "",
             validated_at=get_config_value(VALIDATED_ENV, "").strip(),
         )
+        if access and not project_name:
+            return ManagedAssetSettingsState("", "", region, "", "")
+        return state
 
     def status(self) -> ManagedAssetCatalogStatusResponse:
         state = self.settings()
@@ -153,6 +163,7 @@ class ManagedAssetCatalogService:
             validation_message=(
                 "资产目录凭证已校验" if state.configured and state.validated_at else
                 "资产目录凭证尚未校验" if state.configured else
+                "请联系管理员配置本账户专属真人资产目录" if account_access.get() else
                 "请在模型与设置中配置火山方舟资产目录 AK/SK"
             ),
         )
@@ -244,6 +255,14 @@ class ManagedAssetCatalogService:
             for item in assets_payload.get("Items", [])
             if isinstance(item, dict)
         ]
+        if account_access.get() and any(
+            item.project_name != state.project_name for item in [*groups, *assets]
+        ):
+            raise ManagedAssetServiceError(
+                409,
+                "managed_asset_project_mismatch",
+                "资产目录返回了非本账户的内容，请联系管理员核对目录配置",
+            )
         return ManagedAssetCatalogResponse(
             kind=kind,
             project_name=state.project_name,

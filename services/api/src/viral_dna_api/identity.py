@@ -18,6 +18,7 @@ class PrincipalType(StrEnum):
 
 
 class AuthMode(StrEnum):
+    PASSWORD = "password"
     LOCAL_BOOTSTRAP = "local_bootstrap"
     EXTERNAL = "external"
 
@@ -27,6 +28,12 @@ class UserSession(BaseModel):
     user_id: UUID
     display_name: str
     auth_mode: AuthMode
+    username: str | None = None
+    account_id: UUID | None = None
+    account_name: str | None = None
+    account_kind: str | None = None
+    role: str | None = None
+    csrf_token: str | None = None
 
 
 class PlatformAdminSession(BaseModel):
@@ -35,6 +42,7 @@ class PlatformAdminSession(BaseModel):
     display_name: str
     auth_mode: AuthMode
     permissions: list[str]
+    csrf_token: str | None = None
 
 
 LOCAL_PLATFORM_ADMIN_ID = uuid5(NAMESPACE_URL, "viraldna:local-platform-admin")
@@ -49,11 +57,11 @@ PLATFORM_ADMIN_PERMISSIONS = [
 
 
 def current_auth_mode() -> AuthMode:
-    raw = get_config_value("VIRAL_DNA_AUTH_MODE", AuthMode.LOCAL_BOOTSTRAP.value)
+    raw = get_config_value("VIRAL_DNA_AUTH_MODE", AuthMode.PASSWORD.value)
     try:
         return AuthMode(raw.strip().lower())
     except ValueError:
-        return AuthMode.LOCAL_BOOTSTRAP
+        return AuthMode.EXTERNAL
 
 
 def admin_console_enabled() -> bool:
@@ -72,6 +80,20 @@ async def require_platform_admin(request: Request) -> PlatformAdminSession:
     if not admin_console_enabled():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="平台管理后台未启用")
     mode = current_auth_mode()
+    if mode is AuthMode.PASSWORD:
+        import asyncio
+
+        from .accounts.http import ADMIN_COOKIE
+        from .accounts.repository import AccountError
+        from .accounts.runtime import account_repository
+
+        try:
+            session = await asyncio.to_thread(
+                account_repository().session, request.cookies.get(ADMIN_COOKIE, ""), admin=True
+            )
+        except AccountError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        return PlatformAdminSession(**session, permissions=PLATFORM_ADMIN_PERMISSIONS)
     if mode is not AuthMode.LOCAL_BOOTSTRAP:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -99,7 +121,14 @@ def create_identity_router(account_context: AccountContextService) -> APIRouter:
     router = APIRouter(tags=["identity"])
 
     @router.get("/session", response_model=UserSession)
-    async def user_session() -> UserSession:
+    async def user_session(request: Request) -> UserSession:
+        if current_auth_mode() is AuthMode.PASSWORD:
+            from .accounts.http import user_payload
+
+            session = getattr(request.state, "authenticated_session", None)
+            if session is None or "access" not in session:
+                raise HTTPException(401, "请先登录")
+            return UserSession(**user_payload(session))
         account = await account_context.current_account()
         return UserSession(
             user_id=account.id,

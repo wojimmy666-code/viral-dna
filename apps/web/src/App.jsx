@@ -65,6 +65,7 @@ import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsP
 import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
+import { accountFetch } from "./accounts/account-client.js";
 import {
   SkillDetail,
   SkillPlaza,
@@ -374,7 +375,7 @@ function projectFacingMessage(value) {
 }
 
 async function apiRequest(path, options = {}) {
-  const response = await fetch(`${API_BASE}${path}`, options);
+  const response = await accountFetch(`${API_BASE}${path}`, options);
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = payload?.detail;
@@ -822,12 +823,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (appRoute.name === "platform-admin") return;
     loadWorkspace().catch(() => undefined);
     loadGenerationSettings().catch(() => undefined);
     loadUserSettings({ quiet: true }).catch(() => undefined);
     refreshHistory({ quiet: true }).catch(() => undefined);
     loadPlatformConnections({ quiet: true }).catch(() => undefined);
-  }, []);
+  }, [appRoute.name === "platform-admin"]);
 
   useEffect(() => {
     if (appRoute.name !== "user-settings") return;
@@ -841,6 +843,7 @@ export function App() {
 
   useEffect(() => {
     const recoverVideoSettings = () => {
+      if (window.location.pathname.startsWith("/admin")) return;
       if (videoSettingsLoadStateRef.current === "loading") return;
       if (
         videoSettingsLoadedRef.current
@@ -873,12 +876,13 @@ export function App() {
   }, [activeNav, loadPlatformConnections]);
 
   useEffect(() => {
+    if (appRoute.name === "platform-admin") return;
     refreshNotifications({ announce: false }).catch(() => undefined);
     const timer = window.setInterval(() => {
       refreshNotifications().catch(() => undefined);
     }, 8000);
     return () => window.clearInterval(timer);
-  }, [refreshNotifications]);
+  }, [refreshNotifications, appRoute.name === "platform-admin"]);
 
   useEffect(() => {
     if (activeNav !== "history") return undefined;
@@ -1810,7 +1814,7 @@ export function App() {
 
   function connectToProgress(analysisId) {
     eventSourceRef.current?.close();
-    const source = new EventSource(`${API_BASE}/analyses/${analysisId}/events`);
+    const source = new EventSource(`${API_BASE}/analyses/${analysisId}/events`, { withCredentials: true });
     eventSourceRef.current = source;
     source.addEventListener("progress", async (event) => {
       const next = JSON.parse(event.data);

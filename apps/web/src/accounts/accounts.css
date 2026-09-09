@@ -1,0 +1,67 @@
+.account-root { min-height: 100vh; }
+.account-session-bar { display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); padding: var(--space-2) var(--space-6); border-bottom: 1px solid var(--border-default); background: var(--surface-panel); position: relative; z-index: var(--z-dropdown); }
+.account-session-bar > span { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.account-session-bar > span > svg, .account-session-bar small { flex-shrink: 0; }
+.account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-login-shell, .account-session-bar, .account-management, .account-readonly, .account-password-form { font-family: var(--font-family-ui); }
+.account-login-shell a, .account-management a, .account-readonly a, .account-menu-panel a { color: var(--accent); text-decoration: none; }
+.account-login-shell a:hover, .account-management a:hover, .account-readonly a:hover, .account-menu-panel a:hover { text-decoration: underline; }
+.account-session-bar small, .account-help { color: var(--text-secondary); font-size: var(--type-caption-size); line-height: var(--type-leading-copy); }
+.account-menu { position: relative; min-width: 0; max-width: min(40%, 240px); }
+.account-menu > button { max-width: 100%; }
+.account-menu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-menu-panel { position: absolute; right: 0; top: 100%; min-width: 160px; padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-1); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); }
+.account-menu-panel a, .account-menu-panel button { min-height: 40px; padding: var(--space-2); text-align: left; }
+.account-login-shell { min-height: 100vh; display: grid; place-items: center; padding: var(--space-6); }
+.account-login-panel { width: min(100%, 440px); padding: var(--space-8); border: 1px solid var(--border-default); border-radius: var(--radius-panel); background: var(--surface-panel); }
+.account-brand { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--type-weight-semibold); margin-bottom: var(--space-6); }
+.account-brand > span { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-control); background: var(--accent); color: var(--text-on-accent); }
+.account-login-panel h1, .account-management h1, .account-readonly h1 { font-size: var(--type-page-size); font-weight: var(--type-weight-semibold); line-height: var(--type-leading-tight); margin: 0 0 var(--space-6); }
+.account-management h2, .account-readonly h2, .account-readonly h3, .account-password-form h2 { font-size: var(--type-heading-size); font-weight: var(--type-weight-semibold); line-height: var(--type-leading-tight); }
+.account-login-panel fieldset, .account-create-form fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.account-field { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; font-size: var(--type-label-size); color: var(--text-primary); }
+.account-field > span { font-weight: var(--type-weight-semibold); }
+.account-login-panel fieldset > p, .account-create-form fieldset > p, .account-create-form fieldset > h2, .account-password-form h2 { margin: 0; }
+.account-field input, .account-field select, .account-activation-link input { width: 100%; min-width: 0; height: var(--control-height); padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); color: var(--text-primary); font: inherit; }
+.account-primary { width: 100%; min-height: 44px; }
+.account-error { color: var(--status-danger-text); background: var(--status-danger-bg); padding: var(--space-3) var(--space-4); border-radius: var(--radius-control); font-size: var(--type-body-size); overflow-wrap: anywhere; }
+.account-login-panel footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-6); font-size: var(--type-caption-size); color: var(--text-secondary); }
+.account-checkbox { display: flex; align-items: flex-start; gap: var(--space-2); font-size: var(--type-body-size); line-height: var(--type-leading-copy); }
+.account-checkbox input { flex-shrink: 0; }
+.account-loading { padding: var(--space-8); color: var(--text-secondary); }
+.account-management, .account-readonly { max-width: 1120px; margin: 0 auto; padding: var(--space-6); }
+.account-management-heading, .account-actions, .account-name-form { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.account-management-heading { justify-content: space-between; margin: var(--space-6) 0; }
+.account-management-heading h1 { margin: 0; }
+.account-name-form { align-items: end; margin-bottom: var(--space-6); }
+.account-name-form .account-field { flex: 1; max-width: 440px; }
+.account-create-form, .account-password-form, .account-activation-link { padding: var(--space-6); margin: var(--space-4) 0; border: 1px solid var(--border-default); border-radius: var(--radius-panel); background: var(--surface-panel); max-width: 560px; }
+.account-password-form { margin-inline: auto; display: flex; flex-direction: column; gap: var(--space-4); }
+.account-activation-link p { font-size: var(--type-caption-size); color: var(--text-secondary); }
+.account-activation-link .account-actions { margin-top: var(--space-3); }
+.account-table-wrap { overflow-x: auto; }
+.account-table-wrap table { width: 100%; border-collapse: collapse; text-align: left; font-size: var(--type-body-size); }
+.account-table-wrap table { min-width: 640px; }
+.account-table-wrap th, .account-table-wrap td:nth-child(n+3) { white-space: nowrap; }
+.account-table-wrap td:first-child, .account-table-wrap td:nth-child(2) { max-width: 240px; }
+.account-table-wrap th { font-weight: var(--type-weight-semibold); color: var(--text-secondary); }
+.account-table-wrap td, .account-table-wrap th { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border-default); overflow-wrap: anywhere; }
+.account-edit-notice { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-3) var(--space-6); background: var(--surface-subtle); color: var(--text-secondary); font-size: var(--type-body-size); }
+.account-edit-notice > span { flex: 1; min-width: 160px; }
+.account-readonly h1 { margin-top: var(--space-4); }
+.account-readonly-shot { padding-block: var(--space-4); border-top: 1px solid var(--border-default); }
+.account-readonly-media { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-3); }
+.account-readonly-media figure { margin: 0; max-width: 240px; }
+.account-readonly-media img, .account-readonly-media video { object-fit: contain; max-width: 100%; max-height: 240px; border-radius: var(--radius-control); }
+.account-readonly-media figcaption { font-size: var(--type-caption-size); color: var(--text-secondary); }
+.account-readonly details { margin-top: var(--space-3); }
+.account-prompt-copy { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-family-ui); font-size: var(--type-body-size); line-height: var(--type-leading-copy); }
+@media (max-width: 760px) {
+  .account-session-bar { padding-inline: var(--space-3); }
+  .account-login-shell { padding: var(--space-3); }
+  .account-login-panel { padding: var(--space-6); }
+  .account-management, .account-readonly { padding: var(--space-4); }
+  .account-field input, .account-field select, .account-activation-link input { font-size: var(--type-heading-size); }
+  .account-field input, .account-field select, .account-activation-link input, .account-menu-panel a, .account-menu-panel button, .account-management button, .account-password-form button, .account-edit-notice button { min-height: 44px; }
+  .account-table-wrap td, .account-table-wrap th { padding: var(--space-2); }
+}

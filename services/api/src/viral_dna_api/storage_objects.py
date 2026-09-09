@@ -480,7 +480,14 @@ class StorageManager:
     ) -> None:
         self.repository = repository
         self.workspace = workspace
-        self._drivers: dict[UUID, StorageDriver] = {}
+        self._account_drivers: dict[UUID | None, dict[UUID, StorageDriver]] = {}
+
+    @property
+    def _drivers(self) -> dict[UUID, StorageDriver]:
+        from .access_context import account_access
+
+        access = account_access.get()
+        return self._account_drivers.setdefault(access.account_id if access else None, {})
 
     def bind_local_location(self, storage_location_id: UUID) -> None:
         self.register_driver(storage_location_id, LocalFileStorageDriver(self.workspace.root))

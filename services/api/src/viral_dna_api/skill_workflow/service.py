@@ -5483,7 +5483,13 @@ class SkillWorkflowService:
         )
         for response in shots:
             plan = response.plan
-            if not plan.required or plan.video_status == WorkflowItemStatus.APPROVED:
+            if (
+                plan.lifecycle_status != "active"
+                or (detail.project.video_stage_shot_ids is not None
+                    and plan.id not in detail.project.video_stage_shot_ids)
+                or (detail.project.video_stage_shot_ids is None and not plan.required)
+                or plan.video_status == WorkflowItemStatus.APPROVED
+            ):
                 continue
             await self.production_service.create_video_run(
                 plan.id,

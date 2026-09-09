@@ -337,9 +337,16 @@ class SQLiteStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
+        from .access_context import database_edit_fence
+        from .accounts.fencing import FencedConnection
+
+        connection = sqlite3.connect(self.database_path, timeout=10, factory=FencedConnection)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
+        fence = database_edit_fence.get()
+        if fence:
+            connection.execute("ATTACH DATABASE ? AS authz", (str(fence.auth_database),))
+            connection.edit_fence = fence
         return connection
 
     def _initialize(self) -> None:

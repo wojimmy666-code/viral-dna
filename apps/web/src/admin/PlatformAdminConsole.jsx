@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import {
   ArrowLeft,
   CloudArrowUp,
@@ -7,6 +8,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkle,
+  Users,
 } from "@phosphor-icons/react";
 import { DepthGenerationSettings } from "../depth-settings/DepthGenerationSettings.jsx";
 import { MediaStagingSettingsPanel } from "../media-staging/MediaStagingSettingsPanel.jsx";
@@ -15,12 +17,17 @@ import { PlatformSkillAdmin } from "./PlatformSkillAdmin.jsx";
 import "./platform-admin.css";
 
 const ADMIN_SECTIONS = [
+  { id: "accounts", label: "账户管理", Icon: Users },
   { id: "providers", label: "服务商与凭据", Icon: Key },
   { id: "models", label: "模型与默认值", Icon: SlidersHorizontal },
   { id: "skills", label: "平台 Skill", Icon: Sparkle },
   { id: "media", label: "媒体与对象存储", Icon: CloudArrowUp },
   { id: "runtime", label: "运行环境", Icon: Cpu },
 ];
+
+function adminRequest(request, path, options) {
+  return request(path.startsWith("/admin/") ? path : `/admin${path}`, options);
+}
 
 function stateLabel(configured) {
   return configured ? "已配置" : "未配置";
@@ -47,6 +54,7 @@ export function PlatformAdminConsole({
   videoServerSettings,
 }) {
   const videoProviders = videoServerSettings?.providers || [];
+  const runtimeRequest = useCallback((path, options) => adminRequest(request, path, options), [request]);
   return (
     <div className="platform-admin-shell settings-surface">
       <aside className="platform-admin-sidebar">
@@ -423,7 +431,7 @@ export function PlatformAdminConsole({
                 </label>
               </div>
             </div>
-            <DepthGenerationSettings request={request} />
+            <DepthGenerationSettings request={runtimeRequest} />
           </section>
         )}
 

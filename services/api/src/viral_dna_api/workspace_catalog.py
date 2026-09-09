@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from . import __version__
+from .access_context import account_access
 from .chinese import to_simplified
 from .runtime_config import get_config_value, local_env_path
 from .schema import WORKSPACE_SCHEMA_VERSION
@@ -103,6 +104,7 @@ class Account(BaseModel):
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
     deleted_at: datetime | None = None
+    kind: str = "personal"
 
 
 class DeviceInstallation(BaseModel):
@@ -345,6 +347,39 @@ class AccountContextService:
         self._lock = asyncio.Lock()
 
     async def ensure_current(self) -> AccountContextResponse:
+        access = account_access.get()
+        if access is not None:
+            # Server-verified immutable request context, not a shared current-account file.
+            device_id = access.device_id or access.workspace_id
+            return AccountContextResponse(
+                account=Account(
+                    id=access.account_id, display_name=access.account_name, kind=access.account_kind
+                ),
+                device=DeviceInstallation(
+                    id=device_id,
+                    account_id=access.account_id,
+                    name="服务端",
+                    platform=platform.system(),
+                    app_version=__version__,
+                ),
+                active_workspace=Workspace(
+                    id=access.workspace_id, account_id=access.account_id, name=access.account_name
+                ),
+                registration=WorkspaceRegistration(
+                    workspace_id=access.workspace_id,
+                    device_id=device_id,
+                    local_root=str(access.workspace_root),
+                ),
+                storage_locations=[
+                    StorageLocation(
+                        id=access.storage_location_id,
+                        workspace_id=access.workspace_id,
+                        account_id=access.account_id,
+                        device_id=device_id,
+                        name="账户存储",
+                    )
+                ],
+            )
         try:
             paths = self.workspace_manager.initialize(self.workspace_manager.root)
         except WorkspaceError as exc:
@@ -363,6 +398,15 @@ class AccountContextService:
 
     async def list_workspaces(self) -> list[WorkspaceListItem]:
         context = await self.ensure_current()
+        if account_access.get() is not None:
+            return [
+                WorkspaceListItem(
+                    workspace=context.active_workspace,
+                    registration=context.registration,
+                    storage_locations=context.storage_locations,
+                    active=True,
+                )
+            ]
         state = await self.repository.load()
         items: list[WorkspaceListItem] = []
         for workspace in sorted(
@@ -445,6 +489,14 @@ class AccountContextService:
     async def list_storage_locations(self, workspace_id: UUID) -> list[StorageLocation]:
         context = await self.ensure_current()
         state = await self.repository.load()
+        if account_access.get() is not None:
+            if workspace_id != context.active_workspace.id:
+                raise AccountCatalogError("找不到工作区", status_code=404)
+            return context.storage_locations + [
+                item for item in state.storage_locations
+                if item.account_id == context.account.id and item.workspace_id == workspace_id
+                and item.id not in {location.id for location in context.storage_locations}
+            ]
         workspace = next(
             (
                 item

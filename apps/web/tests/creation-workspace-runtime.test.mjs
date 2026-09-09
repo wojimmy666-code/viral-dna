@@ -5,6 +5,7 @@ import { parse } from "@babel/parser";
 import { SKILL_WORKFLOW_STAGES, stageState } from "../src/skill-workflow/skill-workflow-ui.js";
 import { readOnce } from "../src/creation-workspace/read-request.js";
 import { productionGateStatusPath } from "../src/production-ui.js";
+import { videoStageShots, workspaceShotId } from "../src/creation-workspace/video-stage-selection.js";
 
 // Execute the real event handlers with isolated state/network boundaries. This
 // exercises async behavior, not screenshots or a substitute for browser QA.
@@ -39,6 +40,9 @@ function productionScope() {
     imageGenerationSettings: {},
     readOnce,
     productionGateStatusPath,
+    videoStageShots, workspaceShotId,
+    detail: null,
+    gate: null,
     actionError: "",
     shotDetail: { plan: { id: "a" } },
     workflow: null,
@@ -65,6 +69,134 @@ function productionScope() {
 
 const productionHandler = (name, scope) => handler("../src/ProductionWorkflow.jsx", "ProductionHub", name, scope);
 const skillHandler = (name, scope) => handler("../src/skill-workflow/SkillExperience.jsx", "SkillProjectWorkspace", name, scope);
+
+test("video scope counts shots, not pictures; preview and required flags cannot add participants", () => {
+  const shots = Array.from({length:15}, (_, i) => ({plan:{id:`s${i+1}`,index:i+1,
+    required:false, image_status:"approved", visual_beats:[{},{}]}}));
+  const project = {video_stage_shot_ids:["s2","s4","s8","s10","s15"]};
+  assert.equal(videoStageShots(shots, project).length, 5);
+  assert.equal(workspaceShotId(shots, project, "shot_videos", "s1"), "s2");
+  assert.equal(workspaceShotId(shots, project, "shot_videos", "s10"), "s10");
+  assert.equal(workspaceShotId(shots, project, "shot_images", "s1"), "s1");
+  assert.equal(videoStageShots(shots, {}).length, 15); // Legacy, no read-time mutation.
+  assert.equal(videoStageShots(shots, {video_stage_shot_ids:[]}).length, 0);
+  assert.equal(workspaceShotId(shots, {video_stage_shot_ids:[]}, "shot_videos", "s1"), null);
+  shots[3].plan.lifecycle_status = "discarded";
+  assert.equal(videoStageShots(shots, project).length, 4);
+});
+
+test("refresh falls back from an excluded deep link and never loads its video draft", async () => {
+  const scope = productionScope(), loaded = [], locations = [];
+  scope.activeSection = "shot_videos";
+  const request = scope.request;
+  scope.request = async path => {
+    loaded.push(path);
+    if (path === "/productions/p") return {project:{id:"p",video_stage_shot_ids:["b"]}};
+    return request(path);
+  };
+  scope.updateLocation = next => locations.push(next);
+  const result = await productionHandler("refreshProject", scope)("p", "a", "beat-a", "shot_videos");
+  assert.equal(scope.selectedShotId, "b");
+  assert.equal(scope.shotDetail.plan.id, "b");
+  assert.equal(result.workspaceSelection.shotId, "b");
+  assert.equal(locations.at(-1).shotId, "b");
+  assert.equal(locations.at(-1).candidateId, "");
+  assert.ok(loaded.includes("/production-shots/b/video-generation-draft"));
+  assert.ok(!loaded.some(path => path.startsWith("/production-shots/a")));
+  assert.ok(!loaded.some(path => path.includes("video-stage/enter")));
+  assert.equal(scope.shots.length, 3); // Image workspace retains the full data.
+});
+
+test("video deep links cannot select an excluded shot", async () => {
+  const scope = productionScope(), loaded = [];
+  scope.activeSection = "shot_videos";
+  scope.detail = {project:{video_stage_shot_ids:["b"]}};
+  scope.shots = ["a","b"].map(id=>({plan:{id}}));
+  const request = scope.request;
+  scope.request = path => { loaded.push(path); return request(path); };
+  await productionHandler("selectShot", scope)("a", {candidateId:"outside"});
+  assert.equal(scope.selectedShotId, "b");
+  assert.equal(scope.focusedCandidateId, "");
+  assert.ok(!loaded.some(path => path.startsWith("/production-shots/a")));
+});
+
+test("a late video refresh cannot restore its old route after navigation", async () => {
+  const scope = productionScope(), entered = deferred(), release = deferred();
+  const request = scope.request;
+  scope.request = path => path === "/productions/p"
+    ? {project:{id:"p",video_id:"source",video_stage_shot_ids:["b"]}} : request(path);
+  scope.refreshAnalysisUpdate = async () => { entered.resolve(); await release.promise; };
+  scope.updateLocation = () => assert.fail("an expired refresh must not navigate");
+  const refresh = productionHandler("refreshProject",scope)("p","a","beat-a","shot_videos");
+  await entered.promise;
+  scope.projectRefreshRequestId.current += 1;
+  scope.activeSection = "shot_images";
+  release.resolve();
+  await refresh;
+});
+
+test("navigation invalidates pending refreshes only after all drafts save", async () => {
+  const scope = productionScope(), events = [];
+  scope.navigationBusy = {current:false}; scope.busy = false;
+  scope.mainCreationStep = section => section;
+  scope.productionNavigation = () => [{id:"shot_videos",enabled:true}];
+  scope.setChangingSection = () => {};
+  scope.setActiveSection = section => { scope.activeSection = section; };
+  scope.flushWorkspace = async () => {
+    assert.equal(scope.projectRefreshRequestId.current,0); events.push("saved");
+  };
+  await productionHandler("changeSection",scope)("shot_videos");
+  assert.deepEqual(events,["saved"]);
+  assert.equal(scope.projectRefreshRequestId.current,1);
+  assert.equal(scope.activeSection,"shot_videos");
+  scope.flushWorkspace = async () => { throw new Error("save failed"); };
+  await productionHandler("changeSection",scope)("shot_images");
+  assert.equal(scope.projectRefreshRequestId.current,1);
+  assert.equal(scope.activeSection,"shot_videos");
+});
+
+for (const skill of [false, true]) for (const phase of ["shot_images","shot_videos","editing","export"]) {
+  test(`${skill ? "Skill" : "analysis"} explicit entry refreshes scope from ${phase} after saving`, async () => {
+    const scope = productionScope(), events = [];
+    scope.detail = {project:{id:"p",active_step:phase}};
+    scope.workflow = skill ? {imagesApproved:true} : null;
+    scope.executeAction = action => action();
+    scope.flushWorkspace = async () => { events.push("save"); };
+    scope.request = async (path, options) => {
+      if (path.endsWith("?step=shot_images")) {
+        events.push("image-gate"); return {allowed:true,approved_image_count:5};
+      }
+      if (path === "/productions/p") {
+        events.push("revision"); return {project:{current_revision_id:"fresh",active_step:phase}};
+      }
+      assert.equal(path,"/productions/p/video-stage/enter");
+      assert.equal(options.method,"POST");
+      assert.deepEqual(JSON.parse(options.body),{expected_revision_id:"fresh"});
+      events.push("enter");
+      return {};
+    };
+    scope.refreshProject = async () => { events.push("refresh"); };
+    scope.onProjectsChanged = async () => {};
+    scope.setActiveSection = section => { scope.activeSection = section; };
+    scope.onNotice = () => {};
+    await productionHandler("advanceWorkflow",scope)();
+    assert.deepEqual(events,["save","image-gate","revision","enter","refresh"]);
+    assert.equal(scope.activeSection,"shot_videos");
+  });
+}
+
+test("scoped video drag sends only participant IDs with an explicit server scope", async () => {
+  const scope = productionScope();
+  scope.detail = {project:{id:"p"}}; scope.activeSection = "shot_videos";
+  scope.executeAction = action => action();
+  scope.request = async (path, options) => {
+    if (!options) return {project:{current_revision_id:"fresh"}};
+    assert.equal(path,"/productions/p/shots/order");
+    assert.deepEqual(JSON.parse(options.body), {expected_revision_id:"fresh", ordered_shot_plan_ids:["s8","s2"],scope:"shot_videos"});
+  };
+  scope.refreshProject = async () => {}; scope.onNotice = () => {};
+  await productionHandler("reorderShots",scope)(["s8","s2"]);
+});
 
 for (const skill of [false, true]) {
   test(`${skill ? "Skill" : "analysis"} advances only the selected video subset after flushing`, async () => {

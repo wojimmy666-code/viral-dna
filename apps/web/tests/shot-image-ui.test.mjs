@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { globalPromptWasEdited } from "../src/prompt-context/input-freshness.js";
+import { restoreGenerationPreferences } from "../src/image-generation-controls/generation-preferences.js";
+
+test("shot images default to one, migrate only old counts and retain later explicit choices", () => {
+  const defaults = {count:1, model:"default", inputMode:"text_to_image"};
+  const legacy = {count:2, model:"chosen", resolution:"1280x720", inputMode:"keyframe_edit"};
+  const policy = {count:1};
+  assert.equal(restoreGenerationPreferences(null, defaults, policy).count, 1);
+  assert.deepEqual(restoreGenerationPreferences(legacy, defaults, policy), {...legacy, count:1});
+  assert.equal(legacy.count, 2); // Reading never rewrites the stored selection.
+  assert.deepEqual(restoreGenerationPreferences({...legacy, _defaultVersions:policy}, defaults, policy), legacy);
+  assert.equal(restoreGenerationPreferences(legacy, defaults).count, 2); // Other stages unchanged.
+  assert.equal(restoreGenerationPreferences({count:4, _defaultVersions:null}, defaults, policy).count, 1);
+  assert.equal(restoreGenerationPreferences("invalid", defaults, policy).count, 1);
+});
 
 test("global prompt notices are part-specific and do not flag hydration or a reverted edit", () => {
   const detail = { current_global_prompts: { common_image_prompt: "柔光", common_video_prompt: "慢推" } };
@@ -36,6 +50,13 @@ const productionWorkflowSource = readFileSync(
   new URL("../src/ProductionWorkflow.jsx", import.meta.url),
   "utf8",
 );
+
+test("both image workflows use the single-picture default with the same cache policy", () => {
+  const choices = productionWorkflowSource.slice(productionWorkflowSource.indexOf("const [imageChoices"), productionWorkflowSource.indexOf("const { engine: generationEngine"));
+  assert.match(choices, /count: 1,/);
+  assert.match(choices, /defaultVersions: \{ count: 1 \}/);
+  assert.doesNotMatch(choices, /default_candidate_count/);
+});
 const productionWorkflowStyles = readFileSync(
   new URL("../src/production-workflow.css", import.meta.url),
   "utf8",

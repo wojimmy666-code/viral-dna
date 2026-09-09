@@ -43,6 +43,7 @@ export const PRODUCTION_CHANGE_LABELS = Object.freeze({
   shot_plan_changed: "更新分镜计划",
   shot_structure_changed: "调整分镜结构",
   video_editing_selection_changed: "调整参与剪辑的视频",
+  video_stage_selection_changed: "调整视频阶段分镜",
   source_keyframe_changed: "更换分镜关键帧",
   image_candidate_selected: "选择图片候选",
   image_candidates_archived: "删除图片候选",

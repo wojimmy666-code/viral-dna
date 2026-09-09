@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+from .access_context import account_access
+from .accounts.runtime import account_repository
 from .chinese import to_simplified
 from .workspace_catalog import AccountContextService, default_account_catalog_path
 
@@ -402,7 +404,7 @@ class SQLiteNotificationRepository:
             rows = connection.execute(
                 f"""
                 SELECT * FROM account_notifications
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY updated_at DESC, created_at DESC
                 LIMIT ?
                 """,
@@ -535,6 +537,31 @@ class NotificationService:
         limit: int = 100,
     ) -> NotificationListResponse:
         context = await self.account_context.ensure_current()
+        access = account_access.get()
+        if access and access.user_id:
+            read_versions = await asyncio.to_thread(
+                account_repository().read_notifications, str(access.user_id)
+            )
+            all_items = await self.repository.list_for_account(context.account.id, limit=1000)
+            items = [
+                item.model_copy(
+                    update={
+                        "read_at": item.updated_at
+                        if read_versions.get(str(item.id)) == item.updated_at.isoformat()
+                        else None,
+                    }
+                )
+                for item in all_items
+            ]
+            return NotificationListResponse(
+                items=[
+                    item
+                    for item in items
+                    if (status is None or item.status == status)
+                    and (not unread_only or item.read_at is None)
+                ][:limit],
+                unread_count=sum(item.read_at is None for item in items),
+            )
         items = await self.repository.list_for_account(
             context.account.id,
             status=status,
@@ -550,6 +577,18 @@ class NotificationService:
 
     async def mark_read(self, notification_id: UUID) -> AccountNotification:
         account = await self.account_context.current_account()
+        access = account_access.get()
+        if access and access.user_id:
+            items = await self.repository.list_for_account(account.id, limit=1000)
+            item = next((item for item in items if item.id == notification_id), None)
+            if item is None:
+                raise NotificationServiceError(404, "通知不存在")
+            await asyncio.to_thread(
+                account_repository().mark_notifications,
+                str(access.user_id),
+                [(str(item.id), item.updated_at.isoformat())],
+            )
+            return item.model_copy(update={"read_at": utc_now()})
         updated = await self.repository.mark_read(account.id, notification_id, utc_now())
         if updated is None:
             raise NotificationServiceError(404, "通知不存在")
@@ -557,6 +596,15 @@ class NotificationService:
 
     async def mark_all_read(self) -> NotificationReadAllResponse:
         account = await self.account_context.current_account()
+        access = account_access.get()
+        if access and access.user_id:
+            current = await self.list_notifications(unread_only=True, limit=1000)
+            await asyncio.to_thread(
+                account_repository().mark_notifications,
+                str(access.user_id),
+                [(str(item.id), item.updated_at.isoformat()) for item in current.items],
+            )
+            return NotificationReadAllResponse(updated_count=len(current.items))
         updated = await self.repository.mark_all_read(account.id, utc_now())
         return NotificationReadAllResponse(updated_count=updated)
 

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { registerAccountFlusher } from "./accounts/account-client.js";
 import { readOnce } from "./creation-workspace/read-request.js";
+import { videoStageShots, workspaceShotId } from "./creation-workspace/video-stage-selection.js";
 import { useGenerationPreferences } from "./image-generation-controls/generation-preferences.js";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CreationNavigation, CreationWorkspace } from "./creation-workspace/CreationWorkspace.jsx";
@@ -1656,10 +1658,11 @@ export function ProductionHub({
     `viraldna:image-options:${recordId}:${selectedShotId || "default"}:${selectedVisualBeatId || "first"}`,
     {
       engine: "default", inputMode: workflow ? "text_to_image" : "keyframe_edit",
-      count: imageGenerationSettings?.default_candidate_count || 1,
+      count: 1,
       model: imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
       resolution: imageGenerationSettings?.image_width ? `${imageGenerationSettings.image_width}x${imageGenerationSettings.image_height}` : "",
     },
+    { defaultVersions: { count: 1 } },
   );
   const { engine: generationEngine, inputMode: generationInputMode, count: generationCandidateCount, model: generationModelAlias, resolution: generationResolution } = imageChoices;
   const setGenerationEngine = (value) => setImageChoices((current) => ({ engine: typeof value === "function" ? value(current.engine) : value }));
@@ -1698,6 +1701,10 @@ export function ProductionHub({
     if (await globalPromptRef.current?.flush() === false) throw new Error("请先保存全局提示词，再继续操作");
   }
 
+  const accountFlush = useRef(flushWorkspace);
+  accountFlush.current = flushWorkspace;
+  useEffect(() => registerAccountFlusher(() => accountFlush.current()), []);
+
   useImperativeHandle(workspaceRef, () => ({
     flush: flushWorkspace,
     refresh: () => refreshProject(),
@@ -1720,6 +1727,7 @@ export function ProductionHub({
     setChangingSection(true);
     try {
       await flushWorkspace();
+      projectRefreshRequestId.current += 1;
       setActionError("");
       setActiveSection(next);
       if (!fromHistory) updateLocation({ productionId: selectedProjectId, section: next, shotId: selectedShotId, visualBeatId: selectedVisualBeatId, candidateId: focusedCandidateId }, { replace: false });
@@ -2026,17 +2034,8 @@ export function ProductionHub({
     setGate(nextGate);
     setGenerationSettings(workflow ? imageGenerationSettings : nextGenerationSettings);
     setSettingsDraft(settingsFromProject(nextDetail.project));
-    const targetShotId = (
-      preferredShotId
-      && (nextShots || []).some(
-        (item) => item.plan.id === preferredShotId
-          && item.plan.lifecycle_status !== "discarded",
-      )
-    )
-      ? preferredShotId
-      : (nextShots || []).find(
-        (item) => item.plan.lifecycle_status !== "discarded",
-      )?.plan?.id || null;
+    const targetShotId = workspaceShotId(nextShots, nextDetail.project, section, preferredShotId);
+    let targetVisualBeatId = null;
     if (targetShotId) {
       const [nextShotDetail, persistedVideoDraft] = await Promise.all([
         request(`/production-shots/${targetShotId}`),
@@ -2046,6 +2045,7 @@ export function ProductionHub({
         nextShotDetail,
         preferredVisualBeatId,
       );
+      targetVisualBeatId = targetVisualBeat?.id || null;
       if (!canHydrateShot()) return nextDetail;
       setSelectedShotId(targetShotId);
       setShotDetail(nextShotDetail);
@@ -2074,7 +2074,12 @@ export function ProductionHub({
       resetVideoDraft();
     }
     if (nextDetail.project.video_id) await refreshAnalysisUpdate(projectId);
-    return nextDetail;
+    if (!canHydrateShot()) return nextDetail;
+    if (section === "shot_videos" && targetShotId !== preferredShotId) {
+      setFocusedCandidateId("");
+      updateLocation({ productionId: projectId, section, shotId: targetShotId || "", visualBeatId: targetVisualBeatId || "", candidateId: "" });
+    }
+    return { ...nextDetail, workspaceSelection: { shotId: targetShotId, visualBeatId: targetVisualBeatId } };
   }
 
   async function refreshAnalysisUpdate(projectId = selectedProjectId) {
@@ -2130,7 +2135,7 @@ export function ProductionHub({
         : !mainCreationStep(resolved) || productionNavigation(opened.project).some((step) => step.id === mainCreationStep(resolved) && step.enabled);
       const nextSection = allowed ? resolved : workflow?.section || opened.project.active_step || "project_setup";
       setActiveSection(nextSection);
-      updateLocation({ productionId: projectId, section: nextSection, shotId: shotPlanId || "", visualBeatId: visualBeatId || "" });
+      updateLocation({ productionId: projectId, section: nextSection, shotId: opened.workspaceSelection?.shotId || "", visualBeatId: opened.workspaceSelection?.visualBeatId || "" });
     } catch (requestError) {
       setContentError(requestError.message);
     } finally {
@@ -2139,6 +2144,14 @@ export function ProductionHub({
   }
 
   async function selectShot(shotPlanId, { visualBeatId = null, candidateId = "" } = {}) {
+    if (activeSection === "shot_videos") {
+      const target = workspaceShotId(shots, detail?.project, activeSection, shotPlanId);
+      if (target !== shotPlanId) {
+        updateLocation({ shotId: target || "", visualBeatId: "", candidateId: "" });
+        if (target) return selectShot(target);
+        return;
+      }
+    }
     const selectionRequest = ++shotRequestId.current;
     shotSelectionPending.current = true;
     try {
@@ -2332,6 +2345,7 @@ export function ProductionHub({
         body: JSON.stringify({
           expected_revision_id: latest.project.current_revision_id,
           ordered_shot_plan_ids: orderedShotPlanIds,
+          scope: activeSection === "shot_videos" ? "shot_videos" : "all",
         }),
       });
       await refreshProject(detail.project.id, selectedShotId);
@@ -2906,12 +2920,11 @@ export function ProductionHub({
       if (!imageGate.allowed) throw new Error(imageGate.blocker_messages?.join("；") || "请至少采用一张分镜图");
       if (workflow && !workflow.imagesApproved && await workflow.onAdvance("shot_images") === false) return;
       const latest = await request(`/productions/${detail.project.id}`);
-      if (!["shot_videos", "editing", "export"].includes(latest.project.active_step)) await request(`/productions/${detail.project.id}/advance`, {
+      await request(`/productions/${detail.project.id}/video-stage/enter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           expected_revision_id: latest.project.current_revision_id,
-          target_step: "shot_videos",
         }),
       });
       await Promise.all([
@@ -4032,8 +4045,8 @@ export function ProductionHub({
                 selectedShotId={selectedShotId}
                 selectedVisualBeatId={selectedVisualBeatId}
                 setVideoDraft={setVideoDraft}
-                shotDetail={shotDetail}
-                shots={shots}
+                shotDetail={videoStageShots(shots, detail.project).some(item => item.plan.id === shotDetail?.plan?.id) ? shotDetail : null}
+                shots={videoStageShots(shots, detail.project)}
                 sourceVideoUrl={capabilities.hasVideo ? resolveUrl(
                   "/api/v1/productions/" + detail.project.id + "/source-video",
                 ) : ""}

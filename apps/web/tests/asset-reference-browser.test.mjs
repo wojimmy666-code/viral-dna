@@ -65,10 +65,12 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
       import { VideoPromptReferenceEditor } from './src/video-inputs/VideoPromptReferenceEditor.jsx';
       import { approvedVisualBeatFramesFromDetail, reconcileVideoDraftReferences } from './src/video-inputs/video-prompt-references.js';
       import { ShotVideoList, ShotVideoWorkspace } from './src/ShotVideoWorkspace.jsx';
+      import { videoStageShots } from './src/creation-workspace/video-stage-selection.js';
       import { EMPTY_VIDEO_DRAFT, useShotVideoGenerationDraft } from './src/video-generation-controls/useShotVideoGenerationDraft.js';
       import './src/production-workflow.css';
       import { ImageBatchToolbar } from './src/image-generation-controls/ImageBatchToolbar.jsx';
       import { ImageGenerationCommandBar } from './src/image-generation-controls/ImageGenerationCommandBar.jsx';
+      import { useGenerationPreferences } from './src/image-generation-controls/generation-preferences.js';
       import { GlobalPromptEditor, PromptPreview } from './src/prompt-context/GlobalPromptEditor.jsx';
       import { PromptSectionHeader } from './src/prompt-context/PromptSectionHeader.jsx';
       import { SkillShotNavigation } from './src/image-generation-controls/SkillShotNavigation.jsx';
@@ -138,6 +140,22 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
         { reference_asset_id:'missing', label:'产品/失效图片', thumbnail_url:'data:image/png;base64,broken' },
       ];
       const params = new URLSearchParams(location.search);
+      const imageCountPrefix = 'fixture:image-count:' + (params.get('origin') || 'skill') + ':';
+      if (params.has('seed-image-count')) for (const [id,count] of [['a',2],['b',4]]) {
+        localStorage.setItem(imageCountPrefix+id,JSON.stringify({count,model:'qwen',resolution:'1280x720',inputMode:'text_to_image'}));
+      }
+      function ImageCountFixture() {
+        const [shot,setShot]=useState('a'); window.selectImageCountShot=setShot;
+        const [choice,setChoice]=useGenerationPreferences(imageCountPrefix+shot,
+          {count:1,model:'qwen',resolution:'1280x720',inputMode:'text_to_image'}, {defaultVersions:{count:1}});
+        window.imageCountChoice=choice;
+        return <><ImageGenerationCommandBar aspectRatio="16:9" settings={{...settings,execution_mode:'remote_api'}}
+          candidateCount={choice.count} modelAlias={choice.model} resolution={choice.resolution} inputMode={choice.inputMode}
+          inputCount={0} generationAvailable onGenerate={()=>{window.submittedImageCount=choice.count;}}
+          onCandidateCountChange={count=>setChoice({count})} onResolutionChange={resolution=>setChoice({resolution})}
+          onInputModeChange={inputMode=>setChoice({inputMode})} onModelChange={model=>setChoice({model})} />
+          <AssetReferenceEditor value="@产品/方形图" references={[options[0]]} options={options} onChange={()=>{}} /></>;
+      }
       if(params.has('partial')) window.lastBatch={id:'partial-fixture',status:'partial',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),items:Array.from({length:15},(_,index)=>({visual_beat_id:'beat-'+index,shot_plan_id:'shot-'+index,shot_index:index+1,status:index<13?'completed':'failed',error_message:index<13?null:'生成失败，请重试'}))};
       const reference = options.find(item => item.reference_asset_id === params.get('asset')) || options[0];
       if(params.has('long')) reference.label = '产品/' + '超长中文素材名称'.repeat(20);
@@ -194,12 +212,14 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
           <div style={{height:700}}>页面可滚动</div></div>;
       }
       function VideoListFixture() {
-        const [shots,setShots]=useState([1,2,3].map(index=>({plan:{id:'s'+index,index,start_seconds:index-1,end_seconds:index,duration_seconds:1,video_prompt:'不得作为标题的很长提示词',video_status:index===3?'draft':'approved',include_in_editing:true}})));
+        const [shots,setShots]=useState(Array.from({length:params.has('scope')?15:3},(_,i)=>i+1).map(index=>({plan:{id:'s'+index,index,start_seconds:index-1,end_seconds:index,duration_seconds:1,video_prompt:'不得作为标题的很长提示词',video_status:index===3?'draft':'approved',include_in_editing:true}})));
+        const [project,setProject]=useState(params.has('scope')?{video_stage_shot_ids:['s2','s4','s8','s10','s15']}:{});
+        window.setVideoScope=ids=>setProject({video_stage_shot_ids:ids}); window.allVideoShotCount=shots.length;
         const [busy,setBusy]=useState(false); window.setVideoBusy=setBusy;
         const eligible=['s1','s2'],selected=shots.filter(item=>eligible.includes(item.plan.id)&&item.plan.include_in_editing).map(item=>item.plan.id);
-        return <section style={{width:'min(300px,100%)'}}><ShotVideoList shots={shots} busy={busy} selectedShotId="s1"
+        return <section style={{width:'min(300px,100%)'}}><ShotVideoList shots={videoStageShots(shots,project)} busy={busy} selectedShotId="s1"
           gate={{eligible_video_shot_ids:eligible,selected_video_shot_ids:selected}} onSelectShot={id=>{window.selectedShot=id;}}
-          onReorderShots={ids=>{window.videoOrder=ids;setShots(current=>ids.map((id,index)=>({...current.find(item=>item.plan.id===id),plan:{...current.find(item=>item.plan.id===id).plan,index:index+1}})));}}
+          onReorderShots={ids=>{window.videoOrder=ids;setShots(current=>{let position=0;return current.map((item,index)=>{const id=ids.includes(item.plan.id)?ids[position++]:item.plan.id;const next=current.find(shot=>shot.plan.id===id);return {...next,plan:{...next.plan,index:index+1}};});});}}
           onEditingSelectionChange={(id,included)=>{window.videoSelected={id,included};setShots(current=>current.map(item=>item.plan.id===id?{...item,plan:{...item.plan,include_in_editing:included}}:item));}} />
           <AssetReferenceEditor value="@产品/方形图" references={[options[0]]} options={options} onChange={()=>{}} /></section>;
       }
@@ -239,7 +259,7 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
           {params.has('workspace') && <><PromptPreview common="全局约束" local={draft.value} /><GlobalPromptEditor path="/context" part="image" request={request} /></>}
         </div>;
       }
-      createRoot(document.getElementById('root')).render(params.has('video-hydration') ? <VideoHydrationFixture /> : params.has('video-workspace') ? <VideoWorkspaceFixture /> : params.has('video-prompt') ? <VideoPromptFixture /> : params.has('video-list') ? <VideoListFixture /> : <Fixture />);
+      createRoot(document.getElementById('root')).render(params.has('image-count') ? <ImageCountFixture /> : params.has('video-hydration') ? <VideoHydrationFixture /> : params.has('video-workspace') ? <VideoWorkspaceFixture /> : params.has('video-prompt') ? <VideoPromptFixture /> : params.has('video-list') ? <VideoListFixture /> : <Fixture />);
     ` },
   });
   const js = bundle.outputFiles.find(file => file.path.endsWith('.js')).contents;
@@ -305,6 +325,26 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
     }
     const visible = "Boolean(document.querySelector('.asset-reference-popover'))";
     await send('Page.enable'); await send('Runtime.enable');
+
+    for (const origin of ['skill','analysis']) await t.test(origin+' image count defaults to one and manual multi-image choices remain per shot',async()=>{
+      await load('?image-count=1&seed-image-count=1&origin='+origin);
+      assert.match(await evaluate("document.querySelector('.shot-image-settings-trigger').textContent"),/1张/);
+      await click('.shot-image-generate-button');
+      assert.equal(await evaluate('window.submittedImageCount'),1);
+      await click('.shot-image-settings-trigger');
+      await ready("document.querySelector('.image-setting-segments.candidates button:nth-child(3)')");
+      await click('.image-setting-segments.candidates button:nth-child(3)');
+      await ready('window.imageCountChoice.count===3'); await key('Escape');
+      await click('.shot-image-generate-button');
+      assert.equal(await evaluate('window.submittedImageCount'),3);
+      await evaluate("window.selectImageCountShot('b')"); await ready('window.imageCountChoice.count===1');
+      assert.equal(await evaluate('window.imageCountChoice.resolution'),'1280x720');
+      await evaluate("window.selectImageCountShot('c')"); await ready('window.imageCountChoice.count===1');
+      await evaluate("window.selectImageCountShot('a')"); await ready('window.imageCountChoice.count===3');
+      await load('?image-count=1&origin='+origin);
+      assert.equal(await evaluate('window.imageCountChoice.count'),3);
+      assert.match(await evaluate("document.querySelector('.shot-image-settings-trigger').textContent"),/3张/);
+    });
 
     await t.test('video hydration displays every adopted frame and preserves typing, switching and explicit removal',async()=>{
       await load('?video-hydration=1');
@@ -405,6 +445,27 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
         const shot=await send('Page.captureScreenshot',{format:'png'});
         await writeFile(process.env.VIDEO_UI_SCREENSHOT_PATH,Buffer.from(shot.data,'base64'));
       }
+    });
+
+    await t.test('fifteen image shots show exactly five video participants with scoped ordering',async()=>{
+      await load('?video-list=1&scope=1');
+      const titles="Array.from(document.querySelectorAll('.shot-video-list-copy strong'),item=>item.textContent.trim())";
+      assert.deepEqual(await evaluate(titles),['分镜2','分镜4','分镜8','分镜10','分镜15']);
+      assert.equal(await evaluate("document.querySelector('.shot-video-list header span').textContent"),'5 个');
+      await click('.shot-video-select');
+      assert.equal(await evaluate('window.selectedShot'),'s2');
+      await evaluate("document.querySelector('.shot-video-drag').focus()"); await key('ArrowDown');
+      await ready("window.videoOrder?.[0]==='s4'");
+      assert.deepEqual(await evaluate('window.videoOrder'),['s4','s2','s8','s10','s15']);
+      assert.equal(await evaluate('window.allVideoShotCount'),15);
+      await evaluate("window.setVideoScope(['s4','s2','s8','s10','s15','s12'])");
+      await ready("document.querySelectorAll('.shot-video-row').length===6");
+      assert.equal(await evaluate("document.querySelector('.shot-video-list header span').textContent"),'6 个');
+      await evaluate("window.setVideoScope(['s8'])");
+      await ready("document.querySelectorAll('.shot-video-row').length===1");
+      assert.deepEqual(await evaluate(titles),['分镜8']);
+      await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});
+      assert.ok(await evaluate('document.documentElement.scrollWidth<=390'));
     });
 
     await t.test('plain text and blank clicks place a caret, never activate the first thumbnail',async()=>{

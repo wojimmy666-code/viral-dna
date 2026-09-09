@@ -67,14 +67,10 @@ def _capability_response(
         availability_note=capability.availability_note,
         repository_url=capability.repository_url,
         checkpoint_path=(
-            str(capability.checkpoint_path)
-            if capability.checkpoint_path is not None
-            else None
+            str(capability.checkpoint_path) if capability.checkpoint_path is not None else None
         ),
         runtime_path=(
-            str(capability.runtime_path)
-            if capability.runtime_path is not None
-            else None
+            str(capability.runtime_path) if capability.runtime_path is not None else None
         ),
         license=capability.license,
     )
@@ -364,10 +360,14 @@ async def _depth_settings_response(
 def create_depth_generation_settings_router(
     settings: DepthGenerationSettingsService,
     service: DepthControlService,
+    *,
+    prefix: str = "/settings/depth-generation",
+    dependencies=None,
 ) -> APIRouter:
     router = APIRouter(
-        prefix="/settings/depth-generation",
+        prefix=prefix,
         tags=["depth-generation-settings"],
+        dependencies=dependencies,
     )
 
     @router.get("", response_model=DepthGenerationSettingsResponse)

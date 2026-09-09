@@ -12,15 +12,27 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
 
 from . import __version__
+from .access_context import account_access
 from .account_preferences import (
     UserPreferencesService,
     create_user_preferences_router,
 )
+from .accounts.authorization import create_project_authorizer
+from .accounts.http import (
+    AccountAuthenticationMiddleware,
+    account_validation_error,
+    create_account_router,
+    error_response,
+)
+from .accounts.repository import AccountError
+from .accounts.runtime import account_repository, password_auth_enabled
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
 from .ai.text_model_routing import preferred_text_model_aliases
@@ -172,6 +184,7 @@ from .models import (
     VideoGenerationSettingsUpdate,
     VideoProviderValidationRequest,
     VideoProviderValidationResponse,
+    VideoStageEnterRequest,
     VideoStatus,
     WorkspaceInfo,
     WorkspacePathRequest,
@@ -289,18 +302,17 @@ def parse_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await account_context_service.ensure_current()
-    await platform_connection_service.initialize()
-    await notification_service.initialize()
-    await project_asset_service.bootstrap_legacy_references()
-    await record_service.bootstrap(recover_interrupted=True)
-    await project_service.bootstrap_analysis_projects()
-    await production_service.recover_generation_runs()
-    await skill_workflow_service.recover()
+    _initialized_accounts.clear()
+    if password_auth_enabled():
+        for access in await asyncio.to_thread(account_repository().runtime_accounts):
+            context_token = account_access.set(access)
+            try:
+                await ensure_account_runtime()
+            finally:
+                account_access.reset(context_token)
+    else:
+        await initialize_account_runtime()
     await skill_presentation_service.recover()
-    await depth_control_job_service.recover()
-    await video_enhancement_service.recover()
-    media_staging_service.start_cleanup()
     try:
         yield
     finally:
@@ -313,12 +325,46 @@ async def lifespan(_app: FastAPI):
         await media_staging_service.shutdown()
 
 
+async def initialize_account_runtime():
+    await account_context_service.ensure_current()
+    await platform_connection_service.initialize()
+    await notification_service.initialize()
+    await project_asset_service.bootstrap_legacy_references()
+    await record_service.bootstrap(recover_interrupted=True)
+    await project_service.bootstrap_analysis_projects()
+    await production_service.recover_generation_runs()
+    await skill_workflow_service.recover()
+    await depth_control_job_service.recover()
+    await video_enhancement_service.recover()
+    media_staging_service.start_cleanup()
+
+
+_initialized_accounts = set()
+_account_initializers = {}
+
+
+async def ensure_account_runtime():
+    access = account_access.get()
+    if access is None:
+        return
+    key = (str(access.account_id), str(access.workspace_root))
+    if key in _initialized_accounts:
+        return
+    lock = _account_initializers.setdefault(key, asyncio.Lock())
+    async with lock:
+        if key not in _initialized_accounts:
+            await initialize_account_runtime()
+            _initialized_accounts.add(key)
+
+
 app = FastAPI(
     title="ViralDNA API",
     version=__version__,
     description="Phase 1 single-video analysis orchestration API",
     lifespan=lifespan,
+    dependencies=[Depends(create_project_authorizer(store))],
 )
+app.add_middleware(AccountAuthenticationMiddleware, initialize=ensure_account_runtime)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=parse_cors_origins(),
@@ -326,6 +372,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(AccountError)
+async def handle_account_error(_request, exc: AccountError):
+    return error_response(exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_error(request, exc: RequestValidationError):
+    path = request.url.path
+    if "/auth/" in path or path.startswith(("/api/v1/account", "/api/v1/admin/accounts")):
+        return error_response(account_validation_error(
+            exc.errors(), admin_login="/admin/auth/" in path,
+        ))
+    return await request_validation_exception_handler(request, exc)
+
 
 model_settings_service = ModelSettingsService()
 image_generation_settings_service = ImageGenerationSettingsService()
@@ -475,6 +537,7 @@ skill_workflow_service = SkillWorkflowService(
     storyboard_author=ModelStoryboardAuthor(preferences=user_preferences_service),
     asset_library=asset_library_service,
 )
+app.include_router(create_account_router(account_context_service, store), prefix=API_PREFIX)
 app.include_router(create_asset_router(asset_library_service), prefix=API_PREFIX)
 app.include_router(
     create_generated_asset_promotion_router(generated_asset_promotion_service),
@@ -502,20 +565,29 @@ app.include_router(
     ),
     prefix=API_PREFIX,
 )
-app.include_router(
-    create_depth_control_router(
-        production_service,
-        depth_control_service,
-        depth_control_job_service,
-    ),
-    prefix=API_PREFIX,
+depth_router = create_depth_control_router(
+    production_service, depth_control_service, depth_control_job_service,
 )
+app.include_router(depth_router, prefix=API_PREFIX)
+for runtime_route in depth_router.routes:
+    if runtime_route.path.startswith("/depth-controls/engines"):
+        app.add_api_route(
+            API_PREFIX + "/admin" + runtime_route.path, runtime_route.endpoint,
+            methods=list(runtime_route.methods), response_model=runtime_route.response_model,
+            status_code=runtime_route.status_code, dependencies=[Depends(require_platform_admin)],
+        )
 app.include_router(
     create_depth_generation_settings_router(
         depth_generation_settings_service,
         depth_control_service,
     ),
     prefix=API_PREFIX,
+)
+app.include_router(
+    create_depth_generation_settings_router(
+        depth_generation_settings_service, depth_control_service,
+        prefix="/admin/settings/depth-generation", dependencies=[Depends(require_platform_admin)],
+    ), prefix=API_PREFIX,
 )
 app.include_router(
     create_video_enhancement_router(
@@ -2405,6 +2477,19 @@ async def advance_production(
 ) -> ProductionProjectDetail:
     try:
         return await production_service.advance(project_id, payload)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post(
+    f"{API_PREFIX}/productions/{{project_id}}/video-stage/enter",
+    response_model=ProductionProjectDetail,
+)
+async def enter_production_video_stage(
+    project_id: UUID, payload: VideoStageEnterRequest,
+) -> ProductionProjectDetail:
+    try:
+        return await production_service.enter_video_stage(project_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

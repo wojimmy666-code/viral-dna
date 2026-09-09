@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from .access_context import account_access
 from .models import WorkspaceValidationResponse
 from .runtime_config import RuntimeConfigError, get_config_value, persist_config_values
 from .schema import WORKSPACE_SCHEMA_VERSION
@@ -82,6 +83,9 @@ class WorkspaceManager:
 
     @property
     def paths(self) -> WorkspacePaths:
+        access = account_access.get()
+        if access is not None:
+            return self.paths_for(access.workspace_root)
         # Tests use an in-memory repository and frequently isolate media files by
         # changing the legacy storage environment variable after module import.
         if os.getenv("VIRAL_DNA_STORE", "sqlite").lower() == "memory":
@@ -174,6 +178,8 @@ class WorkspaceManager:
         return paths
 
     def activate(self, raw_path: str | Path, *, persist: bool = True) -> WorkspacePaths:
+        if account_access.get() is not None:
+            raise WorkspaceError("账户的数据位置由服务端管理，不能切换工作区")
         candidate = self.normalize(raw_path)
         prepared = self.initialize(candidate)
         if persist:
@@ -332,6 +338,13 @@ class WorkspaceManager:
             workspace_id = UUID(str(existing.get("workspace_id")))
         except (TypeError, ValueError, AttributeError):
             workspace_id = uuid4()
+
+        access = account_access.get()
+        if access is not None and paths.root == access.workspace_root:
+            if existing.get("workspace_id") and workspace_id != access.workspace_id:
+                raise WorkspaceError("工作区身份与当前账户绑定不一致")
+            workspace_id = access.workspace_id
+            account_id = access.account_id
 
         existing_account_id: UUID | None = None
         if existing.get("account_id"):

@@ -1,9 +1,13 @@
+import { accountHeaders } from "./accounts/account-client.js";
+
 export function uploadFormWithProgress(url, body, onProgress, signal, errorMessage) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const abort = () => xhr.abort();
     const cleanup = () => signal?.removeEventListener("abort", abort);
     xhr.open("POST", url);
+    xhr.withCredentials = true;
+    accountHeaders(url).forEach((value, key) => xhr.setRequestHeader(key, value));
     xhr.responseType = "json";
     xhr.upload.onprogress = event => onProgress?.(event.lengthComputable ? Math.round(event.loaded / event.total * 100) : null);
     xhr.onload = () => {

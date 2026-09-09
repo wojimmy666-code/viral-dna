@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { accountStorageKey, registerAccountFlusher } from "../accounts/account-client.js";
 import { ArrowCounterClockwise, ArrowRight, Plus, Trash } from "@phosphor-icons/react";
 import { AutosaveStatus, InlineMessage } from "../ui/system/index.js";
 import { createStoryboardDraftSession, newStoryboardShot, storyboardDraftIssues } from "./storyboard-draft.js";
@@ -32,7 +33,7 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
     return () => { active = false; };
   }, [projectId, request]);
   const fields = useRef(new Map());
-  const cacheKey = `viraldna:storyboard-draft:${projectId}`;
+  const cacheKey = accountStorageKey(`viraldna:storyboard-draft:${projectId}`);
   const [session] = useState(() => createStoryboardDraftSession(manifest, {
     save: (payload) => callbacks.current.request(`/projects/${projectId}/storyboard-draft`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -49,6 +50,9 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
   }
 
   useImperativeHandle(ref, () => ({ flush }), [session]);
+  const accountFlush = useRef(flush);
+  accountFlush.current = flush;
+  useEffect(() => registerAccountFlusher(() => accountFlush.current()), []);
   useEffect(() => { session.hydrate(manifest); }, [manifest, session]);
   useEffect(() => {
     // A crash/reload can occur inside the debounce window. Restore only against

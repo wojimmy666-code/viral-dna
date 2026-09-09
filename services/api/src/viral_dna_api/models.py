@@ -225,6 +225,7 @@ class ProductionChangeKind(StrEnum):
     VIDEO_REJECTED = "video_rejected"
     VIDEO_PREPARATION_CHANGED = "video_preparation_changed"
     VIDEO_EDITING_SELECTION_CHANGED = "video_editing_selection_changed"
+    VIDEO_STAGE_SELECTION_CHANGED = "video_stage_selection_changed"
     ANALYSIS_PROMPTS_SYNCED = "analysis_prompts_synced"
     WORKFLOW_ADVANCED = "workflow_advanced"
     BRANCH_CREATED = "branch_created"
@@ -1903,6 +1904,9 @@ class ProductionProject(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     status: ProductionProjectStatus = ProductionProjectStatus.DRAFT
     active_step: ProductionStep = ProductionStep.SHOT_IMAGES
+    # None preserves legacy projects until the user explicitly enters from images.
+    # A saved list is a scope snapshot, not a projection of changing adoptions.
+    video_stage_shot_ids: list[UUID] | None = None
     current_revision_id: UUID | None = None
     output_aspect_ratio: str = Field(
         default="9:16",
@@ -3193,6 +3197,7 @@ class ShotEditingSelectionUpdate(BaseModel):
 
 class ShotPlanReorder(BaseModel):
     expected_revision_id: UUID
+    scope: Literal["all", "shot_videos"] = "all"
     ordered_shot_plan_ids: list[UUID] = Field(min_length=1, max_length=200)
 
     @field_validator("ordered_shot_plan_ids")
@@ -3768,6 +3773,10 @@ class ProductionGateStatus(BaseModel):
 class ProductionAdvanceRequest(BaseModel):
     expected_revision_id: UUID
     target_step: ProductionStep
+
+
+class VideoStageEnterRequest(BaseModel):
+    expected_revision_id: UUID
 
 
 class EditingHandoffClip(BaseModel):

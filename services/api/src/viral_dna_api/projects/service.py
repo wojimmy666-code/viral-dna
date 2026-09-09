@@ -106,6 +106,9 @@ class ProjectService:
     async def bootstrap_analysis_projects(self) -> None:
         """Idempotent v14 read-model migration with AnalysisRecord UUID preservation."""
 
+        from ..access_context import account_access
+
+        access = account_access.get()
         existing = {item.id: item for item in await self.repository.list_projects()}
         for record in await self.repository.list_records():
             current = existing.get(record.id)
@@ -119,7 +122,8 @@ class ProjectService:
             lifecycle = _lifecycle_from_record(record)
             project = Project(
                 id=record.id,
-                owner_account_id=(current.owner_account_id if current else None),
+                owner_account_id=(access.account_id if access else
+                                  current.owner_account_id if current else None),
                 kind=ProjectKind.ANALYSIS,
                 name=record.name,
                 folder_id=record.folder_id,

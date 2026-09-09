@@ -293,6 +293,11 @@ class PublicMediaStager:
             "s": size,
             "m": media_type,
         }
+        from .access_context import account_access
+
+        access = account_access.get()
+        if access is not None:
+            payload["a"] = str(access.account_id)
         encoded = _b64encode(
             json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
                 "utf-8"

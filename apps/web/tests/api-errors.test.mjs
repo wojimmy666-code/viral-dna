@@ -46,7 +46,7 @@ test("the real API request handler uses validation messages while preserving err
     calls.push({ path, options });
     return { ok: false, status: 422, json: async () => ({ detail: [{ loc: ["path", "project_id"], type: "uuid_parsing" }] }) };
   };
-  const request = new Function("fetch", "API_BASE", "apiErrorMessage", "projectFacingMessage", `return (${source.slice(fn.start, fn.end)});`)(fetch, "/api/v1", apiErrorMessage, (value) => value);
+  const request = new Function("accountFetch", "API_BASE", "apiErrorMessage", "projectFacingMessage", `return (${source.slice(fn.start, fn.end)});`)(fetch, "/api/v1", apiErrorMessage, (value) => value);
   await assert.rejects(request("/projects/batch/lifecycle", { method: "POST" }), (error) => {
     assert.equal(error.status, 422);
     assert.equal(error.message, "请求参数有误：项目 ID 格式不正确");

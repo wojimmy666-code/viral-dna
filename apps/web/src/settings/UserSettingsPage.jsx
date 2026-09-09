@@ -375,16 +375,16 @@ export function UserSettingsPage({
               <header className="settings-panel-heading">
                 <div>
                   <h2>当前设备</h2>
-                  <p>工作区保存在本机；未来登录后可将账户连接到云端工作区。</p>
+                  <p>{session?.auth_mode === "password" ? "账户数据由服务端独立保存，不支持切换个人或企业空间。" : "工作区保存在本机；未来登录后可将账户连接到云端工作区。"}</p>
                 </div>
               </header>
               <dl className="device-settings-list">
-                <div><dt>设备模式</dt><dd>本地工作区</dd></div>
-                <div><dt>工作区路径</dt><dd>{workspace?.root_path || "尚未读取"}</dd></div>
+                <div><dt>数据位置</dt><dd>{session?.auth_mode === "password" ? "账户专属存储" : "本地工作区"}</dd></div>
+                {session?.auth_mode !== "password" && <div><dt>工作区路径</dt><dd>{workspace?.root_path || "尚未读取"}</dd></div>}
                 <div><dt>账户数据</dt><dd>仅当前账户可见</dd></div>
                 <div><dt>云端同步</dt><dd>接口已预留，当前版本未启用</dd></div>
               </dl>
-              <div className="device-workspace-editor">
+              {session?.auth_mode !== "password" && <div className="device-workspace-editor">
                 <label className="settings-field">
                   <span>工作区文件夹</span>
                   <input
@@ -416,7 +416,7 @@ export function UserSettingsPage({
                   <p className="device-workspace-valid"><Check size={17} /> 文件夹可写</p>
                 )}
                 {workspaceError && <p className="settings-page-error" role="alert">{workspaceError}</p>}
-              </div>
+              </div>}
             </>
           )}
 

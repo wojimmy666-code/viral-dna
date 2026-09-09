@@ -153,7 +153,7 @@ test("step switches flush every editor and audio subviews reuse the same timelin
   assert.match(barrier, /await flushShotDraft\(\)/);
   assert.match(barrier, /await flushVideoDraft\(\)/);
   assert.match(barrier, /await editorRef\.current\?\.flush\(\)/);
-  assert.match(source, /await flushWorkspace\(\);\s*setActionError\(""\);\s*setActiveSection\(next\)/);
+  assert.match(source, /await flushWorkspace\(\);\s*projectRefreshRequestId\.current \+= 1;\s*setActionError\(""\);\s*setActiveSection\(next\)/);
   assert.match(source, /\["editing", "audio_caption"\]\.includes\(activeSection\) && \(\s*<VideoEditorWorkspace/);
 });
 

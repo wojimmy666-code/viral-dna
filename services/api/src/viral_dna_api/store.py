@@ -1365,6 +1365,7 @@ class WorkspaceStore:
         self._memory_mode = os.getenv("VIRAL_DNA_STORE", "sqlite").lower() == "memory"
         self._switch_lock = asyncio.Lock()
         self._backend = self._new_backend(workspace_manager.database_path)
+        self._account_backends = {}
 
     def _new_backend(self, database_path: Path):
         if self._memory_mode:
@@ -1375,12 +1376,28 @@ class WorkspaceStore:
 
     @property
     def backend(self):
+        from .access_context import account_access
+
+        access = account_access.get()
+        if access is not None:
+            key = (str(access.account_id), str(access.workspace_root))
+            if key not in self._account_backends:
+                from .accounts.fencing import FencedRepository
+
+                workspace_manager.initialize(access.workspace_root)
+                self._account_backends[key] = FencedRepository(
+                    self._new_backend(workspace_manager.database_path))
+            return self._account_backends[key]
         return self._backend
 
     def __getattr__(self, name: str):
-        return getattr(self._backend, name)
+        return getattr(self.backend, name)
 
     async def switch_workspace(self, path: str) -> None:
+        from .access_context import account_access
+
+        if account_access.get() is not None:
+            raise WorkspaceError("个人与企业账户独立，不允许切换工作区")
         async with self._switch_lock:
             analyses = await self._backend.list_analyses()
             active = [
@@ -1397,29 +1414,29 @@ class WorkspaceStore:
             self._backend = backend
 
     async def add_analysis(self, analysis: AnalysisJob) -> AnalysisJob:
-        saved = await self._backend.add_analysis(analysis)
+        saved = await self.backend.add_analysis(analysis)
         await self._sync_record_from_analysis(saved)
         return saved
 
     async def save_analysis(self, analysis: AnalysisJob) -> AnalysisJob:
-        saved = await self._backend.save_analysis(analysis)
+        saved = await self.backend.save_analysis(analysis)
         await self._sync_record_from_analysis(saved)
         return saved
 
     async def save_video(self, video: Video) -> Video:
-        saved = await self._backend.save_video(video)
+        saved = await self.backend.save_video(video)
         if video.record_id is not None:
-            record = await self._backend.get_record(video.record_id)
+            record = await self.backend.get_record(video.record_id)
             if record is not None and record.status != video.status:
                 record.status = video.status
                 record.updated_at = _utc_now()
-                await self._backend.save_record(record)
+                await self.backend.save_record(record)
         return saved
 
     async def save_report(self, report: AnalysisReport) -> AnalysisReport:
         simplified = simplify_model(report)
-        saved = await self._backend.save_report(simplified)
-        analysis = await self._backend.get_analysis(report.analysis_id)
+        saved = await self.backend.save_report(simplified)
+        analysis = await self.backend.get_analysis(report.analysis_id)
         if analysis is not None and analysis.record_id is not None:
             await archive_report(analysis.record_id, simplified)
         return saved
@@ -1427,7 +1444,7 @@ class WorkspaceStore:
     async def _sync_record_from_analysis(self, analysis: AnalysisJob) -> None:
         if analysis.record_id is None:
             return
-        record = await self._backend.get_record(analysis.record_id)
+        record = await self.backend.get_record(analysis.record_id)
         if record is None:
             return
         if analysis.stage == AnalysisStage.COMPLETED:
@@ -1441,7 +1458,7 @@ class WorkspaceStore:
         record.latest_analysis_id = analysis.id
         record.status = next_status
         record.updated_at = max(record.updated_at, analysis.updated_at)
-        await self._backend.save_record(record)
+        await self.backend.save_record(record)
 
 
 def create_store() -> WorkspaceStore:
