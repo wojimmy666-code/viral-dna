@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createServicePlan, createSpawnOptions } from "./managed-launcher.mjs";
+import { createServicePlan, createSpawnOptions } from "../dev/managed-launcher.mjs";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,7 +27,7 @@ test("managed services bypass cmd and inherit the launch-run logs", () => {
 });
 
 test("batch entry routes managed launches around manual console and PowerShell polling", () => {
-  const batch = readFileSync(path.join(scriptDirectory, "start.bat"), "utf8");
+  const batch = readFileSync(path.join(scriptDirectory, "../dev/start-dev.bat"), "utf8");
   const managedRoute = "if defined PROJECT_LAUNCHER_MANAGED goto :managed_start";
   const managedStart = batch.indexOf("\r\n:managed_start\r\n");
   const managedEnd = batch.indexOf("\r\n:prepare_api\r\n", managedStart);

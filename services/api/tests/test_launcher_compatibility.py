@@ -4,8 +4,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_windows_launcher_restarts_only_a_stale_viral_dna_api() -> None:
-    launcher = (REPOSITORY_ROOT / "scripts" / "start.bat").read_text("utf-8")
-    detector = (REPOSITORY_ROOT / "scripts" / "api-service-state.ps1").read_text("utf-8")
+    launcher = (REPOSITORY_ROOT / "scripts" / "dev" / "start-dev.bat").read_text("utf-8")
+    detector = (REPOSITORY_ROOT / "scripts" / "dev" / "api-service-state.ps1").read_text(
+        "utf-8"
+    )
 
     assert "api-service-state.ps1" in launcher
     assert "-Mode check" in launcher

@@ -214,7 +214,7 @@ def project_root() -> Path:
 
 
 def wrapper_path() -> Path:
-    return project_root() / "scripts" / "codex_imagegen_adapter.py"
+    return project_root() / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
 
 
 def _safe_environment() -> dict[str, str]:

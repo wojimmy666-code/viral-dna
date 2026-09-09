@@ -1062,7 +1062,7 @@ def test_codex_auto_configuration_persists_wrapper_and_model_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     isolate_image_settings(tmp_path, monkeypatch)
-    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
 
     async def discovery() -> LocalCodexDiscoveryResponse:
         return LocalCodexDiscoveryResponse(
@@ -1231,7 +1231,7 @@ def test_codex_windows_system_proxy_is_not_reinjected_into_child_process() -> No
 def test_codex_sandbox_preflight_uses_selected_mode_without_model_call(
     tmp_path: Path,
 ) -> None:
-    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
     fake_codex = write_fake_codex(tmp_path)
     result = subprocess.run(
         [
@@ -1270,7 +1270,7 @@ def test_codex_sandbox_preflight_uses_selected_mode_without_model_call(
 def test_codex_sandbox_service_reports_delivery_and_never_generates(
     tmp_path: Path,
 ) -> None:
-    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
 
     async def discovery() -> LocalCodexDiscoveryResponse:
         return LocalCodexDiscoveryResponse(
@@ -1328,7 +1328,7 @@ def test_codex_sandbox_setup_error_is_actionable_and_not_retryable() -> None:
 
 
 def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None:
-    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
     fake_codex = write_fake_codex(tmp_path)
     run_root = tmp_path / "run"
     source = write_image(run_root / "tool-inputs" / "source.jpg", size=(320, 576))
@@ -1412,7 +1412,7 @@ def test_codex_imagegen_wrapper_protocol_with_fake_codex(tmp_path: Path) -> None
 def test_codex_imagegen_wrapper_captures_standard_generated_image_output(
     tmp_path: Path,
 ) -> None:
-    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+    wrapper = Path(__file__).resolve().parents[3] / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
     fake_codex = write_fake_codex(tmp_path)
     run_root = tmp_path / "run-codex-home"
     request_path = run_root / "request.json"

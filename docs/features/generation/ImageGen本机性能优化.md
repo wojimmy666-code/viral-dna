@@ -36,7 +36,7 @@
 无出图预检（只初始化服务、定位技能、检查临时线程配置，不提交生成回合）：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/codex_imagegen_adapter.py --codex-executable '<本机 codex.exe 路径>' preflight-runtime --cwd 'D:\Projects\ViralDna\tmp' --timeout 30
+.\.venv\Scripts\python.exe scripts/imagegen/codex_imagegen_adapter.py --codex-executable '<本机 codex.exe 路径>' preflight-runtime --cwd 'D:\Projects\ViralDna\tmp' --timeout 30
 ```
 
 本机 Codex 0.153.4 的三次预检约 0.6–1.1 秒，包含实际任务的 Windows 长路径目录；这不是实际出图测速。验证使用模拟 Codex/图片工具，不消费图片额度。实际加速比例仍需下一批真实出图确认，不承诺固定倍速。

@@ -19,3 +19,9 @@ Thumbs.db
 storage/
 uploads/
 tools/
+
+# Real deployment configuration must live outside the repository.
+scripts/deploy/config.json
+scripts/deploy/*.local.json
+scripts/deploy/api.env
+scripts/deploy/runtime/

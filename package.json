@@ -9,7 +9,10 @@
     "dev:web": "npm --workspace apps/web run dev",
     "build:web": "npm --workspace apps/web run build",
     "check:design": "npm --workspace apps/web run check:design",
-    "test:launcher": "node --test scripts/managed-launcher.test.mjs",
+    "check:docs": "node scripts/checks/check-docs.mjs",
+    "check:scripts": "node scripts/checks/check-scripts.mjs",
+    "test:launcher": "node --test scripts/tests/managed-launcher.test.mjs scripts/tests/deploy-layout.test.mjs",
+    "test:deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/deploy-server.tests.ps1",
     "test:web": "npm --workspace apps/web run test"
   }
 }

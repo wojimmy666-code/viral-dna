@@ -1,0 +1,17 @@
+<service>
+  <id>@@SERVICE_ID@@</id>
+  <name>@@SERVICE_ID@@</name>
+  <description>ViralDNA production static frontend and reverse proxy.</description>
+  <executable>@@EXECUTABLE@@</executable>
+  <arguments>@@ARGUMENTS@@</arguments>
+  <workingdirectory>@@WORKING_DIRECTORY@@</workingdirectory>
+  <env name="XDG_DATA_HOME" value="@@CADDY_DATA@@" />
+  <env name="XDG_CONFIG_HOME" value="@@CADDY_CONFIG@@" />
+  <startmode>Manual</startmode>
+  <stoptimeout>120 sec</stoptimeout>
+  <logpath>@@LOG_DIRECTORY@@</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+</service>

@@ -103,7 +103,7 @@ ShotPlan + 原关键帧 + ReferenceBinding
 
 ### 5.1 Codex + ImageGen 自动发现与包装器
 
-已新增首套内置本机包装器 `scripts/codex_imagegen_adapter.py`，但业务 Gateway 仍只依赖通用 JSON 协议：
+已新增首套内置本机包装器 `scripts/imagegen/codex_imagegen_adapter.py`，但业务 Gateway 仍只依赖通用 JSON 协议：
 
 - 设置弹窗打开后自动执行无费用环境发现，并支持手动重新检测。
 - 检查 Codex CLI 的绝对可执行路径、版本、登录状态、ChatGPT／Codex 桌面端和本机 `imagegen` 技能；发现过程不会提交提示词，也不会调用模型。

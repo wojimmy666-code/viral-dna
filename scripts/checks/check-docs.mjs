@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Read-only: validates repository documentation, never crawls external sites.
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const slash = value => value.split(path.sep).join('/');
 const relative = value => slash(path.relative(root, value));
 

@@ -1,0 +1,26 @@
+{
+  "SchemaVersion": 1,
+  "RepositoryRoot": "D:\\ViralDNA\\code",
+  "DeploymentRoot": "D:\\ViralDNA\\deployment",
+  "EnvFile": "D:\\ViralDNA\\config\\api.env",
+  "ServicePrefix": "ViralDNA-Production",
+  "ServiceAccount": ".\\viraldna-service",
+  "SiteUrl": "http://127.0.0.1:8080",
+  "AllowPublicAccess": false,
+  "ApiPort": 8000,
+  "ProbePort": 18080,
+  "CaddyAdminPort": 12019,
+  "StopTimeoutSeconds": 120,
+  "HealthTimeoutSeconds": 120,
+  "LocalAI": false,
+  "Tools": {
+    "Git": "C:\\Program Files\\Git\\cmd\\git.exe",
+    "Node": "C:\\Program Files\\nodejs\\node.exe",
+    "Npm": "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+    "Python": "C:\\Python312\\python.exe",
+    "FFmpeg": "D:\\ViralDNA\\tools\\ffmpeg\\bin\\ffmpeg.exe",
+    "FFprobe": "D:\\ViralDNA\\tools\\ffmpeg\\bin\\ffprobe.exe",
+    "Caddy": "D:\\ViralDNA\\tools\\caddy.exe",
+    "WinSW": "D:\\ViralDNA\\tools\\WinSW-x64.exe"
+  }
+}

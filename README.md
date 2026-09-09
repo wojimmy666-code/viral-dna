@@ -17,7 +17,7 @@
 ```text
 apps/web       React + Vite 工作台
 services/api   FastAPI、账户、任务、媒体和存储
-scripts        本地启动、运行工具与检查
+scripts        start.bat / deploy-server.bat 两个入口，其余脚本按用途分目录
 docs           按用途分类的功能、架构、部署和验收文档
 ```
 
@@ -35,6 +35,10 @@ Windows 环境要求 Node.js 20.19+、Python 3.11+；媒体处理需要 FFmpeg�
 
 平台 Provider 凭据和模型目录由独立 admin 后台维护，用户设置只管理生成偏好，不在用户页面填写 API Key。已有工作区与账户数据路径不得通过重新初始化或切换免登录模式绕过。
 
+## Windows 正式部署
+
+完成 [首次服务器配置](docs/deployment/Windows服务器一键部署.md) 后，以管理员身份运行 `scripts/deploy-server.bat`。菜单提供 GitHub SSH 更新＋编译＋启动、编译＋启动、启动和关闭；前三项均先关闭本项目现有服务。正式入口使用静态前端和 Windows 服务，不复用 Vite 开发服务。
+
 ## 文档入口
 
 - [全部文档与维护规则](docs/README.md)
@@ -51,7 +55,10 @@ Windows 环境要求 Node.js 20.19+、Python 3.11+；媒体处理需要 FFmpeg�
 ## 开发检查
 
 ```powershell
-node scripts/check-docs.mjs
+npm run check:docs
+npm run check:scripts
+npm run test:launcher
+npm run test:deploy
 npm run check:design
 npm run test:web
 npm run build:web

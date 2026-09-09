@@ -1,0 +1,42 @@
+{
+    admin 127.0.0.1:@@ADMIN_PORT@@
+    storage file_system {
+        root "@@CADDY_DATA@@"
+    }
+}
+
+(viral_dna_site) {
+    root * "@@WEB_ROOT@@"
+    encode gzip
+    route {
+        header X-ViralDNA-Release "@@RELEASE_ID@@"
+        @private path /.git* /.env* /storage/* /uploads/* /services/* /scripts/*
+        respond @private 404
+        handle /api/* {
+            reverse_proxy 127.0.0.1:@@API_PORT@@ {
+                flush_interval -1
+            }
+        }
+        handle /health {
+            reverse_proxy 127.0.0.1:@@API_PORT@@
+        }
+        @static path_regexp static \.[a-zA-Z0-9]{1,8}$
+        handle @static {
+            file_server
+        }
+        handle {
+            try_files {path} /index.html
+            file_server
+        }
+    }
+}
+
+@@SITE_URL@@ {
+    @@SITE_BIND@@
+    import viral_dna_site
+}
+
+http://127.0.0.1:@@PROBE_PORT@@ {
+    bind 127.0.0.1
+    import viral_dna_site
+}

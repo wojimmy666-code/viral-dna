@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const defaultProjectRoot = path.resolve(scriptDirectory, "..");
+const defaultProjectRoot = path.resolve(scriptDirectory, "../..");
 
 export function createServicePlan(projectRoot = defaultProjectRoot) {
   return [

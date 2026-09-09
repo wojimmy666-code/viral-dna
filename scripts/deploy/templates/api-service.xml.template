@@ -1,0 +1,18 @@
+<service>
+  <id>@@SERVICE_ID@@</id>
+  <name>@@SERVICE_ID@@</name>
+  <description>ViralDNA production API; managed only by deploy-server.bat.</description>
+  <executable>@@EXECUTABLE@@</executable>
+  <arguments>@@ARGUMENTS@@</arguments>
+  <workingdirectory>@@WORKING_DIRECTORY@@</workingdirectory>
+  <env name="VIRAL_DNA_ENV_FILE" value="@@ENV_FILE@@" />
+  <env name="PYTHONUTF8" value="1" />
+  <env name="PATH" value="@@TOOL_PATH@@;%PATH%" />
+  <startmode>Manual</startmode>
+  <stoptimeout>120 sec</stoptimeout>
+  <logpath>@@LOG_DIRECTORY@@</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+</service>

@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $apiSourceRoot = Join-Path $projectRoot "services\api\src"
 $schemaPath = Join-Path $apiSourceRoot "viral_dna_api\schema.py"
 $pyprojectPath = Join-Path $projectRoot "services\api\pyproject.toml"

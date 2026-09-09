@@ -35,7 +35,7 @@ from viral_dna_api.production import ProductionService
 from viral_dna_api.store import InMemoryStore
 from viral_dna_api.workspace import WorkspaceManager
 
-WRAPPER = Path(__file__).resolve().parents[3] / "scripts" / "codex_imagegen_adapter.py"
+WRAPPER = Path(__file__).resolve().parents[3] / "scripts" / "imagegen" / "codex_imagegen_adapter.py"
 
 
 def wrapper_functions():
