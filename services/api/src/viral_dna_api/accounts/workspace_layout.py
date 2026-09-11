@@ -95,7 +95,7 @@ def account_workspace(root: Path, account_id: UUID | str) -> Path:
 
 
 @contextmanager
-def layout_lock(auth_database: Path):
+def layout_lock(auth_database: Path, *, allow_incomplete_import=False):
     """Held for the API lifetime, or exclusively by the offline migration tool."""
     path = checked_path(auth_database).with_suffix(".workspace-layout.lock")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +118,12 @@ def layout_lock(auth_database: Path):
                 "账户数据正在被 API 或迁移工具使用，请先停止本项目 API"
             ) from exc
         try:
+            marker = checked_path(auth_database.with_suffix(".installation-migration.json"))
+            if marker.exists() and not allow_incomplete_import:
+                raise WorkspaceLayoutError(
+                    "发现未完成的跨机账户导入；禁止启动 API，"
+                    "请用 transfer-installation.py recover 预览恢复"
+                )
             yield
         finally:
             handle.seek(0)

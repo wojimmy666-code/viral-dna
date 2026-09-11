@@ -20,6 +20,10 @@ storage/
 uploads/
 tools/
 
+# Private account migration bundles include identity hashes and all account data.
+*.vdna-migration/
+*.vdna-migration.pending-*/
+
 # Single-root server deployment: private runtime is never source code.
 /.server/
 # Legacy private deployment configuration.
