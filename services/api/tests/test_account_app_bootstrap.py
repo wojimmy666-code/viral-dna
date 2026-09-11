@@ -4,8 +4,11 @@ import os
 import subprocess
 import sys
 
+import pytest
 
-def test_real_app_setup_login_new_accounts_and_both_project_flows(tmp_path):
+
+@pytest.mark.parametrize("has_legacy", [True, False])
+def test_real_app_setup_login_new_accounts_and_both_project_flows(tmp_path, has_legacy):
     env = os.environ.copy()
     env.update(
         {
@@ -22,11 +25,14 @@ def test_real_app_setup_login_new_accounts_and_both_project_flows(tmp_path):
             "VIRAL_DNA_PLATFORM_CONNECTIONS_PATH": str(tmp_path / "connections.json"),
             "VIRAL_DNA_PLATFORM_SECRET_ROOT": str(tmp_path / "secrets"),
             "VIRAL_DNA_YTDLP_COOKIE_FILE": "",
+            "VIRAL_DNA_TEST_HAS_LEGACY": "1" if has_legacy else "0",
         }
     )
     script = r"""
 import asyncio
 import os
+import json
+from pathlib import Path
 from uuid import uuid4
 from fastapi.testclient import TestClient
 from viral_dna_api.main import app, store, account_context_service
@@ -35,6 +41,8 @@ from viral_dna_api.workspace import workspace_manager
 
 password = "12345678"
 legacy_root = workspace_manager.root
+has_legacy = os.environ["VIRAL_DNA_TEST_HAS_LEGACY"] == "1"
+assert not legacy_root.exists(), "Importing the password-mode app must not create legacy storage"
 video = Video(source_type="upload", title="Existing analysis", record_id=uuid4())
 record = AnalysisRecord(
     id=video.record_id, video_id=video.id, name="Existing analysis", source_type="upload"
@@ -43,13 +51,19 @@ async def seed():
     await store.add_video(video)
     await store.save_record(record)
     return await account_context_service.ensure_current()
-legacy_context = asyncio.run(seed())
+legacy_context = asyncio.run(seed()) if has_legacy else None
 
 def checked(response, status=200):
     assert response.status_code == status, (response.status_code, response.text)
     return response.json()
 
 with TestClient(app, headers={"Origin": "http://testserver"}) as client:
+    from viral_dna_api.accounts.workspace_layout import layout_lock, WorkspaceLayoutError
+    try:
+        with layout_lock(Path(os.environ["VIRAL_DNA_AUTH_DB_PATH"])):
+            raise AssertionError("Running API did not exclude offline migration")
+    except WorkspaceLayoutError:
+        pass
     setup_status = checked(client.get("/api/v1/auth/status"))
     assert setup_status["initialized"] is False
     assert setup_status["setup_allowed"] is True
@@ -83,18 +97,30 @@ with TestClient(app, headers={"Origin": "http://testserver"}) as client:
     session = checked(client.post("/api/v1/auth/login", json={
         "username": "13800000001", "password": password}))
     client.headers["X-CSRF-Token"] = session["csrf_token"]
-    assert session["account_id"] == str(legacy_context.account.id)
-    assert checked(client.get("/api/v1/projects"))["items"][0]["id"] == str(record.id)
+    target_root = Path(os.environ["VIRAL_DNA_ACCOUNTS_ROOT"]) / session["account_id"]
+    assert target_root.is_dir()
+    registry = json.loads(Path(os.environ["VIRAL_DNA_ACCOUNT_CATALOG_PATH"]).read_text("utf-8"))
+    assert registry["registrations"][0]["local_root"] == str(target_root)
     context = checked(client.get("/api/v1/context"))
-    assert context["active_workspace"]["id"] == str(legacy_context.active_workspace.id)
-    assert context["device"]["id"] == str(legacy_context.device.id)
+    owner_workspace_id = context["active_workspace"]["id"]
+    assert context["registration"]["local_root"] == str(target_root)
+    if has_legacy:
+        assert session["account_id"] == str(legacy_context.account.id)
+        assert checked(client.get("/api/v1/projects"))["items"][0]["id"] == str(record.id)
+        assert owner_workspace_id == str(legacy_context.active_workspace.id)
+        assert context["device"]["id"] == str(legacy_context.device.id)
+        assert legacy_root.exists(), "Keep the original workspace after copying"
+    else:
+        assert checked(client.get("/api/v1/projects"))["items"] == []
+        assert not legacy_root.exists()
     assert checked(client.get("/api/v1/me/notifications"))["items"] == []
-    checked(client.post(f"/api/v1/projects/{record.id}/edit-lease/acquire", json={
-        "editor_id":"test-analysis-tab-123", "token":"analysis-lock-token"*3}))
-    client.headers.update({
-        "X-Editor-Id":"test-analysis-tab-123", "X-Edit-Token":"analysis-lock-token"*3})
-    checked(client.get(f"/api/v1/records/{record.id}"))
-    checked(client.get(f"/api/v1/records/{record.id}/productions"))
+    if has_legacy:
+        checked(client.post(f"/api/v1/projects/{record.id}/edit-lease/acquire", json={
+            "editor_id":"test-analysis-tab-123", "token":"analysis-lock-token"*3}))
+        client.headers.update({
+            "X-Editor-Id":"test-analysis-tab-123", "X-Edit-Token":"analysis-lock-token"*3})
+        checked(client.get(f"/api/v1/records/{record.id}"))
+        checked(client.get(f"/api/v1/records/{record.id}/productions"))
     checked(client.post("/api/v1/auth/logout"))
     client.cookies.clear()
 
@@ -118,7 +144,7 @@ with TestClient(app, headers={"Origin": "http://testserver"}) as client:
     workspace_id = context["active_workspace"]["id"]
     checked(client.get(f"/api/v1/workspaces/{workspace_id}/storage-locations"))
     assert client.put("/api/v1/context/active-workspace", json={
-        "workspace_id":str(legacy_context.active_workspace.id)}).status_code == 403
+        "workspace_id":owner_workspace_id}).status_code == 403
     assert client.post("/api/v1/account/members", json={
         "username":"13900000003", "display_name":"Invalid"}).status_code == 403
     skills = checked(client.get("/api/v1/skills"))["items"]
@@ -135,6 +161,8 @@ with TestClient(app, headers={"Origin": "http://testserver"}) as client:
     assert client.put("/api/v1/settings/model", json={}).status_code == 403
     checked(client.get("/api/v1/admin/depth-controls/engines"))
     assert workspace_manager.root == legacy_root
+    if not has_legacy:
+        assert not legacy_root.exists()
 print("Isolated startup, legacy ownership, account roles and Skill/analysis routes passed.")
 """
     result = subprocess.run(

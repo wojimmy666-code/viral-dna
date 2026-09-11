@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- REFERENCE FRAGMENT ONLY. Never replace applicationHost.config with this file. -->
+<!-- Prefer the site-scoped IIS Manager steps in README.md. -->
+<!-- If merging manually, merge into the existing ViralDNA location. -->
+<!-- Do not add a server variable that is already present or inherited. -->
+<location path="ViralDNA" inheritInChildApplications="false">
+  <system.webServer>
+    <rewrite>
+      <allowedServerVariables>
+        <add name="HTTP_X_FORWARDED_PROTO" />
+        <add name="HTTP_X_FORWARDED_HOST" />
+        <add name="HTTP_X_FORWARDED_FOR" />
+      </allowedServerVariables>
+    </rewrite>
+    <security>
+      <requestFiltering>
+        <requestLimits maxAllowedContentLength="2147483648" />
+      </requestFiltering>
+    </security>
+    <httpErrors existingResponse="PassThrough" />
+    <urlCompression doStaticCompression="false" doDynamicCompression="false" />
+    <caching enabled="false" enableKernelCache="false" />
+  </system.webServer>
+</location>

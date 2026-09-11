@@ -63,11 +63,24 @@ function Write-AtomicJson([string]$Path, $Value) {
     Write-AtomicText $Path ($Value | ConvertTo-Json -Depth 12)
 }
 
+function Get-PrivateRuntimeRoot($Config) {
+    if ($Config.PSObject.Properties.Name -notcontains 'PrivateRuntimeRoot') { return $null }
+    $root = Get-FullPath $Config.PrivateRuntimeRoot
+    if ($root -ne (Join-Path (Get-FullPath $Config.RepositoryRoot) '.server')) {
+        throw 'PrivateRuntimeRoot must be exactly RepositoryRoot\.server.'
+    }
+    Assert-NoReparsePoint $root
+    return $root
+}
+
 function Read-DeployConfig([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Deployment config not found: $Path. Copy scripts/deploy/config.example.json and configure it first."
     }
-    $c = Read-JsonFile $Path
+    return Resolve-DeployConfig (Read-JsonFile $Path)
+}
+
+function Resolve-DeployConfig($c) {
     if ($c.SchemaVersion -ne 1) { throw 'Unsupported deployment config schema.' }
     foreach ($key in @('RepositoryRoot', 'DeploymentRoot', 'EnvFile')) {
         $c.$key = Get-FullPath $c.$key
@@ -78,18 +91,24 @@ function Read-DeployConfig([string]$Path) {
             throw 'Use a dedicated deployment directory, not a drive, user, or system root.'
         }
     }
-    if ((Test-PathWithin $c.DeploymentRoot $c.RepositoryRoot) -or
+    $private = Get-PrivateRuntimeRoot $c
+    if ($private) {
+        if ($c.DeploymentRoot -ne (Join-Path $private 'deployment') -or
+            $c.EnvFile -ne (Join-Path $private 'config\api.env')) {
+            throw 'Single-root deployment must keep deployment and private env in the reserved .server paths.'
+        }
+    } elseif ((Test-PathWithin $c.DeploymentRoot $c.RepositoryRoot) -or
         (Test-PathWithin $c.RepositoryRoot $c.DeploymentRoot)) {
         throw 'RepositoryRoot and DeploymentRoot must be separate, non-nested directories.'
     }
-    if ((Test-PathWithin $c.EnvFile $c.RepositoryRoot) -or
+    if ((-not $private -and (Test-PathWithin $c.EnvFile $c.RepositoryRoot)) -or
         (Test-PathWithin $c.EnvFile (Join-Path $c.DeploymentRoot 'releases'))) {
         throw 'EnvFile must stay outside source code and release directories.'
     }
     if ($c.ServicePrefix -notmatch '^[A-Za-z][A-Za-z0-9-]{2,48}$') { throw 'Invalid ServicePrefix.' }
     if ($c.ServiceAccount -notmatch '^[^\s\\]+\\[^\s\\]+$' -or
         $c.ServiceAccount -match '(?i)^(NT AUTHORITY|NT SERVICE)\\|LocalSystem') {
-        throw 'Configure a dedicated local/domain service account, not a built-in system account.'
+        throw 'Configure a local/domain Windows service account (the current administrator is supported), not a built-in system account.'
     }
     $site = [Uri]$c.SiteUrl
     if (-not $site.IsAbsoluteUri -or $site.UserInfo -or $site.Query -or $site.Fragment -or
@@ -111,7 +130,11 @@ function Read-DeployConfig([string]$Path) {
     }
     foreach ($key in @('Git', 'Node', 'Npm', 'Python', 'FFmpeg', 'FFprobe', 'Caddy', 'WinSW')) {
         $c.Tools.$key = Get-FullPath $c.Tools.$key
+        if ($private -and -not (Test-PathWithin $c.Tools.$key (Join-Path $private 'tools'))) {
+            throw "Single-root tool $key must stay in .server\tools."
+        }
     }
+    Assert-IisConfig $c
     return $c
 }
 
@@ -130,7 +153,11 @@ function Read-ProductionEnv($Config) {
         'VIRAL_DNA_WORKSPACE_ROOT', 'VIRAL_DNA_PLATFORM_SECRET_ROOT')) {
         $path = Get-FullPath $values[$key]
         Assert-NoReparsePoint $path
-        if ((Test-PathWithin $path $Config.RepositoryRoot) -or (Test-PathWithin $path $Config.DeploymentRoot)) {
+        $private = Get-PrivateRuntimeRoot $Config
+        if ($private -and -not (Test-PathWithin $path (Join-Path $private 'data'))) {
+            throw "$key must point to persistent business data in .server\data."
+        }
+        if ((-not $private -and (Test-PathWithin $path $Config.RepositoryRoot)) -or (Test-PathWithin $path $Config.DeploymentRoot)) {
             throw "$key must point to persistent business data outside source/deployment directories."
         }
         if ($path.Length -lt 4) { throw "$key cannot use a drive root." }
@@ -139,6 +166,9 @@ function Read-ProductionEnv($Config) {
     if ($origins -contains '*' -or $origins -notcontains $Config.SiteUrl.TrimEnd('/') -or
         $origins -notcontains "http://127.0.0.1:$($Config.ProbePort)") {
         throw 'CORS_ORIGINS must include the exact SiteUrl and local probe origin, never a wildcard.'
+    }
+    if ((Test-IisEnabled $Config) -and $origins -notcontains $Config.Iis.SiteUrl.TrimEnd('/')) {
+        throw 'CORS_ORIGINS must also include the exact IIS SiteUrl.'
     }
     return $values
 }
@@ -207,7 +237,9 @@ function Invoke-DeployGit($Config, [string[]]$Arguments, [switch]$AllowFailure) 
     $gitArgs = @('-c', 'core.quotepath=false', '-c', 'protocol.allow=never', '-c', 'protocol.ssh.allow=always',
         '-c', 'core.sshCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15') + $Arguments
     $cwd = if (Test-Path -LiteralPath $Config.RepositoryRoot) { $Config.RepositoryRoot } else { Split-Path -Parent $Config.EnvFile }
+    $gitRoot = Split-Path -Parent (Split-Path -Parent $Config.Tools.Git)
     return Invoke-DeployProcess $Config.Tools.Git $gitArgs $cwd -Environment @{
+        PATH = (Join-Path $gitRoot 'usr\bin') + ';' + (Split-Path -Parent $Config.Tools.Git) + ';' + $env:PATH
         GIT_TERMINAL_PROMPT = '0'; GIT_SSH_COMMAND = $null; GIT_SSH = $null
         GIT_DIR = $null; GIT_WORK_TREE = $null; GIT_INDEX_FILE = $null
     } -AllowFailure:$AllowFailure -Quiet
@@ -215,6 +247,8 @@ function Invoke-DeployGit($Config, [string[]]$Arguments, [switch]$AllowFailure) 
 
 function Assert-Repository($Config, [switch]$Clean, [switch]$AllowMissing) {
     if (-not (Test-Path -LiteralPath (Join-Path $Config.RepositoryRoot '.git'))) {
+        if ($AllowMissing -and (Get-PrivateRuntimeRoot $Config) -and (Test-Path -LiteralPath $Config.RepositoryRoot) -and
+            @(Get-ChildItem -LiteralPath $Config.RepositoryRoot -Force | Where-Object Name -ne '.server').Count -eq 0) { return }
         if ($AllowMissing -and (-not (Test-Path -LiteralPath $Config.RepositoryRoot) -or
             @(Get-ChildItem -LiteralPath $Config.RepositoryRoot -Force).Count -eq 0)) { return }
         throw 'Repository is missing or target is not an empty clone directory.'
@@ -226,6 +260,9 @@ function Assert-Repository($Config, [switch]$Clean, [switch]$AllowMissing) {
     foreach ($remoteArguments in @(@('remote', 'get-url', '--all', 'origin'), @('remote', 'get-url', '--push', '--all', 'origin'))) {
         if ((Invoke-DeployGit $Config $remoteArguments).Output.Trim() -cne $script:Remote) { throw 'origin must use the approved SSH URL for fetch and push.' }
     }
+    if ((Get-PrivateRuntimeRoot $Config) -and (Invoke-DeployGit $Config @('ls-files', '--', '.server')).Output.Trim()) {
+        throw 'Private .server files must never be tracked by Git.'
+    }
     if ($Clean -and (Invoke-DeployGit $Config @('status', '--porcelain')).Output.Trim()) {
         throw 'Uncommitted/untracked changes found. Update refused; nothing will be overwritten or stashed.'
     }
@@ -234,6 +271,27 @@ function Assert-Repository($Config, [switch]$Clean, [switch]$AllowMissing) {
 
 function Update-DeployRepository($Config) {
     Assert-Repository $Config -Clean -AllowMissing
+    if (Get-PrivateRuntimeRoot $Config) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Config.RepositoryRoot '.git'))) {
+            $null = New-Item -ItemType Directory -Path $Config.RepositoryRoot -Force
+            $null = Invoke-DeployGit $Config @('init', '--initial-branch=main')
+            $null = Invoke-DeployGit $Config @('remote', 'add', 'origin', $script:Remote)
+            Add-PrivateGitExclude $Config
+        }
+        $null = Invoke-DeployGit $Config @('fetch', '--no-tags', 'origin', 'main')
+        if ((Invoke-DeployGit $Config @('ls-tree', '-r', '--name-only', 'FETCH_HEAD', '--', '.server')).Output.Trim()) {
+            throw 'Remote main contains reserved .server files; update refused before checkout.'
+        }
+        $head = Invoke-DeployGit $Config @('rev-parse', '--verify', 'HEAD') -AllowFailure
+        if ($head.Code -eq 0) {
+            $ancestor = Invoke-DeployGit $Config @('merge-base', '--is-ancestor', 'HEAD', 'FETCH_HEAD') -AllowFailure
+            if ($ancestor.Code -ne 0) { throw 'Local main is ahead/diverged; fast-forward update refused.' }
+        }
+        $null = Invoke-DeployGit $Config @('merge', '--ff-only', 'FETCH_HEAD')
+        $null = Invoke-DeployGit $Config @('branch', '--set-upstream-to=origin/main', 'main')
+        Assert-Repository $Config -Clean
+        return
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $Config.RepositoryRoot '.git'))) {
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $Config.RepositoryRoot) -Force
         $null = Invoke-DeployGit $Config @('clone', '--branch', 'main', '--single-branch', $script:Remote, $Config.RepositoryRoot)
@@ -244,6 +302,19 @@ function Update-DeployRepository($Config) {
         $null = Invoke-DeployGit $Config @('merge', '--ff-only', 'FETCH_HEAD')
     }
     Assert-Repository $Config -Clean
+}
+
+function Add-PrivateGitExclude($Config) {
+    if (-not (Get-PrivateRuntimeRoot $Config)) { return }
+    $gitDirectory = Join-Path $Config.RepositoryRoot '.git'
+    if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) { throw 'Use a normal Git repository, not a linked worktree.' }
+    $exclude = Join-Path $gitDirectory 'info\exclude'
+    Assert-NoReparsePoint $exclude
+    $text = if (Test-Path -LiteralPath $exclude) { [IO.File]::ReadAllText($exclude) } else { '' }
+    if ($text -notmatch '(?m)^/\.server/\s*$') {
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $exclude) -Force
+        Write-AtomicText $exclude ($text.TrimEnd() + "`r`n/.server/`r`n")
+    }
 }
 
 function Expand-DeployTemplate([string]$Name, [hashtable]$Values, [switch]$Xml) {
@@ -261,11 +332,13 @@ function Expand-DeployTemplate([string]$Name, [hashtable]$Values, [switch]$Xml) 
 function Get-CaddyConfig($Config, $Release) {
     $root = $Config.DeploymentRoot
     $site = [Uri]$Config.SiteUrl
-    return Expand-DeployTemplate 'Caddyfile.template' @{
+    $template = if (Test-IisEnabled $Config) { 'Caddyfile.iis.template' } else { 'Caddyfile.template' }
+    return Expand-DeployTemplate $template @{
         ADMIN_PORT = $Config.CaddyAdminPort; API_PORT = $Config.ApiPort; PROBE_PORT = $Config.ProbePort
         CADDY_DATA = (Join-Path $root 'caddy\data').Replace('\', '/')
         WEB_ROOT = (Join-Path $Release.Path 'apps\web\dist\client').Replace('\', '/')
         RELEASE_ID = $Release.Id; SITE_URL = $Config.SiteUrl.TrimEnd('/')
+        SITE_PORT = $site.Port
         SITE_BIND = $(if ($site.IsLoopback) { 'bind 127.0.0.1' } else { '# Public HTTPS explicitly enabled.' })
     }
 }
@@ -279,7 +352,7 @@ function New-DeployRelease($Config) {
     $null = New-Item -ItemType Directory -Path $releaseRoot
     $files = (Invoke-DeployGit $Config @('ls-files', '--cached', '--others', '--exclude-standard', '-z')).Output.Split([char]0)
     foreach ($relative in ($files | Where-Object { $_ } | Select-Object -Unique)) {
-        if ($relative -match '(^|/)(\.git|node_modules|\.venv[^/]*|__pycache__|storage|uploads|tmp|\.tmp|tools)(/|$)' -or
+        if ($relative -match '(^|/)(\.git|\.server|node_modules|\.venv[^/]*|__pycache__|storage|uploads|tmp|\.tmp|tools)(/|$)' -or
             $relative -match '(^|/)\.env(?!\.example$)' -or $relative -match '\.local\.(json|ya?ml)$') { continue }
         $source = Get-FullPath (Join-Path $Config.RepositoryRoot $relative)
         $target = Get-FullPath (Join-Path $releaseRoot $relative)
@@ -297,13 +370,26 @@ function New-DeployRelease($Config) {
     Write-DeployLog "Building isolated release $id (local changes: $dirty)."
     $buildEnv = @{ VITE_API_BASE_URL = '/api/v1'; NODE_ENV = 'production'; PYTHONUTF8 = '1';
         PATH = (Split-Path -Parent $Config.Tools.Node) + ';' + $env:PATH }
+    $private = Get-PrivateRuntimeRoot $Config
+    $pythonEnv = @{}
+    if ($private) {
+        foreach ($cache in @('npm', 'pip', 'temp')) {
+            $cachePath = Join-Path $private ('cache\' + $cache)
+            Assert-NoReparsePoint $cachePath
+            $null = New-Item -ItemType Directory -Path $cachePath -Force
+        }
+        $buildEnv['npm_config_cache'] = Join-Path $private 'cache\npm'
+        $buildEnv['TEMP'] = Join-Path $private 'cache\temp'
+        $buildEnv['TMP'] = $buildEnv['TEMP']
+        $pythonEnv = @{ PIP_CACHE_DIR = (Join-Path $private 'cache\pip'); TEMP = $buildEnv['TEMP']; TMP = $buildEnv['TMP']; PYTHONUTF8 = '1' }
+    }
     $null = Invoke-DeployProcess $Config.Tools.Node @($Config.Tools.Npm, 'ci', '--include=dev', '--no-audit', '--no-fund') $releaseRoot -Environment $buildEnv
     $null = Invoke-DeployProcess $Config.Tools.Node @($Config.Tools.Npm, 'run', 'build:web') $releaseRoot -Environment $buildEnv
-    $null = Invoke-DeployProcess $Config.Tools.Python @('-m', 'venv', (Join-Path $releaseRoot '.venv')) $releaseRoot
+    $null = Invoke-DeployProcess $Config.Tools.Python @('-m', 'venv', (Join-Path $releaseRoot '.venv')) $releaseRoot -Environment $pythonEnv
     $python = Join-Path $releaseRoot '.venv\Scripts\python.exe'
     $api = Join-Path $releaseRoot 'services\api'
     if ($Config.LocalAI) { $api += '[local-ai]' }
-    $null = Invoke-DeployProcess $python @('-m', 'pip', 'install', '-e', $api) $releaseRoot
+    $null = Invoke-DeployProcess $python @('-m', 'pip', 'install', '-e', $api) $releaseRoot -Environment $pythonEnv
     $null = Invoke-DeployProcess $python @('-m', 'pip', 'check') $releaseRoot
     $freeze = Invoke-DeployProcess $python @('-m', 'pip', 'freeze') $releaseRoot -Quiet
     Write-AtomicText (Join-Path $releaseRoot 'python-packages.txt') $freeze.Output
@@ -473,6 +559,7 @@ function Test-DeployPrerequisites($Config, [string]$Action) {
     Assert-Administrator
     $null = Get-ServiceAccountSid $Config
     foreach ($role in @('api', 'web')) { Assert-ManagedService $Config $role (Get-DeployService $Config $role) }
+    if (Test-AutomaticIis $Config) { Assert-ManagedIis $Config }
     if ($Action -eq 'stop') { return }
     $null = Read-ProductionEnv $Config
     $tools = @('Caddy', 'WinSW', 'FFmpeg', 'FFprobe')
@@ -547,6 +634,7 @@ function Assert-RunningDeployInstance($Config, $Release, [string]$Role) {
 }
 
 function Stop-DeployServices($Config) {
+    if (Test-AutomaticIis $Config) { Stop-ManagedIis $Config }
     foreach ($role in @('web', 'api')) {
         $service = Get-DeployService $Config $role
         Assert-ManagedService $Config $role $service
@@ -651,8 +739,14 @@ function Start-DeployServices($Config, $Release) {
         }
         Assert-RunningDeployInstance $Config $Release 'api'
         $status = Invoke-RestMethod -Uri "http://127.0.0.1:$($Config.ApiPort)/api/v1/auth/status" -TimeoutSec 5
-        if ($status.auth_mode -ne 'password') { throw 'API is not in password authentication mode.' }
-        if (-not ([Uri]$Config.SiteUrl).IsLoopback -and -not $status.initialized) {
+        if ($status.auth_mode -cne 'password' -or $status.initialized -isnot [bool]) {
+            throw 'API must report password authentication and a boolean initialization state.'
+        }
+        $manualIis = Test-ManualIis $Config
+        $entryUrl = Get-DeployEntryUrl $Config
+        if ($manualIis -and -not $status.initialized) {
+            Assert-ManualIisBootstrapStopped $Config
+        } elseif (-not ([Uri]$entryUrl).IsLoopback -and -not $status.initialized) {
             throw 'Public startup refused: complete account setup using the local SiteUrl first.'
         }
         Start-Service -Name $webName
@@ -669,17 +763,72 @@ function Start-DeployServices($Config, $Release) {
         }
         Assert-RunningDeployInstance $Config $Release 'api'
         Assert-RunningDeployInstance $Config $Release 'web'
-        # Enable reboot startup only after the complete stack has passed checks.
-        Set-Service -Name $apiName -StartupType Automatic
-        Set-Service -Name $webName -StartupType Automatic
+        if (Test-AutomaticIis $Config) {
+            Start-ManagedIis $Config
+            $null = Wait-DeployHttp ($entryUrl.TrimEnd('/') + '/login') $Config.HealthTimeoutSeconds {
+                param($r) return $r.Headers['X-ViralDNA-Release'] -eq $expectedRelease -and $r.Content -match 'ViralDNA'
+            }
+            $null = Wait-DeployHttp ($entryUrl.TrimEnd('/') + '/api/v1/auth/status') $Config.HealthTimeoutSeconds {
+                param($r) return ($r.Content | ConvertFrom-Json).auth_mode -eq 'password'
+            }
+            Enable-ManagedIisAutostart $Config
+        }
+        # During manual-IIS bootstrap, leave both services on manual startup.
+        # After local setup, menu option 3 validates initialization and enables
+        # reboot startup. IIS remains entirely under the operator's control.
+        $startupType = if ($manualIis -and -not $status.initialized) { 'Manual' } else { 'Automatic' }
+        Set-Service -Name $apiName -StartupType $startupType
+        Set-Service -Name $webName -StartupType $startupType
         Write-AtomicJson (Join-Path $Config.DeploymentRoot 'active.json') $Release
-        Write-DeployLog "Ready: $($Config.SiteUrl) | release $($Release.Id)"
+        if ($manualIis) {
+            Write-DeployLog "Internal services ready: $($Config.SiteUrl.TrimEnd('/'))/login | release $($Release.Id)"
+            if (-not $status.initialized) {
+                Write-DeployLog 'LOCAL SETUP REQUIRED: keep the ViralDNA IIS site stopped, complete account setup on this server, then choose menu option 3.'
+            } else {
+                Write-DeployLog "Accounts initialized. Start the ViralDNA IIS site manually, then run the read-only verify-public check for $entryUrl."
+            }
+            Write-DeployLog 'IIS bindings, certificates, site state and shared proxy settings were not modified. Public HTTPS is not yet verified by this action.'
+        } else {
+            Write-DeployLog "Ready: $entryUrl | release $($Release.Id)"
+        }
     } catch {
         $failure = $_
         Write-DeployLog 'Startup failed; attempting scoped graceful cleanup (no database rollback).'
         try { Stop-DeployServices $Config } catch { Write-DeployLog "Cleanup needs operator attention: $($_.Exception.Message)" }
         throw $failure
     }
+}
+
+function Test-DeployPublicEntry($Config) {
+    if (-not (Test-IisEnabled $Config) -or ([Uri]$Config.Iis.SiteUrl).IsLoopback) {
+        throw 'Configure the IIS public HTTPS SiteUrl before verifying the public entry.'
+    }
+    $null = Read-ProductionEnv $Config
+    $marker = Join-Path $Config.DeploymentRoot 'active.json'
+    Assert-NoReparsePoint $marker
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { throw 'No started release found. Build/start the internal services first.' }
+    $active = Read-JsonFile $marker
+    if ($active.SchemaVersion -ne 1 -or $active.Id -notmatch '^[0-9]{8}-[0-9]{6}-[0-9a-f]{10}-[0-9a-f]{8}$' -or
+        (Get-FullPath $active.Path) -ne (Join-Path $Config.DeploymentRoot ('releases\' + $active.Id))) {
+        throw 'Invalid active release metadata.'
+    }
+    $entry = $Config.Iis.SiteUrl.TrimEnd('/')
+    foreach ($path in @('/login', '/api/v1/auth/status')) {
+        # Do not follow redirects or bypass TLS validation. No login credentials
+        # are requested or sent; a certificate/hostname error must remain visible.
+        $response = Invoke-WebRequest -UseBasicParsing -Uri ($entry + $path) -MaximumRedirection 0 -TimeoutSec 10
+        if ($response.StatusCode -ne 200 -or $response.Headers['X-ViralDNA-Release'] -cne $active.Id) {
+            throw "Public entry is not serving the expected release: $entry$path"
+        }
+        if ($path -eq '/login' -and $response.Content -notmatch 'ViralDNA') { throw 'Public login page is not the ViralDNA application.' }
+        if ($path -eq '/api/v1/auth/status') {
+            $status = $response.Content | ConvertFrom-Json
+            if ($status.auth_mode -cne 'password' -or $status.initialized -isnot [bool] -or -not $status.initialized) {
+                throw 'Public API must use password authentication and have completed local account setup.'
+            }
+        }
+    }
+    return $entry
 }
 
 function Invoke-DeployWorkflow([string]$Action, [hashtable]$Steps) {
@@ -694,4 +843,5 @@ function Invoke-DeployWorkflow([string]$Action, [hashtable]$Steps) {
     & $Steps.Start
 }
 
+. (Join-Path $PSScriptRoot 'Iis.Proxy.ps1')
 Export-ModuleMember -Function *-*

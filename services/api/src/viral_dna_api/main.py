@@ -35,7 +35,7 @@ from .accounts.http import (
     error_response,
 )
 from .accounts.repository import AccountError
-from .accounts.runtime import account_repository, password_auth_enabled
+from .accounts.runtime import account_database_path, account_repository, password_auth_enabled
 from .ai.billing import cny_to_micros, summarize_model_runs
 from .ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
 from .ai.text_model_routing import preferred_text_model_aliases
@@ -305,6 +305,19 @@ def parse_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from .accounts.workspace_layout import layout_lock
+
+    if password_auth_enabled():
+        with layout_lock(account_database_path()):
+            async with account_lifespan(_app):
+                yield
+    else:
+        async with account_lifespan(_app):
+            yield
+
+
+@asynccontextmanager
+async def account_lifespan(_app: FastAPI):
     _initialized_accounts.clear()
     if password_auth_enabled():
         for access in await asyncio.to_thread(account_repository().runtime_accounts):

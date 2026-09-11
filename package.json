@@ -13,6 +13,11 @@
     "check:scripts": "node scripts/checks/check-scripts.mjs",
     "test:launcher": "node --test scripts/tests/managed-launcher.test.mjs scripts/tests/deploy-layout.test.mjs",
     "test:deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/deploy-server.tests.ps1",
+    "test:server-prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/server-prepare.tests.ps1",
+    "test:server-single-root": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/server-single-root.tests.ps1",
+    "test:manual-iis-controller": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/manual-iis-controller.tests.ps1",
+    "test:manual-iis-update": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/manual-iis-update.tests.ps1",
+    "test:manual-iis-config": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/manual-iis-config.tests.ps1",
     "test:web": "npm --workspace apps/web run test"
   }
 }

@@ -19,6 +19,16 @@ def _repository(path: str, tenant_root: str) -> AccountRepository:
 
 def account_repository() -> AccountRepository:
     base = default_account_catalog_path().parent
-    path = get_config_value("VIRAL_DNA_AUTH_DB_PATH", "").strip() or str(base / "accounts.sqlite3")
+    path = str(account_database_path())
     root = get_config_value("VIRAL_DNA_ACCOUNTS_ROOT", "").strip() or str(base / "accounts")
     return _repository(path, root)
+
+
+def account_database_path() -> Path:
+    """Resolve without opening/initializing the database, for the startup lock."""
+    configured = get_config_value("VIRAL_DNA_AUTH_DB_PATH", "").strip()
+    return (
+        Path(configured).resolve()
+        if configured
+        else (default_account_catalog_path().parent / "accounts.sqlite3")
+    )

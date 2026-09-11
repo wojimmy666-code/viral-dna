@@ -346,6 +346,26 @@ class AccountContextService:
         self.workspace_manager = workspace_manager
         self._lock = asyncio.Lock()
 
+    async def prepare_account_setup(self, tenant_root: Path) -> AccountContextResponse:
+        """A clean install starts in accounts/<id>; existing source data is explicit."""
+        from .accounts.workspace_layout import account_workspace
+
+        source = self.workspace_manager.root
+        if source.exists() and any(source.iterdir()):
+            return await self.ensure_current()
+        async with self._lock:
+            state = await self.repository.load()
+            account = self._ensure_account(state, preferred_id=None)
+            target = account_workspace(tenant_root, account.id)
+            paths = self.workspace_manager.initialize(target)
+            self.workspace_manager.ensure_identity(paths=paths, account_id=account.id)
+            await self.repository.save(state)
+        registered = await self._register_paths(paths, make_active=True, touch_opened=True)
+        return AccountContextResponse(
+            account=registered[0], device=registered[1], active_workspace=registered[2],
+            registration=registered[3], storage_locations=[registered[4]],
+        )
+
     async def ensure_current(self) -> AccountContextResponse:
         access = account_access.get()
         if access is not None:

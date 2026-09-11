@@ -1364,7 +1364,9 @@ class WorkspaceStore:
     def __init__(self) -> None:
         self._memory_mode = os.getenv("VIRAL_DNA_STORE", "sqlite").lower() == "memory"
         self._switch_lock = asyncio.Lock()
-        self._backend = self._new_backend(workspace_manager.database_path)
+        self._backend = (
+            self._new_backend(workspace_manager.database_path) if self._memory_mode else None
+        )
         self._account_backends = {}
         self.durable_storage = None
 
@@ -1390,6 +1392,8 @@ class WorkspaceStore:
                     self._new_backend(workspace_manager.database_path)
                 )
             return self._account_backends[key]
+        if self._backend is None:
+            self._backend = self._new_backend(workspace_manager.database_path)
         return self._backend
 
     def __getattr__(self, name: str):
@@ -1487,7 +1491,7 @@ class WorkspaceStore:
         if account_access.get() is not None:
             raise WorkspaceError("个人与企业账户独立，不允许切换工作区")
         async with self._switch_lock:
-            analyses = await self._backend.list_analyses()
+            analyses = await self.backend.list_analyses()
             active = [
                 analysis
                 for analysis in analyses

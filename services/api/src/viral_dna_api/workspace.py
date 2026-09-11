@@ -54,7 +54,13 @@ class WorkspaceManager:
             get_config_value("VIRAL_DNA_STORAGE_ROOT", "storage"),
         )
         root = self.normalize(configured)
-        self._paths = self.initialize(root)
+        # Password-mode accounts are bound by the identity database. Do not
+        # create a special legacy workspace merely by importing the API.
+        self._paths = (
+            self.paths_for(root)
+            if get_config_value("VIRAL_DNA_AUTH_MODE", "password").strip().lower() == "password"
+            else self.initialize(root)
+        )
 
     @staticmethod
     def normalize(raw_path: str | Path) -> Path:

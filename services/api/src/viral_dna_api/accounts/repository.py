@@ -12,6 +12,13 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from ..access_context import AccountAccess
+from .workspace_layout import (
+    WorkspaceLayoutError,
+    account_workspace,
+    checked_path,
+    provision_workspace,
+    relocate_catalog,
+)
 
 SESSION_SECONDS = 12 * 60 * 60
 ADMIN_SESSION_SECONDS = 2 * 60 * 60
@@ -144,8 +151,8 @@ CREATE TABLE IF NOT EXISTS auth_account_runtime (
 
 class AccountRepository:
     def __init__(self, path: Path, tenant_root: Path):
-        self.path = path.resolve()
-        self.tenant_root = tenant_root.resolve()
+        self.path = checked_path(path)
+        self.tenant_root = checked_path(tenant_root)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
@@ -262,53 +269,78 @@ class AccountRepository:
         location_id: UUID,
         device_id: UUID | None = None,
         managed_asset_project: str = "default",
+        catalog_path: Path | None = None,
     ) -> None:
-        """Explicitly bind the existing workspace; never move/delete its files."""
+        """Use the same account directory rule as every subsequently created account.
+
+        The setup ownership confirmation authorizes a copy of legacy data, not
+        its deletion. IDs are preserved; the binding is committed after copying.
+        """
         admin_encoded = password_hash(admin_password)
         owner_encoded = password_hash(owner_password)
         login = username_key(username)
         if kind not in {"personal", "enterprise"}:
             raise AccountError(422, "account_kind_invalid", "请选择个人或企业账户")
+        if self.initialized():
+            raise AccountError(409, "already_initialized", "账户系统已经初始化")
         now = time.time()
-        with self.connect(write=True) as db:
-            if db.execute("SELECT 1 FROM auth_admins").fetchone():
-                raise AccountError(409, "already_initialized", "账户系统已经初始化")
-            db.execute(
-                "INSERT INTO auth_admins VALUES(?,1,'admin',?)", (str(uuid4()), admin_encoded)
-            )
-            db.execute(
-                "INSERT INTO auth_accounts VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    str(account_id),
-                    kind,
-                    name,
-                    "active",
-                    str(workspace_id),
-                    str(location_id),
-                    str(legacy_root.resolve()),
-                    now,
-                    now,
-                ),
-            )
-            db.execute(
-                "INSERT INTO auth_account_runtime VALUES(?,?,?)",
-                (str(account_id), str(device_id or workspace_id), managed_asset_project),
-            )
-            owner_id = str(uuid4())
-            db.execute(
-                "INSERT INTO auth_users VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    owner_id,
-                    str(account_id),
-                    login,
-                    display_name,
-                    "owner",
-                    owner_encoded,
-                    "active",
-                    now,
-                ),
-            )
-            self.audit(db, owner_id, "legacy_workspace_claimed", str(account_id))
+        try:
+            with provision_workspace(
+                self.tenant_root, account_id, workspace_id, source=legacy_root
+            ) as root:
+                with (
+                    relocate_catalog(catalog_path, workspace_id, legacy_root.resolve(), root),
+                    self.connect(write=True) as db,
+                ):
+                    if db.execute("SELECT 1 FROM auth_admins").fetchone():
+                        raise AccountError(409, "already_initialized", "账户系统已经初始化")
+                    db.execute(
+                        "INSERT INTO auth_admins VALUES(?,1,'admin',?)",
+                        (str(uuid4()), admin_encoded),
+                    )
+                    db.execute(
+                        "INSERT INTO auth_accounts VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            str(account_id),
+                            kind,
+                            name,
+                            "active",
+                            str(workspace_id),
+                            str(location_id),
+                            str(root),
+                            now,
+                            now,
+                        ),
+                    )
+                    db.execute(
+                        "INSERT INTO auth_account_runtime VALUES(?,?,?)",
+                        (str(account_id), str(device_id or workspace_id), managed_asset_project),
+                    )
+                    owner_id = str(uuid4())
+                    db.execute(
+                        "INSERT INTO auth_users VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            owner_id,
+                            str(account_id),
+                            login,
+                            display_name,
+                            "owner",
+                            owner_encoded,
+                            "active",
+                            now,
+                        ),
+                    )
+                    self.audit(db, owner_id, "account_initialized", str(account_id))
+                    if legacy_root.resolve() != root and legacy_root.exists():
+                        self.audit(db, owner_id, "legacy_workspace_copied", str(account_id))
+        except WorkspaceLayoutError as exc:
+            raise AccountError(409, "workspace_layout_invalid", str(exc)) from exc
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise AccountError(
+                503,
+                "workspace_copy_failed",
+                "账户目录创建或校验失败，原数据保留，请检查磁盘与目录权限",
+            ) from exc
 
     def accounts(self) -> list[dict]:
         with self.connect() as db:
@@ -371,7 +403,7 @@ class AccountRepository:
         login = username_key(username)
         account_id, user_id = str(uuid4()), str(uuid4())
         now = time.time()
-        root = self.tenant_root / account_id
+        root = account_workspace(self.tenant_root, account_id)
         try:
             with self.connect(write=True) as db:
                 workspace_id = str(uuid4())

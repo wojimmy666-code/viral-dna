@@ -20,7 +20,9 @@ storage/
 uploads/
 tools/
 
-# Real deployment configuration must live outside the repository.
+# Single-root server deployment: private runtime is never source code.
+/.server/
+# Legacy private deployment configuration.
 scripts/deploy/config.json
 scripts/deploy/*.local.json
 scripts/deploy/api.env

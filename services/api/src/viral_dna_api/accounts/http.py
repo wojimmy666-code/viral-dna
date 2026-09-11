@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hmac
 import json
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -13,7 +14,6 @@ from starlette.responses import JSONResponse
 
 from ..access_context import account_access
 from ..runtime_config import get_config_value
-from ..workspace import workspace_manager
 from .repository import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
@@ -22,6 +22,7 @@ from .repository import (
     csrf_token,
 )
 from .runtime import account_repository, password_auth_enabled
+from .workspace_layout import WorkspaceLayoutError
 
 USER_COOKIE = "viraldna_user_session"
 ADMIN_COOKIE = "viraldna_admin_session"
@@ -294,6 +295,7 @@ def require_owner():
 
 def create_account_router(account_context, repository) -> APIRouter:
     router = APIRouter(tags=["accounts"])
+    setup_lock = asyncio.Lock()
 
     @router.get("/auth/status")
     async def status_info(request: Request):
@@ -308,13 +310,20 @@ def create_account_router(account_context, repository) -> APIRouter:
 
     @router.post("/auth/setup")
     async def setup(payload: SetupInput, request: Request):
+        async with setup_lock:
+            return await initialize_accounts(payload, request)
+
+    async def initialize_accounts(payload: SetupInput, request: Request):
         if account_repository().initialized():
             raise AccountError(409, "already_initialized", "账户系统已经初始化")
         if not local_setup_allowed(request):
             raise AccountError(403, "local_setup_required", "请在部署本机打开应用完成首次账户设置")
         if not payload.confirm_legacy_ownership:
             raise AccountError(422, "ownership_confirmation_required", "请确认现有数据的归属账户")
-        context = await account_context.ensure_current()
+        try:
+            context = await account_context.prepare_account_setup(account_repository().tenant_root)
+        except WorkspaceLayoutError as exc:
+            raise AccountError(409, "workspace_layout_invalid", str(exc)) from exc
         async with _password_workers:
             await asyncio.to_thread(
                 account_repository().bootstrap,
@@ -324,11 +333,12 @@ def create_account_router(account_context, repository) -> APIRouter:
                 name=payload.name,
                 username=payload.username,
                 display_name=payload.display_name,
-                legacy_root=workspace_manager.root,
+                legacy_root=Path(context.registration.local_root),
                 account_id=context.account.id,
                 workspace_id=context.active_workspace.id,
                 location_id=context.storage_locations[0].id,
                 device_id=context.device.id,
+                catalog_path=getattr(account_context.repository, "path", None),
                 managed_asset_project=get_config_value(
                     "VIRAL_DNA_VOLC_ARK_ASSET_PROJECT_NAME", "default"
                 ),

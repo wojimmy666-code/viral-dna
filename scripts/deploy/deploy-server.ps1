@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('menu', 'update', 'build', 'start', 'stop', 'status', 'check')]
+    [ValidateSet('menu', 'update', 'build', 'start', 'stop', 'status', 'check', 'verify-public')]
     [string]$Action = 'menu',
     [string]$Config = $env:VIRAL_DNA_DEPLOY_CONFIG,
     [switch]$Yes,
@@ -15,7 +15,12 @@ function Show-DeployStatus($Settings) {
     Write-Host ''
     Write-Host 'ViralDNA 正式服务器部署' -ForegroundColor Cyan
     Write-Host "代码目录：$($Settings.RepositoryRoot)"
-    Write-Host "访问地址：$($Settings.SiteUrl)"
+    Write-Host "访问地址：$(Get-DeployEntryUrl $Settings)"
+    if (Test-ManualIis $Settings) {
+        Write-Host 'IIS：手动管理，菜单不会修改或启停 IIS。'
+        Write-Host "本机初始化／检查：$($Settings.SiteUrl.TrimEnd('/'))/login"
+        Write-Host '首次初始化完成后按 3，随后手动启动 IIS 并运行 06-check-https.bat。'
+    }
     foreach ($role in @('api', 'web')) {
         $service = Get-DeployService $Settings $role
         $state = if ($null -eq $service) { '未注册' } else { $service.State }
@@ -60,9 +65,18 @@ function Invoke-SelectedAction($Settings, [string]$Selected, [bool]$NonInteracti
 
 try {
     if ($env:OS -ne 'Windows_NT') { throw 'This entry is for Windows Server with Windows PowerShell 5.1.' }
-    if ([string]::IsNullOrWhiteSpace($Config)) { $Config = Join-Path $env:ProgramData 'ViralDNA\deployment\config.json' }
+    if ([string]::IsNullOrWhiteSpace($Config)) {
+        $singleRootConfig = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) '.server\config\deploy.json'
+        $Config = if (Test-Path -LiteralPath $singleRootConfig) { $singleRootConfig } else { Join-Path $env:ProgramData 'ViralDNA\deployment\config.json' }
+    }
     $settings = Read-DeployConfig $Config
     if ($Action -eq 'status') { Show-DeployStatus $settings; return }
+    if ($Action -eq 'verify-public') {
+        $entry = Test-DeployPublicEntry $settings
+        Write-Host "HTTPS 入口检查通过：$entry"
+        Write-Host '已核对 TLS、当前版本和账号初始化状态；未修改或启停任何服务。登录、上传和实时进度仍需人工验收。'
+        return
+    }
     if ($Action -eq 'check') {
         Test-DeployPrerequisites $settings 'check'
         Write-Host '配置和基础检查通过。此操作未停止、启动或注册服务，也未访问 GitHub。'
