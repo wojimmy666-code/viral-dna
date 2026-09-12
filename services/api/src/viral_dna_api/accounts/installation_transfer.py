@@ -46,6 +46,7 @@ from .workspace_layout import (
     atomic_bytes,
     backup_database,
     checked_path,
+    io_path,
     layout_lock,
 )
 
@@ -472,7 +473,7 @@ def import_bundle(
             (job / name).mkdir()
         progress("预检通过，正在准备目标副本；当前身份库未启用")
         prepared = job / "prepared"
-        shutil.copytree(bundle / "accounts", prepared / "accounts", symlinks=True)
+        shutil.copytree(io_path(bundle / "accounts"), io_path(prepared / "accounts"), symlinks=True)
         shutil.copy2(bundle / "identity/accounts.sqlite3", prepared / "auth")
         if inventory(prepared / "accounts", hashes=True) != inventory(
             bundle / "accounts", hashes=True

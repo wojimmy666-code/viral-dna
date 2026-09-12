@@ -23,7 +23,7 @@ from viral_dna_api.account_storage.catalog import StorageCatalog
 from viral_dna_api.accounts import installation_bundle as bundle_lib
 from viral_dna_api.accounts import installation_transfer as transfer
 from viral_dna_api.accounts import repository as auth
-from viral_dna_api.accounts.workspace_layout import WorkspaceLayoutError, layout_lock
+from viral_dna_api.accounts.workspace_layout import WorkspaceLayoutError, io_path, layout_lock
 from viral_dna_api.asset_library import Asset, AssetFolder
 from viral_dna_api.models import AnalysisRecord, Video
 from viral_dna_api.sqlite_store import SQLiteStore
@@ -206,6 +206,46 @@ def apply_import(exported, cfg, **kwargs):
         confirm_empty_target=True,
         **kwargs,
     )
+
+
+def test_long_media_paths_survive_export_verify_and_import_without_system_changes(source):
+    relative = Path("records") / ("a" * 72) / ("b" * 72) / ("c" * 72) / "original.bin"
+    root = source.roots[0]
+    media = root / relative
+    assert len(str(media)) > 260
+    io_path(media.parent).mkdir(parents=True)
+    io_path(media).write_bytes(b"original-image-or-video\x00")
+    with closing(bundle_lib.connect(root / ".viraldna/workspace.db", writable=True)) as db:
+        for key, raw in db.execute("SELECT record_key,payload FROM object_replicas").fetchall():
+            payload = json.loads(raw)
+            payload["object_key"] = relative.as_posix()
+            db.execute(
+                "UPDATE object_replicas SET payload=? WHERE record_key=?",
+                (json.dumps(payload), key),
+            )
+        db.commit()
+    with closing(
+        bundle_lib.connect(root / ".viraldna/durable-storage.sqlite3", writable=True)
+    ) as db:
+        db.execute("UPDATE blobs SET relative_path=?", (relative.as_posix(),))
+        db.commit()
+    path = source.tmp / "long.vdna-migration"
+    report = transfer.export_bundle(source.cfg, path, confirm_api_stopped=True)
+    bundle_lib.verify_bundle(path, expected_digest=report["manifest_sha256"])
+    destination = settings(source.tmp / "production/data")
+    transfer.import_bundle(
+        destination,
+        path,
+        expected_digest=report["manifest_sha256"],
+        confirm_api_stopped=True,
+        confirm_empty_target=True,
+    )
+    account = next(
+        row for row in bundle_lib.accounts_in(destination.auth) if row["id"] == source.account_id
+    )
+    assert not account["workspace_root"].startswith("\\\\?\\")
+    imported = destination.accounts / source.account_id / relative
+    assert io_path(imported).read_bytes() == io_path(media).read_bytes()
 
 
 def test_round_trip_accounts_passwords_ids_paths_history_and_capacity(exported):
@@ -544,6 +584,22 @@ def test_directory_junction_in_bundle_is_refused(exported, monkeypatch):
     monkeypatch.setattr(Path, "lstat", pretend_junction)
     with pytest.raises(WorkspaceLayoutError, match="联接"):
         bundle_lib.verify_bundle(exported.path)
+
+
+def test_junction_metadata_is_checked_beyond_windows_path_limit(source, monkeypatch):
+    target = source.roots[0] / ("long" * 20) / ("nested" * 15) / ("parent" * 15)
+    io_path(target).mkdir(parents=True)
+    original = Path.lstat
+
+    def pretend_long_junction(path):
+        info = original(path)
+        if path == io_path(target):
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", pretend_long_junction)
+    with pytest.raises(WorkspaceLayoutError, match="联接"):
+        bundle_lib.inventory(source.roots[0])
 
 
 def test_wrong_ownership_or_remote_only_original_cannot_be_exported(source):

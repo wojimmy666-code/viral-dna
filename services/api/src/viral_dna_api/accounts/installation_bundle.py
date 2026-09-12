@@ -23,6 +23,7 @@ from .workspace_layout import (
     _is_database,
     backup_database,
     checked_path,
+    io_path,
     read_identity,
 )
 
@@ -290,13 +291,13 @@ def snapshot_workspace(source, destination):
     files = inventory(source)
     databases = {name for name in files if _is_database(source / name)}
     companions = {name + suffix for name in databases for suffix in ("-wal", "-shm", "-journal")}
-    destination.mkdir(parents=True)
+    io_path(destination).mkdir(parents=True)
     for name, (directory, _, _) in _files(source).items():
         target = destination / name
         if directory:
-            target.mkdir(parents=True, exist_ok=True)
+            io_path(target).mkdir(parents=True, exist_ok=True)
         elif name not in companions:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            io_path(target.parent).mkdir(parents=True, exist_ok=True)
             if name in databases:
                 backup_database(source / name, target)
                 # A portable, closed snapshot has no WAL/SHM companions. This
@@ -304,7 +305,9 @@ def snapshot_workspace(source, destination):
                 with closing(connect(target, writable=True)) as db:
                     db.execute("PRAGMA journal_mode=DELETE")
             else:
-                shutil.copy2(checked_path(source / name), target, follow_symlinks=False)
+                shutil.copy2(
+                    io_path(checked_path(source / name)), io_path(target), follow_symlinks=False
+                )
                 checked_path(target)
                 if _digest(target) != _digest(source / name):
                     fail("复制校验失败，未发布迁移包")
@@ -348,8 +351,8 @@ def validate_workspace(root, account):
                 path = checked_path(root / portable_name(blob[0]))
                 if (
                     not path.is_relative_to(root)
-                    or not path.is_file()
-                    or path.stat().st_size != blob[1]
+                    or not io_path(path).is_file()
+                    or io_path(path).stat().st_size != blob[1]
                 ):
                     fail("容量账本登记的原件缺失或大小不一致")
                 if _digest(path) != blob[2]:
@@ -388,8 +391,8 @@ def validate_objects(db, root, account):
             key = portable_name(replica["object_key"].replace("\\", "/"))
             path = checked_path(root / key)
             if (
-                path.is_file()
-                and path.stat().st_size == obj["size_bytes"]
+                io_path(path).is_file()
+                and io_path(path).stat().st_size == obj["size_bytes"]
                 and _digest(path) == obj["sha256"]
             ):
                 found = True

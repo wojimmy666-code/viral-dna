@@ -71,12 +71,26 @@ def relocate_catalog(path: Path | None, workspace_id, source: Path, target: Path
         raise
 
 
+def io_path(path: Path) -> Path:
+    """Use extended Windows paths for I/O, never in persisted business paths."""
+    if os.name != "nt":
+        return path
+    value = os.path.abspath(path)
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
+
+
 def checked_path(path: Path) -> Path:
     """Reject links/junctions before resolve() can hide their real destination."""
     candidate = Path(os.path.abspath(path))
     for item in (*reversed(candidate.parents), candidate):
         try:
-            info = item.lstat()
+            # Keep ordinary paths ordinary; extend only paths beyond Windows'
+            # legacy directory limit, without resolving away junction metadata.
+            info = (io_path(item) if len(str(item)) >= 248 else item).lstat()
         except FileNotFoundError:
             continue
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
@@ -153,12 +167,14 @@ def _files(root: Path):
         return result
     if not root.is_dir():
         raise WorkspaceLayoutError("工作区必须是目录")
-    for directory, directories, files in os.walk(root, followlinks=False):
+    physical_root = io_path(root)
+    for directory, directories, files in os.walk(physical_root, followlinks=False):
+        logical_directory = root / Path(directory).relative_to(physical_root)
         for name in (*directories, *files):
-            path = checked_path(Path(directory) / name)
+            path = checked_path(logical_directory / name)
             if not path.is_relative_to(root):
                 raise WorkspaceLayoutError("文件超出工作区范围")
-            info = path.stat()
+            info = io_path(path).stat()
             if not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode):
                 raise WorkspaceLayoutError("工作区包含不支持的特殊文件")
             result[path.relative_to(root).as_posix()] = (
@@ -170,12 +186,12 @@ def _files(root: Path):
 
 
 def _digest(path: Path):
-    with path.open("rb") as stream:
+    with io_path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def _is_database(path: Path):
-    with path.open("rb") as stream:
+    with io_path(path).open("rb") as stream:
         return stream.read(16) == b"SQLite format 3\x00"
 
 
