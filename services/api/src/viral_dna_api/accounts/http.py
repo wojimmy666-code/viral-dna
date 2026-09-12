@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
@@ -228,6 +229,12 @@ class MemberInput(StrictInput):
     display_name: str = Field(min_length=1, max_length=120)
 
 
+class MemberPhoneInput(StrictInput):
+    current_username: PhoneNumber
+    username: PhoneNumber
+    confirm_change: bool = Field(strict=True)
+
+
 class LeaseInput(StrictInput):
     editor_id: str = Field(min_length=16, max_length=100)
     token: SecretStr = Field(min_length=32, max_length=200)
@@ -247,6 +254,8 @@ def account_validation_error(errors: list[dict], *, admin_login: bool = False) -
     """Return field-specific guidance without reflecting input values or secrets."""
     labels = {
         "username": "登录名" if admin_login else "手机号",
+        "current_username": "当前手机号",
+        "confirm_change": "修改确认",
         "password": "密码",
         "admin_password": "admin 密码",
         "owner_password": "前端登录密码",
@@ -456,6 +465,21 @@ def create_account_router(account_context, repository) -> APIRouter:
     @router.get("/admin/accounts/{account_id}/members")
     async def admin_members(account_id: str):
         return {"items": await asyncio.to_thread(account_repository().members, account_id)}
+
+    @router.patch("/admin/accounts/{account_id}/members/{user_id}/phone")
+    async def change_member_phone(
+        account_id: UUID, user_id: UUID, payload: MemberPhoneInput, request: Request
+    ):
+        if not payload.confirm_change:
+            raise AccountError(422, "phone_confirmation_required", "请确认修改登录手机号")
+        return await asyncio.to_thread(
+            account_repository().change_member_phone,
+            str(account_id),
+            str(user_id),
+            current_username=payload.current_username,
+            username=payload.username,
+            actor=request.state.authenticated_session["admin_id"],
+        )
 
     @router.post("/admin/accounts/{account_id}/members/{user_id}/reset")
     async def reset_password(account_id: str, user_id: str, request: Request):

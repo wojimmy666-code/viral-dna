@@ -48,6 +48,11 @@
 .account-table-wrap td, .account-table-wrap th { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border-default); overflow-wrap: anywhere; }
 .account-edit-notice { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-3) var(--space-6); background: var(--surface-subtle); color: var(--text-secondary); font-size: var(--type-body-size); }
 .account-edit-notice > span { flex: 1; min-width: 160px; }
+.account-phone-form h3 { margin: 0; font-size: var(--type-heading-size); font-weight: var(--type-weight-semibold); line-height: var(--type-leading-tight); overflow-wrap: anywhere; }
+.account-phone-current { margin: 0; font-size: var(--type-body-size); color: var(--text-primary); }
+.account-phone-review { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-8); margin: 0; }
+.account-phone-review dt { font-size: var(--type-caption-size); color: var(--text-secondary); margin-bottom: var(--space-1); }
+.account-phone-review dd { margin: 0; font-size: var(--type-body-size); font-weight: var(--type-weight-semibold); color: var(--text-primary); }
 .account-readonly h1 { margin-top: var(--space-4); }
 .account-readonly-shot { padding-block: var(--space-4); border-top: 1px solid var(--border-default); }
 .account-readonly-media { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-3); }

@@ -153,6 +153,55 @@ def client_for(sandbox):
     )
 
 
+def test_only_admin_with_csrf_and_confirmation_can_change_phone(sandbox):
+    async def scenario():
+        path = (
+            f"/api/v1/admin/accounts/{sandbox.owner.account_id}"
+            f"/members/{sandbox.owner.user_id}/phone"
+        )
+        payload = {
+            "current_username": "13800000001",
+            "username": "13900000009",
+            "confirm_change": True,
+        }
+        async with (
+            client_for(sandbox) as owner,
+            client_for(sandbox) as admin,
+            client_for(sandbox) as member,
+        ):
+            assert (await admin.patch(path, json=payload)).status_code == 401
+            await login(owner)
+            await login(member, "13800000002")
+            assert (await owner.patch(path, json=payload)).status_code == 401
+            await login(admin, "admin", admin=True)
+            csrf = admin.headers.pop("X-CSRF-Token")
+            assert (await admin.patch(path, json=payload)).status_code == 403
+            admin.headers["X-CSRF-Token"] = csrf
+            rejected = await admin.patch(path, json={**payload, "confirm_change": False})
+            assert rejected.status_code == 422
+            assert rejected.json()["detail"]["code"] == "phone_confirmation_required"
+            assert (
+                await admin.patch(path, json={**payload, "username": "13900000001"})
+            ).status_code == 409
+            assert (await owner.get("/api/v1/session")).status_code == 200
+            response = await admin.patch(path, json=payload)
+            assert response.status_code == 200, response.text
+            assert response.json()["username"] == "13900000009"
+            assert "password" not in response.text
+            assert (await owner.get("/api/v1/session")).status_code == 401
+            assert (await member.get("/api/v1/session")).status_code == 200
+            assert (await admin.get("/api/v1/admin/session")).status_code == 200
+            assert (await admin.patch(path, json=payload)).json()["detail"][
+                "code"
+            ] == "username_changed"
+            await login(owner, "13900000009")
+            projects = await owner.get("/api/v1/projects")
+            assert projects.status_code == 200
+            assert str(sandbox.project.id) in projects.text
+
+    asyncio.run(scenario())
+
+
 async def login(client, name="13800000001", admin=False):
     response = await client.post(
         "/api/v1/admin/auth/login" if admin else "/api/v1/auth/login",

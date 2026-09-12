@@ -64,7 +64,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
   const admin = { admin_id: "admin-1", auth_mode: "password", principal_type: "platform_admin", display_name: "admin", csrf_token: "admin-csrf" };
   const state = { lease: null, requests: [], rejectWrite: false, initialized: false,
     quota: 10000000000, storageConnection: {}, historyTrashed: false, storageFailed: false,
-    historyDeleted: false };
+    historyDeleted: false, memberPhone: "13800000001", phoneFailure: null, holdPhone: false };
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://fixture").pathname;
     if (!path.startsWith("/api/")) {
@@ -124,9 +124,16 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     }
     if (path.endsWith("/readonly")) return send({ name: "只读项目", productions: [{ id: "p", name: "分镜图片", shots: [{ id: "s", index: 1, images: [], image_prompt: "已保存提示词" }] }] });
     if (path.endsWith("/fixture")) return send(state.rejectWrite ? { detail: { code: "edit_lease_lost", message: "编辑权已失效" } } : {}, state.rejectWrite ? 423 : 200);
+    if (path === "/api/v1/admin/accounts/account-1/members/user-1/phone") {
+      if (state.phoneFailure) return send({ detail: state.phoneFailure }, 409);
+      if (body.username === "13800000002") return send({ detail: { code: "username_exists", message: "该手机号已被其他用户使用，请更换手机号" } }, 409);
+      if (state.holdPhone) await new Promise(resolvePhone => { state.releasePhone = resolvePhone; });
+      state.memberPhone = body.username;
+      return send({ updated: true, id: "user-1", username: body.username });
+    }
     if (path.endsWith("/members")) {
       if (request.method === "POST") return send({ activation_token: "one-time-activation", username: body.username });
-      return send({ items: [{ id: "user-1", display_name: "负责人", username: "13800000001", role: "owner", status: "active" }, { id: "user-2", display_name: "另一位成员", username: "13800000002", role: "member", status: "active" }] });
+      return send({ items: [{ id: "user-1", display_name: "负责人", username: state.memberPhone, role: "owner", status: "active" }, { id: "user-2", display_name: "另一位成员", username: "13800000002", role: "member", status: "active" }] });
     }
     if (path.endsWith("/admin/accounts")) {
       if (request.method === "POST") return send({ activation_token: "one-time-activation", username: body.username });
@@ -168,6 +175,10 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     }
     async function screenshot(name, width) {
       if (!process.env.ACCOUNT_SCREENSHOT_DIR) return;
+      if (name.startsWith('account-phone-')) {
+        await evaluate("document.querySelector('.account-phone-form').scrollIntoView({block:'center',behavior:'instant'})");
+        await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+      }
       const shot = await send("Page.captureScreenshot", { format: "png" });
       await writeFile(join(process.env.ACCOUNT_SCREENSHOT_DIR, `${name}-${width}.png`), Buffer.from(shot.data, "base64"));
     }
@@ -246,6 +257,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       user.display_name = "负责人姓名".repeat(20); user.account_name = "企业名称".repeat(20);
       for (const width of [1280, 390]) {
         await load("/account/members", width); await ready("document.querySelector('.account-table-wrap tbody tr')");
+        assert.equal(await evaluate("document.querySelector('button[aria-label$=\"：修改手机号\"]')"), null);
         assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
         assert.equal(await evaluate("document.querySelector('.account-table-wrap').scrollWidth >= 640"), true);
         await screenshot("account-members", width);
@@ -300,6 +312,76 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       assert.equal(state.quota, 20000000000);
       await screenshot("storage-admin", 1280);
     });
+    await t.test("admin phone edit validates, confirms, cancels, keeps failed drafts and prevents duplicate writes", async () => {
+      const changes = () => state.requests.filter(item => item.path.endsWith('/phone'));
+      const open = async () => {
+        await ready("document.querySelector('button[aria-label=\"负责人：修改手机号\"]') && !document.querySelector('button[aria-label=\"负责人：修改手机号\"]').disabled");
+        await evaluate("document.querySelector('button[aria-label=\"负责人：修改手机号\"]').click()");
+        await ready("document.querySelector('[name=new_phone]')");
+      };
+      const submit = () => evaluate("document.querySelector('.account-phone-form').requestSubmit()");
+      for (const width of [1440, 1280, 1024, 768, 390]) {
+        await load('/admin/accounts', width);
+        await ready("[...document.querySelectorAll('button')].some(b=>b.textContent==='用户与容量')");
+        await evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='用户与容量').click()");
+        await ready("document.querySelector('button[aria-label=\"负责人：修改手机号\"]')");
+        await open();
+        assert.equal(await evaluate("document.activeElement.name"), 'new_phone');
+        assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
+        await screenshot('account-phone-edit', width);
+        await fill('new_phone', '13900000009'); await submit();
+        await ready("document.querySelector('.account-phone-review')");
+        assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
+        assert.match(await evaluate("document.querySelector('.account-phone-form').textContent"), /13800000001[\s\S]*13900000009/);
+        await screenshot('account-phone-confirm', width);
+        await evaluate("[...document.querySelectorAll('.account-phone-form button')].find(b=>b.textContent==='取消').click()");
+        await ready("!document.querySelector('.account-phone-form')");
+        assert.equal(await evaluate("document.activeElement.getAttribute('aria-label')"), '负责人：修改手机号');
+      }
+      assert.equal(changes().length, 0);
+      await open();
+      await evaluate("document.querySelector('.account-phone-form').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+      await ready("!document.querySelector('.account-phone-form')");
+      assert.equal(await evaluate("document.activeElement.getAttribute('aria-label')"), '负责人：修改手机号');
+      await open();
+      await fill('new_phone', '123'); await submit();
+      await ready("document.querySelector('.account-phone-form [role=alert]')?.textContent.includes('11 位')");
+      await fill('new_phone', '13800000001'); await submit();
+      await ready("document.querySelector('.account-phone-form [role=alert]')?.textContent.includes('不能与当前')");
+      assert.equal(changes().length, 0);
+      await fill('new_phone', '13800000002'); await submit();
+      await ready("document.querySelector('.account-phone-review')"); await submit();
+      await ready("document.querySelector('.account-phone-form [role=alert]')?.textContent.includes('已被其他')");
+      assert.equal(await evaluate("document.querySelector('[name=new_phone]').value"), '13800000002');
+      assert.equal(state.memberPhone, '13800000001');
+      state.phoneFailure = { code: 'username_changed', message: '手机号已被修改，请重新读取用户列表后再试' };
+      await fill('new_phone', '13900000009'); await submit();
+      await ready("document.querySelector('.account-phone-review')"); await submit();
+      await ready("document.querySelector('.account-phone-form [role=alert]')?.textContent.includes('重新读取')");
+      assert.equal(await evaluate("document.querySelector('.account-phone-form button[type=submit]')"), null);
+      state.phoneFailure = null;
+      await evaluate("[...document.querySelectorAll('.account-phone-form button')].find(b=>b.textContent==='重新读取用户列表').click()");
+      await ready("!document.querySelector('.account-phone-form') && document.querySelector('button[aria-label=\"负责人：修改手机号\"]')?.disabled === false");
+      await open(); await fill('new_phone', '13900000009'); await submit();
+      await ready("document.querySelector('.account-phone-review')");
+      state.holdPhone = true;
+      const count = changes().length;
+      await evaluate("(()=>{const form=document.querySelector('.account-phone-form');form.requestSubmit();form.requestSubmit();})()");
+      await ready("document.querySelector('.account-phone-form fieldset').disabled");
+      for (let i = 0; i < 100 && !state.releasePhone; i++) await pause(20);
+      assert.equal(changes().length, count + 1);
+      await evaluate("document.querySelector('.account-phone-form').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+      assert.equal(await evaluate("Boolean(document.querySelector('.account-phone-form'))"), true);
+      state.releasePhone(); state.holdPhone = false;
+      await ready("!document.querySelector('.account-phone-form')");
+      assert.equal(state.memberPhone, '13900000009');
+      assert.match(await evaluate("document.querySelector('.account-management').textContent"), /手机号已修改/);
+      assert.equal(await evaluate("document.activeElement.getAttribute('aria-label')"), '负责人：修改手机号');
+      const request = changes().at(-1);
+      assert.equal(request.method, 'PATCH');
+      assert.equal(request.headers['x-csrf-token'], 'admin-csrf');
+      assert.deepEqual(request.body, { current_username: '13800000001', username: '13900000009', confirm_change: true });
+    });
     await t.test("storage needs target confirmation, survives remote failure and fits narrow screens", async () => {
       state.quota = 10000000000;
       await load("/login"); await ready("document.querySelector('input[name=username]')");
@@ -353,6 +435,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       assert.equal(state.historyDeleted, true);
     });
   } finally {
+    state.releasePhone?.();
     await client?.send("Browser.close").catch(() => {}); client?.close();
     if (chrome.exitCode === null) await Promise.race([exited, pause(3000)]);
     if (chrome.exitCode === null) { chrome.kill(); await Promise.race([exited, pause(3000)]); }

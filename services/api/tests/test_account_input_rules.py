@@ -7,6 +7,7 @@ from viral_dna_api.accounts.http import (
     ActivateInput,
     LoginInput,
     MemberInput,
+    MemberPhoneInput,
     PasswordInput,
     SetupInput,
     UserLoginInput,
@@ -58,6 +59,10 @@ def test_front_login_account_creation_and_invites_reject_non_mobile_numbers(phon
         (UserLoginInput, {"username": phone, "password": "12345678"}),
         (MemberInput, {"username": phone, "display_name": "成员"}),
         (
+            MemberPhoneInput,
+            {"current_username": "13800000001", "username": phone, "confirm_change": True},
+        ),
+        (
             AccountInput,
             {"kind": "personal", "name": "个人", "username": phone, "display_name": "甲"},
         ),
@@ -73,6 +78,19 @@ def test_mobile_numbers_are_normalized_and_admin_login_remains_independent():
     assert username_key(" 13800000001 ") == "13800000001"
     assert UserLoginInput(username=" 13800000001 ", password="12345678").username == "13800000001"
     assert LoginInput(username="admin", password="12345678").username == "admin"
+
+
+def test_phone_change_requires_explicit_boolean_and_forbids_other_account_fields():
+    payload = {"current_username": "13800000001", "username": "13900000001", "confirm_change": True}
+    assert MemberPhoneInput.model_validate(payload).confirm_change is True
+    for invalid in (
+        {**payload, "confirm_change": "true"},
+        {**payload, "password": "12345678"},
+        {**payload, "role": "owner"},
+        {k: v for k, v in payload.items() if k != "confirm_change"},
+    ):
+        with pytest.raises(ValidationError):
+            MemberPhoneInput.model_validate(invalid)
 
 
 @pytest.mark.parametrize("length", [7, 8, 128, 129])

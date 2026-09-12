@@ -488,6 +488,45 @@ class AccountRepository:
                 )
             ]
 
+    def change_member_phone(
+        self,
+        account_id: str,
+        user_id: str,
+        *,
+        current_username: str,
+        username: str,
+        actor: str,
+    ) -> dict:
+        previous, next_phone = username_key(current_username), username_key(username)
+        with self.connect(write=True) as db:
+            if not db.execute("SELECT 1 FROM auth_admins WHERE id=?", (actor,)).fetchone():
+                raise AccountError(403, "admin_required", "只有后台管理员可以修改登录手机号")
+            user = db.execute(
+                "SELECT * FROM auth_users WHERE id=? AND account_id=?", (user_id, account_id)
+            ).fetchone()
+            if not user:
+                raise AccountError(404, "member_missing", "该账户下的用户不存在")
+            if user["username"] != previous:
+                raise AccountError(
+                    409, "username_changed", "手机号已被修改，请重新读取用户列表后再试"
+                )
+            if previous == next_phone:
+                raise AccountError(422, "username_unchanged", "新手机号不能与当前手机号相同")
+            if db.execute("SELECT 1 FROM auth_users WHERE username=?", (next_phone,)).fetchone():
+                raise AccountError(409, "username_exists", "该手机号已被其他用户使用，请更换手机号")
+            # A single transaction preserves identity/password/data ownership and
+            # revokes only this user's credentials. BEGIN IMMEDIATE fences races.
+            db.execute("UPDATE auth_users SET username=? WHERE id=?", (next_phone, user_id))
+            db.execute(
+                "DELETE FROM auth_sessions WHERE principal_id=? AND principal_type='user'",
+                (user_id,),
+            )
+            db.execute("DELETE FROM auth_invitations WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM auth_storage_tokens WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (user_id,))
+            self.audit(db, actor, "user_phone_changed", account_id, user_id)
+        return {"updated": True, "id": user_id, "username": next_phone}
+
     def invite(self, account_id: str, *, username: str, display_name: str, actor: str) -> dict:
         login = username_key(username)
         user_id = str(uuid4())
@@ -621,7 +660,11 @@ class AccountRepository:
             raise AccountError(401, "login_failed", failed_message)
         with self.connect(write=True) as db:
             current = db.execute(f"SELECT * FROM {table} WHERE id=?", (row["id"],)).fetchone()
-            if not current or current["password_hash"] != row["password_hash"]:
+            if (
+                not current
+                or current["password_hash"] != row["password_hash"]
+                or current["username"] != row["username"]
+            ):
                 raise AccountError(401, "login_failed", "登录状态已改变，请重新登录")
             if not admin:
                 account = db.execute(

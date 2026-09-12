@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { accountRequest } from "./account-client.js";
 import { PHONE_INPUT_PROPS, pastePhone, phoneError } from "./account-form.js";
 import { AdminStorageQuota, AdminSyncServer } from "./StorageManagement.jsx";
 import { formatStorage } from "./storage-ui.js";
+import { MemberPhoneForm } from "./MemberPhoneForm.jsx";
 
 const statusText = { active: "已启用", disabled: "已停用", pending: "待激活" };
 export function AccountManagement({ admin, session }) {
@@ -17,6 +18,9 @@ export function AccountManagement({ admin, session }) {
   const [activation, setActivation] = useState("");
   const [notice, setNotice] = useState("");
   const [confirmation, setConfirmation] = useState(null);
+  const [phoneTarget, setPhoneTarget] = useState(null);
+  const phoneTrigger = useRef(null);
+  useEffect(() => { if (!phoneTarget) phoneTrigger.current?.focus(); }, [phoneTarget]);
   const [name, setName] = useState(session?.account_name || "");
   const [accountDetails, setAccountDetails] = useState({ name: "", managed_asset_project: "" });
   const [draft, setDraft] = useState({ kind: "personal", name: "", username: "", display_name: "" });
@@ -50,6 +54,15 @@ export function AccountManagement({ admin, session }) {
     setAccountDetails({ name: account.name, managed_asset_project: account.managed_asset_project || "" });
     await run(async () => { const response = await accountRequest(`/admin/accounts/${account.id}/members`); setMembers(response.items); });
   }
+  function closePhoneForm() {
+    setPhoneTarget(null);
+  }
+  function phoneChanged(result) {
+    setMembers(current => current.map(member => member.id === result.id ? { ...member, username: result.username } : member));
+    setActivation("");
+    setNotice("手机号已修改，该用户请使用新手机号和原密码重新登录。");
+    closePhoneForm();
+  }
   async function reset(member) {
     await run(async () => {
       const path = admin ? `/admin/accounts/${selected.id}/members/${member.id}/reset` : `/account/members/${member.id}/${member.status === "disabled" ? "restore" : "reset"}`;
@@ -67,7 +80,7 @@ export function AccountManagement({ admin, session }) {
   const memberRows = admin ? members : items;
   return <main className="account-management">
     <Link to={admin ? "/admin/providers" : "/projects"}>{admin ? "返回平台设置" : "返回项目"}</Link>
-    <header className="account-management-heading"><h1>{admin ? "账户管理" : "企业成员"}</h1><button className="primary-button" onClick={() => { setCreating(true); setActivation(""); }} disabled={busy}>{admin ? "新建账户" : "邀请成员"}</button></header>
+    <header className="account-management-heading"><h1>{admin ? "账户管理" : "企业成员"}</h1><button className="primary-button" onClick={() => { setCreating(true); setActivation(""); }} disabled={busy || Boolean(phoneTarget)}>{admin ? "新建账户" : "邀请成员"}</button></header>
     {!admin && <form className="account-name-form" onSubmit={event => { event.preventDefault(); void run(async () => { await accountRequest("/account", { method: "PATCH", body: { name } }); setNotice("企业名称已更新"); }); }}><label className="account-field"><span>企业名称</span><input value={name} required maxLength={120} onChange={e => setName(e.target.value)} /></label><button className="secondary-button" disabled={busy}>更新名称</button></form>}
     {error && <p className="account-error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
@@ -81,7 +94,7 @@ export function AccountManagement({ admin, session }) {
       <p className="account-help">每个账户使用独立手机号，由本人通过激活链接设置至少 8 位密码。</p><div className="account-actions"><button className="primary-button" type="submit">{busy ? "处理中…" : admin ? "创建并生成激活链接" : "生成邀请链接"}</button><button className="secondary-button" type="button" onClick={() => setCreating(false)}>取消</button></div>
     </fieldset></form>}
     {confirmation && <div className="account-edit-notice"><span>{admin ? `确认${confirmation.status === "disabled" ? "启用" : "停用"}“${confirmation.name}”？` : `确认移除“${confirmation.display_name}”？其企业项目和资产将保留。`}</span><button className="secondary-button" disabled={busy} onClick={confirmAction}>确认</button><button className="text-button" disabled={busy} onClick={() => setConfirmation(null)}>取消</button></div>}
-    {loading ? <p role="status">正在读取…</p> : admin ? <div className="account-table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>成员</th><th>状态</th><th>存储用量 / 容量</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}><td>{item.name}</td><td>{item.kind === "enterprise" ? "企业" : "个人"}</td><td>{item.member_count}</td><td>{statusText[item.status]}</td><td>{item.storage ? `${formatStorage(item.storage.used_bytes)} / ${formatStorage(item.storage.limit_bytes)}` : "—"}</td><td><div className="account-actions"><button className="text-button" disabled={busy} onClick={() => openMembers(item)}>用户与容量</button><button className="text-button" disabled={busy} onClick={() => setConfirmation(item)}>{item.status === "disabled" ? "启用" : "停用"}</button></div></td></tr>)}</tbody></table></div> : null}
+    {loading ? <p role="status">正在读取…</p> : admin ? <div className="account-table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>成员</th><th>状态</th><th>存储用量 / 容量</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}><td>{item.name}</td><td>{item.kind === "enterprise" ? "企业" : "个人"}</td><td>{item.member_count}</td><td>{statusText[item.status]}</td><td>{item.storage ? `${formatStorage(item.storage.used_bytes)} / ${formatStorage(item.storage.limit_bytes)}` : "—"}</td><td><div className="account-actions"><button className="text-button" disabled={busy || Boolean(phoneTarget)} onClick={() => openMembers(item)}>用户与容量</button><button className="text-button" disabled={busy || Boolean(phoneTarget)} onClick={() => setConfirmation(item)}>{item.status === "disabled" ? "启用" : "停用"}</button></div></td></tr>)}</tbody></table></div> : null}
     {admin && selected && <details className="account-details">
       <summary>账户设置 · {selected.name}</summary>
       <form className="account-create-form" onSubmit={event => {
@@ -98,12 +111,18 @@ export function AccountManagement({ admin, session }) {
     </details>}
     {(selected || !admin) && <section>
       <h2>{admin ? `${selected.name} · 用户` : "成员列表"}</h2>
+      {admin && phoneTarget && <MemberPhoneForm key={phoneTarget.id} accountId={selected.id}
+        member={phoneTarget} onClose={closePhoneForm} onChanged={phoneChanged}
+        onReload={() => { closePhoneForm(); void openMembers(selected); }} />}
       <div className="account-table-wrap"><table>
         <thead><tr><th>姓名</th><th>手机号</th><th>身份</th><th>状态</th><th>操作</th></tr></thead>
         <tbody>{memberRows.map(item => <tr key={item.id}>
           <td>{item.display_name}</td><td>{item.username}</td><td>{item.role === "owner" ? "负责人" : "成员"}</td><td>{statusText[item.status]}</td>
           <td><div className="account-actions">
-            {(item.status !== "disabled" || !admin) && <button className="text-button" disabled={busy} onClick={() => reset(item)}>{item.status !== "active" ? "重新邀请" : "重置密码"}</button>}
+            {admin && <button className="text-button" disabled={busy || Boolean(phoneTarget)}
+              aria-label={`${item.display_name}：修改手机号`} aria-expanded={phoneTarget?.id === item.id}
+              onClick={event => { phoneTrigger.current = event.currentTarget; setPhoneTarget(item); setNotice(""); setError(""); }}>修改手机号</button>}
+            {(item.status !== "disabled" || !admin) && <button className="text-button" disabled={busy || Boolean(phoneTarget)} onClick={() => reset(item)}>{item.status !== "active" ? "重新邀请" : "重置密码"}</button>}
             {!admin && item.role !== "owner" && item.status !== "disabled" && <button className="text-button" disabled={busy} onClick={() => setConfirmation(item)}>移除</button>}
           </div></td>
         </tr>)}</tbody>
