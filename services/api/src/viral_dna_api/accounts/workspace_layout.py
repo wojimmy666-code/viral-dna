@@ -26,13 +26,13 @@ def atomic_bytes(path: Path, content: bytes):
     checked_path(path)
     temporary = checked_path(path.with_name(f".{path.name}.{uuid4().hex}.tmp"))
     try:
-        with temporary.open("xb") as stream:
+        with io_path(temporary).open("xb") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        os.replace(io_path(temporary), io_path(path))
     finally:
-        temporary.unlink(missing_ok=True)
+        io_path(temporary).unlink(missing_ok=True)
 
 
 def catalog_update(path: Path | None, workspace_id, source: Path, target: Path):
@@ -134,6 +134,15 @@ def layout_lock(auth_database: Path, *, allow_incomplete_import=False):
         try:
             marker = checked_path(auth_database.with_suffix(".installation-migration.json"))
             if marker.exists() and not allow_incomplete_import:
+                try:
+                    supplement = json.loads(marker.read_text("utf-8")).get("kind") == "supplement"
+                except (OSError, ValueError, AttributeError):
+                    supplement = False
+                if supplement:
+                    raise WorkspaceLayoutError(
+                        "发现未完成的补充迁移；禁止启动 API，"
+                        "请用 transfer-supplement.py recover 预览恢复"
+                    )
                 raise WorkspaceLayoutError(
                     "发现未完成的跨机账户导入；禁止启动 API，"
                     "请用 transfer-installation.py recover 预览恢复"
@@ -163,11 +172,11 @@ def read_identity(root: Path, account_id: UUID | str, workspace_id: UUID | str):
 
 def _files(root: Path):
     result = {}
-    if not root.exists():
-        return result
-    if not root.is_dir():
-        raise WorkspaceLayoutError("工作区必须是目录")
     physical_root = io_path(root)
+    if not physical_root.exists():
+        return result
+    if not physical_root.is_dir():
+        raise WorkspaceLayoutError("工作区必须是目录")
     for directory, directories, files in os.walk(physical_root, followlinks=False):
         logical_directory = root / Path(directory).relative_to(physical_root)
         for name in (*directories, *files):
