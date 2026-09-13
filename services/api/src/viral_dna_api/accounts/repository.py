@@ -527,6 +527,97 @@ class AccountRepository:
             self.audit(db, actor, "user_phone_changed", account_id, user_id)
         return {"updated": True, "id": user_id, "username": next_phone}
 
+    @staticmethod
+    def _require_enterprise_owner(db, account_id: str, actor: str) -> None:
+        # Recheck inside the write transaction, including an account disabled
+        # after authentication but while password hashing was in progress.
+        row = db.execute(
+            "SELECT 1 FROM auth_users u JOIN auth_accounts a ON a.id=u.account_id "
+            "WHERE u.id=? AND u.account_id=? AND u.role='owner' AND u.status='active' "
+            "AND a.kind='enterprise' AND a.status='active'",
+            (actor, account_id),
+        ).fetchone()
+        if not row:
+            raise AccountError(403, "owner_required", "只有本企业负责人能管理成员")
+
+    @staticmethod
+    def _revoke_member_access(db, user_id: str) -> None:
+        db.execute(
+            "DELETE FROM auth_sessions WHERE principal_id=? AND principal_type='user'", (user_id,)
+        )
+        db.execute("DELETE FROM auth_invitations WHERE user_id=?", (user_id,))
+        db.execute("DELETE FROM auth_storage_tokens WHERE user_id=?", (user_id,))
+        db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (user_id,))
+
+    def create_member(
+        self, account_id: str, *, username: str, display_name: str, password: str, actor: str
+    ) -> dict:
+        login = username_key(username)
+        display_name = display_name.strip()
+        if not 1 <= len(display_name) <= 120:
+            raise AccountError(422, "display_name_invalid", "请填写姓名（1–120 个字符）")
+        encoded = password_hash(password)
+        user_id = str(uuid4())
+        with self.connect(write=True) as db:
+            self._require_enterprise_owner(db, account_id, actor)
+            existing = db.execute(
+                "SELECT account_id,status FROM auth_users WHERE username=?", (login,)
+            ).fetchone()
+            if existing:
+                if existing["account_id"] == account_id and existing["status"] == "disabled":
+                    raise AccountError(
+                        409, "member_removed", "该成员已移除，请在“已移除”列表中恢复"
+                    )
+                raise AccountError(409, "username_exists", "该手机号已被使用，请使用独立手机号")
+            db.execute(
+                "INSERT INTO auth_users VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    user_id,
+                    account_id,
+                    login,
+                    display_name,
+                    "member",
+                    encoded,
+                    "active",
+                    time.time(),
+                ),
+            )
+            self.audit(db, actor, "member_created", account_id, user_id)
+        return {"id": user_id, "username": login, "status": "active"}
+
+    def set_member_password(
+        self, account_id: str, user_id: str, *, password: str, actor: str, restore: bool = False
+    ) -> dict:
+        encoded = password_hash(password)
+        with self.connect(write=True) as db:
+            self._require_enterprise_owner(db, account_id, actor)
+            row = db.execute(
+                "SELECT * FROM auth_users WHERE id=? AND account_id=?", (user_id, account_id)
+            ).fetchone()
+            if not row:
+                raise AccountError(404, "member_missing", "成员不存在")
+            if row["role"] != "member" or user_id == actor:
+                raise AccountError(409, "owner_required", "不能在成员管理中重置企业负责人密码")
+            if restore and row["status"] != "disabled":
+                raise AccountError(409, "member_not_removed", "只能恢复已移除的成员，请刷新列表")
+            if not restore and row["status"] not in ("active", "pending"):
+                raise AccountError(409, "member_removed", "该成员已移除，请在“已移除”列表中恢复")
+            if password_matches(password, row["password_hash"]):
+                raise AccountError(422, "password_unchanged", "新密码不能与原密码相同")
+            db.execute(
+                "UPDATE auth_users SET status='active',password_hash=? WHERE id=?",
+                (encoded, user_id),
+            )
+            self._revoke_member_access(db, user_id)
+            self.audit(
+                db,
+                actor,
+                "member_restored" if restore else "member_password_reset",
+                account_id,
+                user_id,
+            )
+        return {"id": user_id, "username": row["username"], "status": "active"}
+
     def invite(self, account_id: str, *, username: str, display_name: str, actor: str) -> dict:
         login = username_key(username)
         user_id = str(uuid4())
@@ -566,10 +657,7 @@ class AccountRepository:
             if row["role"] == "owner":
                 raise AccountError(409, "owner_required", "不能移除企业负责人")
             db.execute("UPDATE auth_users SET status='disabled' WHERE id=?", (user_id,))
-            db.execute("DELETE FROM auth_sessions WHERE principal_id=?", (user_id,))
-            db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (user_id,))
-            db.execute("DELETE FROM auth_storage_tokens WHERE user_id=?", (user_id,))
-            db.execute("DELETE FROM auth_invitations WHERE user_id=?", (user_id,))
+            self._revoke_member_access(db, user_id)
             self.audit(db, actor, "member_removed", account_id, user_id)
 
     def reset_link(self, account_id: str, user_id: str, actor: str) -> dict:

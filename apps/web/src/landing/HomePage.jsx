@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ArrowRight, ArrowUpRight, Check, Eye, List, LockSimple, Pause, Play, X } from "@phosphor-icons/react";
 import { loginHref } from "../accounts/login-destination.js";
 import HomeFilm from "./HomeFilm.jsx";
 import { FILM_SCENES } from "./home-media.js";
+import LoginDialog from "./LoginDialog.jsx";
 import "./home.css";
+
+function CreationLink(props) {
+  return <Link {...props} state={{ homepageLogin: true }} />;
+}
 
 const IMAGE_SOURCES = {
   "hero-scene": { png: "/home/hero-scene.png", webp: "/home/hero-scene.webp" },
@@ -59,18 +64,18 @@ function CreationWorkflow() {
 
 function SkillShowcase() {
   return <section className="vd-skills vd-section" id="skills" aria-labelledby="vd-skills-title">
-    <div className="vd-section-heading"><h2 id="vd-skills-title">将创作方法，<br />变为可复用的 Skill。</h2><div><p>让创作从一套方法开始。<br />具体可用的 Skill，以登录后的列表为准。</p><Link className="vd-text-link" to={loginHref("/skills")}>进入 Skill 库<ArrowUpRight size={21} /></Link></div></div>
+    <div className="vd-section-heading"><h2 id="vd-skills-title">将创作方法，<br />变为可复用的 Skill。</h2><div><p>让创作从一套方法开始。<br />具体可用的 Skill，以登录后的列表为准。</p><CreationLink className="vd-text-link" to={loginHref("/skills")}>进入 Skill 库<ArrowUpRight size={21} /></CreationLink></div></div>
     <div className="vd-methods">{[
       { title: "产品叙事", image: "thumb-close", copy: "用镜头建立质感，让产品成为故事主角。" },
       { title: "场景演绎", image: "thumb-scene", copy: "从场景与情绪出发，寻找合适的表达。" },
       { title: "细节表达", image: "thumb-motion", copy: "围绕材质、光线和景别，形成视觉节奏。" },
-    ].map(method => <article key={method.title}><Link className="vd-method-link" to={loginHref("/skills")} aria-label={`探索${method.title}创作方法`}><div className="vd-method-image"><SceneImage name={method.image} alt="" /><span>创作方向示意</span><ArrowUpRight size={24} /></div><h3>{method.title}</h3><p>{method.copy}</p></Link></article>)}</div>
+    ].map(method => <article key={method.title}><CreationLink className="vd-method-link" to={loginHref("/skills")} aria-label={`探索${method.title}创作方法`}><div className="vd-method-image"><SceneImage name={method.image} alt="" /><span>创作方向示意</span><ArrowUpRight size={24} /></div><h3>{method.title}</h3><p>{method.copy}</p></CreationLink></article>)}</div>
   </section>;
 }
 
 function TeamSection() {
   return <section className="vd-team vd-section" id="team" aria-labelledby="vd-team-title">
-    <div className="vd-team-copy"><h2 id="vd-team-title">让团队在同一个<br className="vd-mobile-break" />项目里，<br className="vd-team-desktop-break" />向前创作。</h2><p>企业成员分别登录，共享资产与项目。<br />一次只交给一位编辑者，让每次修改都有序发生。</p><ul><li><Check size={20} />企业成员共用资产与项目</li><li><Check size={20} />同一项目，一位编辑者</li><li><Check size={20} />其他成员可只读查看</li></ul><Link className="vd-text-link" to={loginHref()}>进入团队创作台<ArrowUpRight size={21} /></Link><p className="vd-caption">个人与企业使用独立账户；账户开通请联系管理员。</p></div>
+    <div className="vd-team-copy"><h2 id="vd-team-title">让团队在同一个<br className="vd-mobile-break" />项目里，<br className="vd-team-desktop-break" />向前创作。</h2><p>企业成员分别登录，共享资产与项目。<br />一次只交给一位编辑者，让每次修改都有序发生。</p><ul><li><Check size={20} />企业成员共用资产与项目</li><li><Check size={20} />同一项目，一位编辑者</li><li><Check size={20} />其他成员可只读查看</li></ul><CreationLink className="vd-text-link" to={loginHref()}>进入团队创作台<ArrowUpRight size={21} /></CreationLink><p className="vd-caption">个人与企业使用独立账户；账户开通请联系管理员。</p></div>
     <div className="vd-team-example" aria-label="企业项目协作示意，非实际账户数据"><div className="vd-team-example-title"><span>产品故事 · 团队项目</span><span className="vd-caption">协作示意</span></div><div className="vd-team-project"><SceneImage name="thumb-close" alt="团队项目的产品画面示意" /><div><p>共享项目</p><h3>一支关于质感的短片</h3><span className="vd-caption">分镜、素材与创作记录，留在同一个项目。</span></div></div><div className="vd-collaborator"><span>成员 A</span><span><LockSimple size={17} />正在编辑</span></div><div className="vd-collaborator"><span>成员 B</span><span><Eye size={17} />只读查看</span></div><div className="vd-team-example-footer">示意状态 · 不读取真实成员或编辑锁</div></div>
   </section>;
 }
@@ -124,12 +129,13 @@ function DemoDialog({ onClose, initialScene }) {
       {failed && <p className="vd-media-status" role="status">视频暂时无法播放。<button type="button" className="vd-media-retry" onClick={() => { film.current?.retry(); setWantsPlay(true); }}>重试播放</button></p>}
       <div className="vd-demo-steps" aria-label="选择演示分镜">{SAMPLES.map((item, index) => <button type="button" key={item.label} aria-pressed={scene === index} onClick={() => { setScene(index); film.current?.seekToScene(index); if (failed) film.current?.retry(); setWantsPlay(true); }}>{item.label}</button>)}</div>
       <p className="vd-demo-explanation">三段分镜按顺序组成这支静音示意短片。在创作台中，你可以生成和采用画面、制作分镜视频，再调整顺序并剪辑导出。播放本片不会调用生成模型。</p>
-      <Link className="vd-button vd-primary" to={loginHref("/projects/new")}>开始自己的创作<ArrowRight size={20} /></Link>
+      <CreationLink className="vd-button vd-primary" to={loginHref("/projects/new")}>开始自己的创作<ArrowRight size={20} /></CreationLink>
     </div>
   </dialog>;
 }
 
-export default function HomePage() {
+export default function HomePage({ loginOpen = false }) {
+  const location = useLocation(), navigate = useNavigate();
   const reduced = useReducedMotion();
   const saveData = useSaveData();
   const [sample, setSample] = useState(0);
@@ -142,7 +148,12 @@ export default function HomePage() {
   const [demo, setDemo] = useState(false);
   const hero = useRef(null), menuButton = useRef(null);
   const heroFilm = useRef(null);
-  const shouldPlay = wantsPlay && active && visible && !menu && !demo;
+  const shouldPlay = wantsPlay && active && visible && !menu && !demo && !loginOpen;
+  useEffect(() => { if (loginOpen) { setDemo(false); setMenu(false); } }, [loginOpen]);
+  function closeLogin() {
+    if (location.state?.homepageLogin) navigate(-1);
+    else navigate("/", { replace: true });
+  }
   useEffect(() => {
     document.title = "ViralDNA · 看懂好视频，把创意做成片";
     const observer = new IntersectionObserver(entries => setActive(entries[0].isIntersecting && entries[0].intersectionRatio >= 0.15), { threshold: 0.15 });
@@ -182,7 +193,7 @@ export default function HomePage() {
     <header className="vd-navigation">
       <Link className="vd-brand" to="/" aria-label="ViralDNA 首页"><img src="/favicon.svg" alt="" width="40" height="40" /><span>ViralDNA</span></Link>
       <nav className={menu ? "vd-nav-links is-open" : "vd-nav-links"} aria-label="官网导航" id="vd-main-navigation">{NAVIGATION.map(([label, id]) => <a href={`#${id}`} key={id} onClick={() => setMenu(false)}>{label}</a>)}</nav>
-      <Link className="vd-button vd-primary vd-nav-cta" to={loginHref()}>进入创作台</Link>
+      <CreationLink className="vd-button vd-primary vd-nav-cta" to={loginHref()}>进入创作台</CreationLink>
       <button ref={menuButton} className="vd-icon-button vd-menu-toggle" type="button" aria-label={menu ? "关闭导航" : "打开导航"} aria-controls="vd-main-navigation" aria-expanded={menu} onClick={() => setMenu(!menu)}>{menu ? <X size={24} /> : <List size={24} />}</button>
     </header>
     <main id="home-content">
@@ -192,7 +203,7 @@ export default function HomePage() {
           posterUrl={IMAGE_SOURCES[SAMPLES[sample].image].webp} onSceneChange={setSample}
           onPlaybackChange={setPlaying} onBlocked={() => setWantsPlay(false)} onFailure={setFailed} />
         <div className="vd-hero-copy"><h1>看懂好视频，<br />把创意做成片。</h1><p>从原视频分析或 Skill 出发，连接分镜、图像、视频与剪辑，<br className="vd-desktop-break" />让每一步创作都清晰可控。</p>
-          <div className="vd-hero-actions"><Link className="vd-button vd-primary" to={loginHref()}>进入创作台<ArrowRight size={25} /></Link><button className="vd-button vd-secondary" type="button" onClick={() => setDemo(true)}><Play size={24} weight="fill" />观看演示</button></div>
+          <div className="vd-hero-actions"><CreationLink className="vd-button vd-primary" to={loginHref()}>进入创作台<ArrowRight size={25} /></CreationLink><button className="vd-button vd-secondary" type="button" onClick={() => setDemo(true)}><Play size={24} weight="fill" />观看演示</button></div>
         </div>
         <div className="vd-sample-dock">
           <p className="vd-sample-note">视觉示意 · 非真实案例{failed && <span role="status"> · 视频暂不可用，可重试播放</span>}</p>
@@ -202,15 +213,16 @@ export default function HomePage() {
         </div>
       </section>
       <section className="vd-paths" aria-label="两种创作方式">
-        <article><h2>有参考，就从分析开始。</h2><p>理解视频，拆解亮点，找到可复用的创意方法。</p><Link className="vd-text-link" to={loginHref("/projects/new")}>分析一条视频<ArrowUpRight size={21} /></Link></article>
-        <article><h2>有想法，就从 Skill 开始。</h2><p>用自然语言描述你的想法，让创意有迹可循。</p><Link className="vd-text-link" to={loginHref("/skills")}>探索创作 Skill<ArrowUpRight size={21} /></Link></article>
+        <article><h2>有参考，就从分析开始。</h2><p>理解视频，拆解亮点，找到可复用的创意方法。</p><CreationLink className="vd-text-link" to={loginHref("/projects/new")}>分析一条视频<ArrowUpRight size={21} /></CreationLink></article>
+        <article><h2>有想法，就从 Skill 开始。</h2><p>用自然语言描述你的想法，让创意有迹可循。</p><CreationLink className="vd-text-link" to={loginHref("/skills")}>探索创作 Skill<ArrowUpRight size={21} /></CreationLink></article>
       </section>
       <CreationWorkflow />
       <SkillShowcase />
       <TeamSection />
-      <section className="vd-closing vd-section"><h2>灵感，不必停留在脑海。</h2><p>从一条参考视频，或一个想法开始。</p><Link className="vd-button vd-primary" to={loginHref()}>进入创作台<ArrowRight size={24} /></Link></section>
+      <section className="vd-closing vd-section"><h2>灵感，不必停留在脑海。</h2><p>从一条参考视频，或一个想法开始。</p><CreationLink className="vd-button vd-primary" to={loginHref()}>进入创作台<ArrowRight size={24} /></CreationLink></section>
     </main>
-    <footer className="vd-footer"><Link className="vd-brand" to="/" aria-label="返回 ViralDNA 首页"><img src="/favicon.svg" alt="" width="32" height="32" /><span>ViralDNA</span></Link><p>看懂好视频，把创意做成片。</p><a href="#workflow">创作流程</a><Link to={loginHref()}>账户登录</Link><small>本页影像为 AI 视觉示意，非真实客户案例。</small></footer>
-    {demo && <DemoDialog initialScene={sample} onClose={() => setDemo(false)} />}
+    <footer className="vd-footer"><Link className="vd-brand" to="/" aria-label="返回 ViralDNA 首页"><img src="/favicon.svg" alt="" width="32" height="32" /><span>ViralDNA</span></Link><p>看懂好视频，把创意做成片。</p><a href="#workflow">创作流程</a><CreationLink to={loginHref()}>账户登录</CreationLink><Link to="/admin/login">后台登录</Link><small>本页影像为 AI 视觉示意，非真实客户案例。</small></footer>
+    {demo && !loginOpen && <DemoDialog initialScene={sample} onClose={() => setDemo(false)} />}
+    {loginOpen && <LoginDialog onClose={closeLogin} />}
   </div>;
 }

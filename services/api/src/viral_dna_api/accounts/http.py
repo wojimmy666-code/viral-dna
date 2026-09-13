@@ -227,6 +227,13 @@ class AccountUpdateInput(StrictInput):
 class MemberInput(StrictInput):
     username: PhoneNumber
     display_name: str = Field(min_length=1, max_length=120)
+    # Omission preserves invitation-only clients; a supplied password creates
+    # an immediately usable ordinary member, never a new owner or account.
+    password: AccountPassword | None = None
+
+
+class MemberPasswordInput(StrictInput):
+    password: AccountPassword
 
 
 class MemberPhoneInput(StrictInput):
@@ -500,10 +507,20 @@ def create_account_router(account_context, repository) -> APIRouter:
     @router.post("/account/members")
     async def invite(payload: MemberInput):
         access = require_owner()
+        if payload.password is not None:
+            async with _password_workers:
+                return await asyncio.to_thread(
+                    account_repository().create_member,
+                    str(access.account_id),
+                    username=payload.username,
+                    display_name=payload.display_name,
+                    password=payload.password.get_secret_value(),
+                    actor=str(access.user_id),
+                )
         return await asyncio.to_thread(
             account_repository().invite,
             str(access.account_id),
-            **payload.model_dump(),
+            **payload.model_dump(exclude={"password"}),
             actor=str(access.user_id),
         )
 
@@ -516,15 +533,34 @@ def create_account_router(account_context, repository) -> APIRouter:
         return {"removed": True}
 
     @router.post("/account/members/{user_id}/reset")
-    async def resend(user_id: str):
+    async def resend(user_id: str, payload: MemberPasswordInput | None = None):
         access = require_owner()
+        if payload is not None:
+            async with _password_workers:
+                return await asyncio.to_thread(
+                    account_repository().set_member_password,
+                    str(access.account_id),
+                    user_id,
+                    password=payload.password.get_secret_value(),
+                    actor=str(access.user_id),
+                )
         return await asyncio.to_thread(
             account_repository().reset_link, str(access.account_id), user_id, str(access.user_id)
         )
 
     @router.post("/account/members/{user_id}/restore")
-    async def restore(user_id: str):
+    async def restore(user_id: str, payload: MemberPasswordInput | None = None):
         access = require_owner()
+        if payload is not None:
+            async with _password_workers:
+                return await asyncio.to_thread(
+                    account_repository().set_member_password,
+                    str(access.account_id),
+                    user_id,
+                    password=payload.password.get_secret_value(),
+                    actor=str(access.user_id),
+                    restore=True,
+                )
         return await asyncio.to_thread(
             account_repository().restore_member,
             str(access.account_id),

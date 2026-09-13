@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { destinationAfterLogin } from "./login-destination.js";
+import { requestPasswordLogin } from "./login-service.js";
 import { Buildings, Lock, SignOut, UserCircle } from "@phosphor-icons/react";
 import {
   accountRequest, currentAccountSession, flushAccountDrafts, mediaUrl,
@@ -39,9 +40,7 @@ export function AccountLogin({ admin, setup, activation, onDone }) {
         window.history.replaceState(null, "", "/login");
         onDone();
       } else {
-        const session = await accountRequest(admin ? "/admin/auth/login" : "/auth/login", {
-          method: "POST", body: { username: draft.username.trim(), password: draft.password },
-        });
+        const session = await requestPasswordLogin(draft, { admin });
         setAccountSession(session, admin); onDone(session);
       }
     } catch (failure) { setError(failure.message); } finally { setBusy(false); }
@@ -272,6 +271,7 @@ export function AccountRoot({ children }) {
   if (auth.auth_mode !== "password") return loginRoute ? <Navigate to={destinationAfterLogin(location, admin)} replace /> : children;
   if (!auth.initialized && auth.setup_allowed === false) return <main className="account-loading">请在部署本机打开应用完成首次账户设置，完成后即可登录。</main>;
   if (!auth.initialized) return <AccountLogin setup onDone={loadSession} />;
+  if (location.pathname === "/setup") return <Navigate to="/login" replace />;
   if (activation) return <AccountLogin activation={activation} onDone={() => { navigate("/login", { replace: true }); void loadSession(); }} />;
   if (!session) return <AccountLogin key={String(admin)} admin={admin} onDone={next => { setSession(next); navigate(destinationAfterLogin(location, admin), { replace: true }); }} />;
   if (loginRoute) return <Navigate to={destinationAfterLogin(location, admin)} replace />;

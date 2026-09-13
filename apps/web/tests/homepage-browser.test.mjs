@@ -15,17 +15,31 @@ const mime = { ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+
 
 test("public homepage: privacy boundary, responsive UI, keyboard controls and login return", { timeout: 180000 }, async t => {
   await stat(join(buildRoot, "index.html"));
-  const requests = [], errors = [];
+  const requests = [], errors = [], interceptionErrors = [];
+  const pendingInterceptions = new Set();
+  let finishingBrowser = false;
   let imageFailure = false;
   let videoFailure = false, holdVideo = false;
   const releaseVideo = [];
+  let statusFailure = false, initialized = true, setupAllowed = false, authenticated = false;
+  let rejectLogin = false, holdLogin = false, loginPosts = 0;
+  const releaseLogin = [];
+  const fixtureAccount = { user_id: "fixture-user", account_id: "fixture-account", auth_mode: "password", account_kind: "personal", account_name: "验收示意账户", display_name: "验收用户", role: "owner", csrf_token: "fixture-only" };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://local.fixture"), path = url.pathname;
     requests.push(path);
     const json = (body, code = 200) => { response.writeHead(code, { "Content-Type": "application/json" }); response.end(JSON.stringify(body)); };
-    if (path === "/api/v1/auth/status") return json({ auth_mode: "password", initialized: true, setup_allowed: false });
+    if (path === "/api/v1/auth/status") {
+      if (statusFailure) { response.writeHead(502, { "Content-Type": "text/html" }); response.end("Gateway unavailable"); return; }
+      return json({ auth_mode: "password", initialized, setup_allowed: setupAllowed });
+    }
+    if (path === "/api/v1/session" && authenticated) return json(fixtureAccount);
     if (path === "/api/v1/session" || path === "/api/v1/admin/session") return json({ detail: { message: "请先登录" } }, 401);
-    if (path === "/api/v1/auth/login") return json({ user_id: "fixture-user", account_id: "fixture-account", auth_mode: "password", account_kind: "personal", account_name: "验收示意账户", display_name: "验收用户", role: "owner", csrf_token: "fixture-only" });
+    if (path === "/api/v1/auth/login") {
+      loginPosts++;
+      if (holdLogin) await new Promise(release => releaseLogin.push(release));
+      return rejectLogin ? json({ detail: { message: "登录失败" } }, 401) : json(fixtureAccount);
+    }
     if (path.startsWith("/api/")) return json({ items: [], records: [], projects: [], skills: [], total: 0 });
     if (imageFailure && path.startsWith("/home/") && /\.(webp|png)$/.test(path)) { response.writeHead(404); response.end(); return; }
     if (videoFailure && path.endsWith(".mp4")) { response.writeHead(404, { "Cache-Control": "no-store" }); response.end(); return; }
@@ -53,8 +67,19 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
   browser.on("Runtime.consoleAPICalled", event => { if (event.type === "error") errors.push(event.args.map(arg => arg.value || arg.description).join(" ")); });
   // Prevent page-origin external requests; local files only during acceptance.
   browser.on("Fetch.requestPaused", event => {
+    if (finishingBrowser) return;
     const allowed = event.request.url.startsWith(base + "/") || event.request.url.startsWith("data:");
-    void send(allowed ? "Fetch.continueRequest" : "Fetch.failRequest", { requestId: event.requestId, ...(!allowed ? { errorReason: "BlockedByClient" } : {}) });
+    const continuation = send(allowed ? "Fetch.continueRequest" : "Fetch.failRequest", { requestId: event.requestId, ...(!allowed ? { errorReason: "BlockedByClient" } : {}) });
+    pendingInterceptions.add(continuation);
+    void continuation.then(
+      () => pendingInterceptions.delete(continuation),
+      error => {
+        pendingInterceptions.delete(continuation);
+        // Navigation can cancel an intercepted request before its reply; closing
+        // Fetch also releases paused IDs. Neither is an application failure.
+        if (!finishingBrowser && !error.message.includes("Invalid InterceptionId.")) interceptionErrors.push(error.message);
+      },
+    );
   });
   await send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
   async function load(path = "/", width = 1536, height = 1024) {
@@ -63,8 +88,17 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
     await evaluate("document.fonts.ready");
   }
   async function click(selector) { await evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`); await pause(80); }
+  async function fillLogin() {
+    for (const [name, value] of [["username", "13800000001"], ["password", "test-only-password"]]) {
+      await evaluate(`(()=>{const input=document.querySelector('.vd-login [name=${name}]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+    }
+  }
+  async function loginReady() { await ready("document.querySelector('.vd-login[open]') && document.querySelector('.vd-login fieldset') && !document.querySelector('.vd-login fieldset').disabled"); }
   async function shot(name, full = false) {
     if (!screenshots) return;
+    // Error/checking states may settle before the dialog's entrance animation.
+    // Await the actual animation so visual evidence never captures a mid-frame.
+    if (name.startsWith("login-")) await evaluate("Promise.all((document.querySelector('.vd-login')?.getAnimations() || []).map(animation => animation.finished.catch(() => {})))");
     await mkdir(screenshots, { recursive: true }); await browser.screenshot(join(screenshots, name + ".png"), full);
   }
   async function key(keyName, code = keyName) { const windowsVirtualKeyCode = ({ Escape: 27, ArrowDown: 40, End: 35, Tab: 9 })[keyName]; await send("Input.dispatchKeyEvent", { type: "keyDown", key: keyName, code, windowsVirtualKeyCode }); await send("Input.dispatchKeyEvent", { type: "keyUp", key: keyName, code, windowsVirtualKeyCode }); }
@@ -230,17 +264,147 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
       assert.match(await evaluate("document.querySelector('.vd-hero-actions a').getAttribute('href')"), /\/login\?returnTo=/);
       imageFailure = false;
     });
+    await t.test("login overlays the same homepage, pauses playback and restores focus, scroll and history", async () => {
+      await load(); await ready("document.querySelector('.vd-hero video').currentTime > 0");
+      await evaluate("window.__loginHero = document.querySelector('.vd-hero video'); document.querySelector('.vd-hero-actions a').focus()");
+      const previousCanvas = await evaluate("[document.documentElement.style.backgroundColor,document.documentElement.style.colorScheme,document.documentElement.style.scrollbarGutter]");
+      const requestStart = requests.length;
+      await click('.vd-hero-actions a'); await loginReady();
+      assert.equal(await evaluate("window.__loginHero === document.querySelector('.vd-hero video')"), true);
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').paused"), true);
+      assert.equal(await evaluate("document.body.style.overflow"), "hidden");
+      assert.equal(await evaluate("getComputedStyle(document.documentElement).backgroundColor"), "rgb(16, 15, 18)");
+      assert.equal(await evaluate("getComputedStyle(document.documentElement).colorScheme"), "dark");
+      assert.equal(requests.slice(requestStart).some(path => /PrivateApplication|\/assets\/App-/.test(path)), false);
+      assert.equal(await evaluate("document.querySelector('.vd-login').contains(document.activeElement)"), true);
+      for (let index = 0; index < 9; index++) { await key("Tab"); assert.equal(await evaluate("document.querySelector('.vd-login').contains(document.activeElement)"), true); }
+      await shot("login-desktop");
+      const submitCenter = await evaluate("(()=>{const r=document.querySelector('.vd-login-submit').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()");
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...submitCenter }); await pause(200);
+      const hover = await evaluate("(()=>{const s=getComputedStyle(document.querySelector('.vd-login-submit'));return {color:s.color,background:s.backgroundColor}})()");
+      assert.equal(hover.background, "rgb(99, 85, 246)");
+      const luminance = rgb => rgb.match(/\d+(?:\.\d+)?/g).slice(0,3).map(Number).map(value => { const channel = value / 255; return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4; }).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
+      const foreground = luminance(hover.color), background = luminance(hover.background);
+      assert.ok((Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05) >= 4.5, "login hover text contrast must reach 4.5:1");
+      await shot("login-hover");
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
+      await key("Escape"); await ready("location.pathname === '/' && !document.querySelector('.vd-login')");
+      assert.deepEqual(await evaluate("[document.documentElement.style.backgroundColor,document.documentElement.style.colorScheme,document.documentElement.style.scrollbarGutter]"), previousCanvas);
+      assert.equal(await evaluate("document.activeElement === document.querySelector('.vd-hero-actions a')"), true);
+      await ready("!document.querySelector('.vd-hero video').paused");
+      await evaluate("history.forward()"); await loginReady();
+      await evaluate("history.back()"); await ready("!document.querySelector('.vd-login')");
+      await evaluate("document.querySelector('.vd-paths').scrollIntoView({behavior:'instant'}); document.querySelector('.vd-paths a').focus(); window.__loginScroll = scrollY");
+      await click('.vd-paths a'); await loginReady();
+      assert.equal(await evaluate("scrollY === window.__loginScroll"), true);
+      await click('[aria-label="关闭登录"]'); await ready("!document.querySelector('.vd-login')");
+      assert.equal(await evaluate("scrollY === window.__loginScroll"), true);
+      assert.equal(await evaluate("document.activeElement === document.querySelector('.vd-paths a')"), true);
+      assert.deepEqual(errors, []);
+    });
+    await t.test("password reveal, credential errors, single submission and abandoned requests are safe", async () => {
+      await load('/login'); await loginReady(); await fillLogin();
+      await click('[aria-label="显示密码"]'); assert.equal(await evaluate("document.querySelector('#vd-login-password').type"), "text");
+      await click('[aria-label="隐藏密码"]'); assert.equal(await evaluate("document.querySelector('#vd-login-password').type"), "password");
+      rejectLogin = true;
+      await click('.vd-login-submit'); await ready("document.querySelector('.vd-login-error')");
+      assert.match(await evaluate("document.querySelector('.vd-login-error').textContent"), /手机号或密码不正确/);
+      assert.equal(await evaluate("document.querySelector('#vd-login-phone').value"), "13800000001");
+      await shot("login-invalid-credentials");
+      rejectLogin = false; holdLogin = true;
+      const before = loginPosts;
+      await click('.vd-login-submit'); await click('.vd-login-submit');
+      assert.equal(loginPosts - before, 1);
+      assert.equal(await evaluate("document.querySelector('.vd-login-submit').textContent"), "正在登录…");
+      await click('[aria-label="关闭登录"]'); await ready("location.pathname === '/'");
+      holdLogin = false; releaseLogin.splice(0).forEach(release => release()); await pause(150);
+      assert.equal(await evaluate("location.pathname"), "/");
+      await click('.vd-hero-actions a'); await loginReady();
+      assert.equal(await evaluate("document.querySelector('#vd-login-password').value"), "");
+      await click('[aria-label="关闭登录"]');
+    });
+    await t.test("server failures keep the homepage and form, then recover through retry", async () => {
+      statusFailure = true;
+      await load('/login'); await ready("document.querySelector('.vd-login-retry')");
+      assert.match(await evaluate("document.querySelector('.vd-login').innerText"), /连接登录服务/);
+      assert.equal(await evaluate("Boolean(document.querySelector('.vd-home .vd-hero'))"), true);
+      assert.equal(await evaluate("document.querySelector('.vd-login fieldset').disabled"), true);
+      await shot("login-service-error");
+      statusFailure = false; await click('.vd-login-retry'); await loginReady();
+      assert.equal(await evaluate("Boolean(document.querySelector('.vd-login-retry'))"), false);
+      // Actual backdrop pointer press; a form-to-backdrop drag must not dismiss.
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: 8, y: 8, button: "left", clickCount: 1 });
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 8, y: 8, button: "left", clickCount: 1 });
+      await ready("location.pathname === '/' && !document.querySelector('.vd-login')");
+    });
+    await t.test("mobile, reduced motion, short keyboard viewport and direct refresh remain usable", async () => {
+      await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+      for (const [width, height] of [[390,844], [320,568], [768,900], [390,360]]) {
+        await load('/login?returnTo=%2Fprojects%2Fnew', width, height); await loginReady();
+        assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true);
+        assert.equal(await evaluate("(()=>{const r=document.querySelector('.vd-login').getBoundingClientRect();return r.top>=15 && r.bottom<=innerHeight-15 && r.left>=15 && r.right<=innerWidth-15})()"), true);
+        assert.equal(await evaluate("getComputedStyle(document.querySelector('.vd-login input')).fontSize"), "16px");
+        assert.equal(await evaluate("getComputedStyle(document.documentElement).backgroundColor"), "rgb(16, 15, 18)");
+        assert.equal(await evaluate("document.querySelector('.vd-hero video').getAttribute('src')"), null);
+        assert.equal(await evaluate("performance.getEntriesByType('resource').some(entry => new URL(entry.name).pathname.endsWith('.mp4'))"), false);
+        assert.equal(await evaluate("getComputedStyle(document.querySelector('.vd-login-submit')).fontSize"), "16px");
+        const buttonHeight = await evaluate("document.querySelector('.vd-login-submit').getBoundingClientRect().height");
+        assert.ok(buttonHeight >= 48 && buttonHeight < 50, `48px control with fractional line height: ${buttonHeight}`);
+        assert.equal(await evaluate("getComputedStyle(document.querySelector('.vd-login')).animationName"), "none");
+        if (height === 360) {
+          await evaluate("document.querySelector('#vd-login-password').focus();document.querySelector('.vd-login-submit').scrollIntoView({block:'nearest',behavior:'instant'})");
+          assert.equal(await evaluate("(()=>{const r=document.querySelector('.vd-login-submit').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()"), true);
+          assert.equal(await evaluate("(()=>{const r=document.querySelector('.vd-login-close').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()"), true);
+        }
+        await shot(`login-${width}-${height}`);
+      }
+      await click('[aria-label="关闭登录"]'); await ready("location.pathname === '/'");
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').paused"), true);
+      await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+    });
+    await t.test("admin and first setup stay separate from the public login dialog", async () => {
+      await load('/admin/login'); await ready("document.querySelector('.account-login-panel')");
+      assert.equal(await evaluate("Boolean(document.querySelector('.vd-home'))"), false);
+      assert.equal(await evaluate("document.querySelector('[name=username]').value"), "admin");
+      await click('.account-login-panel footer a'); await loginReady();
+      assert.equal(await evaluate("getComputedStyle(document.querySelector('.vd-login')).backgroundColor"), "rgb(28, 27, 32)");
+      assert.equal(await evaluate("Boolean(document.querySelector('.vd-login a[href=\"/admin/login\"]'))"), false);
+      initialized = false; setupAllowed = false;
+      await load('/login'); await ready("document.querySelector('.vd-login-status')?.innerText.includes('部署本机')");
+      assert.equal(await evaluate("Boolean(document.querySelector('.vd-login-setup'))"), false);
+      setupAllowed = true; await load('/login'); await ready("document.querySelector('.vd-login-setup')");
+      await click('.vd-login-setup'); await ready("location.pathname === '/setup' && document.querySelector('[name=admin_password]')");
+      initialized = true; setupAllowed = false;
+      assert.equal(requests.some(path => path === '/api/v1/auth/setup'), false);
+    });
+    await t.test("existing sessions bypass the form and rejected return targets stay inside the app", async () => {
+      authenticated = true;
+      await load('/login?returnTo=%2Fskills'); await ready("location.pathname === '/skills'");
+      await load('/login?returnTo=https%3A%2F%2Fevil.example'); await ready("location.pathname === '/projects'");
+      authenticated = false;
+    });
     await t.test("private destinations still require login and preserve returnTo", async () => {
       await load("/login?returnTo=%2Fskills", 1280, 900);
-      await ready("document.querySelector('.account-login-panel input[name=username]')");
-      assert.equal(await evaluate("document.querySelector('.vd-home')"), null);
-      assert.match(await evaluate("document.querySelector('.account-login-panel').innerText"), /手机号/);
-      for (const [name, value] of [["username", "13800000001"], ["password", "test-only-password"]]) {
-        await evaluate(`(()=>{const input=document.querySelector('[name=${name}]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-      }
-      await click('.account-primary'); await ready("location.pathname === '/skills'");
+      await loginReady();
+      assert.equal(await evaluate("Boolean(document.querySelector('.vd-home'))"), true);
+      assert.match(await evaluate("document.querySelector('.vd-login').innerText"), /手机号/);
+      await fillLogin();
+      await click('.vd-login-submit'); await ready("location.pathname === '/skills'");
       // The success route is the actual app; synthetic fixtures do not claim to
       // exercise the full Skill backend. Its regression tests remain separate.
     });
-  } finally { holdVideo = false; releaseVideo.splice(0).forEach(release => release()); await browser.close(); await new Promise(resolveClose => server.close(resolveClose)); }
+  } finally {
+    holdVideo = false; holdLogin = false;
+    releaseLogin.splice(0).forEach(release => release()); releaseVideo.splice(0).forEach(release => release());
+    finishingBrowser = true;
+    try {
+      // Stop interception and drain in-flight acknowledgements before closing
+      // CDP, so successful app checks cannot leave rejected teardown promises.
+      await send("Fetch.disable");
+      await Promise.allSettled([...pendingInterceptions]);
+    } finally {
+      await browser.close(); await new Promise(resolveClose => server.close(resolveClose));
+    }
+    assert.deepEqual(interceptionErrors, []);
+  }
 });

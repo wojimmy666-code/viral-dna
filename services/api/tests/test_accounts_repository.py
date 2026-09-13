@@ -32,6 +32,138 @@ def session(repo, name="13800000001", remote="test"):
     return token, repo.session(token)["access"]
 
 
+def test_owner_can_create_active_member_without_invitation(repo):
+    owner_token, owner = session(repo)
+    result = repo.create_member(
+        str(owner.account_id),
+        username=" 13800000002 ",
+        display_name=" 新成员 ",
+        password="12345678",
+        actor=str(owner.user_id),
+    )
+    assert result["status"] == "active" and "activation_token" not in result
+    token = repo.login("13800000002", "12345678", admin=False, remote="new-member")
+    access = repo.session(token)["access"]
+    assert access.account_id == owner.account_id and access.role == "member"
+    assert access.workspace_root == owner.workspace_root
+    assert repo.session(owner_token)
+    with repo.connect() as db:
+        assert db.execute("SELECT count(*) FROM auth_invitations").fetchone()[0] == 0
+        assert "12345678" not in str([tuple(row) for row in db.execute("SELECT * FROM auth_users")])
+        assert (
+            db.execute(
+                "SELECT display_name FROM auth_users WHERE id=?", (result["id"],)
+            ).fetchone()[0]
+            == "新成员"
+        )
+
+
+def test_member_removal_and_password_restore_preserve_identity_and_revoke_credentials(repo):
+    owner_token, owner = session(repo)
+    account_id, actor = str(owner.account_id), str(owner.user_id)
+    result = repo.create_member(
+        account_id, username="13800000002", display_name="成员", password=PASSWORD, actor=actor
+    )
+    token, member = session(repo, "13800000002")
+    # Members cannot mint sync tokens today; also clean up legacy credentials
+    # if a database imported from an older installation contains one.
+    sync = "fixture-legacy-sync-token"
+    with repo.connect(write=True) as db:
+        db.execute(
+            "INSERT INTO auth_storage_tokens VALUES(?,?,?,?,?,?)",
+            (token_hash(sync), account_id, result["id"], "fixture-device", 4102444800, 1700000000),
+        )
+    invitation = repo.reset_link(account_id, result["id"], actor)["activation_token"]
+    repo.lease(member, "project-a", editor_id="tab-one", token="lease-token", action="acquire")
+    before = next(item for item in repo.members(account_id) if item["id"] == result["id"])
+    repo.remove_member(account_id, result["id"], actor)
+    for operation in (
+        lambda: repo.session(token),
+        lambda: repo.storage_token_session(sync),
+        lambda: repo.activate(invitation, "new-secret-123"),
+    ):
+        with pytest.raises(AccountError):
+            operation()
+    with pytest.raises(AccountError) as duplicate:
+        repo.create_member(
+            account_id, username="13800000002", display_name="重复", password=PASSWORD, actor=actor
+        )
+    assert duplicate.value.code == "member_removed"
+    with pytest.raises(AccountError) as unchanged:
+        repo.set_member_password(
+            account_id, result["id"], password=PASSWORD, actor=actor, restore=True
+        )
+    assert unchanged.value.code == "password_unchanged"
+    restored = repo.set_member_password(
+        account_id, result["id"], password="new-secret-123", actor=actor, restore=True
+    )
+    assert restored["id"] == result["id"]
+    after = next(item for item in repo.members(account_id) if item["id"] == result["id"])
+    assert before == after
+    assert repo.session(owner_token) and not repo.lease(owner, "project-a")["occupied"]
+    with pytest.raises(AccountError):
+        repo.session(token)
+    with pytest.raises(AccountError):
+        repo.login("13800000002", PASSWORD, admin=False, remote="old-pass")
+    new_token = repo.login("13800000002", "new-secret-123", admin=False, remote="restored")
+    assert str(repo.session(new_token)["access"].user_id) == result["id"]
+    repo.set_member_password(account_id, result["id"], password="reset-secret-456", actor=actor)
+    with pytest.raises(AccountError):
+        repo.session(new_token)
+    assert repo.login("13800000002", "reset-secret-456", admin=False, remote="reset")
+    with repo.connect() as db:
+        assert (
+            db.execute(
+                "SELECT count(*) FROM auth_storage_tokens WHERE user_id=?", (result["id"],)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_direct_member_mutations_recheck_owner_and_account_scope(repo):
+    _, owner = session(repo)
+    account_id, actor = str(owner.account_id), str(owner.user_id)
+    member = repo.create_member(
+        account_id, username="13800000002", display_name="成员", password=PASSWORD, actor=actor
+    )
+    other = repo.create_account(
+        kind="enterprise", name="企业乙", username="13900000001", display_name="乙", actor="admin"
+    )
+    repo.activate(other["activation_token"], PASSWORD)
+    _, other_owner = session(repo, "13900000001")
+    for invalid_actor in (member["id"], str(other_owner.user_id), "admin"):
+        with pytest.raises(AccountError) as denied:
+            repo.create_member(
+                account_id,
+                username="13800000003",
+                display_name="越权",
+                password=PASSWORD,
+                actor=invalid_actor,
+            )
+        assert denied.value.status == 403
+        with pytest.raises(AccountError):
+            repo.set_member_password(
+                account_id, member["id"], password="new-secret-123", actor=invalid_actor
+            )
+    with pytest.raises(AccountError) as cross_account:
+        repo.set_member_password(
+            account_id, str(other_owner.user_id), password="new-secret-123", actor=actor
+        )
+    assert cross_account.value.status == 404
+    with pytest.raises(AccountError):
+        repo.set_member_password(account_id, actor, password="new-secret-123", actor=actor)
+    with pytest.raises(AccountError) as duplicate:
+        repo.create_member(
+            account_id, username="13900000001", display_name="重复", password=PASSWORD, actor=actor
+        )
+    assert duplicate.value.code == "username_exists" and "企业乙" not in str(duplicate.value)
+    with repo.connect(write=True) as db:
+        db.execute("UPDATE auth_accounts SET status='disabled' WHERE id=?", (account_id,))
+    with pytest.raises(AccountError) as disabled:
+        repo.set_member_password(account_id, member["id"], password="new-secret-123", actor=actor)
+    assert disabled.value.status == 403
+
+
 def test_independent_accounts_and_single_admin(repo):
     _, owner = session(repo)
     other = repo.create_account(

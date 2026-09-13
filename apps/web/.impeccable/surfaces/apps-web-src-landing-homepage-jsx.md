@@ -5,20 +5,29 @@ primary_target: "apps/web/src/landing/HomePage.jsx"
 related_targets:
   - "apps/web/src/landing/HomeFilm.jsx"
   - "apps/web/src/landing/home-media.js"
+  - "apps/web/src/landing/LoginDialog.jsx"
+  - "apps/web/src/landing/PublicLoginForm.jsx"
+  - "apps/web/src/landing/login.css"
 ---
 
 # 对外官网首页
+
+## 当前登录扩展 · 2026-09-13
+
+用户确认前端登录在本首页上浮现深色原生 dialog。`/` 与 `/login?returnTo=…` 保持同一首页实例；创作入口统一打开浮层并保留站内白名单目标，直达与刷新 `/login` 同样有效。背景首页仅使用公开素材，普通 `/` 不预读账户接口；仅打开浮层后按需加载表单并读取认证状态。打开暂停影片，关闭恢复原播放意图、滚动与焦点；后台登录入口位于页脚，后台、初始化、激活与工作台内重新登录保留独立流程。
+
+登录模式继承本页已批准的世界，具体尺度、表单状态、可见视口与临时根画布规则见[登录表面契约](apps-web-src-landing-logindialog-jsx.md)及 `apps/web/src/landing/DESIGN.md`。最新证据见根 `.impeccable/review/homepage-login/acceptance.md`：独立 review 已 ship，两项材料修复 resolved；官网浏览器最终 16/16、退出码 0。短视口 fixture 不代表实体手机键盘实测，匿名 API 核对不代表真实密码登录。以下媒体、原始首屏 gate、原生素材例外与早期联调限制按各自历史时点保留。
 
 ## 当前媒体更新 · 2026-09-13
 
 用户已提供「视频节点 1 .mp4」「视频节点 2.mp4」「视频节点 3.mp4」并明确要求应用到首页。现按原帧顺序无损拼接为 15.125 秒、720p、24fps 的静音影片，替换先前静态轮播及静态演示；版式与产品事实保持不变。缩略图来自实际视频首帧，播放/暂停与分镜跳转均操作真实影片。来源见 `public/home/video/provenance.json`，本次本地验收见根 `.impeccable/review/homepage-video/acceptance.md`。以下原生图片例外与旧 finish review 保留为历史记录，不代表新视频为4K或已部署。
 
-- Scope: `/` 公开官网，与现有账户保护下的工作台分离；不部署、不推送。
+- Scope: `/` 公开官网及同一实例上的 `/login` 浮层，与现有账户保护下的工作台分离；不部署、不推送。
 - Mode: Persuade。面向初次了解 ViralDNA 的内容创作者与企业团队，让用户理解从参考视频或 Skill 到分镜、视频及剪辑导出的创作流程。
 - Visual authority: 用户附图明确批准 `.impeccable/mocks/cinematic-negative-space.png`（第 2 张，1536 × 1024）。保留原有播放标志，仅扩展官网的品牌展示规范，不改工作台视觉系统。
 - Approved story: 电影式首屏、两个创作入口、演示流程、精选创作方法、企业共享与收尾入口。
 - Proof boundary: 当前影像为 AI 设计示意，页面和播放器均明确标记，不读取或匿名暴露任何账户私有资产，不称其为真实生成案例。没有真实公开案例、联系方式或政策信息时不得伪造；发布清单可后续替换影像。
-- Behavior: 导航锚点、作品切换、暂停、演示弹窗、移动菜单、登录后返回站内目标均可用；不因官网访问调用模型、创建项目或获得编辑租约。
+- Behavior: 导航锚点、作品切换、暂停、演示弹窗、移动菜单、官网登录浮层与登录后返回站内目标均可用；不因官网访问调用模型、创建项目或获得编辑租约。
 
 ## Direction contract
 

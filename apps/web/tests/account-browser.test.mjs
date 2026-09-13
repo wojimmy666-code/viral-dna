@@ -65,7 +65,8 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
   const admin = { admin_id: "admin-1", auth_mode: "password", principal_type: "platform_admin", display_name: "admin", csrf_token: "admin-csrf" };
   const state = { lease: null, requests: [], rejectWrite: false, initialized: false,
     quota: 10000000000, storageConnection: {}, historyTrashed: false, storageFailed: false,
-    historyDeleted: false, memberPhone: "13800000001", phoneFailure: null, holdPhone: false };
+    historyDeleted: false, memberPhone: "13800000001", phoneFailure: null, holdPhone: false,
+    memberStatus: "active", newMembers: [], memberFailure: null, memberRefreshDelay: 0 };
   const server = createServer(async (request, response) => {
     const path = new URL(request.url, "http://fixture").pathname;
     if (!path.startsWith("/api/")) {
@@ -132,9 +133,20 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       state.memberPhone = body.username;
       return send({ updated: true, id: "user-1", username: body.username });
     }
+    if (path === "/api/v1/account/members/user-2" && request.method === "DELETE") {
+      state.memberStatus = "disabled"; return send({ removed: true });
+    }
+    if (path === "/api/v1/account/members/user-2/restore" || path === "/api/v1/account/members/user-2/reset") {
+      state.memberStatus = "active"; return send({ id: "user-2", username: "13800000002", status: "active" });
+    }
     if (path.endsWith("/members")) {
-      if (request.method === "POST") return send({ activation_token: "one-time-activation", username: body.username });
-      return send({ items: [{ id: "user-1", display_name: "负责人", username: state.memberPhone, role: "owner", status: "active" }, { id: "user-2", display_name: "另一位成员", username: "13800000002", role: "member", status: "active" }] });
+      if (request.method === "POST") {
+        if (state.memberFailure) return send({ detail: state.memberFailure }, 409);
+        const created = { id: `member-${state.newMembers.length + 3}`, username: body.username, display_name: body.display_name, role: "member", status: "active", created_at: 1700000000 };
+        state.newMembers.push(created); return send({ id: created.id, username: created.username, status: "active" });
+      }
+      if (!isAdmin && state.memberRefreshDelay) await pause(state.memberRefreshDelay);
+      return send({ items: [{ id: "user-1", display_name: "负责人", username: state.memberPhone, role: "owner", status: "active", created_at: 1700000000 }, { id: "user-2", display_name: "另一位成员", username: "13800000002", role: "member", status: state.memberStatus, created_at: 1700000000 }, ...state.newMembers] });
     }
     if (path.endsWith("/admin/accounts")) {
       if (request.method === "POST") return send({ activation_token: "one-time-activation", username: body.username });
@@ -180,7 +192,11 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
         await evaluate("document.querySelector('.account-phone-form').scrollIntoView({block:'center',behavior:'instant'})");
         await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
       }
-      const shot = await send("Page.captureScreenshot", { format: "png" });
+      const fullPage = name.startsWith('enterprise-member-') || name === 'account-members';
+      const metrics = fullPage ? await send("Page.getLayoutMetrics") : null;
+      const shot = await send("Page.captureScreenshot", { format: "png", ...(fullPage ? {
+        captureBeyondViewport: true, clip: { x: 0, y: 0, width, height: metrics.cssContentSize.height, scale: 1 },
+      } : {}) });
       await writeFile(join(process.env.ACCOUNT_SCREENSHOT_DIR, `${name}-${width}.png`), Buffer.from(shot.data, "base64"));
     }
     await send("Page.enable"); await send("Runtime.enable");
@@ -273,22 +289,102 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
         await load("/account/members", width); await ready("document.querySelector('.account-table-wrap tbody tr')");
         assert.equal(await evaluate("document.querySelector('button[aria-label$=\"：修改手机号\"]')"), null);
         assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
-        assert.equal(await evaluate("document.querySelector('.account-table-wrap').scrollWidth >= 640"), true);
+        assert.equal(await evaluate("document.querySelector('.account-table-wrap').scrollWidth >= 640"), width >= 640);
         await screenshot("account-members", width);
       }
       user.display_name = "负责人"; user.account_name = "企业账户";
     });
-    await t.test("enterprise invitations require a mobile number and explain eight-character passwords", async () => {
+    await t.test("owner creates a member directly with phone and initial password; failures retain the draft", async () => {
       await evaluate("document.querySelector('.account-management-heading button').click()");
       await ready("document.querySelector('.account-create-form')");
+      assert.equal(await evaluate("document.activeElement.name"), "display_name");
+      await evaluate("document.querySelector('.account-create-form').requestSubmit()");
+      await ready("document.querySelector('.account-error')?.textContent.includes('请填写成员姓名')");
+      assert.equal(await evaluate("document.querySelector('[name=display_name]').getAttribute('aria-invalid')"), "true");
+      assert.equal(await evaluate("document.querySelector('[name=member_password]').getAttribute('aria-invalid')"), "false");
       await fill("username", "not-mobile"); await fill("display_name", "新成员");
       await evaluate("document.querySelector('.account-create-form').requestSubmit()");
       assert.equal(await evaluate("document.querySelector('input[name=username]').validity.patternMismatch"), true);
-      assert.match(await evaluate("document.querySelector('.account-create-form').textContent"), /至少 8 位密码/);
+      assert.match(await evaluate("document.querySelector('.account-create-form').textContent"), /至少 8 位/);
       await fill("username", "13800000003");
+      await fill("member_password", "1234567");
       await evaluate("document.querySelector('.account-create-form').requestSubmit()");
-      await ready("document.querySelector('.account-activation-link')");
-      assert.equal(state.requests.find(item => item.path.endsWith('/account/members') && item.method === 'POST').body.username, '13800000003');
+      await ready("document.querySelector('.account-error')?.textContent.includes('8–128')");
+      assert.equal(state.newMembers.length, 0);
+      await fill("member_password", "12345678");
+      await evaluate("document.querySelector('button[aria-label=显示密码]').click()");
+      assert.equal(await evaluate("document.querySelector('[name=member_password]').type"), "text");
+      await evaluate("document.querySelector('button[aria-label=隐藏密码]').click()");
+      state.memberFailure = { code: "username_exists", message: "该手机号已被使用，请使用独立手机号" };
+      await evaluate("document.querySelector('.account-create-form').requestSubmit()");
+      await ready("document.querySelector('.account-error')?.textContent.includes('手机号已被使用')");
+      assert.equal(await evaluate("document.querySelector('[name=username]').getAttribute('aria-invalid')"), "true");
+      assert.equal(await evaluate("document.querySelector('[name=username]').getAttribute('aria-describedby')===document.querySelector('.account-error').id"), true);
+      assert.equal(await evaluate("document.querySelector('[name=member_password]').getAttribute('aria-invalid')"), "false");
+      assert.equal(await evaluate("document.querySelector('[name=member_password]').value"), "12345678");
+      for (const width of [1280, 390]) {
+        await send("Emulation.setDeviceMetricsOverride", { width, height: 960, deviceScaleFactor: 1, mobile: false });
+        assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
+        await screenshot("enterprise-member-create-error", width);
+      }
+      state.memberFailure = null;
+      state.memberRefreshDelay = 200;
+      await evaluate("document.querySelector('.account-create-form').requestSubmit();document.querySelector('.account-create-form')?.requestSubmit()");
+      await ready("!document.querySelector('.account-create-form') && document.querySelector('table')?.textContent.includes('新成员')");
+      await ready("document.activeElement === document.querySelector('.account-management-heading button') && !document.activeElement.disabled");
+      state.memberRefreshDelay = 0;
+      assert.equal(state.newMembers.length, 1);
+      assert.equal(await evaluate("document.querySelector('.account-activation-link')"), null);
+      assert.equal(await evaluate("document.querySelector('input[type=password]')"), null);
+      const created = state.requests.filter(item => item.path.endsWith('/account/members') && item.method === 'POST').at(-1);
+      assert.deepEqual(created.body, { username: '13800000003', display_name: '新成员', password: '12345678' });
+    });
+    await t.test("owner soft-removes and restores the same member with a fresh password", async () => {
+      const click = label => evaluate(`document.querySelector('button[aria-label="${label}"]').click()`);
+      await click("另一位成员：移除成员");
+      await ready("document.querySelector('.enterprise-member-editor')?.textContent.includes('13800000002')");
+      assert.match(await evaluate("document.querySelector('.enterprise-member-editor').textContent"), /生成历史及操作记录全部保留/);
+      await evaluate("document.querySelector('.enterprise-member-editor').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");
+      await ready("!document.querySelector('.enterprise-member-editor')");
+      assert.equal(state.memberStatus, "active");
+      await click("另一位成员：移除成员");
+      state.memberRefreshDelay = 200;
+      await evaluate("document.querySelector('.enterprise-member-editor').requestSubmit()");
+      await ready("!document.querySelector('.enterprise-member-editor') && !document.querySelector('table')?.textContent.includes('另一位成员')");
+      await ready("document.activeElement === document.querySelector('.account-management-heading button') && !document.activeElement.disabled");
+      state.memberRefreshDelay = 0;
+      assert.equal(state.memberStatus, "disabled");
+      await evaluate("[...document.querySelectorAll('.enterprise-member-toolbar button')].find(b=>b.textContent.startsWith('已移除')).click()");
+      await ready("document.querySelector('button[aria-label=\"另一位成员：恢复成员\"]')");
+      await click("另一位成员：恢复成员");
+      await fill("member_password", "restored-123");
+      await screenshot("enterprise-member-restore", 390);
+      await evaluate("document.querySelector('.enterprise-member-editor').requestSubmit()");
+      await ready("!document.querySelector('.enterprise-member-editor') && document.body.textContent.includes('暂无已移除成员')");
+      assert.equal(state.memberStatus, "active");
+      const restored = state.requests.find(item => item.path.endsWith('/members/user-2/restore'));
+      assert.deepEqual(restored.body, { password: "restored-123" });
+      await evaluate("[...document.querySelectorAll('.enterprise-member-toolbar button')].find(b=>b.textContent.startsWith('当前成员')).click()");
+      await click("另一位成员：重置密码");
+      await fill("member_password", "reset-again-456");
+      await evaluate("document.querySelector('.enterprise-member-editor').requestSubmit()");
+      await ready("!document.querySelector('.enterprise-member-editor') && document.body.textContent.includes('密码已重置')");
+      assert.equal(state.requests.find(item => item.path.endsWith('/members/user-2/reset')).body.password, "reset-again-456");
+      assert.equal(await evaluate("document.querySelector('button[aria-label=\"负责人：移除成员\"]')"), null);
+      await evaluate("(()=>{const input=document.querySelector('[aria-label=搜索成员]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'13800000002');input.dispatchEvent(new Event('input',{bubbles:true}));})()");
+      await ready("document.querySelectorAll('tbody tr').length===1");
+      assert.match(await evaluate("document.querySelector('tbody').textContent"), /另一位成员/);
+    });
+    await t.test("ordinary members and personal owners cannot open member management", async () => {
+      for (const [kind, role] of [["enterprise", "member"], ["personal", "owner"]]) {
+        user.account_kind = kind; user.role = role;
+        const before = state.requests.filter(item => item.path === '/api/v1/account/members').length;
+        await load("/account/members", 390);
+        await ready("document.body.textContent.includes('只有企业负责人')");
+        assert.equal(await evaluate("document.querySelector('.account-management button')"), null);
+        assert.equal(state.requests.filter(item => item.path === '/api/v1/account/members').length, before);
+      }
+      user.account_kind = "enterprise"; user.role = "owner";
     });
     await t.test("logout waits for successful draft flush", async () => {
       state.lease = null; await load("/projects"); await ready("document.querySelector('.account-menu > button')");

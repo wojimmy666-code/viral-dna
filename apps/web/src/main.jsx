@@ -8,7 +8,7 @@ const PrivateApplication = lazy(() => import("./accounts/PrivateApplication.jsx"
 
 function RootRoutes() {
   const location = useLocation();
-  if (location.pathname === "/") return <HomePage />;
+  if (location.pathname === "/" || location.pathname === "/login") return <HomePage loginOpen={location.pathname === "/login"} />;
   return <Suspense fallback={<main className="entry-loading" role="status">正在打开 ViralDNA…</main>}><PrivateApplication /></Suspense>;
 }
 

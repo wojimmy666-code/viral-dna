@@ -7,6 +7,7 @@ from viral_dna_api.accounts.http import (
     ActivateInput,
     LoginInput,
     MemberInput,
+    MemberPasswordInput,
     MemberPhoneInput,
     PasswordInput,
     SetupInput,
@@ -103,12 +104,26 @@ def test_password_rules_match_setup_login_activation_and_changes(length):
         (UserLoginInput, {"username": "13800000001", "password": password}),
         (ActivateInput, {"token": "t" * 43, "password": password}),
         (PasswordInput, {"current_password": "12345678", "new_password": password}),
+        (MemberInput, {"username": "13800000002", "display_name": "成员", "password": password}),
+        (MemberPasswordInput, {"password": password}),
     ]:
         if 8 <= length <= 128:
             model.model_validate(payload)
         else:
             with pytest.raises(ValidationError):
                 model.model_validate(payload)
+
+
+def test_member_password_inputs_do_not_expose_secrets_or_accept_tenant_and_role_fields():
+    payload = {"username": "13800000002", "display_name": "成员", "password": "secret-test-456"}
+    assert payload["password"] not in repr(MemberInput(**payload))
+    assert payload["password"] not in repr(MemberPasswordInput(password=payload["password"]))
+    assert MemberInput(username=payload["username"], display_name="成员").password is None
+    for key in ("account_id", "role", "status"):
+        with pytest.raises(ValidationError):
+            MemberInput(**payload, **{key: "owner"})
+        with pytest.raises(ValidationError):
+            MemberPasswordInput(password=payload["password"], **{key: "owner"})
 
 
 def test_field_guidance_does_not_return_values_passwords_or_unknown_field_names():

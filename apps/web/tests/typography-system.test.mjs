@@ -111,14 +111,19 @@ test("keeps every stylesheet on semantic typography and text-color tokens", () =
   ]);
 
   for (const { file, source } of stylesheets) {
-    const homepage = file.replaceAll("\\", "/") === "landing/home.css";
+    const normalizedFile = file.replaceAll("\\", "/");
+    const homepage = normalizedFile === "landing/home.css";
+    const publicLogin = normalizedFile === "landing/login.css";
+    // The approved public-site form has its own scoped scale, separate from
+    // the light workbench. Allow only its documented values, not arbitrary CSS.
     const surfaceSizes = homepage ? new Set([...allowedSizes,
       "var(--home-display-size)", "var(--home-heading-size)", "var(--home-title-size)",
       "var(--home-body-size)", "var(--home-label-size)", "var(--home-caption-size)", "var(--home-section-size)",
-    ]) : allowedSizes;
+    ]) : publicLogin ? new Set([...allowedSizes, "13px", "14px", "16px", "18px", "24px"]) : allowedSizes;
     const surfaceWeights = homepage ? new Set([...allowedWeights,
       "var(--home-weight-regular)", "var(--home-weight-semibold)", "var(--home-weight-display)",
-    ]) : allowedWeights;
+    ]) : publicLogin ? new Set([...allowedWeights, "400", "500", "600"]) : allowedWeights;
+    const surfaceColors = publicLogin ? new Set([...allowedColors, "#ffc0c4"]) : allowedColors;
     for (const value of declarations(source, "font-size")) {
       assert.ok(surfaceSizes.has(value), `${file} uses non-system font-size: ${value}`);
     }
@@ -128,7 +133,7 @@ test("keeps every stylesheet on semantic typography and text-color tokens", () =
     }
     for (const value of declarations(source, "color")) {
       assert.ok(
-        value.startsWith("var(") || allowedColors.has(value),
+        value.startsWith("var(") || surfaceColors.has(value),
         `${file} uses a literal text color: ${value}`,
       );
     }
@@ -145,6 +150,15 @@ test("keeps every stylesheet on semantic typography and text-color tokens", () =
     );
     assert.doesNotMatch(source, /--production-(?:type|text|leading)-/);
   }
+});
+
+test("keeps the public login scale within its named homepage component", () => {
+  const source = stylesheets.find(({ file }) => file.replaceAll("\\", "/") === "landing/login.css")?.source;
+  assert.ok(source, "missing the public login stylesheet");
+  assert.match(source, /\.vd-home \.vd-login\s*\{/);
+  assert.doesNotMatch(source, /(?:^|\n)\s*(?:input|button|label|h[1-6]|body|:root)\b/);
+  assert.match(cssRule(source, ".vd-login input"), /font-size:\s*16px/);
+  assert.match(cssRule(source, ".vd-home .vd-login .vd-login-submit"), /font-size:\s*16px/);
 });
 
 test("uses the same global prompt editor role for image and video", () => {

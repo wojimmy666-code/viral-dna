@@ -1,9 +1,11 @@
 ---
 name: ViralDNA Public Homepage
-description: 公开官网的电影式片场留白；规范仅覆盖 landing 表面。
+description: 公开官网的电影式片场留白；规范仅覆盖 landing 首页及其登录浮层。
 colors:
   primary: "#5b4df5"
   primary-hover: "#7165ff"
+  login-primary-hover: "#6355f6"
+  login-error: "#ffc0c4"
   ground: "#100f12"
   text: "#f7f7f6"
   muted: "#bcbcc2"
@@ -44,8 +46,34 @@ typography:
     fontFamily: '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
     fontSize: "14px"
     fontWeight: 400
+  login-brand:
+    fontFamily: '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
+    fontSize: "18px"
+    fontWeight: 600
+    lineHeight: 1.5
+  login-field-label:
+    fontFamily: '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
+    fontSize: "14px"
+    fontWeight: 500
+    lineHeight: 1.5
+  login-input:
+    fontFamily: '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
+    fontSize: "16px"
+    fontWeight: 400
+    lineHeight: 1.5
+  login-help:
+    fontFamily: '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
+    fontSize: "13px"
+    fontWeight: 400
+    lineHeight: 1.6
+  login-status:
+    fontFamily: '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
+    fontSize: "14px"
+    fontWeight: 400
+    lineHeight: 1.6
 rounded:
   label: "4px"
+  inset-control: "6px"
   compact: "8px"
   thumbnail: "10px"
   surface: "12px"
@@ -55,6 +83,7 @@ spacing:
   small: "8px"
   compact: "12px"
   standard: "16px"
+  form-gap: "20px"
   content: "24px"
   panel: "28px"
   wide: "32px"
@@ -89,6 +118,40 @@ components:
     backgroundColor: "{colors.panel}"
     textColor: "{colors.text}"
     rounded: "{rounded.surface}"
+  login-dialog:
+    backgroundColor: "{colors.panel}"
+    textColor: "{colors.text}"
+    rounded: "{rounded.dialog}"
+    padding: "28px 32px 32px"
+    width: "min(440px, calc(100% - 32px))"
+  login-dialog-phone:
+    padding: "20px 24px 24px"
+  login-field:
+    backgroundColor: "{colors.ground}"
+    textColor: "{colors.text}"
+    typography: "{typography.login-input}"
+    rounded: "{rounded.compact}"
+    padding: "12px 14px"
+    height: "48px"
+  login-password-toggle:
+    backgroundColor: transparent
+    textColor: "{colors.muted}"
+    rounded: "{rounded.inset-control}"
+    padding: "0"
+    width: "44px"
+    height: "44px"
+  login-submit:
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.text}"
+    typography: "{typography.label}"
+    rounded: "{rounded.compact}"
+    padding: "12px 20px"
+    width: "100%"
+  login-submit-hover:
+    backgroundColor: "{colors.login-primary-hover}"
+  login-error:
+    textColor: "{colors.login-error}"
+    typography: "{typography.login-status}"
 ---
 
 # Design System: ViralDNA Public Homepage
@@ -99,23 +162,26 @@ components:
 
 暖金侧光、玻璃、金属和岩石影像为官网建立片场气氛。深炭背景托住宽厚白字，既有紫色标志与主操作保持品牌识别，界面结构以留白和细线组织。
 
-本契约从 [HomePage.jsx](HomePage.jsx) 与 [home.css](home.css) 提取，仅适用于公开 `/`。工作台继续遵守 [Web 工作台设计契约](../../DESIGN.md)。首页构图与交付状态见[方向契约](../../../../.impeccable/homepage-brief.md)，产品事实见 [PRODUCT.md](../../../../PRODUCT.md)；它们不扩大本文件的视觉作用域。
+本契约从 [HomePage.jsx](HomePage.jsx)、[home.css](home.css)、[LoginDialog.jsx](LoginDialog.jsx)、[PublicLoginForm.jsx](PublicLoginForm.jsx) 与 [login.css](login.css) 提取，适用于公开 `/` 及同一首页实例上的 `/login` 浮层。登录是用户批准的既有视觉世界窄扩展；后台、初始化、激活及工作台内重新登录继续沿用独立账户界面，工作台继续遵守 [Web 工作台设计契约](../../DESIGN.md)。首页构图与历史交付状态见[方向契约](../../../../.impeccable/homepage-brief.md)，登录本次证据见[验收记录](../../../../.impeccable/review/homepage-login/acceptance.md)，产品事实见 [PRODUCT.md](../../../../PRODUCT.md)；它们不扩大本文件的视觉作用域。
 
 **Key Characteristics:**
 
 - 影像承担材质与暖色，紫色承担品牌与交互。
 - 本地中文展示字体、两行首屏标题、宽松区块间距。
 - 手机独立重排，示意标识与核心操作清楚可达。
+- 登录以深炭功能面板承接创作入口，保留首页的播放意图、位置与焦点。
 
 ## Colors
 
 ### Primary
 
-品牌紫用于主按钮、选中边框、焦点及方向图标；亮紫用于悬停与强调反馈。沿用现有播放标志，不创造另一套官网标识。
+品牌紫用于主按钮、选中边框、焦点及方向图标；亮紫用于首页悬停与强调反馈。登录提交按钮保留品牌紫默认态，使用 login-primary-hover 专用悬停色，其普通白字对比度为 4.7083:1；不替换原首页悬停色或焦点色。沿用现有播放标志，不创造另一套官网标识。
 
 ### Neutral
 
 炭黑地面、浅色文字、辅助灰字、抬高一层的面板及细线组成主要界面。暖金来自影像，不是额外的界面状态色；创作方法区使用源码中的轻微底色变化。
+
+登录错误使用浅玫瑰色 login-error，并配合明确的原位文字反馈；连接状态与管理员说明使用辅助灰字，不能只靠颜色说明失败。
 
 邻近 sidecar 的八阶 OKLCH 色带仅用于面板预览，由实际色值推导；页面的规范色值仍以 frontmatter 为准。组件片段独立解析局部令牌，不依赖工作台样式。
 
@@ -127,6 +193,8 @@ components:
 
 Display 对应首屏两行标题，section 对应流程、方法、协作与收尾，headline 对应双入口，title 对应内容小标题；body、label、caption 分别承担阅读、控件与示意说明。普通正文常规字重，按钮与标题半粗，首屏标题使用展示粗重。中文使用正常字距。
 
+登录完整继承中文系统 UI 字体，不使用汉字覆盖有限的展示子集。紧凑品牌为 login-brand，标题复用 title，字段标签为 login-field-label，输入为 login-input，管理员说明为 login-help，连接及错误状态为 login-status。提交文字沿用 label（16px／600，行高 1.4）；18px 品牌和 13px 说明是本次接受的层级，不推成工作台通用字号。
+
 **The Two-Line Rule.** 首屏保留“看懂好视频，／把创意做成片。”两行关系；手机调整字号和结构，不挤压正文来维持桌面布局。
 
 ## Layout
@@ -137,22 +205,28 @@ Display 对应首屏两行标题，section 对应流程、方法、协作与收�
 
 820px 以下 display 使用 `clamp(38px, 6.65vw, 54px)`、body 为 17px、section 为 32px；480px 以下 display 使用 `clamp(32px, 8.55vw, 41px)`。主按钮高度依次为桌面至少 62px、中屏至少 54px；手机导航与轮播按钮至少 44px。手机图片按 66% / 68% 水平位置裁切，正文处于独立深色底面。
 
+登录面板按可见视口居中，宽度与内边距见 login-dialog；左右至少留 16px，最大高度为可见视口高度减 32px。监听 visualViewport 高度与顶部偏移，短视口内部纵向滚动，标题栏的品牌与关闭按钮 sticky 保持可达。480px 及以下采用 login-dialog-phone，标题栏下间距从 20px 调为 16px，标题下间距从 28px 调为 24px；其余表单尺度保持不变。
+
 ## Elevation & Depth
 
-玻璃、金属、岩石与暖光的深度由栅格素材提供。界面面板使用色阶、细边框和留白，没有通用卡片投影；影像上的示意文字有柔和黑色文字阴影。演示弹窗使用深色原生遮罩，其精确值及文字阴影保存在 sidecar 的 extensions。
+玻璃、金属、岩石与暖光的深度由栅格素材提供。界面面板使用色阶、细边框和留白，没有通用卡片投影；影像上的示意文字有柔和黑色文字阴影。演示弹窗使用深色原生遮罩，登录浮层另用功能性压暗（58%）与轻模糊（5px）区分输入前景；精确遮罩值保存在 sidecar 的 extensions。登录打开期间，根画布临时取 landing ground，使用 dark color-scheme 和 stable scrollbar-gutter；关闭完整恢复原属性，避免预留区露白或污染独立浅色界面。自动填充的内阴影只用于维持输入背景，不是卡片投影。
 
 ## Shapes
 
-按钮、媒体舞台和协作卡共用柔和矩形，缩略图略紧凑，演示弹窗略宽松；小型真实性标签使用小圆角。轮播、菜单和关闭控件采用圆形。真实样片允许 cover 裁切；这不改变工作台素材预览完整显示的规则。
+按钮、媒体舞台和协作卡共用柔和矩形，缩略图略紧凑，演示与登录弹窗使用 dialog 圆角；小型真实性标签使用小圆角。轮播、菜单和关闭控件采用圆形。登录输入与提交使用 compact 圆角，密码眼睛控件内嵌 2px，圆角相应为 inset-control（6px），触控区域仍为 44px；这是输入框内部形状关系。真实样片允许 cover 裁切；这不改变工作台素材预览完整显示的规则。
 
 ## Components
 
-- 主按钮是紫底白字，次按钮透明底配中性边框；悬停改变背景或边框（160ms ease-out）。键盘焦点为亮紫轮廓（2px，外偏移 5px）。文字链接悬停加下划线。导航手机展开后保持相同色系，Escape 关闭并恢复菜单按钮焦点。
+- 主按钮是紫底白字，次按钮透明底配中性边框；悬停改变背景或边框（160ms ease-out）。键盘焦点为亮紫轮廓（2px，外偏移 5px；登录输入例外见下）。文字链接悬停加下划线。导航手机展开后保持相同色系，Escape 关闭并恢复菜单按钮焦点。
 - 三段样片使用实际视频首帧缩略图、名称与 pressed 状态；选中边框外置。用户提供的三段视频无损拼成一支 15.125 秒、720p 静音影片，以真实播放时间驱动「光线唤醒 / 材质特写 / 英雄定格」的选中态，点击缩略图跳转对应分镜。不再用定时器切图或 CSS 推近模拟运镜。
-- 解码帧准备好前显示匹配封面，准备好后以 180ms 透明度过渡显示视频。首屏媒体离开视口、标签页隐藏、菜单或演示打开时暂停；减少动态效果与节省流量默认不设置视频地址，允许用户显式播放，播放按钮不禁用。视频失败保留封面与创作入口，并提供重试。实际播放与用户的播放意图分别记录，临时暂停后不覆盖用户决定。
+- 解码帧准备好前显示匹配封面，准备好后以 180ms 透明度过渡显示视频。首屏媒体离开视口、标签页隐藏、菜单、演示或登录打开时暂停；减少动态效果与节省流量默认不设置视频地址，允许用户显式播放，播放按钮不禁用。视频失败保留封面与创作入口，并提供重试。实际播放与用户的播放意图分别记录，临时暂停后不覆盖用户决定。
 - 五步流程使用单选 tablist、文字步骤与当前方向图标；支持方向键、Home、End 和 roving focus。画面旁保留“创作示意”及非实际项目数据说明。
 - 演示采用原生 dialog，支持关闭按钮、Escape 和遮罩关闭，锁定背景滚动并在关闭后恢复原焦点。16:9 原生视频控制完整显示影片，分镜按钮可跳转；标记为「静音分镜短片」，不冒充真实客户案例，不调用模型。演示播放时首屏暂停，减少重复解码。
-- 方法卡使用影像、标题与简短说明；协作卡通过细分隔线组织示意成员和状态。后者是静态展示，不能渲染为实际编辑锁或账户数据。首页没有输入框，不在此契约新增表单模式。
+- 方法卡使用影像、标题与简短说明；协作卡通过细分隔线组织示意成员和状态。后者是静态展示，不能渲染为实际编辑锁或账户数据。背景首页不嵌入表单，登录输入仅出现在已批准的浮层。
+- 登录采用原生 dialog：32px 既有品牌标识、紧凑标题、纵向手机号与密码、全宽提交、弱化管理员说明。输入高 48px、边框 1px；字段间距 20px，标签至输入 8px。密码右侧为 44px 显示／隐藏按钮。输入焦点为亮紫 2px 轮廓、外偏移 2px；图标与提交按钮保留原 5px 偏移。
+- 登录提交最小高度 48px，按 16px／1.4 行高、上下 12px 内边距与 1px 边框自然形成约 48.39px 的实际高度，不固定为整数截图高度。提交上距 28px，说明上距 24px。请求中禁用字段并显示“正在登录…”；输入透明度为 0.7、禁用按钮为 0.65，连接失败保留可用重试入口，凭据错误留在字段后并允许原位修改。
+- 登录支持关闭按钮、Escape、遮罩关闭和 Tab 焦点圈定；进入时聚焦标题，关闭恢复原控件焦点与滚动。打开暂停影片并保留用户播放意图，关闭后按原意图与可见性恢复。入场仅在未启用减少动态效果时执行（180ms，透明度 0.8→1、下移 8px→0）；减少动态效果下无入场动画。
+- `/` 与 `/login` 复用首页实例，创作入口保留站内目标白名单；直达和刷新 `/login` 仍打开浮层。仅浮层打开后按需加载表单并检查 auth/status 与 session，普通 `/` 不预读账户接口。复用现有认证、手机号和密码规则；请求通过 AbortController 限制为 15 秒并防重，关闭卸载表单、清除密码并忽略迟到结果。后台登录留在官网页脚，独立账户流程不套用此暗色表单。
 
 ## Do's and Don'ts
 
@@ -161,6 +235,7 @@ Display 对应首屏两行标题，section 对应流程、方法、协作与收�
 - **Do** 将官网令牌限制在 landing 表面，保留浅色工作台的原有规范。
 - **Do** 保留示意影像、分镜短片和协作状态的真实性说明，视频与封面使用同一公开来源。
 - **Do** 维护手机可达操作、键盘焦点及减少动态效果下的手动切换。
+- **Do** 保持登录专用悬停色、系统字体、原位状态与关闭后的完整状态恢复。
 
 ### Don't:
 

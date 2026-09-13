@@ -1,0 +1,37 @@
+.vd-home .vd-login { box-sizing: border-box; position: fixed; inset: calc(var(--login-viewport-top, 0px) + var(--login-viewport-height, 100dvh) / 2) 0 auto; translate: 0 -50%; width: min(440px, calc(100% - 32px)); max-height: calc(var(--login-viewport-height, 100dvh) - 32px); margin: 0 auto; padding: 28px 32px 32px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--home-line); border-radius: 16px; background: var(--home-panel); color: var(--home-text); color-scheme: dark; font-family: inherit; font-size: 16px; line-height: 1.5; scrollbar-width: thin; scrollbar-color: var(--home-muted) var(--home-panel); }
+.vd-login::backdrop { background: rgb(8 7 10 / 58%); backdrop-filter: blur(5px); }
+.vd-login-heading { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; background: var(--home-panel); }
+.vd-login-brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 600; }
+.vd-home .vd-login .vd-login-close { width: 44px; height: 44px; border-color: transparent; background: transparent; flex-shrink: 0; }
+.vd-home .vd-login-close:hover { background: var(--home-ground); border-color: var(--home-line); }
+.vd-home .vd-login h2 { margin: 0 0 28px; font-family: inherit; font-size: 24px; line-height: 1.4; font-weight: 600; }
+.vd-login h2:focus { outline: none; }
+.vd-login-form fieldset { display: flex; flex-direction: column; min-width: 0; margin: 0; padding: 0; border: 0; }
+.vd-login-field { display: flex; flex-direction: column; gap: 8px; font-size: 14px; font-weight: 500; }
+.vd-login-field + .vd-login-field { margin-top: 20px; }
+.vd-login input { box-sizing: border-box; width: 100%; min-width: 0; height: 48px; border: 1px solid var(--home-line); border-radius: 8px; padding: 12px 14px; background: var(--home-ground); color: var(--home-text); font: inherit; font-size: 16px; font-weight: 400; caret-color: var(--home-accent-hover); }
+.vd-login input::placeholder { color: var(--home-muted); opacity: 1; }
+.vd-login input:focus-visible { outline: 2px solid var(--home-accent-hover); outline-offset: 2px; border-color: var(--home-accent-hover); }
+.vd-login input:disabled { opacity: 0.7; }
+.vd-login input:autofill { box-shadow: 0 0 0 1000px var(--home-ground) inset; -webkit-text-fill-color: var(--home-text); caret-color: var(--home-accent-hover); }
+.vd-login-password { position: relative; margin-top: 8px; }
+.vd-login-password input { padding-right: 54px; }
+.vd-login-password button { position: absolute; inset: 2px 2px 2px auto; display: grid; place-items: center; width: 44px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--home-muted); }
+.vd-login-password button:hover { color: var(--home-text); background: var(--home-panel); }
+.vd-home .vd-login .vd-login-submit { width: 100%; min-height: 48px; margin-top: 28px; padding: 12px 20px; font-size: 16px; border-radius: 8px; }
+.vd-home .vd-login .vd-login-submit:hover { background: #6355f6; }
+.vd-login fieldset:disabled button { opacity: 0.65; cursor: not-allowed; }
+.vd-home .vd-login-help { margin: 24px 0 0; color: var(--home-muted); font-size: 13px; line-height: 1.6; }
+.vd-home .vd-login-status { margin: 16px 0 0; color: var(--home-muted); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.vd-home .vd-login-status p { margin: 0; font: inherit; }
+.vd-home .vd-login-error { margin: 16px 0 0; color: #ffc0c4; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.vd-home .vd-login-retry, .vd-home .vd-login-setup { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 0; border: 0; background: transparent; color: var(--home-text); font: inherit; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+@media (prefers-reduced-motion: no-preference) {
+  .vd-login[open] { animation: vd-login-arrive 180ms cubic-bezier(0.16, 1, 0.3, 1); }
+  @keyframes vd-login-arrive { from { opacity: 0.8; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+}
+@media (max-width: 480px) {
+  .vd-home .vd-login { padding: 20px 24px 24px; }
+  .vd-login-heading { margin-bottom: 16px; }
+  .vd-home .vd-login h2 { margin-bottom: 24px; }
+}

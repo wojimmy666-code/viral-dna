@@ -212,6 +212,133 @@ async def login(client, name="13800000001", admin=False):
     return response.json()
 
 
+def test_enterprise_member_direct_creation_removal_restore_and_legacy_invites(sandbox):
+    async def scenario():
+        path = "/api/v1/account/members"
+        async with client_for(sandbox) as owner, client_for(sandbox) as newcomer:
+            await login(owner)
+            created = await owner.post(
+                path,
+                json={
+                    "username": "13800000003",
+                    "display_name": "新成员",
+                    "password": "12345678",
+                },
+            )
+            assert created.status_code == 200, created.text
+            member = created.json()
+            assert member["status"] == "active" and "activation_token" not in member
+            authenticated = await newcomer.post(
+                "/api/v1/auth/login", json={"username": "13800000003", "password": "12345678"}
+            )
+            assert authenticated.status_code == 200
+            newcomer.headers["X-CSRF-Token"] = authenticated.json()["csrf_token"]
+            assert authenticated.json()["account_id"] == str(sandbox.owner.account_id)
+            assert authenticated.json()["role"] == "member"
+            before = await owner.get(f"/api/v1/projects/{sandbox.project.id}/readonly")
+            assert before.status_code == 200
+            assert (
+                await newcomer.get(f"/api/v1/projects/{sandbox.project.id}/readonly")
+            ).status_code == 200
+            await acquire(newcomer, sandbox.project.id)
+            removed = await owner.delete(f"{path}/{member['id']}")
+            assert removed.status_code == 200
+            assert (await newcomer.get("/api/v1/auth/session")).status_code == 401
+            assert (
+                await owner.get(f"/api/v1/projects/{sandbox.project.id}/readonly")
+            ).json() == before.json()
+            listing = (await owner.get(path)).json()["items"]
+            assert (
+                next(item for item in listing if item["id"] == member["id"])["status"] == "disabled"
+            )
+            assert not sandbox.auth.lease(sandbox.owner, str(sandbox.project.id))["occupied"]
+            restored = await owner.post(
+                f"{path}/{member['id']}/restore", json={"password": "restored-123"}
+            )
+            assert restored.status_code == 200 and restored.json()["id"] == member["id"]
+            assert (await newcomer.get("/api/v1/auth/session")).status_code == 401
+            assert (
+                await newcomer.post(
+                    "/api/v1/auth/login", json={"username": "13800000003", "password": "12345678"}
+                )
+            ).status_code == 401
+            assert (
+                await newcomer.post(
+                    "/api/v1/auth/login",
+                    json={"username": "13800000003", "password": "restored-123"},
+                )
+            ).status_code == 200
+            reset = await owner.post(
+                f"{path}/{member['id']}/reset", json={"password": "reset-again-456"}
+            )
+            assert reset.status_code == 200
+            assert (await newcomer.get("/api/v1/auth/session")).status_code == 401
+            legacy = await owner.post(
+                path, json={"username": "13800000004", "display_name": "旧版邀请"}
+            )
+            assert legacy.status_code == 200 and legacy.json()["activation_token"]
+            legacy_id = legacy.json()["id"]
+            assert (await owner.post(f"{path}/{legacy_id}/reset")).json()["activation_token"]
+            assert (await owner.delete(f"{path}/{legacy_id}")).status_code == 200
+            assert (await owner.post(f"{path}/{legacy_id}/restore")).json()["activation_token"]
+
+    asyncio.run(scenario())
+
+
+def test_member_management_requires_owner_csrf_and_same_enterprise(sandbox):
+    async def scenario():
+        path = "/api/v1/account/members"
+        payload = {"username": "13800000003", "display_name": "成员", "password": "12345678"}
+        async with (
+            client_for(sandbox) as owner,
+            client_for(sandbox) as member,
+            client_for(sandbox) as person,
+            client_for(sandbox) as admin,
+        ):
+            owner_session = await login(owner)
+            member_session = await login(member, "13800000002")
+            person_session = await login(person, "13900000001")
+            await login(admin, "admin", admin=True)
+            target = f"{path}/{member_session['user_id']}"
+            for unauthorized in (member, person, admin):
+                assert (await unauthorized.get(path)).status_code in (401, 403)
+                assert (await unauthorized.post(path, json=payload)).status_code in (401, 403)
+                assert (await unauthorized.delete(target)).status_code in (401, 403)
+                for action in ("reset", "restore"):
+                    assert (
+                        await unauthorized.post(
+                            f"{target}/{action}", json={"password": "new-secret-456"}
+                        )
+                    ).status_code in (401, 403)
+            del owner.headers["X-CSRF-Token"]
+            assert (await owner.post(path, json=payload)).status_code == 403
+            owner.headers["X-CSRF-Token"] = owner_session["csrf_token"]
+            for override in (
+                {"account_id": person_session["account_id"]},
+                {"role": "owner"},
+                {"password": "short"},
+                {"username": "not-mobile"},
+            ):
+                assert (await owner.post(path, json={**payload, **override})).status_code == 422
+            assert (await owner.delete(f"{path}/{owner_session['user_id']}")).status_code == 409
+            assert (
+                await owner.post(
+                    f"{path}/{owner_session['user_id']}/reset", json={"password": "new-secret-456"}
+                )
+            ).status_code == 409
+            for action in ("reset", "restore"):
+                assert (
+                    await owner.post(
+                        f"{path}/{person_session['user_id']}/{action}",
+                        json={"password": "new-secret-456"},
+                    )
+                ).status_code == 404
+            assert (await owner.delete(f"{path}/{person_session['user_id']}")).status_code == 404
+            assert len((await owner.get(path)).json()["items"]) == 2
+
+    asyncio.run(scenario())
+
+
 async def acquire(client, project_id, editor="editor-tab-one-123", token="first-lease-token-" * 3):
     body = {"editor_id": editor, "token": token}
     response = await client.post(f"/api/v1/projects/{project_id}/edit-lease/acquire", json=body)
