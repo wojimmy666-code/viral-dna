@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, ArrowUpRight, Check, Eye, List, LockSimple, Pause, Play, X } from "@phosphor-icons/react";
 import { loginHref } from "../accounts/login-destination.js";
+import HomeFilm from "./HomeFilm.jsx";
+import { FILM_SCENES } from "./home-media.js";
 import "./home.css";
 
 const IMAGE_SOURCES = {
@@ -9,20 +11,19 @@ const IMAGE_SOURCES = {
   "thumb-close": { png: "/home/thumb-close.png", webp: "/home/thumb-close.webp" },
   "thumb-scene": { png: "/home/thumb-scene.png", webp: "/home/thumb-scene.webp" },
   "thumb-motion": { png: "/home/thumb-motion.png", webp: "/home/thumb-motion.webp" },
+  "film-01": { png: "/home/video/amber-01.png", webp: "/home/video/amber-01.webp", width: 1280, height: 720 },
+  "film-02": { png: "/home/video/amber-02.png", webp: "/home/video/amber-02.webp", width: 1280, height: 720 },
+  "film-03": { png: "/home/video/amber-03.png", webp: "/home/video/amber-03.webp", width: 1280, height: 720 },
 };
 
-export function SceneImage({ name, className = "", alt = "", eager = false }) {
+export function SceneImage({ name, className = "", alt = "", eager = false, priority = false }) {
   const [failure, setFailure] = useState(0);
   useEffect(() => setFailure(0), [name]);
   const source = IMAGE_SOURCES[name];
-  return <picture className={className}>{failure >= 2 ? <span className="vd-image-unavailable" role="img" aria-label={alt || "展示图片暂时不可用"}>画面暂时不可用</span> : <>{failure === 0 && <source type="image/webp" srcSet={source.webp} />}<img src={source.png} alt={alt} width="1672" height="941" loading={eager ? "eager" : "lazy"} fetchPriority={eager && name === "hero-scene" ? "high" : "auto"} onError={() => setFailure(current => current + 1)} /></>}</picture>;
+  return <picture className={className}>{failure >= 2 ? <span className="vd-image-unavailable" role="img" aria-label={alt || "展示图片暂时不可用"}>画面暂时不可用</span> : <>{failure === 0 && <source type="image/webp" srcSet={source.webp} />}<img src={source.png} alt={alt} width={source.width || 1672} height={source.height || 941} loading={eager ? "eager" : "lazy"} fetchPriority={priority || (eager && name === "hero-scene") ? "high" : "auto"} onError={() => setFailure(current => current + 1)} /></>}</picture>;
 }
 
-const SAMPLES = [
-  { label: "产品特写", image: "hero-scene", thumbnail: "thumb-close", alt: "暖金侧光下，琥珀色玻璃瓶立于黑色岩石上", detail: "用材质、光线与细节，建立产品的第一印象。" },
-  { label: "场景演绎", image: "thumb-scene", thumbnail: "thumb-scene", alt: "岩石峡谷中的琥珀色玻璃瓶，远处透入暖色光线", detail: "把产品放进有情绪的场景，让画面有了故事。" },
-  { label: "运镜节奏", image: "thumb-motion", thumbnail: "thumb-motion", alt: "银色金属瓶盖与琥珀色瓶身的倾斜近景", detail: "通过景别变化与镜头衔接，组织成片的节奏。" },
-];
+const SAMPLES = FILM_SCENES;
 const NAVIGATION = [["作品案例", "showcase"], ["创作流程", "workflow"], ["Skill", "skills"], ["团队协作", "team"]];
 // Explicit public presentation list. Never populated from an account's assets,
 // projects, provider credentials, or the authenticated Skill catalog.
@@ -85,23 +86,44 @@ function useReducedMotion() {
   return reduced;
 }
 
+function useSaveData() {
+  const [saveData, setSaveData] = useState(() => Boolean(navigator.connection?.saveData));
+  useEffect(() => {
+    const connection = navigator.connection;
+    const update = () => setSaveData(Boolean(connection?.saveData));
+    connection?.addEventListener?.("change", update);
+    return () => connection?.removeEventListener?.("change", update);
+  }, []);
+  return saveData;
+}
+
 function DemoDialog({ onClose, initialScene }) {
   const dialog = useRef(null);
+  const film = useRef(null);
   const [scene, setScene] = useState(initialScene);
+  const [wantsPlay, setWantsPlay] = useState(true);
+  const [visible, setVisible] = useState(!document.hidden);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     const previousFocus = document.activeElement;
     const element = dialog.current;
     element.showModal();
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { element.close(); document.body.style.overflow = previousOverflow; previousFocus?.focus(); };
+    const visibility = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", visibility);
+    return () => { document.removeEventListener("visibilitychange", visibility); element.close(); document.body.style.overflow = previousOverflow; previousFocus?.focus(); };
   }, []);
   return <dialog ref={dialog} className="vd-demo" aria-labelledby="vd-demo-title" onCancel={event => { event.preventDefault(); onClose(); }} onClose={() => { if (!dialog.current?.open) onClose(); }} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); onClose(); } }} onClick={event => { if (event.target === dialog.current) onClose(); }}>
     <div className="vd-demo-heading"><h2 id="vd-demo-title">从一个产品，到一段故事</h2><button type="button" className="vd-icon-button" aria-label="关闭演示" onClick={onClose}><X size={24} /></button></div>
-    <SceneImage name={SAMPLES[scene].thumbnail} alt={SAMPLES[scene].alt} className="vd-demo-image" eager />
-    <div className="vd-demo-body"><p className="vd-caption">视觉示意 · 非真实案例 · 静态分镜演示</p><h3>{SAMPLES[scene].label}</h3><p>{SAMPLES[scene].detail}</p>
-      <div className="vd-demo-steps" aria-label="选择演示分镜">{SAMPLES.map((item, index) => <button type="button" key={item.label} aria-pressed={scene === index} onClick={() => setScene(index)}>{item.label}</button>)}</div>
-      <p className="vd-demo-explanation">在创作台中，你可以逐张生成和采用分镜图，再制作分镜视频，调整顺序并剪辑导出。这里展示的是画面组织方式，不会调用生成模型。</p>
+    <HomeFilm ref={film} className="vd-demo-image" controls initialScene={initialScene} playing={wantsPlay && visible}
+      poster={<SceneImage name={SAMPLES[scene].image} alt={SAMPLES[scene].alt} eager />}
+      posterUrl={IMAGE_SOURCES[SAMPLES[scene].image].webp} onSceneChange={setScene}
+      onUserIntent={setWantsPlay} onBlocked={() => setWantsPlay(false)} onFailure={setFailed} />
+    <div className="vd-demo-body"><p className="vd-caption">视觉示意 · 非真实案例 · 静音分镜短片</p><h3>{SAMPLES[scene].label}</h3><p>{SAMPLES[scene].detail}</p>
+      {failed && <p className="vd-media-status" role="status">视频暂时无法播放。<button type="button" className="vd-media-retry" onClick={() => { film.current?.retry(); setWantsPlay(true); }}>重试播放</button></p>}
+      <div className="vd-demo-steps" aria-label="选择演示分镜">{SAMPLES.map((item, index) => <button type="button" key={item.label} aria-pressed={scene === index} onClick={() => { setScene(index); film.current?.seekToScene(index); if (failed) film.current?.retry(); setWantsPlay(true); }}>{item.label}</button>)}</div>
+      <p className="vd-demo-explanation">三段分镜按顺序组成这支静音示意短片。在创作台中，你可以生成和采用画面、制作分镜视频，再调整顺序并剪辑导出。播放本片不会调用生成模型。</p>
       <Link className="vd-button vd-primary" to={loginHref("/projects/new")}>开始自己的创作<ArrowRight size={20} /></Link>
     </div>
   </dialog>;
@@ -109,34 +131,52 @@ function DemoDialog({ onClose, initialScene }) {
 
 export default function HomePage() {
   const reduced = useReducedMotion();
+  const saveData = useSaveData();
   const [sample, setSample] = useState(0);
-  const [playing, setPlaying] = useState(() => !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  const [active, setActive] = useState(true);
+  const [wantsPlay, setWantsPlay] = useState(() => !window.matchMedia("(prefers-reduced-motion: reduce)").matches && !navigator.connection?.saveData);
+  const [playing, setPlaying] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [active, setActive] = useState(false);
   const [visible, setVisible] = useState(!document.hidden);
-  const [interacting, setInteracting] = useState(false);
   const [menu, setMenu] = useState(false);
   const [demo, setDemo] = useState(false);
   const hero = useRef(null), menuButton = useRef(null);
-  const rotating = playing && !reduced && active && visible && !interacting && !menu && !demo;
+  const heroFilm = useRef(null);
+  const shouldPlay = wantsPlay && active && visible && !menu && !demo;
   useEffect(() => {
     document.title = "ViralDNA · 看懂好视频，把创意做成片";
-    const observer = new IntersectionObserver(entries => setActive(entries[0].isIntersecting), { threshold: 0.15 });
-    observer.observe(hero.current);
+    const observer = new IntersectionObserver(entries => setActive(entries[0].isIntersecting && entries[0].intersectionRatio >= 0.15), { threshold: 0.15 });
+    observer.observe(hero.current.querySelector(".vd-hero-image"));
     const visibility = () => setVisible(!document.hidden);
     document.addEventListener("visibilitychange", visibility);
     return () => { observer.disconnect(); document.removeEventListener("visibilitychange", visibility); };
   }, []);
   useEffect(() => {
-    if (!rotating) return;
-    const timer = setInterval(() => setSample(current => (current + 1) % SAMPLES.length), 7000);
-    return () => clearInterval(timer);
-  }, [rotating, sample]);
+    if (reduced || saveData) setWantsPlay(false);
+  }, [reduced, saveData]);
   useEffect(() => {
     if (!menu) return;
     const escape = event => { if (event.key === "Escape") { setMenu(false); menuButton.current?.focus(); } };
     document.addEventListener("keydown", escape);
     return () => document.removeEventListener("keydown", escape);
   }, [menu]);
+  function showHero() {
+    if (!active) hero.current?.scrollIntoView({ behavior: "instant", block: "start" });
+  }
+  function selectScene(index) {
+    setSample(index);
+    heroFilm.current?.seekToScene(index);
+    const canStart = !reduced && !saveData;
+    if (failed && canStart) heroFilm.current?.retry();
+    setWantsPlay(canStart);
+    if (canStart) showHero();
+  }
+  function togglePlayback() {
+    if (wantsPlay && !failed) { setWantsPlay(false); return; }
+    if (failed) heroFilm.current?.retry();
+    showHero();
+    setWantsPlay(true);
+  }
   return <div className="vd-home">
     <a className="vd-skip" href="#home-content">跳至主要内容</a>
     <header className="vd-navigation">
@@ -146,15 +186,18 @@ export default function HomePage() {
       <button ref={menuButton} className="vd-icon-button vd-menu-toggle" type="button" aria-label={menu ? "关闭导航" : "打开导航"} aria-controls="vd-main-navigation" aria-expanded={menu} onClick={() => setMenu(!menu)}>{menu ? <X size={24} /> : <List size={24} />}</button>
     </header>
     <main id="home-content">
-      <section ref={hero} className={`vd-hero${rotating ? " is-playing" : ""}${sample ? " is-alternate" : ""}`} id="showcase" aria-label="作品视觉示意">
-        <SceneImage key={sample} name={SAMPLES[sample].image} alt={SAMPLES[sample].alt} className="vd-hero-image" eager />
+      <section ref={hero} className={`vd-hero${playing && shouldPlay ? " is-playing" : ""}`} id="showcase" aria-label="作品视觉示意">
+        <HomeFilm ref={heroFilm} className="vd-hero-image" playing={shouldPlay}
+          poster={<SceneImage name={SAMPLES[sample].image} alt={SAMPLES[sample].alt} eager priority />}
+          posterUrl={IMAGE_SOURCES[SAMPLES[sample].image].webp} onSceneChange={setSample}
+          onPlaybackChange={setPlaying} onBlocked={() => setWantsPlay(false)} onFailure={setFailed} />
         <div className="vd-hero-copy"><h1>看懂好视频，<br />把创意做成片。</h1><p>从原视频分析或 Skill 出发，连接分镜、图像、视频与剪辑，<br className="vd-desktop-break" />让每一步创作都清晰可控。</p>
           <div className="vd-hero-actions"><Link className="vd-button vd-primary" to={loginHref()}>进入创作台<ArrowRight size={25} /></Link><button className="vd-button vd-secondary" type="button" onClick={() => setDemo(true)}><Play size={24} weight="fill" />观看演示</button></div>
         </div>
-        <div className="vd-sample-dock" onMouseEnter={() => setInteracting(true)} onMouseLeave={() => setInteracting(false)} onFocus={() => setInteracting(true)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setInteracting(false); }}>
-          <p className="vd-sample-note">视觉示意 · 非真实案例</p>
-          <div className="vd-sample-controls"><div className="vd-samples" aria-label="切换示意画面">{SAMPLES.map((item, index) => <button type="button" key={item.label} className="vd-sample" aria-label={`查看${item.label}`} aria-pressed={sample === index} onClick={() => { setSample(index); setPlaying(false); }}><SceneImage name={item.thumbnail} alt="" eager /><span>{item.label}</span></button>)}</div>
-            <button className="vd-icon-button vd-play-toggle" type="button" aria-label={playing && !reduced ? "暂停画面轮播" : "播放画面轮播"} disabled={reduced} title={reduced ? "已遵循系统减少动态效果设置，可手动切换画面" : undefined} onClick={() => setPlaying(!playing)}>{playing && !reduced ? <Pause size={24} weight="fill" /> : <Play size={24} weight="fill" />}</button>
+        <div className="vd-sample-dock">
+          <p className="vd-sample-note">视觉示意 · 非真实案例{failed && <span role="status"> · 视频暂不可用，可重试播放</span>}</p>
+          <div className="vd-sample-controls"><div className="vd-samples" aria-label="切换视频分镜">{SAMPLES.map((item, index) => <button type="button" key={item.label} className="vd-sample" aria-label={`查看${item.label}`} aria-pressed={sample === index} onClick={() => selectScene(index)}><SceneImage name={item.thumbnail} alt="" eager /><span>{item.label}</span></button>)}</div>
+            <button className="vd-icon-button vd-play-toggle" type="button" aria-label={failed ? "重试播放视频" : wantsPlay ? "暂停视频" : "播放视频"} title={(reduced || saveData) && !wantsPlay ? "已关闭自动播放；点击可手动播放视频" : undefined} onClick={togglePlayback}>{wantsPlay && !failed ? <Pause size={24} weight="fill" /> : <Play size={24} weight="fill" />}</button>
           </div>
         </div>
       </section>

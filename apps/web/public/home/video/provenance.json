@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "purpose": "用户指定公开首页使用的三段琥珀瓶分镜视频及其派生封面",
+  "prepared_on": "2026-09-13",
+  "authorization": "用户明确要求将所提供的三个本地视频应用到主页；本轮仅本地接入，未部署或推送",
+  "source_type": "user_provided_local_video",
+  "sources": [
+    { "filename": "视频节点 1 .mp4", "sha256": "09f0cfcfe5c30b238ba5fe5efe4716b1650eb94aa6ec9f50774f6911ecd0ca02", "bytes": 5048374, "video_frames": 121, "frame_rate": 24, "width": 1280, "height": 720, "chapter": "光线唤醒", "start_frame": 0 },
+    { "filename": "视频节点 2.mp4", "sha256": "4b7a2b7910874ed5bff23180296ac8c5d64453d882ec51422c4756558b60aee9", "bytes": 3636237, "video_frames": 121, "frame_rate": 24, "width": 1280, "height": 720, "chapter": "材质特写", "start_frame": 121 },
+    { "filename": "视频节点 3.mp4", "sha256": "eefd9895425e1a07b1ad0e3d44142f989d13dc4919577afd964f3b843010da59", "bytes": 5208204, "video_frames": 121, "frame_rate": 24, "width": 1280, "height": 720, "chapter": "英雄定格", "start_frame": 242 }
+  ],
+  "film": {
+    "filename": "amber-film-v1.mp4",
+    "sha256": "e6b8f30f65c10cc9e2d217d60eb18b3f193953a6682f43a2c0ffca29cd0be745",
+    "bytes": 13562561,
+    "width": 1280,
+    "height": 720,
+    "frame_rate": 24,
+    "frames": 363,
+    "duration_seconds": 15.125,
+    "video_codec": "h264",
+    "audio_tracks": 0,
+    "processing": "按1、2、3顺序拼接，视频流直接复制，不裁剪、不缩放、不插帧、不二次有损编码；仅首页派生文件移除音轨，moov前置以支持流式加载",
+    "verification": "已对比全部363帧解码后的MD5，与按顺序排列的原视频画面完全相同；原始下载文件保留"
+  },
+  "posters": [
+    { "source_index": 1, "source_frame": 0, "png": "amber-01.png", "webp": "amber-01.webp", "width": 1280, "height": 720 },
+    { "source_index": 2, "source_frame": 0, "png": "amber-02.png", "webp": "amber-02.webp", "width": 1280, "height": 720 },
+    { "source_index": 3, "source_frame": 0, "png": "amber-03.png", "webp": "amber-03.webp", "width": 1280, "height": 720 }
+  ],
+  "poster_processing": "从各原视频首个可解码帧提取PNG，并编码quality=92的WebP显示版本，不调用图像或视频生成模型",
+  "privacy_boundary": "仅显式公开的本组展示文件，不包含账户资产地址、账户标识、私有工作区或模型凭据；原件本地绝对路径不发布",
+  "quality_note": "原视频真实规格为720p；本次没有宣称或伪造1080p/4K，也不承诺生成画面本身不存在瑕疵。"
+}

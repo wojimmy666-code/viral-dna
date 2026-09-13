@@ -11,12 +11,14 @@ import { localBrowser, pause } from "./helpers/local-browser.mjs";
 const webRoot = fileURLToPath(new URL("..", import.meta.url));
 const buildRoot = join(webRoot, "dist/client");
 const screenshots = process.env.HOMEPAGE_SCREENSHOT_DIR && resolve(process.env.HOMEPAGE_SCREENSHOT_DIR);
-const mime = { ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".webp": "image/webp", ".png": "image/png", ".ttf": "font/ttf", ".html": "text/html; charset=utf-8" };
+const mime = { ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".webp": "image/webp", ".png": "image/png", ".mp4": "video/mp4", ".ttf": "font/ttf", ".html": "text/html; charset=utf-8" };
 
 test("public homepage: privacy boundary, responsive UI, keyboard controls and login return", { timeout: 180000 }, async t => {
   await stat(join(buildRoot, "index.html"));
   const requests = [], errors = [];
   let imageFailure = false;
+  let videoFailure = false, holdVideo = false;
+  const releaseVideo = [];
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://local.fixture"), path = url.pathname;
     requests.push(path);
@@ -26,12 +28,22 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
     if (path === "/api/v1/auth/login") return json({ user_id: "fixture-user", account_id: "fixture-account", auth_mode: "password", account_kind: "personal", account_name: "验收示意账户", display_name: "验收用户", role: "owner", csrf_token: "fixture-only" });
     if (path.startsWith("/api/")) return json({ items: [], records: [], projects: [], skills: [], total: 0 });
     if (imageFailure && path.startsWith("/home/") && /\.(webp|png)$/.test(path)) { response.writeHead(404); response.end(); return; }
+    if (videoFailure && path.endsWith(".mp4")) { response.writeHead(404, { "Cache-Control": "no-store" }); response.end(); return; }
+    if (holdVideo && path.endsWith(".mp4")) await new Promise(release => releaseVideo.push(release));
     try {
       let file = resolve(buildRoot, "." + decodeURIComponent(path));
       if (!file.startsWith(buildRoot + sep)) file = join(buildRoot, "index.html");
       if (!extname(file)) file = join(buildRoot, "index.html");
       const data = await readFile(file);
-      response.writeHead(200, { "Content-Type": mime[extname(file)] || "application/octet-stream", "Cache-Control": "no-store" }); response.end(data);
+      const headers = { "Content-Type": mime[extname(file)] || "application/octet-stream", "Cache-Control": "no-store", "Accept-Ranges": "bytes" };
+      const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || "");
+      if (range) {
+        const start = Number(range[1]), end = Math.min(range[2] ? Number(range[2]) : data.length - 1, data.length - 1);
+        if (start > end) { response.writeHead(416, { "Content-Range": `bytes */${data.length}` }); response.end(); return; }
+        response.writeHead(206, { ...headers, "Content-Range": `bytes ${start}-${end}/${data.length}`, "Content-Length": end - start + 1 }); response.end(data.subarray(start, end + 1));
+      } else {
+        response.writeHead(200, { ...headers, "Content-Length": data.length }); response.end(data);
+      }
     } catch { response.writeHead(404); response.end(); }
   });
   await new Promise(resolveServer => server.listen(0, "127.0.0.1", resolveServer));
@@ -58,12 +70,12 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
   async function key(keyName, code = keyName) { const windowsVirtualKeyCode = ({ Escape: 27, ArrowDown: 40, End: 35, Tab: 9 })[keyName]; await send("Input.dispatchKeyEvent", { type: "keyDown", key: keyName, code, windowsVirtualKeyCode }); await send("Input.dispatchKeyEvent", { type: "keyUp", key: keyName, code, windowsVirtualKeyCode }); }
   async function resetHero() {
     await evaluate("window.scrollTo({top:0,behavior:'instant'})");
-    // Select through the real control and leave playback paused. A screenshot
-    // can take longer than the carousel interval on slower acceptance hosts.
-    await click('[aria-label="查看产品特写"]');
+    await click('[aria-label="查看光线唤醒"]');
+    await click('[aria-label="暂停视频"]');
     await ready("!document.querySelector('.vd-hero.is-playing')");
+    await ready("document.querySelector('.vd-hero video').paused");
     await ready("document.querySelector('.vd-hero-image img').complete && document.querySelector('.vd-hero-image img').naturalWidth");
-    assert.equal(await evaluate("document.querySelector('[aria-label=\"查看产品特写\"]').getAttribute('aria-pressed')"), "true");
+    assert.equal(await evaluate("document.querySelector('[aria-label=\"查看光线唤醒\"]').getAttribute('aria-pressed')"), "true");
     await evaluate("document.getAnimations().forEach(animation => { animation.pause(); animation.currentTime = 0; })");
   }
   try {
@@ -90,17 +102,25 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
       await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
     });
     await t.test("samples, pause, dialog, focus restoration and workflow keyboard navigation", async () => {
-      await click('[aria-label="查看场景演绎"]');
-      assert.equal(await evaluate("document.querySelector('[aria-label=\"查看场景演绎\"]').getAttribute('aria-pressed')"), "true");
-      assert.equal(await evaluate("document.querySelector('.vd-hero.is-playing') === null"), true);
-      await click('[aria-label="播放画面轮播"]');
-      assert.equal(await evaluate("document.querySelector('.vd-hero.is-playing') !== null"), true);
-      await click('[aria-label="暂停画面轮播"]');
+      await click('[aria-label="查看材质特写"]');
+      await ready("document.querySelector('.vd-hero video').currentTime >= 121 / 24 && !document.querySelector('.vd-hero video').paused");
+      assert.equal(await evaluate("document.querySelector('[aria-label=\"查看材质特写\"]').getAttribute('aria-pressed')"), "true");
+      await click('[aria-label="暂停视频"]');
+      await ready("document.querySelector('.vd-hero video').paused");
+      const pausedTime = await evaluate("document.querySelector('.vd-hero video').currentTime");
+      await pause(250);
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').currentTime"), pausedTime);
+      await click('[aria-label="播放视频"]');
+      await ready("document.querySelector('.vd-hero.is-playing') && !document.querySelector('.vd-hero video').paused");
       await evaluate("document.querySelector('.vd-hero-actions button').focus()");
       await click('.vd-hero-actions button'); await ready("document.querySelector('dialog[open]')");
-      assert.match(await evaluate("document.querySelector('dialog').innerText"), /静态分镜演示/);
+      await ready("document.querySelector('.vd-demo video').currentTime >= 121 / 24 && !document.querySelector('.vd-demo video').paused");
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').paused"), true);
+      assert.match(await evaluate("document.querySelector('dialog').innerText"), /静音分镜短片/);
+      assert.equal(await evaluate("document.querySelector('.vd-demo video').controls"), true);
       await click('.vd-demo-steps button:last-child');
-      assert.equal(await evaluate("document.querySelector('.vd-demo h3').textContent"), "运镜节奏");
+      await ready("document.querySelector('.vd-demo video').currentTime >= 242 / 24");
+      assert.equal(await evaluate("document.querySelector('.vd-demo h3').textContent"), "英雄定格");
       await shot("demo-desktop"); await key("Escape"); await ready("!document.querySelector('dialog')");
       assert.equal(await evaluate("document.activeElement === document.querySelector('.vd-hero-actions button')"), true);
       await evaluate("document.getElementById('vd-step-0').focus()"); await key("ArrowDown");
@@ -109,11 +129,68 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
       await key("End"); assert.equal(await evaluate("document.activeElement.id"), "vd-step-4");
       assert.deepEqual(errors, []);
     });
+    await t.test("actual film advances chapters, loops, pauses offscreen and honors page visibility", async () => {
+      await load(); await ready("document.querySelector('.vd-hero video').currentTime > 0 && !document.querySelector('.vd-hero video').paused");
+      assert.equal(await evaluate("document.querySelectorAll('.vd-home video').length"), 1);
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').muted && document.querySelector('.vd-hero video').playsInline"), true);
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').videoWidth"), 1280);
+      assert.ok(Math.abs(await evaluate("document.querySelector('.vd-hero video').duration") - 15.125) < 0.01);
+      await evaluate("document.querySelector('.vd-hero video').currentTime = 4.9");
+      await ready("document.querySelector('[aria-label=\"查看材质特写\"]').getAttribute('aria-pressed') === 'true'");
+      await evaluate("document.querySelector('.vd-hero video').currentTime = 10");
+      await ready("document.querySelector('[aria-label=\"查看英雄定格\"]').getAttribute('aria-pressed') === 'true'");
+      await evaluate("document.querySelector('.vd-hero video').currentTime = 14.95");
+      await ready("document.querySelector('.vd-hero video').currentTime < 1 && document.querySelector('[aria-label=\"查看光线唤醒\"]').getAttribute('aria-pressed') === 'true'");
+      await evaluate("document.getElementById('workflow').scrollIntoView({behavior:'instant'})");
+      await ready("document.querySelector('.vd-hero video').paused");
+      await evaluate("window.scrollTo({top:0,behavior:'instant'})");
+      await ready("!document.querySelector('.vd-hero video').paused");
+      // Deterministic visibility event fixture; no access to a user's real tabs.
+      await evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'))");
+      await ready("document.querySelector('.vd-hero video').paused");
+      await evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'))");
+      await ready("!document.querySelector('.vd-hero video').paused");
+      for (const label of ["材质特写", "英雄定格", "光线唤醒"]) await click(`[aria-label="查看${label}"]`);
+      await ready("document.querySelector('.vd-hero video').currentTime < 2 && document.querySelector('[aria-label=\"查看光线唤醒\"]').getAttribute('aria-pressed') === 'true'");
+      assert.deepEqual(requests.filter(path => path.startsWith("/api/")), []);
+      assert.deepEqual(errors, []);
+    });
+    await t.test("slow video keeps a poster visible, and failed media can be retried", async () => {
+      holdVideo = true;
+      try {
+        await load();
+        await ready("document.querySelector('.vd-hero-image img').complete && document.querySelector('.vd-hero-image img').naturalWidth");
+        assert.equal(await evaluate("document.querySelector('.vd-hero-image').dataset.ready"), "false");
+        assert.equal(await evaluate("getComputedStyle(document.querySelector('.vd-hero video')).opacity"), "0");
+      } finally { holdVideo = false; releaseVideo.splice(0).forEach(release => release()); }
+      await ready("document.querySelector('.vd-hero-image').dataset.ready === 'true'");
+      videoFailure = true; await load();
+      await ready("document.querySelector('.vd-hero-image').dataset.failed === 'true'");
+      assert.equal(await evaluate("document.querySelector('.vd-hero-image img').naturalWidth"), 1280);
+      assert.match(await evaluate("document.querySelector('.vd-sample-note').textContent"), /视频暂不可用/);
+      await shot("video-error");
+      videoFailure = false; await click('[aria-label="重试播放视频"]');
+      await ready("document.querySelector('.vd-hero-image').dataset.ready === 'true' && !document.querySelector('.vd-hero video').paused");
+    });
+    await t.test("autoplay denial remains recoverable with an explicit play action", async () => {
+      const script = await send("Page.addScriptToEvaluateOnNewDocument", { source: `(() => { const original = HTMLMediaElement.prototype.play; let denied = false; HTMLMediaElement.prototype.play = function () { if (!denied) { denied = true; return Promise.reject(new DOMException('Fixture autoplay denial', 'NotAllowedError')); } return original.call(this); }; })();` });
+      try {
+        await load(); await ready("document.querySelector('.vd-play-toggle').getAttribute('aria-label') === '播放视频'");
+        await click('[aria-label="播放视频"]');
+        await ready("document.querySelector('.vd-hero-image').dataset.ready === 'true' && !document.querySelector('.vd-hero video').paused");
+      } finally { await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: script.identifier }); }
+    });
     await t.test("mobile/tablet layouts and reduced-motion behavior", async () => {
       await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+      const requestStart = requests.length;
       await load("/", 390, 844);
       await ready("[...document.querySelectorAll('.vd-hero img')].every(img => img.complete && img.naturalWidth)");
-      assert.equal(await evaluate("document.querySelector('.vd-play-toggle').disabled"), true);
+      assert.equal(await evaluate("document.querySelector('.vd-play-toggle').disabled"), false);
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').getAttribute('src')"), null);
+      await click('[aria-label="查看材质特写"]');
+      assert.equal(await evaluate("document.querySelector('.vd-hero video').getAttribute('src')"), null);
+      assert.equal(requests.slice(requestStart).some(path => path.endsWith(".mp4")), false);
+      await click('[aria-label="查看光线唤醒"]');
       await click('[aria-label="打开导航"]');
       assert.equal(await evaluate("document.querySelector('.vd-menu-toggle').getAttribute('aria-expanded')"), "true");
       await shot("mobile-menu"); await key("Escape");
@@ -128,6 +205,25 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
         await shot(`responsive-${width}`);
       }
       assert.deepEqual(errors, []);
+    });
+    await t.test("reduced-motion and data-saving allow explicit playback without unsolicited video loads", async () => {
+      await load("/", 390, 844);
+      await click('[aria-label="查看材质特写"]');
+      await click('[aria-label="播放视频"]');
+      await ready("document.querySelector('.vd-hero video').currentTime >= 121 / 24 && !document.querySelector('.vd-hero video').paused");
+      await click('[aria-label="暂停视频"]');
+      await ready("document.querySelector('.vd-hero video').paused");
+      await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+      const script = await send("Page.addScriptToEvaluateOnNewDocument", { source: `Object.defineProperty(navigator, 'connection', { configurable: true, value: { saveData: true, addEventListener() {}, removeEventListener() {} } });` });
+      try {
+        const requestStart = requests.length;
+        await load(); await pause(250);
+        assert.equal(requests.slice(requestStart).some(path => path.endsWith(".mp4")), false);
+        await click('[aria-label="查看英雄定格"]');
+        assert.equal(await evaluate("document.querySelector('.vd-hero video').getAttribute('src')"), null);
+        await click('[aria-label="播放视频"]');
+        await ready("document.querySelector('.vd-hero video').currentTime >= 242 / 24 && !document.querySelector('.vd-hero video').paused");
+      } finally { await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: script.identifier }); }
     });
     await t.test("missing images remain recoverable and don't block creation entry", async () => {
       imageFailure = true; await load("/", 390, 844); await ready("document.querySelector('.vd-image-unavailable')");
@@ -146,5 +242,5 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
       // The success route is the actual app; synthetic fixtures do not claim to
       // exercise the full Skill backend. Its regression tests remain separate.
     });
-  } finally { await browser.close(); await new Promise(resolveClose => server.close(resolveClose)); }
+  } finally { holdVideo = false; releaseVideo.splice(0).forEach(release => release()); await browser.close(); await new Promise(resolveClose => server.close(resolveClose)); }
 });

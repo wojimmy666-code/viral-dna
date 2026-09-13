@@ -2,10 +2,16 @@
 version: 1
 slug: "apps-web-src-landing-homepage-jsx"
 primary_target: "apps/web/src/landing/HomePage.jsx"
-related_targets: []
+related_targets:
+  - "apps/web/src/landing/HomeFilm.jsx"
+  - "apps/web/src/landing/home-media.js"
 ---
 
 # 对外官网首页
+
+## 当前媒体更新 · 2026-09-13
+
+用户已提供「视频节点 1 .mp4」「视频节点 2.mp4」「视频节点 3.mp4」并明确要求应用到首页。现按原帧顺序无损拼接为 15.125 秒、720p、24fps 的静音影片，替换先前静态轮播及静态演示；版式与产品事实保持不变。缩略图来自实际视频首帧，播放/暂停与分镜跳转均操作真实影片。来源见 `public/home/video/provenance.json`，本次本地验收见根 `.impeccable/review/homepage-video/acceptance.md`。以下原生图片例外与旧 finish review 保留为历史记录，不代表新视频为4K或已部署。
 
 - Scope: `/` 公开官网，与现有账户保护下的工作台分离；不部署、不推送。
 - Mode: Persuade。面向初次了解 ViralDNA 的内容创作者与企业团队，让用户理解从参考视频或 Skill 到分镜、视频及剪辑导出的创作流程。
