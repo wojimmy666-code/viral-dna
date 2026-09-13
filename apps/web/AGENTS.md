@@ -12,6 +12,13 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - 浏览器标签页图标始终复用侧边栏的项目标识：紫色圆角方块与白色播放三角。
 
+## Public homepage
+
+- `/` 是公开官网，与账户保护下的工作台分离；首页使用 `src/landing/DESIGN.md`，原 `DESIGN.md` 继续约束浅色工作台。用户选定 `.impeccable/mocks/cinematic-negative-space.png`：电影式左文右影、暖金侧光、炭黑底、既有紫色品牌、两行标题“看懂好视频，／把创意做成片。”；移动端独立重排，保留清晰正文与至少 44px 的主要触控目标。
+- 官网顺序为首屏示意影像、原视频与 Skill 双入口、创作流程、创作方法、企业共享协作与收尾入口。影像、静态分镜演示、方法和成员状态均明确为示意；不虚构真实客户案例、成片、可用 Skill、联系方式或政策内容。
+- 首页只读取显式公开展示素材，不请求账户资产、项目、成员、编辑锁、模型凭据或私有 Skill API；访问、切图和演示不得调用生成模型、创建项目或获取编辑租约。创作入口通过 `/login?returnTo=...` 进入，站内目标使用现有白名单，登录后继续由账户与 API 权限校验。
+- 用户仅批准原生 1672×941 主图完成本地版本，不放大伪称高清；素材来源与尺寸例外保留在根 `.impeccable/homepage-brief.md` 和 provenance 记录。独立 finish review 的 `ship` 仅适用于本地范围，机械 hero gate 未全部闭合，不等于真实账户后端联调或部署批准。未经用户明确指令不得部署或推送。
+
 ## Independent accounts
 
 - 资产与生成历史使用账户级服务器存储：个人默认 2 GB、企业默认 10 GB，企业成员共用额度，admin 手动调整。一个账户内按原文件内容去重，加入资产库不重复计量；系统缩略图和缓存不计用户额度，回收站仍占容量。生成完成即归档，不依赖采用或入库，不因项目归档和再次生成删除历史。同步只处理当前账户登记的文件，先确认 HTTPS 目标账户，再增量上传；本地文件保留，只有原文件校验成功才显示已同步。存储入口放账户菜单及资产库紧凑工具行，不增加主导航或持续弹出的成功提示。
@@ -41,7 +48,7 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - 分析报告与创作方案共用专注的项目详情布局：顶部不显示全局搜索和“新建项目”，正文不显示产品介绍区与“导入短视频”模块；项目卡上方保留紧凑面包屑，支持返回项目和方案列表；这些入口只保留在项目页和新建项目流程中。
 - “新建项目”使用独立的 `/projects/new` 页面，只显示导入与分析参数表单；分析进度、分析报告和创作方案不得在该页面下方继续渲染。创建任务成功后立即进入 `/projects/:projectId` 项目详情，浏览器刷新、前进、后退和通知深链都必须恢复同一项目。
-- 不再提供独立工作台首页；`/`、`/workbench`、`/records`、`/analyses/new` 和 `/workbench/records/:recordId` 仅作为旧链接兼容入口，分别跳转到对应 `/projects` 路由。
+- 不再提供独立工作台首页；`/workbench`、`/records`、`/analyses/new` 和 `/workbench/records/:recordId` 仅作为旧链接兼容入口，分别跳转到对应 `/projects` 路由。
 
 ## Analysis record lifecycle
 

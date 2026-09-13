@@ -20,6 +20,12 @@ storage/
 uploads/
 tools/
 
+# Local design-capture helpers and reproducible measurement intermediates.
+/.impeccable/build/capture.mjs
+/.impeccable/build/comp-grid.png
+/.impeccable/build/crops/
+/.impeccable/build/scaffold/
+
 # Private account migration bundles include identity hashes and all account data.
 *.vdna-migration/
 *.vdna-migration.pending-*/

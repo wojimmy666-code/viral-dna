@@ -111,11 +111,20 @@ test("keeps every stylesheet on semantic typography and text-color tokens", () =
   ]);
 
   for (const { file, source } of stylesheets) {
+    const homepage = file.replaceAll("\\", "/") === "landing/home.css";
+    const surfaceSizes = homepage ? new Set([...allowedSizes,
+      "var(--home-display-size)", "var(--home-heading-size)", "var(--home-title-size)",
+      "var(--home-body-size)", "var(--home-label-size)", "var(--home-caption-size)", "var(--home-section-size)",
+    ]) : allowedSizes;
+    const surfaceWeights = homepage ? new Set([...allowedWeights,
+      "var(--home-weight-regular)", "var(--home-weight-semibold)", "var(--home-weight-display)",
+    ]) : allowedWeights;
     for (const value of declarations(source, "font-size")) {
-      assert.ok(allowedSizes.has(value), `${file} uses non-system font-size: ${value}`);
+      assert.ok(surfaceSizes.has(value), `${file} uses non-system font-size: ${value}`);
     }
-    for (const value of declarations(source, "font-weight")) {
-      assert.ok(allowedWeights.has(value), `${file} uses non-system font-weight: ${value}`);
+    const typographySource = homepage ? source.replace(/@font-face\s*\{[^}]+\}/g, "") : source;
+    for (const value of declarations(typographySource, "font-weight")) {
+      assert.ok(surfaceWeights.has(value), `${file} uses non-system font-weight: ${value}`);
     }
     for (const value of declarations(source, "color")) {
       assert.ok(

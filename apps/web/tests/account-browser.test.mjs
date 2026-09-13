@@ -49,12 +49,13 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       function Fixture() {
         const location=useLocation(), [value,setValue]=useState('原始局部提示词');
         useEffect(()=>registerAccountFlusher(async()=>{window.flushes=(window.flushes||0)+1;if(window.blockFlush)throw new Error('保存尚未完成');return true;}),[]);
-        return <main className="account-readonly"><h1>创作工作台</h1><Link to="/projects/${projectId}">打开项目</Link>
+        return <main className="account-readonly"><h1>创作工作台</h1><Link to="/projects/${projectId}">打开项目</Link><Link to="/">返回公开首页</Link>
           {location.pathname.includes('${projectId}') && <label className="account-field"><span>局部提示词</span><textarea value={value} onChange={e=>setValue(e.target.value)} /></label>}
           <button className="secondary-button" onClick={()=>accountRequest('/productions/${projectId}/fixture',{method:'PUT',body:{value}}).catch(()=>{})}>保存草稿</button>
         </main>;
       }
-      createRoot(document.getElementById('root')).render(<React.StrictMode><BrowserRouter><AccountRoot><Fixture/></AccountRoot></BrowserRouter></React.StrictMode>);
+      function FixtureBoundary() { const location=useLocation(); return location.pathname==='/' ? <main className="public-fixture">公开首页</main> : <AccountRoot><Fixture/></AccountRoot>; }
+      createRoot(document.getElementById('root')).render(<React.StrictMode><BrowserRouter><FixtureBoundary/></BrowserRouter></React.StrictMode>);
     ` },
   });
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js")).contents;
@@ -228,6 +229,19 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       await evaluate("document.querySelector('form').requestSubmit()");
       await ready("document.querySelector('.account-session-bar')");
       assert.doesNotMatch(await evaluate("document.body.innerText"), /切换空间|个人空间|企业空间/);
+    });
+    await t.test("leaving the private app for the public homepage releases its edit lease", async () => {
+      state.requests = [];
+      await evaluate(`document.querySelector('a[href="/projects/${projectId}"]').click()`);
+      await ready("document.querySelector('textarea')");
+      assert.ok(state.lease?.token);
+      await evaluate("document.querySelector('a[href=\"/\"]').click()");
+      await ready("document.querySelector('.public-fixture')");
+      for (let attempt = 0; attempt < 50 && state.lease; attempt++) await pause(20);
+      assert.equal(state.lease, null);
+      assert.ok(state.requests.some(item => item.path.endsWith('/edit-lease/release')));
+      await load('/projects', 1280);
+      await ready(`document.querySelector('a[href="/projects/${projectId}"]')`);
     });
     await t.test("StrictMode acquisition does not lock out its own editor; failed save preserves draft", async () => {
       state.requests = [];

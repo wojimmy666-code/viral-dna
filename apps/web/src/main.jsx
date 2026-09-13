@@ -1,14 +1,21 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import { App } from "./App.jsx";
-import { AccountRoot } from "./accounts/AccountRoot.jsx";
-import "./styles.css";
+import { BrowserRouter, useLocation } from "react-router-dom";
+import HomePage from "./landing/HomePage.jsx";
+import "./entry.css";
+
+const PrivateApplication = lazy(() => import("./accounts/PrivateApplication.jsx"));
+
+function RootRoutes() {
+  const location = useLocation();
+  if (location.pathname === "/") return <HomePage />;
+  return <Suspense fallback={<main className="entry-loading" role="status">正在打开 ViralDNA…</main>}><PrivateApplication /></Suspense>;
+}
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <BrowserRouter>
-      <AccountRoot><App /></AccountRoot>
+      <RootRoutes />
     </BrowserRouter>
   </React.StrictMode>,
 );

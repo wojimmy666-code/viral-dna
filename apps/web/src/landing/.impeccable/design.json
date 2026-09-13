@@ -1,0 +1,261 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-13T04:50:20.555Z",
+  "title": "Design System: ViralDNA Public Homepage",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "品牌紫",
+        "tonalRamp": [
+          "oklch(15% 0.2394 278.56)",
+          "oklch(26.43% 0.2394 278.56)",
+          "oklch(37.86% 0.2394 278.56)",
+          "oklch(49.29% 0.2394 278.56)",
+          "oklch(60.71% 0.2394 278.56)",
+          "oklch(72.14% 0.2394 278.56)",
+          "oklch(83.57% 0.2394 278.56)",
+          "oklch(95% 0.2394 278.56)"
+        ]
+      },
+      "primary-hover": {
+        "role": "primary",
+        "displayName": "亮紫反馈",
+        "tonalRamp": [
+          "oklch(15% 0.2205 281.02)",
+          "oklch(26.43% 0.2205 281.02)",
+          "oklch(37.86% 0.2205 281.02)",
+          "oklch(49.29% 0.2205 281.02)",
+          "oklch(60.71% 0.2205 281.02)",
+          "oklch(72.14% 0.2205 281.02)",
+          "oklch(83.57% 0.2205 281.02)",
+          "oklch(95% 0.2205 281.02)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "炭黑地面",
+        "tonalRamp": [
+          "oklch(15% 0.0063 300.90)",
+          "oklch(26.43% 0.0063 300.90)",
+          "oklch(37.86% 0.0063 300.90)",
+          "oklch(49.29% 0.0063 300.90)",
+          "oklch(60.71% 0.0063 300.90)",
+          "oklch(72.14% 0.0063 300.90)",
+          "oklch(83.57% 0.0063 300.90)",
+          "oklch(95% 0.0063 300.90)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "影像白字",
+        "tonalRamp": [
+          "oklch(15% 0.0013 106.42)",
+          "oklch(26.43% 0.0013 106.42)",
+          "oklch(37.86% 0.0013 106.42)",
+          "oklch(49.29% 0.0013 106.42)",
+          "oklch(60.71% 0.0013 106.42)",
+          "oklch(72.14% 0.0013 106.42)",
+          "oklch(83.57% 0.0013 106.42)",
+          "oklch(95% 0.0013 106.42)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "辅助灰字",
+        "tonalRamp": [
+          "oklch(15% 0.0084 286.21)",
+          "oklch(26.43% 0.0084 286.21)",
+          "oklch(37.86% 0.0084 286.21)",
+          "oklch(49.29% 0.0084 286.21)",
+          "oklch(60.71% 0.0084 286.21)",
+          "oklch(72.14% 0.0084 286.21)",
+          "oklch(83.57% 0.0084 286.21)",
+          "oklch(95% 0.0084 286.21)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "深色面板",
+        "tonalRamp": [
+          "oklch(15% 0.0097 294.78)",
+          "oklch(26.43% 0.0097 294.78)",
+          "oklch(37.86% 0.0097 294.78)",
+          "oklch(49.29% 0.0097 294.78)",
+          "oklch(60.71% 0.0097 294.78)",
+          "oklch(72.14% 0.0097 294.78)",
+          "oklch(83.57% 0.0097 294.78)",
+          "oklch(95% 0.0097 294.78)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "结构细线",
+        "tonalRamp": [
+          "oklch(15% 0.0105 293.47)",
+          "oklch(26.43% 0.0105 293.47)",
+          "oklch(37.86% 0.0105 293.47)",
+          "oklch(49.29% 0.0105 293.47)",
+          "oklch(60.71% 0.0105 293.47)",
+          "oklch(72.14% 0.0105 293.47)",
+          "oklch(83.57% 0.0105 293.47)",
+          "oklch(95% 0.0105 293.47)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "首屏标题",
+        "purpose": "本地 Noto Sans SC 800 子集；保持获准的两行标题。"
+      },
+      "section": {
+        "displayName": "叙事区块标题",
+        "purpose": "流程、方法、协作与收尾；本地 Noto Sans SC 600 子集。"
+      },
+      "headline": {
+        "displayName": "双入口标题",
+        "purpose": "两条创作路径的入口说明。"
+      },
+      "title": {
+        "displayName": "内容标题",
+        "purpose": "系统字体栈下的三级标题。"
+      },
+      "body": {
+        "displayName": "阅读正文",
+        "purpose": "中文系统字体栈；官网独立流式正文。"
+      },
+      "label": {
+        "displayName": "操作文字",
+        "purpose": "导航、按钮、流程和协作信息；具体字重以组件为准。"
+      },
+      "caption": {
+        "displayName": "示意与辅助说明",
+        "purpose": "来源真实性、静态演示与辅助状态。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "image-caption",
+        "value": "0 2px 4px #000",
+        "purpose": "仅用于影像上的样片说明与名称；不是面板投影。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "button-state",
+        "value": "background-color 160ms ease-out, border-color 160ms ease-out",
+        "purpose": "主次按钮状态反馈；减少动态效果时关闭。"
+      },
+      {
+        "name": "camera-drift",
+        "value": "7s linear; scale(1) to scale(1.025)",
+        "purpose": "首屏允许轮播时的轻微推近，与 7000ms 切图同步；暂停条件由 HomePage.jsx 管理。"
+      },
+      {
+        "name": "method-hover",
+        "value": "transform 350ms ease-out; scale(1.025)",
+        "purpose": "方法卡图片悬停；减少动态效果时关闭。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact-desktop-max",
+        "value": "1150px"
+      },
+      {
+        "name": "stacked-max",
+        "value": "820px"
+      },
+      {
+        "name": "phone-max",
+        "value": "480px"
+      },
+      {
+        "name": "wide-desktop-min",
+        "value": "1800px"
+      }
+    ],
+    "focus": {
+      "value": "2px solid #7165ff",
+      "offset": "5px",
+      "purpose": "官网所有可聚焦交互的 focus-visible 轮廓。"
+    },
+    "backdrop": {
+      "value": "rgb(0 0 0 / 85%)",
+      "purpose": "原生演示 dialog 的 backdrop。"
+    }
+  },
+  "components": [
+    {
+      "name": "主操作按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "首屏进入创作台链接；Phosphor regular ArrowRight 路径内联，样式包含源码中的响应式尺寸与悬停、焦点。",
+      "html": "<a class=\"ds-primary\" href=\"/login?returnTo=%2Fprojects\">进入创作台<svg width=\"25\" height=\"25\" viewBox=\"0 0 256 256\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M221.66,133.66l-72,72a8,8,0,0,1-11.32-11.32L196.69,136H40a8,8,0,0,1,0-16H196.69L138.34,61.66a8,8,0,0,1,11.32-11.32l72,72A8,8,0,0,1,221.66,133.66Z\"/></svg></a>",
+      "css": ".ds-primary{display:inline-flex;align-items:center;justify-content:center;gap:18px;min-height:62px;padding:14px 32px;border:1px solid transparent;border-radius:12px;background:#5b4df5;color:#f7f7f6;font-family:\"Microsoft YaHei UI\",\"PingFang SC\",system-ui,sans-serif;font-size:clamp(16px,1.3672vw,21px);font-weight:600;line-height:1.4;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background-color 160ms ease-out,border-color 160ms ease-out}.ds-primary:hover{background:#7165ff;}.ds-primary:focus-visible{outline:2px solid #7165ff;outline-offset:5px}@media(max-width:1150px){.ds-primary{min-height:54px;padding:12px 24px}}@media(max-width:820px){.ds-primary{padding:14px 16px;gap:10px;font-size:16px}}@media(max-width:480px){.ds-primary{padding-inline:12px;gap:8px}.ds-primary svg{width:18px}}@media(prefers-reduced-motion:reduce){.ds-primary{transition:none}}"
+    },
+    {
+      "name": "次操作按钮",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "首屏观看演示的样式预览；Phosphor fill Play 路径内联。原生弹窗行为由 HomePage.jsx 负责。",
+      "html": "<div class=\"ds-secondary-surface\" style=\"display:inline-block;background:#100f12\"><button class=\"ds-secondary\" type=\"button\"><svg width=\"24\" height=\"24\" viewBox=\"0 0 256 256\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M240,128a15.74,15.74,0,0,1-7.6,13.51L88.32,229.65a16,16,0,0,1-16.2.3A15.86,15.86,0,0,1,64,216.13V39.87a15.86,15.86,0,0,1,8.12-13.82,16,16,0,0,1,16.2.3L232.4,114.49A15.74,15.74,0,0,1,240,128Z\"/></svg>观看演示</button></div>",
+      "css": ".ds-secondary{display:inline-flex;align-items:center;justify-content:center;gap:18px;min-height:62px;padding:14px 32px;border:1px solid #65646c;border-radius:12px;background:transparent;color:#f7f7f6;font-family:\"Microsoft YaHei UI\",\"PingFang SC\",system-ui,sans-serif;font-size:clamp(16px,1.3672vw,21px);font-weight:600;line-height:1.4;white-space:nowrap;text-decoration:none;cursor:pointer;transition:background-color 160ms ease-out,border-color 160ms ease-out}.ds-secondary:hover{background:#1c1b20;border-color:#bcbcc2;}.ds-secondary:focus-visible{outline:2px solid #7165ff;outline-offset:5px}@media(max-width:1150px){.ds-secondary{min-height:54px;padding:12px 24px}}@media(max-width:820px){.ds-secondary{padding:14px 16px;gap:10px;font-size:16px}}@media(max-width:480px){.ds-secondary{padding-inline:12px;gap:8px}.ds-secondary svg{width:18px}}@media(prefers-reduced-motion:reduce){.ds-secondary{transition:none}}"
+    },
+    {
+      "name": "官网导航链接组",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "实际四项锚点；预览显示桌面链接组和手机展开态。品牌、登录入口与菜单开合见源组件。",
+      "html": "<nav class=\"ds-nav\" aria-label=\"官网导航\"><a class=\"ds-nav-link\" href=\"#showcase\">作品案例</a><a class=\"ds-nav-link\" href=\"#workflow\">创作流程</a><a class=\"ds-nav-link\" href=\"#skills\">Skill</a><a class=\"ds-nav-link\" href=\"#team\">团队协作</a></nav>",
+      "css": ".ds-nav{display:flex;align-items:center;gap:clamp(24px,3.3854vw,52px);background:#100f12;font-family:\"Microsoft YaHei UI\",\"PingFang SC\",system-ui,sans-serif;font-size:16px;font-weight:400;line-height:1.65}.ds-nav-link{padding-block:10px;color:#bcbcc2;text-decoration:none}.ds-nav-link:hover{color:#f7f7f6}.ds-nav-link:focus-visible{outline:2px solid #7165ff;outline-offset:5px}@media(max-width:1150px){.ds-nav{gap:24px}}@media(max-width:820px){.ds-nav{flex-direction:column;align-items:stretch;gap:0;padding:12px 20px;border:1px solid #36353b;border-radius:12px}.ds-nav-link{padding-block:14px}}"
+    },
+    {
+      "name": "演示场景选项",
+      "kind": "chip",
+      "refersTo": "scene-choice",
+      "description": "原生演示中的三项分镜按钮，展示 pressed 与未选状态；源码没有额外 hover 变化，实际切图由 React 状态负责。",
+      "html": "<div class=\"ds-scenes\" aria-label=\"选择演示分镜\"><button class=\"ds-scene\" type=\"button\" aria-pressed=\"true\">产品特写</button><button class=\"ds-scene\" type=\"button\" aria-pressed=\"false\">场景演绎</button><button class=\"ds-scene\" type=\"button\" aria-pressed=\"false\">运镜节奏</button></div>",
+      "css": ".ds-scenes{display:flex;flex-wrap:wrap;gap:8px;background:#100f12}.ds-scene{background:transparent;color:#f7f7f6;font-family:\"Microsoft YaHei UI\",\"PingFang SC\",system-ui,sans-serif;font-size:16px;font-weight:600;padding:10px 16px;border:1px solid #36353b;border-radius:8px;cursor:pointer}.ds-scene:hover{color:#f7f7f6}.ds-scene[aria-pressed=\"true\"]{border-color:#7165ff;background:#1c1b20}.ds-scene:focus-visible{outline:2px solid #7165ff;outline-offset:5px}"
+    },
+    {
+      "name": "协作示意卡文本片段",
+      "kind": "card",
+      "refersTo": "collaboration-card",
+      "description": "从实际协作卡抽取标题、项目说明与真实性页脚；影像和成员行留在源组件。此片段是非交互内容，不添加虚构控件或 hover 状态。",
+      "html": "<article class=\"ds-card\" aria-label=\"企业项目协作示意，非实际账户数据\"><div class=\"ds-card-heading\"><span>产品故事 · 团队项目</span><span class=\"ds-card-caption\">协作示意</span></div><div class=\"ds-card-project\"><p class=\"ds-card-copy\">共享项目</p><h3 class=\"ds-card-title\">一支关于质感的短片</h3><span class=\"ds-card-caption\">分镜、素材与创作记录，留在同一个项目。</span></div><div class=\"ds-card-footer\">示意状态 · 不读取真实成员或编辑锁</div></article>",
+      "css": ".ds-card{border:1px solid #36353b;border-radius:12px;overflow:hidden;background:#1c1b20;color:#f7f7f6;font-family:\"Microsoft YaHei UI\",\"PingFang SC\",system-ui,sans-serif;font-size:16px;line-height:1.65}.ds-card-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:22px 28px;border-bottom:1px solid #36353b}.ds-card-caption{color:#bcbcc2;font-size:14px}.ds-card-project{margin:28px}.ds-card-copy{margin:0;color:#bcbcc2}.ds-card-title{margin:6px 0 8px;font-size:clamp(16px,1.3672vw,21px);font-weight:600;line-height:1.4}.ds-card-footer{padding:18px 28px;border-top:1px solid #36353b;color:#bcbcc2;font-size:14px}@media(max-width:1150px){.ds-card-project{margin:22px}}@media(max-width:820px){.ds-card-heading{padding:18px 20px}.ds-card-project{margin:20px}.ds-card-title{font-size:17px}.ds-card-footer{padding-inline:20px}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "电影级创作片场 / 片场留白",
+    "overview": "暖金侧光、玻璃、金属和岩石影像为官网建立片场气氛。深炭背景托住宽厚白字，既有紫色标志与主操作保持品牌识别，界面结构以留白和细线组织。\n\n本契约从 [HomePage.jsx](HomePage.jsx) 与 [home.css](home.css) 提取，仅适用于公开 `/`。工作台继续遵守 [Web 工作台设计契约](../../DESIGN.md)。首页构图与交付状态见[方向契约](../../../../.impeccable/homepage-brief.md)，产品事实见 [PRODUCT.md](../../../../PRODUCT.md)；它们不扩大本文件的视觉作用域。",
+    "keyCharacteristics": [
+      "影像承担材质与暖色，紫色承担品牌与交互。",
+      "本地中文展示字体、两行首屏标题、宽松区块间距。",
+      "手机独立重排，示意标识与核心操作清楚可达。"
+    ],
+    "rules": [
+      {
+        "name": "The Image Color Rule",
+        "body": "暖色和材质由实际影像承担，界面强调沿用品牌紫。",
+        "section": "colors"
+      },
+      {
+        "name": "The Two-Line Rule",
+        "body": "首屏保留“看懂好视频，／把创意做成片。”两行关系；手机调整字号和结构，不挤压正文来维持桌面布局。",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "**Do** 将官网令牌限制在 landing 表面，保留浅色工作台的原有规范。",
+      "**Do** 保留示意影像、静态分镜和协作状态的真实性说明。",
+      "**Do** 维护手机可达操作、键盘焦点及减少动态效果下的手动切换。"
+    ],
+    "donts": [
+      "**Don't** 把 AI 示意素材描述为真实客户案例、实际视频或真实账户记录。",
+      "**Don't** 用装饰性渐变或 CSS 假材质替代已批准的摄影质感影像。",
+      "**Don't** 将本地获准的原生分辨率例外当作未来素材质量标准；审批与机械门禁状态留在方向契约和验收记录中。"
+    ]
+  }
+}

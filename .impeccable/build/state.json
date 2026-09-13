@@ -1,0 +1,282 @@
+{
+  "tool": "build-phase",
+  "version": 2,
+  "startedAt": "2026-09-12T16:57:47.984Z",
+  "comp": ".impeccable/mocks/cinematic-negative-space.png",
+  "direction": "9201c755",
+  "breakpoint": "1440x960",
+  "artifact": null,
+  "phase": "hero",
+  "phases": {
+    "comps": {
+      "status": "closed",
+      "openedAt": "2026-09-12T16:57:47.983Z",
+      "closedAt": "2026-09-12T17:25:09.873Z",
+      "attempts": 2,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "3 comps, 1 approved",
+        "approved": ".impeccable/mocks/cinematic-negative-space.png",
+        "at": "2026-09-12T17:25:09.873Z"
+      },
+      "forced": null
+    },
+    "spec": {
+      "status": "closed",
+      "openedAt": "2026-09-12T17:25:09.873Z",
+      "closedAt": "2026-09-12T17:33:22.599Z",
+      "attempts": 3,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "15 regions, 4 plates, 6 text regions measured",
+        "at": "2026-09-12T17:33:22.598Z"
+      },
+      "forced": null
+    },
+    "plates": {
+      "status": "closed",
+      "openedAt": "2026-09-12T17:33:22.599Z",
+      "closedAt": "2026-09-13T02:56:49.724Z",
+      "attempts": 1,
+      "notes": [],
+      "gate": {
+        "ok": true,
+        "reasons": [],
+        "summary": "4/4 plates",
+        "at": "2026-09-13T02:56:49.724Z"
+      },
+      "forced": null
+    },
+    "hero": {
+      "status": "open",
+      "openedAt": "2026-09-13T02:56:49.724Z",
+      "closedAt": null,
+      "attempts": 2,
+      "notes": [],
+      "gate": {
+        "ok": false,
+        "reasons": [
+          "control navigation drifts to 61% (structure 74%, color 64%): its chrome differs from the comp's; open .impeccable/review/diff/hero/regions/navigation.png and match the border, fill, radius, chevron or arrow, and label size",
+          "control pause drifts to 51% (structure 55%, color 68%): its chrome differs from the comp's; open .impeccable/review/diff/hero/regions/pause.png and match the border, fill, radius, chevron or arrow, and label size",
+          "the build carries ink in 4 grid cells where the comp is calm (E5, C7, D8, E8); nothing exists on the page that the comp does not show (a kicker, an extra nav item, a divider, a second row of controls); remove it or name it in a stated decision after the hero passes"
+        ],
+        "summary": "hero 80% (drift)",
+        "score": 0.7997,
+        "verdict": "drift",
+        "report": ".impeccable/review/diff/hero/report.json",
+        "sideBySide": "D:/Projects/ViralDna/.impeccable/review/diff/hero/side-by-side.png",
+        "worst": [
+          "pause drift 51%",
+          "scene-label drift 56%",
+          "navigation drift 61%"
+        ],
+        "worstIds": [
+          "pause",
+          "scene-label",
+          "navigation"
+        ],
+        "worstCrops": [
+          {
+            "id": "pause",
+            "verdict": "drift",
+            "score": {
+              "overall": 0.5104,
+              "structure": 0.545,
+              "color": 0.6835,
+              "colorIntersection": 0.4094,
+              "paletteMatch": 0.8311,
+              "detail": 0.1297,
+              "detailRaw": 0.2547,
+              "detailAdded": 0.25,
+              "bands": 0.7333
+            },
+            "file": ".impeccable/review/diff/hero/regions/pause.png"
+          },
+          {
+            "id": "scene-label",
+            "verdict": "drift",
+            "score": {
+              "overall": 0.561,
+              "structure": 0.3975,
+              "color": 0.8354,
+              "colorIntersection": 0.7414,
+              "paletteMatch": 0.886,
+              "detail": 0.4131,
+              "detailRaw": 0.6944,
+              "detailAdded": 0.5625,
+              "bands": 0.9143
+            },
+            "file": ".impeccable/review/diff/hero/regions/scene-label.png"
+          },
+          {
+            "id": "navigation",
+            "verdict": "drift",
+            "score": {
+              "overall": 0.6125,
+              "structure": 0.7426,
+              "color": 0.6427,
+              "colorIntersection": 0.3547,
+              "paletteMatch": 0.7977,
+              "detail": 0.2668,
+              "detailRaw": 0.3657,
+              "detailAdded": 0.1979,
+              "bands": 0
+            },
+            "file": ".impeccable/review/diff/hero/regions/navigation.png"
+          }
+        ],
+        "advisories": [
+          "(advisory, above the 72% bar; fix in the polish pass before responsive) 1 reading:",
+          "  control hero-actions: its rule sits 60px into the box in the comp and 1px in the build (-59px), so the strip is shorter than the comp's; match the height, not only the position"
+        ],
+        "regionVerdicts": {
+          "hero-scene": "drift",
+          "brand": "match",
+          "navigation": "drift",
+          "nav-cta": "drift",
+          "headline": "drift",
+          "description": "drift",
+          "hero-actions": "drift",
+          "scene-label": "drift",
+          "thumb-close": "drift",
+          "thumb-scene": "drift",
+          "thumb-motion": "drift",
+          "sample-labels": "drift",
+          "pause": "drift",
+          "path-reference": "drift",
+          "path-skill": "drift"
+        },
+        "at": "2026-09-13T03:13:39.808Z"
+      },
+      "forced": null,
+      "records": 2,
+      "readingsSeen": {
+        "text scene-label: ink is #5a3a24 in the build, #76787e in the comp; use the comp's colour": 1,
+        "text sample-labels: ink is #b06020 in the build, #b0b0af in the comp; use the comp's colour": 1,
+        "control navigation: its ink is 5px tall in the build and 16px in the comp (-11px); match the height, not only the position": 1,
+        "text scene-label: ink is #b7b8c6 in the build, #76787e in the comp; use the comp's colour": 1,
+        "text sample-labels: ink is #f7f8f7 in the build, #b0b0af in the comp; use the comp's colour": 1,
+        "control hero-actions: its rule sits 60px into the box in the comp and 1px in the build (-59px), so the strip is shorter than the comp's; match the height, not only the position": 2
+      },
+      "history": [
+        {
+          "at": "2026-09-13T03:08:32.369Z",
+          "score": 0.7555,
+          "worstIds": [
+            "path-reference",
+            "path-skill",
+            "scene-label"
+          ],
+          "regionVerdicts": {
+            "hero-scene": "drift",
+            "brand": "drift",
+            "navigation": "drift",
+            "nav-cta": "drift",
+            "headline": "drift",
+            "description": "drift",
+            "hero-actions": "drift",
+            "scene-label": "drift",
+            "thumb-close": "drift",
+            "thumb-scene": "drift",
+            "thumb-motion": "drift",
+            "sample-labels": "drift",
+            "pause": "missing",
+            "path-reference": "drift",
+            "path-skill": "contradicted"
+          },
+          "artifactHash": "97feef085e51"
+        },
+        {
+          "at": "2026-09-13T03:13:39.809Z",
+          "score": 0.7997,
+          "worstIds": [
+            "pause",
+            "scene-label",
+            "navigation"
+          ],
+          "regionVerdicts": {
+            "hero-scene": "drift",
+            "brand": "match",
+            "navigation": "drift",
+            "nav-cta": "drift",
+            "headline": "drift",
+            "description": "drift",
+            "hero-actions": "drift",
+            "scene-label": "drift",
+            "thumb-close": "drift",
+            "thumb-scene": "drift",
+            "thumb-motion": "drift",
+            "sample-labels": "drift",
+            "pause": "drift",
+            "path-reference": "drift",
+            "path-skill": "drift"
+          },
+          "artifactHash": "97feef085e51"
+        }
+      ]
+    },
+    "sections": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    },
+    "motion": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    },
+    "responsive": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    },
+    "review": {
+      "status": "pending",
+      "openedAt": null,
+      "closedAt": null,
+      "attempts": 0,
+      "notes": [],
+      "gate": null,
+      "forced": null
+    }
+  },
+  "finish": null,
+  "plates": {
+    "hero-scene": {
+      "status": "ok",
+      "score": 0.6572,
+      "size": "1672x941"
+    },
+    "thumb-close": {
+      "status": "ok",
+      "score": 0.675,
+      "size": "1672x941"
+    },
+    "thumb-scene": {
+      "status": "ok",
+      "score": 0.6947,
+      "size": "1672x941"
+    },
+    "thumb-motion": {
+      "status": "ok",
+      "score": 0.7941,
+      "size": "1672x941"
+    }
+  }
+}

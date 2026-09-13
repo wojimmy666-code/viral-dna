@@ -1,0 +1,192 @@
+{
+  "regions": [
+    {
+      "id": "hero-scene",
+      "kind": "plate",
+      "box": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.837890625
+      },
+      "snap": false,
+      "note": "Approved comp element: Full-bleed dark cinematic amber bottle photo. Regenerate clean photo WITHOUT any UI, text, logo, buttons, thumbnail cards, nav or labels. Bottle center x1080 y350, matte black left negative space, warm basalt environment on right. No vignette painted over text.",
+      "bleed": true,
+      "plate": "apps/web/public/home/hero-scene.png"
+    },
+    {
+      "id": "brand",
+      "kind": "chrome",
+      "box": {
+        "x": 0.044270833333333336,
+        "y": 0.0234375,
+        "w": 0.11979166666666667,
+        "h": 0.048828125
+      },
+      "snap": false,
+      "note": "Approved comp element: Existing supplied favicon.svg and ViralDNA wordmark"
+    },
+    {
+      "id": "navigation",
+      "kind": "control",
+      "box": {
+        "x": 0.39453125,
+        "y": 0.0234375,
+        "w": 0.2649739583333333,
+        "h": 0.048828125
+      },
+      "snap": false,
+      "note": "Approved comp element: 作品案例 创作流程 Skill 团队协作"
+    },
+    {
+      "id": "nav-cta",
+      "kind": "control",
+      "box": {
+        "x": 0.8665364583333334,
+        "y": 0.0234375,
+        "w": 0.09114583333333333,
+        "h": 0.05078125
+      },
+      "snap": false,
+      "note": "Approved comp element: 进入创作台"
+    },
+    {
+      "id": "headline",
+      "kind": "text",
+      "box": {
+        "x": 0.047526041666666664,
+        "y": 0.205078125,
+        "w": 0.3606770833333333,
+        "h": 0.181640625
+      },
+      "snap": false,
+      "note": "Approved comp element: 看懂好视频，\n把创意做成片。"
+    },
+    {
+      "id": "description",
+      "kind": "text",
+      "box": {
+        "x": 0.048828125,
+        "y": 0.4208984375,
+        "w": 0.3489583333333333,
+        "h": 0.060546875
+      },
+      "snap": false,
+      "note": "Approved comp element: 从原视频分析或 Skill 出发，连接分镜、图像、视频与剪辑，\n让每一步创作都清晰可控。"
+    },
+    {
+      "id": "hero-actions",
+      "kind": "control",
+      "box": {
+        "x": 0.048177083333333336,
+        "y": 0.5244140625,
+        "w": 0.263671875,
+        "h": 0.0625
+      },
+      "snap": false,
+      "note": "Approved comp element: 进入创作台 → / 观看演示"
+    },
+    {
+      "id": "scene-label",
+      "kind": "text",
+      "box": {
+        "x": 0.5481770833333334,
+        "y": 0.6416015625,
+        "w": 0.1328125,
+        "h": 0.0205078125
+      },
+      "snap": false,
+      "note": "Approved comp element: 视觉示意 · 非真实案例"
+    },
+    {
+      "id": "thumb-close",
+      "kind": "image",
+      "box": {
+        "x": 0.5494791666666666,
+        "y": 0.6708984375,
+        "w": 0.11002604166666667,
+        "h": 0.0888671875
+      },
+      "snap": false,
+      "note": "Approved comp element: Product close-up of same amber bottle in hero, clean photo only no border or text",
+      "bleed": true,
+      "plate": "apps/web/public/home/thumb-close.png"
+    },
+    {
+      "id": "thumb-scene",
+      "kind": "image",
+      "box": {
+        "x": 0.6705729166666666,
+        "y": 0.6708984375,
+        "w": 0.111328125,
+        "h": 0.0888671875
+      },
+      "snap": false,
+      "note": "Approved comp element: Wide scene of same amber bottle on dramatic basalt and warm haze, clean photo only no border or text",
+      "bleed": true,
+      "plate": "apps/web/public/home/thumb-scene.png"
+    },
+    {
+      "id": "thumb-motion",
+      "kind": "image",
+      "box": {
+        "x": 0.7916666666666666,
+        "y": 0.6708984375,
+        "w": 0.11067708333333333,
+        "h": 0.0888671875
+      },
+      "snap": false,
+      "note": "Approved comp element: Close tilted macro of brushed silver cap and amber neck of same bottle, clean photo only no border or text",
+      "bleed": true,
+      "plate": "apps/web/public/home/thumb-motion.png"
+    },
+    {
+      "id": "sample-labels",
+      "kind": "text",
+      "box": {
+        "x": 0.5755208333333334,
+        "y": 0.771484375,
+        "w": 0.298828125,
+        "h": 0.021484375
+      },
+      "snap": false,
+      "note": "Approved comp element: 产品特写 场景演绎 运镜节奏"
+    },
+    {
+      "id": "pause",
+      "kind": "control",
+      "box": {
+        "x": 0.9225260416666666,
+        "y": 0.693359375,
+        "w": 0.036458333333333336,
+        "h": 0.0546875
+      },
+      "snap": false,
+      "note": "Approved comp element: pause circular control"
+    },
+    {
+      "id": "path-reference",
+      "kind": "text",
+      "box": {
+        "x": 0.049479166666666664,
+        "y": 0.90625,
+        "w": 0.3209635416666667,
+        "h": 0.0478515625
+      },
+      "snap": false,
+      "note": "Approved comp element: 有参考，就从分析开始。"
+    },
+    {
+      "id": "path-skill",
+      "kind": "text",
+      "box": {
+        "x": 0.546875,
+        "y": 0.90625,
+        "w": 0.41015625,
+        "h": 0.0478515625
+      },
+      "snap": false,
+      "note": "Approved comp element: 有想法，就从 Skill 开始。"
+    }
+  ]
+}

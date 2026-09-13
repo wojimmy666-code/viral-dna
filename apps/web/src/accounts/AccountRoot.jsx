@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { destinationAfterLogin } from "./login-destination.js";
 import { Buildings, Lock, SignOut, UserCircle } from "@phosphor-icons/react";
 import {
   accountRequest, currentAccountSession, flushAccountDrafts, mediaUrl,
@@ -163,6 +164,14 @@ export function AccountRoot({ children }) {
     } catch (failure) { if (version === sessionRequest.current) { setError(failure.message); setAuth({ loading: false, failed: true }); } }
   }
   useEffect(() => { setSession(currentAccountSession(admin)); void loadSession(); }, [admin]);
+  useEffect(() => () => {
+    // The public homepage lives outside this boundary. Leaving the private app
+    // must release its editor immediately, including late in-flight grants.
+    ++generation.current; ++sessionRequest.current;
+    const previous = activeLease.current;
+    activeLease.current = null; requestedLease.current = null;
+    setProjectEditing(null); void release(previous);
+  }, []);
   useEffect(() => {
     const expired = event => {
       if (event.detail.admin !== admin) return;
@@ -259,11 +268,13 @@ export function AccountRoot({ children }) {
   }
   if (auth.loading) return <main className="account-loading" role="status">正在检查登录状态…</main>;
   if (auth.failed) return <main className="account-loading"><ErrorMessage error={error} /><button className="secondary-button" onClick={loadSession}>重试</button></main>;
-  if (auth.auth_mode !== "password") return children;
+  const loginRoute = location.pathname === "/login" || location.pathname === "/admin/login";
+  if (auth.auth_mode !== "password") return loginRoute ? <Navigate to={destinationAfterLogin(location, admin)} replace /> : children;
   if (!auth.initialized && auth.setup_allowed === false) return <main className="account-loading">请在部署本机打开应用完成首次账户设置，完成后即可登录。</main>;
   if (!auth.initialized) return <AccountLogin setup onDone={loadSession} />;
   if (activation) return <AccountLogin activation={activation} onDone={() => { navigate("/login", { replace: true }); void loadSession(); }} />;
-  if (!session) return <AccountLogin key={String(admin)} admin={admin} onDone={next => { setSession(next); navigate(admin ? "/admin/accounts" : "/projects", { replace: true }); }} />;
+  if (!session) return <AccountLogin key={String(admin)} admin={admin} onDone={next => { setSession(next); navigate(destinationAfterLogin(location, admin), { replace: true }); }} />;
+  if (loginRoute) return <Navigate to={destinationAfterLogin(location, admin)} replace />;
   const held = lease?.projectId === projectId;
   const editingReady = !projectId || (held && (lease.editable || lease.lost));
   const management = location.pathname === "/admin/accounts" || location.pathname === "/account/members";
