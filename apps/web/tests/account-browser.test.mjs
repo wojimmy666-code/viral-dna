@@ -41,18 +41,38 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
   const bundle = await build({ bundle: true, write: false, format: "esm", jsx: "automatic", outdir: "out", logLevel: "silent",
     define: { "import.meta.env.VITE_API_BASE_URL": "undefined" },
     stdin: { resolveDir: webRoot, loader: "jsx", contents: `
-      import React, {useEffect,useState} from 'react'; import {createRoot} from 'react-dom/client';
-      import {BrowserRouter,Link,useLocation} from 'react-router-dom';
+      import React, {useCallback,useEffect,useState} from 'react'; import {createRoot} from 'react-dom/client';
+      import {BrowserRouter,Link,useLocation,useNavigate} from 'react-router-dom';
       import {AccountRoot} from './src/accounts/AccountRoot.jsx';
+      import {Topbar} from './src/WorkspaceTopbar.jsx';
+      import {AppSidebar} from './src/app-sidebar/AppSidebar.jsx';
+      import {Briefcase,FolderOpen} from '@phosphor-icons/react';
+      import {NotificationDrawer} from './src/NotificationCenter.jsx';
       import {registerAccountFlusher,accountRequest} from './src/accounts/account-client.js';
       import './src/styles.css';
       function Fixture() {
         const location=useLocation(), [value,setValue]=useState('原始局部提示词');
-        useEffect(()=>registerAccountFlusher(async()=>{window.flushes=(window.flushes||0)+1;if(window.blockFlush)throw new Error('保存尚未完成');return true;}),[]);
-        return <main className="account-readonly"><h1>创作工作台</h1><Link to="/projects/${projectId}">打开项目</Link><Link to="/">返回公开首页</Link>
+        const navigate=useNavigate(), [query,setQuery]=useState(''), [noticeOpen,setNoticeOpen]=useState(false), [unread,setUnread]=useState(12);
+        const [navigationOpen,setNavigationOpen]=useState(false), [collapsed,setCollapsed]=useState(false);
+        const closeNavigation=useCallback(()=>setNavigationOpen(false),[]);
+        useEffect(()=>registerAccountFlusher(async()=>{window.flushes=(window.flushes||0)+1;if(window.blockFlush)throw new Error('保存尚未完成');if(window.holdHomeFlush)await new Promise(resolve=>{window.releaseHomeFlush=resolve;});return true;}),[]);
+        return <div className={'app-shell '+(collapsed?'sidebar-is-collapsed':'')}>
+          <Topbar navigationOpen={navigationOpen} onOpenNavigation={()=>setNavigationOpen(true)}
+            sidebarCollapsed={collapsed} onToggleSidebar={()=>setCollapsed(!collapsed)}
+            focusMode={location.pathname.includes('${projectId}')} assetMode={location.pathname==='/assets'} hideCreate
+            notificationOpen={noticeOpen} notificationUnreadCount={unread} onToggleNotifications={()=>setNoticeOpen(!noticeOpen)}
+            searchValue={query} onSearch={setQuery} />
+          <AppSidebar activeNav="history" navItems={[{id:'history',label:'项目',icon:Briefcase},{id:'assets',label:'资产库',icon:FolderOpen}]}
+            collapsed={collapsed} routeKey={location.pathname} mobileOpen={navigationOpen}
+            onCloseMobile={closeNavigation} historyLifecycle="active" historyLifecycleCounts={{active:1,archived:0,trashed:0}}
+            onSelect={id=>navigate(id==='assets'?'/assets':'/projects')} onSelectHistoryLifecycle={()=>{}} historyCount={1} />
+          <div className="app-body">
+          <main className="account-readonly"><h1>创作工作台</h1><Link to="/projects/${projectId}">打开项目</Link><Link to="/">返回公开首页</Link>
           {location.pathname.includes('${projectId}') && <label className="account-field"><span>局部提示词</span><textarea value={value} onChange={e=>setValue(e.target.value)} /></label>}
           <button className="secondary-button" onClick={()=>accountRequest('/productions/${projectId}/fixture',{method:'PUT',body:{value}}).catch(()=>{})}>保存草稿</button>
-        </main>;
+          </main></div><NotificationDrawer open={noticeOpen} filter="all" items={[]} unreadCount={unread}
+            onClose={()=>setNoticeOpen(false)} onFilterChange={()=>{}} onMarkAllRead={()=>setUnread(0)} />
+        </div>;
       }
       function FixtureBoundary() { const location=useLocation(); return location.pathname==='/' ? <main className="public-fixture">公开首页</main> : <AccountRoot><Fixture/></AccountRoot>; }
       createRoot(document.getElementById('root')).render(<React.StrictMode><BrowserRouter><FixtureBoundary/></BrowserRouter></React.StrictMode>);
@@ -79,7 +99,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     response.setHeader("Content-Type", "application/json");
     const send = (value, status = 200) => { response.statusCode = status; response.end(JSON.stringify(value)); };
     const isAdmin = path.includes("/admin/");
-    if (path.endsWith("/auth/status")) return send({ auth_mode: "password", initialized: state.initialized, setup_allowed: true });
+    if (path.endsWith("/auth/status")) return send({ auth_mode: state.authMode || "password", initialized: state.initialized, setup_allowed: true });
     if (path.endsWith("/auth/setup")) { state.initialized = true; return send({ initialized: true }); }
     if (path.endsWith("/auth/login")) {
       response.setHeader("Set-Cookie", `${isAdmin ? "test_admin" : "test_user"}=active; Path=/; HttpOnly; SameSite=Lax`);
@@ -178,6 +198,9 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       for (let attempt = 0; attempt < 120; attempt++) { if (await evaluate(`Boolean(${expression})`)) return; await pause(25); }
       assert.fail(`Timed out: ${expression}; ${await evaluate("document.body.innerText")}`);
     }
+    async function escape() {
+      for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    }
     async function load(path, width = 1280) {
       await send("Emulation.setDeviceMetricsOverride", { width, height: 860, deviceScaleFactor: 1, mobile: false });
       await send("Page.navigate", { url: base + path });
@@ -246,6 +269,138 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       await ready("document.querySelector('.account-session-bar')");
       assert.doesNotMatch(await evaluate("document.body.innerText"), /切换空间|个人空间|企业空间/);
     });
+    await t.test("one compact header keeps account, search, notifications and mobile navigation usable", async () => {
+      user.display_name = "负责人姓名".repeat(12); user.account_name = "企业名称".repeat(20);
+      for (const width of [1440, 1280, 1024, 820, 768, 390, 320]) {
+        await load('/projects', width); await ready("document.querySelector('.account-session-bar .notification-bell')");
+        assert.equal(await evaluate("document.querySelectorAll('.account-session-bar,.topbar').length"), 1);
+        assert.equal(await evaluate("document.querySelectorAll('.workbench-brand').length"), 1);
+        assert.ok(await evaluate("document.querySelector('.account-session-bar').firstElementChild.matches('.workbench-brand')"));
+        assert.doesNotMatch(await evaluate("document.body.textContent"), /视频逆向拆解系统|创作研究/);
+        assert.equal(await evaluate("document.querySelector('[aria-label=帮助]')"), null);
+        assert.equal(await evaluate("document.querySelector('.account-session-bar').getBoundingClientRect().height"), 56);
+        assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
+        assert.ok(await evaluate("(()=>{const bell=document.querySelector('.notification-bell').getBoundingClientRect(),menu=document.querySelector('.account-menu > button').getBoundingClientRect();return bell.width>=44&&bell.height>=44&&bell.right<=menu.left&&menu.right<=innerWidth&&Math.abs(bell.top-menu.top)<1})()"));
+        assert.equal(await evaluate("document.querySelector('.notification-badge').textContent"), '9+');
+        if (width > 820) {
+          assert.equal(await evaluate("document.querySelector('.sidebar-heading')"), null);
+          await evaluate("window.bodyBeforeSidebarToggle=document.querySelector('.app-body');document.querySelector('.desktop-sidebar-toggle').focus();document.querySelector('.desktop-sidebar-toggle').click()");
+          await ready("document.querySelector('.sidebar-collapsed')");
+          assert.equal(await evaluate("document.querySelector('.sidebar').getBoundingClientRect().width"), 72);
+          assert.ok(await evaluate("window.bodyBeforeSidebarToggle===document.querySelector('.app-body')"));
+          assert.equal(await evaluate("document.querySelector('.desktop-sidebar-toggle').getAttribute('aria-label')"), '展开侧边栏');
+          await evaluate("document.querySelector('.desktop-sidebar-toggle').click()");
+          await ready("!document.querySelector('.sidebar-collapsed')");
+          assert.equal(await evaluate("getComputedStyle(document.querySelector('.global-search-toggle')).display"), 'none');
+          assert.equal(await evaluate("document.querySelector('.sidebar').getBoundingClientRect().top"), 56);
+          assert.equal(await evaluate("document.querySelector('.sidebar').getBoundingClientRect().bottom"), 860);
+        } else {
+          await evaluate("document.querySelector('.global-search-toggle').click()");
+          await ready("document.activeElement===document.querySelector('.global-search input')");
+          assert.ok(await evaluate("(()=>{const box=document.querySelector('.global-search input').getBoundingClientRect();return box.left>=0&&box.right<=innerWidth&&box.height>=44})()"));
+          await evaluate("(()=>{const input=document.querySelector('.global-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'搜索测试');input.dispatchEvent(new Event('input',{bubbles:true}));})()");
+          await ready("document.querySelector('.global-search input').value==='搜索测试'");
+          await escape();
+          await ready("document.activeElement===document.querySelector('.global-search-toggle')");
+          await evaluate("document.querySelector('.mobile-navigation-toggle').focus();document.querySelector('.mobile-navigation-toggle').click()");
+          await ready("document.querySelector('.app-navigation-drawer')?.open");
+          await escape();
+          await ready("!document.querySelector('.app-navigation-drawer')?.open");
+          await ready("document.activeElement===document.querySelector('.mobile-navigation-toggle')");
+          await evaluate("document.querySelector('.mobile-navigation-toggle').click()");
+          await ready("document.querySelector('.app-navigation-drawer')?.open");
+          await evaluate("document.querySelector('.app-navigation-drawer [aria-label=关闭导航]').click()");
+          await ready("!document.querySelector('.app-navigation-drawer')?.open");
+        }
+        if ([1440, 390, 320].includes(width)) await screenshot('unified-header', width);
+        await evaluate("document.querySelector('.notification-bell').click()");
+        await ready("document.querySelector('.notification-drawer')");
+        assert.equal(await evaluate("document.querySelector('.notification-drawer').getBoundingClientRect().top"), 56);
+        await evaluate("document.querySelector('.notification-drawer-scrim').click()");
+        await evaluate("document.querySelector('.account-menu > button').focus();document.querySelector('.account-menu > button').click()");
+        await ready("document.querySelector('.account-menu-panel a[href=\"/account/members\"]')");
+        if (width <= 600) assert.equal(await evaluate("getComputedStyle(document.querySelector('.account-menu-identity')).display"), 'block');
+        assert.ok(await evaluate("(()=>{const box=document.querySelector('.account-menu-panel').getBoundingClientRect();return box.left>=0&&box.right<=innerWidth})()"));
+        // Wait for the opened menu's passive document listeners before keyboard input.
+        await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+        await escape();
+        await ready("!document.querySelector('.account-menu-panel')");
+      }
+      user.display_name = '负责人'; user.account_name = '企业账户';
+      await load('/assets', 390); await ready("document.querySelector('.notification-bell')");
+      assert.equal(await evaluate("document.querySelector('.global-search')"), null);
+      await load('/projects', 1280); await ready("document.querySelector('.notification-bell')");
+      await evaluate("document.querySelector('.account-menu > button').click()");
+      await ready("document.querySelector('.account-menu-panel a[href=\"/account/members\"]')");
+      await evaluate("document.querySelector('.account-menu-panel a[href=\"/account/members\"]').click()");
+      await ready("document.querySelector('.account-management')");
+      assert.equal(await evaluate("document.querySelectorAll('.account-session-bar,.topbar').length"), 1);
+      assert.equal(await evaluate("document.querySelectorAll('.workbench-brand').length"), 1);
+      assert.equal(await evaluate("document.querySelector('.account-header-navigation').childElementCount"), 0);
+      assert.equal(await evaluate("document.querySelector('.account-header-actions').childElementCount"), 0);
+      assert.equal(await evaluate("document.querySelector('.account-header-search').childElementCount"), 0);
+      await load('/projects', 1280); await ready("document.querySelector('.notification-bell')");
+      await screenshot('header-brand-normal', 1280);
+    });
+    await t.test("brand returns account pages home and preserves drafts until saving succeeds", async () => {
+      user.display_name = '负责人'; user.account_name = '企业账户';
+      for (const width of [1280, 390, 320]) {
+        for (const path of ['/account/storage', '/account/members']) {
+          await load(path, width);
+          await ready("document.querySelector('.account-management h1')");
+          assert.equal(await evaluate("document.querySelector('.workbench-brand-link').getAttribute('href')"), '/projects');
+          assert.equal(await evaluate("document.querySelector('.workbench-brand-link').getAttribute('aria-label')"), 'ViralDNA，返回工作台');
+          assert.ok(await evaluate("(()=>{const box=document.querySelector('.workbench-brand-link').getBoundingClientRect();return box.width>=44&&box.height>=44})()"));
+          assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
+          if (path === '/account/storage') {
+            assert.equal(await evaluate("document.querySelector('.storage-management > a').getAttribute('href')"), '/assets');
+            if (width !== 390) await screenshot('home-link-storage', width);
+          }
+          await evaluate("window.homeNavigationMarker=true;document.querySelector('.workbench-brand-link').focus();document.querySelector('.workbench-brand-link').click()");
+          await ready("location.pathname==='/projects' && document.querySelector('.notification-bell')");
+          assert.equal(await evaluate("window.homeNavigationMarker"), true, 'returning home is a client-side navigation');
+          assert.ok(await evaluate("Boolean(document.querySelector('.account-session-bar'))"));
+        }
+      }
+      state.lease = null;
+      await load(`/projects/${projectId}`, 390); await ready("document.querySelector('textarea')");
+      const token = state.lease.token;
+      await evaluate("(()=>{const input=document.querySelector('textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'返回前的未提交草稿');input.dispatchEvent(new Event('input',{bubbles:true}));window.blockFlush=true;window.flushes=0;})()");
+      await evaluate("document.querySelector('.workbench-brand-link').click()");
+      await ready("document.querySelector('.workbench-brand-error')?.textContent==='保存尚未完成'");
+      assert.equal(await evaluate("location.pathname"), `/projects/${projectId}`);
+      assert.equal(await evaluate("document.querySelector('textarea').value"), '返回前的未提交草稿');
+      assert.equal(state.lease.token, token);
+      assert.equal(await evaluate("window.flushes"), 1);
+      await screenshot('home-link-save-error', 390);
+      await evaluate("window.blockFlush=false;window.holdHomeFlush=true;document.querySelector('.workbench-brand-link').click()");
+      await ready("document.querySelector('.workbench-brand-link').getAttribute('aria-busy')==='true' && window.releaseHomeFlush");
+      await evaluate("document.querySelector('.workbench-brand-link').click();document.querySelector('.workbench-brand-link').click()");
+      assert.equal(await evaluate("window.flushes"), 2, 'repeated clicks cannot duplicate the pending save');
+      assert.equal(await evaluate("location.pathname"), `/projects/${projectId}`);
+      await evaluate("window.holdHomeFlush=false;window.releaseHomeFlush()");
+      await ready("location.pathname==='/projects' && !document.querySelector('.workbench-brand-error')");
+      for (let attempt = 0; attempt < 50 && state.lease; attempt++) await pause(20);
+      assert.equal(state.lease, null, 'returning home releases the completed project edit lease');
+      await load('/projects', 1280); await ready("document.querySelector('.notification-bell')");
+    });
+    await t.test("legacy local workbench also places one brand above both sidebar and content", async () => {
+      state.authMode = 'local_bootstrap';
+      try {
+        await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false });
+        await send('Page.navigate', { url: base + '/projects' });
+        await ready("document.querySelector('.app-shell > .topbar .workbench-brand')");
+        assert.equal(await evaluate("document.querySelectorAll('.workbench-brand').length"), 1);
+        assert.equal(await evaluate("document.querySelector('.topbar').getBoundingClientRect().left"), 0);
+        assert.equal(await evaluate("document.querySelector('.topbar').getBoundingClientRect().width"), 1280);
+        assert.equal(await evaluate("document.querySelector('.sidebar').getBoundingClientRect().top"), 64);
+        assert.equal(await evaluate("document.querySelector('.sidebar-heading')"), null);
+        assert.equal(await evaluate("document.querySelector('.workbench-brand-link').getAttribute('href')"), '/projects');
+      } finally {
+        delete state.authMode;
+        await load('/projects', 1280); await ready("document.querySelector('.account-session-bar .notification-bell')");
+      }
+    });
     await t.test("leaving the private app for the public homepage releases its edit lease", async () => {
       state.requests = [];
       await evaluate(`document.querySelector('a[href="/projects/${projectId}"]').click()`);
@@ -268,6 +423,9 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       state.rejectWrite = true;
       await evaluate("document.querySelector('main button').click()");
       await ready("document.querySelector('[inert]')");
+      assert.ok(await evaluate("Boolean(document.querySelector('textarea').closest('[inert]'))"));
+      assert.ok(await evaluate("document.querySelector('.account-header-actions').inert"));
+      assert.equal(await evaluate("document.querySelector('.account-menu > button').closest('[inert]')"), null);
       assert.equal(await evaluate("document.querySelector('textarea').value"), "未提交的新提示词");
       assert.match(await evaluate("document.querySelector('.account-edit-notice').textContent"), /下载备份/);
       const write = state.requests.find(item => item.path.endsWith("/fixture"));
@@ -400,6 +558,8 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       await load("/admin/login"); await ready("document.querySelector('input[name=username]')?.value==='admin'");
       await fill("password", "fixture-admin-password"); await evaluate("document.querySelector('form').requestSubmit()");
       await ready("document.querySelector('.account-management h1')?.textContent==='账户管理'");
+      assert.equal(await evaluate("document.querySelector('.workbench-brand-link').getAttribute('href')"), '/admin/accounts');
+      assert.equal(await evaluate("document.querySelector('.workbench-brand-link').getAttribute('aria-label')"), 'ViralDNA，返回账户管理');
       await evaluate("document.querySelector('.account-management-heading button').click()");
       await ready("document.querySelector('.account-create-form')");
       assert.equal(await evaluate("[...document.querySelectorAll('.account-create-form select option')].map(o=>o.textContent).join(',')"), "个人账户,企业账户");

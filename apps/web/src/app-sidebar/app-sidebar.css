@@ -20,30 +20,11 @@
 .sidebar-heading {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-1);
   flex: 0 0 auto;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  flex: 1;
-}
-
-.brand-mark {
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  color: var(--text-on-accent);
-  background: var(--accent);
-  border-radius: var(--radius-control);
-}
-
-.brand-copy,
 .sidebar-footer-copy {
   display: grid;
   gap: var(--space-1);
@@ -51,12 +32,6 @@
   white-space: nowrap;
 }
 
-.brand strong {
-  font-size: var(--type-subheading-size);
-  line-height: var(--type-leading-tight);
-}
-
-.brand small,
 .sidebar-footer small {
   color: var(--text-secondary);
   font-size: var(--type-caption-size);
@@ -229,9 +204,6 @@
 }
 
 .sidebar-collapsed { padding-inline: var(--space-3); }
-.sidebar-collapsed .sidebar-heading { flex-direction: column; gap: var(--space-2); }
-.sidebar-collapsed .brand { flex: 0 0 44px; justify-content: center; }
-.sidebar-collapsed .brand-copy,
 .sidebar-collapsed .nav-label,
 .sidebar-collapsed .nav-count,
 .sidebar-collapsed .nav-section-label,
@@ -260,7 +232,8 @@
 .sidebar-flyout-title { display: block; padding: var(--space-2) var(--space-3); font-weight: var(--type-weight-semibold); }
 .sidebar-project-flyout .history-lifecycle-nav { margin: 0; padding: 0; border: 0; }
 
-.topbar .mobile-navigation-toggle { display: none; }
+.topbar .mobile-navigation-toggle, .account-header-navigation .mobile-navigation-toggle { display: none; }
+.desktop-sidebar-toggle { flex: 0 0 44px; width: 44px; height: 44px; }
 
 .app-navigation-drawer {
   position: fixed;
@@ -290,7 +263,8 @@
 @media (max-width: 820px) {
   .app-shell,
   .app-shell.sidebar-is-collapsed { display: block; }
-  .topbar .mobile-navigation-toggle { display: grid; width: 44px; height: 44px; flex: 0 0 44px; margin-right: auto; }
+  .topbar .mobile-navigation-toggle, .account-header-navigation .mobile-navigation-toggle { display: grid; width: 44px; height: 44px; flex: 0 0 44px; }
+  .topbar .desktop-sidebar-toggle, .account-header-navigation .desktop-sidebar-toggle { display: none; }
 }
 
 @media (min-width: 821px) and (hover: none) {

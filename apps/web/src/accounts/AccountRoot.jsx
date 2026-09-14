@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { destinationAfterLogin } from "./login-destination.js";
 import { requestPasswordLogin } from "./login-service.js";
-import { Buildings, Lock, SignOut, UserCircle } from "@phosphor-icons/react";
+import { Buildings, CaretDown, Lock, SignOut, UserCircle } from "@phosphor-icons/react";
 import {
   accountRequest, currentAccountSession, flushAccountDrafts, mediaUrl,
   setAccountSession, setProjectEditing,
 } from "./account-client.js";
 import { AccountManagement } from "./AccountManagement.jsx";
+import { AccountHeader } from "./AccountHeader.jsx";
 import { StorageManagement } from "./StorageManagement.jsx";
 import {
   PASSWORD_MIN_LENGTH, PHONE_INPUT_PROPS,
@@ -279,18 +280,18 @@ export function AccountRoot({ children }) {
   const editingReady = !projectId || (held && (lease.editable || lease.lost));
   const management = location.pathname === "/admin/accounts" || location.pathname === "/account/members";
   return <div className="account-root">
-    <header className="account-session-bar">
-      <span>{session.account_kind === "enterprise" ? <Buildings size={17} /> : <UserCircle size={17} />}<span className="account-name" title={session.account_name || "平台管理后台"}>{session.account_name || "平台管理后台"}</span><small>{session.account_kind === "enterprise" ? "企业账户" : admin ? "admin" : "个人账户"}</small></span>
-      <div className="account-menu" ref={menuElement}><button className="text-button" aria-expanded={menu} onClick={() => setMenu(!menu)} title={session.display_name}><span className="account-menu-name">{session.display_name}</span></button>
+    <AccountHeader toolbarDisabled={!!lease?.lost} onHomeNavigation={() => setMenu(false)}
+      identity={<span className="account-identity">{session.account_kind === "enterprise" ? <Buildings size={17} aria-hidden="true" /> : <UserCircle size={17} aria-hidden="true" />}<span className="account-name" title={session.account_name || "平台管理后台"}>{session.account_name || "平台管理后台"}</span><small>{session.account_kind === "enterprise" ? "企业账户" : admin ? "admin" : "个人账户"}</small></span>}
+      accountMenu={<div className="account-menu" ref={menuElement}><button className="text-button" aria-expanded={menu} onClick={() => setMenu(!menu)} title={session.display_name}><span className="account-menu-name">{session.display_name}</span><CaretDown size={14} aria-hidden="true" /></button>
         {menu && <div className="account-menu-panel">
+          <div className="account-menu-identity">{session.account_name || "平台管理后台"}<small>{session.account_kind === "enterprise" ? "企业账户" : admin ? "admin" : "个人账户"}</small></div>
           {admin && <Link to="/admin/accounts" onClick={event => accountNavigate(event, "/admin/accounts")}>账户管理</Link>}
           {!admin && <Link to="/account/storage" onClick={event => accountNavigate(event, "/account/storage")}>存储管理与生成历史</Link>}
           {!admin && session.account_kind === "enterprise" && session.role === "owner" && <Link to="/account/members" onClick={event => accountNavigate(event, "/account/members")}>企业成员</Link>}
           <button className="text-button" onClick={() => { setPasswordOpen(true); setMenu(false); }}>修改密码</button>
           <button className="text-button" onClick={logout}><SignOut size={16} />退出登录</button>
         </div>}
-      </div>
-    </header>
+      </div>}>
     <ErrorMessage error={error} />
     {notice && <p className="account-help" role="status">{notice}</p>}
     {passwordOpen && <form className="account-password-form" onSubmit={changePassword}>
@@ -303,5 +304,6 @@ export function AccountRoot({ children }) {
       {editingReady && <div ref={content} inert={!!lease?.lost}>{children}</div>}
       {projectId && held && !lease.loading && !lease.editable && !lease.lost && <ReadOnlyProject projectId={projectId} />}
     </>}
+    </AccountHeader>
   </div>;
 }

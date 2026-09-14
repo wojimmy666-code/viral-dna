@@ -83,13 +83,17 @@ test("unavailable, invalid or full browser storage cannot break navigation", () 
 
 test("sidebar layout never keys or replaces the project body and exposes accessible controls", () => {
   const app = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
+  const topbar = readFileSync(new URL("../src/WorkspaceTopbar.jsx", import.meta.url), "utf8");
   const sidebar = readFileSync(new URL("../src/app-sidebar/AppSidebar.jsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../src/app-sidebar/app-sidebar.css", import.meta.url), "utf8");
   const baseCss = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   assert.match(app, /<div className="app-body">/);
   assert.doesNotMatch(app, /key=\{[^}]*sidebar/i);
-  assert.match(app, /aria-label="打开导航"/);
-  assert.match(sidebar, /"展开侧边栏" : "收起侧边栏"/);
+  assert.match(topbar, /aria-label="打开导航"/);
+  assert.match(topbar, /"展开侧边栏" : "收起侧边栏"/);
+  assert.match(app, /onToggleSidebar=\{sidebarLayout\.toggle\}/);
+  assert.match(sidebar, /aria-label="关闭导航"/);
+  assert.doesNotMatch(sidebar, /视频逆向拆解系统|创作研究|<Brand/);
   assert.match(sidebar, /popover="auto"/);
   assert.match(sidebar, /dialog\.showModal\(\)/);
   assert.match(sidebar, /onCancel=\{onCloseMobile\}/);

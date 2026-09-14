@@ -11,7 +11,6 @@ import { useLocation, useNavigate } from "react-router-dom";
 import {
   ArrowClockwise,
   Archive,
-  Bell,
   Briefcase,
   CaretDown,
   CaretLeft,
@@ -32,7 +31,6 @@ import {
   FilmStrip,
   Gear,
   LinkSimple,
-  List,
   ListBullets,
   LockSimple,
   MagnifyingGlass,
@@ -56,6 +54,7 @@ import {
 import { AssetLibrary } from "./AssetLibrary.jsx";
 import { apiErrorMessage } from "./api-errors.js";
 import { AppSidebar } from "./app-sidebar/AppSidebar.jsx";
+import { Topbar } from "./WorkspaceTopbar.jsx";
 import { useSidebarLayout } from "./app-sidebar/useSidebarLayout.js";
 import { CategoryProfileLibrary } from "./category-profiles/index.js";
 import { PlatformAdminConsole } from "./admin/PlatformAdminConsole.jsx";
@@ -2460,11 +2459,28 @@ export function App() {
 
   return (
     <div className={`app-shell ${sidebarLayout.collapsed ? "sidebar-is-collapsed" : ""}`}>
+      <Topbar
+        sidebarCollapsed={sidebarLayout.collapsed}
+        onToggleSidebar={sidebarLayout.toggle}
+        navigationOpen={navigationOpen}
+        onOpenNavigation={() => setNavigationOpen(true)}
+        assetMode={["skills", "assets", "categories", "platform-connections"].includes(activeNav)}
+        focusMode={recordDetailMode || skillProjectMode}
+        hideCreate
+        notificationOpen={notificationOpen}
+        notificationUnreadCount={notificationUnreadCount}
+        onCreate={() => selectNav("new-analysis")}
+        onToggleNotifications={toggleNotificationCenter}
+        onSearch={(value) => {
+          changeHistoryQuery(value);
+          if (value) navigate(pathForNav("history"));
+        }}
+        searchValue={historyQuery}
+      />
       <AppSidebar
         activeNav={sidebarActiveNav}
         navItems={navItems}
         collapsed={sidebarLayout.collapsed}
-        onToggle={sidebarLayout.toggle}
         routeKey={location.pathname}
         inProject={recordDetailMode || skillProjectMode}
         mobileOpen={navigationOpen}
@@ -2477,23 +2493,6 @@ export function App() {
       />
 
       <div className="app-body">
-        <Topbar
-          navigationOpen={navigationOpen}
-          onOpenNavigation={() => setNavigationOpen(true)}
-          assetMode={["skills", "assets", "categories", "platform-connections"].includes(activeNav)}
-          focusMode={recordDetailMode || skillProjectMode}
-          hideCreate
-          notificationOpen={notificationOpen}
-          notificationUnreadCount={notificationUnreadCount}
-          onCreate={() => selectNav("new-analysis")}
-          onToggleNotifications={toggleNotificationCenter}
-          onSearch={(value) => {
-            changeHistoryQuery(value);
-            if (value) navigate(pathForNav("history"));
-          }}
-          searchValue={historyQuery}
-        />
-
         <div
           className={
             skillProjectMode
@@ -4675,73 +4674,6 @@ function ModelSettingsDialog({
         </footer>
       </section>
     </div>
-  );
-}
-
-function Topbar({
-  navigationOpen = false,
-  onOpenNavigation,
-  assetMode = false,
-  focusMode = false,
-  hideCreate = false,
-  notificationOpen = false,
-  notificationUnreadCount = 0,
-  onCreate,
-  onSearch,
-  onToggleNotifications,
-  searchValue,
-}) {
-  const primaryActionsHidden = assetMode || focusMode;
-  return (
-    <header className={`topbar ${assetMode ? "asset-mode" : ""} ${focusMode ? "focus-mode" : ""}`}>
-      <button
-        aria-label="打开导航"
-        aria-expanded={navigationOpen}
-        aria-controls="app-navigation-drawer"
-        className="icon-button mobile-navigation-toggle"
-        onClick={onOpenNavigation}
-        type="button"
-      >
-        <List size={22} aria-hidden="true" />
-      </button>
-      {!primaryActionsHidden && (
-        <div className="global-search">
-          <MagnifyingGlass size={18} />
-          <input
-            aria-label="搜索项目"
-            onChange={(event) => onSearch(event.target.value)}
-            placeholder="搜索项目或报告"
-            value={searchValue}
-          />
-          <kbd>⌘ K</kbd>
-        </div>
-      )}
-      <div className="topbar-actions">
-        <button
-          aria-expanded={notificationOpen}
-          aria-label={notificationUnreadCount ? `通知，${notificationUnreadCount} 条未读` : "通知"}
-          className={`icon-button notification-bell ${notificationOpen ? "active" : ""}`}
-          onClick={onToggleNotifications}
-          type="button"
-        >
-          <Bell size={19} />
-          {notificationUnreadCount > 0 && (
-            <span className="notification-badge">
-              {notificationUnreadCount > 9 ? "9+" : notificationUnreadCount}
-            </span>
-          )}
-        </button>
-        <button className="icon-button" type="button" aria-label="帮助">
-          <Question size={19} />
-        </button>
-        {!primaryActionsHidden && !hideCreate && (
-          <button className="primary-button compact" type="button" onClick={onCreate}>
-            <Plus size={17} weight="bold" />
-            新建项目
-          </button>
-        )}
-      </div>
-    </header>
   );
 }
 

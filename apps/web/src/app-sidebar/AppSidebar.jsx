@@ -1,14 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
-import { CaretDown, Gear, LinkSimple, Play, ShieldCheck, SidebarSimple, X } from "@phosphor-icons/react";
+import { CaretDown, Gear, LinkSimple, ShieldCheck, X } from "@phosphor-icons/react";
 import { RECORD_LIFECYCLES, RECORD_LIFECYCLE_META } from "../record-lifecycle-ui.js";
 import "./app-sidebar.css";
-
-function Brand() {
-  return <div className="brand">
-    <span className="brand-mark" aria-hidden="true"><Play size={18} weight="fill" /></span>
-    <span className="brand-copy"><strong>ViralDNA</strong><small>视频逆向拆解系统</small></span>
-  </div>;
-}
 
 function LifecycleLinks({ active, counts, onSelect, inProject }) {
   return <div className="history-lifecycle-nav" aria-label="项目范围">
@@ -140,7 +133,7 @@ function NavigationItem({ item, active, collapsed, count, onSelect, children, ro
 
 export function AppSidebar({
   activeNav, historyLifecycle, historyLifecycleCounts, historyCount, navItems,
-  onSelect, onSelectHistoryLifecycle, collapsed, onToggle, routeKey, inProject,
+  onSelect, onSelectHistoryLifecycle, collapsed, routeKey, inProject,
   mobileOpen, onCloseMobile,
 }) {
   const dialogRef = useRef(null);
@@ -178,22 +171,20 @@ export function AppSidebar({
   function selectLifecycle(lifecycle) { onCloseMobile(); onSelectHistoryLifecycle(lifecycle); }
   const lifecycleLinks = <LifecycleLinks active={historyLifecycle} counts={historyLifecycleCounts} onSelect={selectLifecycle} inProject={inProject} />;
   const contents = <>
-    <div className="sidebar-heading">
-      <Brand />
+    {narrow && <div className="sidebar-heading">
       <button
-        aria-label={narrow ? "关闭导航" : compact ? "展开侧边栏" : "收起侧边栏"}
-        aria-expanded={narrow ? mobileOpen : !compact}
+        aria-label="关闭导航"
+        aria-expanded={mobileOpen}
         aria-controls="app-primary-navigation"
         className="sidebar-toggle"
-        onClick={narrow ? onCloseMobile : onToggle}
-        title={narrow ? "关闭导航" : compact ? "展开侧边栏" : "收起侧边栏"}
+        onClick={onCloseMobile}
+        title="关闭导航"
         type="button"
       >
-        {narrow ? <X size={20} /> : <SidebarSimple size={20} />}
+        <X size={20} aria-hidden="true" />
       </button>
-    </div>
+    </div>}
     <nav className="side-nav" id="app-primary-navigation" aria-label="主导航">
-      <p className="nav-section-label">创作研究</p>
       {navItems.map((item) => <NavigationItem
         active={activeNav === item.id}
         collapsed={compact}

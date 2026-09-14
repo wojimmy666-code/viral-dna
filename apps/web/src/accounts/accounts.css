@@ -1,17 +1,30 @@
-.account-root { min-height: 100vh; }
-.account-session-bar { display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); padding: var(--space-2) var(--space-6); border-bottom: 1px solid var(--border-default); background: var(--surface-panel); position: relative; z-index: var(--z-dropdown); }
+.account-root { --account-header-height: 56px; min-height: 100vh; }
+.account-session-bar { height: var(--account-header-height); display: flex; align-items: center; gap: var(--space-4); padding: 0 var(--space-6); border-bottom: 1px solid var(--border-default); background: var(--surface-panel); position: sticky; top: 0; z-index: var(--z-dropdown); }
 .account-session-bar > span { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .account-session-bar > span > svg, .account-session-bar small { flex-shrink: 0; }
+.account-identity { flex: 1; }
+.account-header-navigation { display: flex; flex: 0 0 auto; }
+.account-header-navigation:empty { display: none; }
+.account-header-search { flex: 0 1 340px; min-width: 0; }
+.account-header-search:empty, .account-header-actions:empty { display: none; }
+.account-header-search .global-search { width: 100%; margin: 0; }
+.account-header-actions { flex: 0 0 auto; }
+.account-session-bar .topbar-actions { gap: var(--space-2); }
+.account-session-bar .icon-button, .account-menu > button { min-width: 44px; height: 44px; }
+.account-root .app-shell { min-height: calc(100vh - var(--account-header-height)); }
+.account-root .sidebar:not(.sidebar-mobile) { top: var(--account-header-height); height: calc(100vh - var(--account-header-height)); height: calc(100dvh - var(--account-header-height)); }
 .account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-login-shell, .account-session-bar, .account-management, .account-readonly, .account-password-form { font-family: var(--font-family-ui); }
 .account-login-shell a, .account-management a, .account-readonly a, .account-menu-panel a { color: var(--accent); text-decoration: none; }
 .account-login-shell a:hover, .account-management a:hover, .account-readonly a:hover, .account-menu-panel a:hover { text-decoration: underline; }
 .account-session-bar small, .account-help { color: var(--text-secondary); font-size: var(--type-caption-size); line-height: var(--type-leading-copy); }
-.account-menu { position: relative; min-width: 0; max-width: min(40%, 240px); }
-.account-menu > button { max-width: 100%; }
+.account-menu { position: relative; min-width: 0; flex-shrink: 0; max-width: min(24vw, 200px); }
+.account-menu > button { max-width: 100%; gap: var(--space-1); }
+.account-menu > button > svg { flex-shrink: 0; }
 .account-menu-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu-panel { position: absolute; right: 0; top: 100%; min-width: 160px; padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-1); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); }
 .account-menu-panel a, .account-menu-panel button { min-height: 40px; padding: var(--space-2); text-align: left; }
+.account-menu-identity { display: none; }
 .account-login-shell { min-height: 100vh; display: grid; place-items: center; padding: var(--space-6); }
 .account-login-panel { width: min(100%, 440px); padding: var(--space-8); border: 1px solid var(--border-default); border-radius: var(--radius-panel); background: var(--surface-panel); }
 .account-brand { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--type-weight-semibold); margin-bottom: var(--space-6); }
@@ -79,6 +92,13 @@
 .account-readonly-media figcaption { font-size: var(--type-caption-size); color: var(--text-secondary); }
 .account-readonly details { margin-top: var(--space-3); }
 .account-prompt-copy { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-family-ui); font-size: var(--type-body-size); line-height: var(--type-leading-copy); }
+@media (max-width: 820px) {
+  .account-session-bar { padding-inline: var(--space-3); gap: var(--space-2); }
+  .account-header-navigation:not(:empty) { display: flex; flex: 0 0 44px; }
+  .account-header-search { flex: 0 0 44px; }
+  .account-session-bar .topbar-actions .icon-button { display: grid; }
+  .account-identity > svg, .account-identity small { display: none; }
+}
 @media (max-width: 760px) {
   .account-session-bar { padding-inline: var(--space-3); }
   .account-login-shell { padding: var(--space-3); }
@@ -87,4 +107,10 @@
   .account-field input, .account-field select, .account-activation-link input { font-size: var(--type-heading-size); }
   .account-field input, .account-field select, .account-activation-link input, .account-menu-panel a, .account-menu-panel button, .account-management button, .account-password-form button, .account-edit-notice button { min-height: 44px; }
   .account-table-wrap td, .account-table-wrap th { padding: var(--space-2); }
+}
+@media (max-width: 600px) {
+  .account-session-bar > .account-identity > * { display: none; }
+  .account-menu-panel { max-width: calc(100vw - 24px); }
+  .account-menu-identity { display: block; padding: var(--space-2); border-bottom: 1px solid var(--border-default); overflow-wrap: anywhere; font-size: var(--type-body-size); }
+  .account-menu-identity small { display: block; margin-top: var(--space-1); }
 }

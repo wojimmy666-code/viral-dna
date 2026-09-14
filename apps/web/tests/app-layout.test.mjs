@@ -8,6 +8,22 @@ import {
 
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
 const appStyles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const topbarSource = readFileSync(new URL("../src/WorkspaceTopbar.jsx", import.meta.url), "utf8");
+const accountHeader = readFileSync(new URL("../src/accounts/AccountHeader.jsx", import.meta.url), "utf8");
+const accountRoot = readFileSync(new URL("../src/accounts/AccountRoot.jsx", import.meta.url), "utf8");
+
+test("shares one account header without dropping standalone routes or escaping lost-lease controls", () => {
+  assert.match(accountRoot, /<AccountHeader toolbarDisabled=\{!!lease\?\.lost\}/);
+  assert.match(accountHeader, /createPortal\(actions, slots\.actions/);
+  assert.match(accountHeader, /inert=\{toolbarDisabled\}/);
+  assert.match(accountHeader, /if \(!slots\) return <header/);
+  assert.match(accountHeader, /<WorkbenchBrand/);
+  assert.ok(appSource.indexOf('<Topbar') < appSource.indexOf('<AppSidebar'));
+  assert.match(appStyles, /\.app-shell > \.topbar \{ grid-column: 1 \/ -1/);
+  assert.match(topbarSource, /primaryActionsHidden = assetMode \|\| focusMode/);
+  assert.doesNotMatch(topbarSource, /Question|aria-label="帮助"/);
+  assert.match(appStyles, /top: var\(--account-header-height, 64px\)/);
+});
 
 test("keeps the primary sidebar focused on active first-phase workflows", () => {
   assert.match(appSource, /\{ id: "new-analysis", label: "新建项目", icon: Plus \}/);

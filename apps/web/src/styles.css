@@ -194,6 +194,9 @@ button:disabled {
   min-width: 0;
 }
 
+.app-shell > .topbar { grid-column: 1 / -1; }
+.app-shell:has(> .topbar) > .sidebar { top: 64px; height: calc(100vh - 64px); height: calc(100dvh - 64px); }
+
 .topbar {
   height: 64px;
   position: sticky;
@@ -253,6 +256,9 @@ button:disabled {
 .topbar.focus-mode .topbar-actions {
   margin-left: auto;
 }
+
+.global-search .global-search-toggle { display: none; }
+.global-search:focus-within { border-color: var(--accent); }
 
 .icon-button {
   width: 36px;
@@ -4835,7 +4841,7 @@ button:disabled {
 
 .notification-drawer-scrim {
   position: fixed;
-  inset: 64px 0 0;
+  inset: var(--account-header-height, 64px) 0 0;
   z-index: 31;
   border: 0;
   background: rgba(26, 27, 38, 0.16);
@@ -4845,7 +4851,7 @@ button:disabled {
 .notification-drawer {
   width: min(390px, calc(100vw - 24px));
   position: fixed;
-  top: 64px;
+  top: var(--account-header-height, 64px);
   right: 0;
   bottom: 0;
   z-index: 32;
@@ -5119,13 +5125,21 @@ button:disabled {
   }
 
   .global-search {
-    width: auto;
-    flex: 1;
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    position: relative;
   }
 
-  .topbar-actions .icon-button {
-    display: none;
-  }
+  .global-search-mark, .global-search input, .global-search kbd { display: none; }
+  .global-search .global-search-toggle { display: grid; width: 44px; height: 44px; }
+  .global-search.search-expanded input { display: block; position: fixed; top: calc(var(--account-header-height, 64px) + var(--space-2)); right: var(--space-3); width: min(340px, calc(100vw - 24px)); height: 44px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); font-size: var(--type-heading-size); }
+  .global-search.search-expanded input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .topbar-actions .icon-button { width: 44px; height: 44px; }
 
   .workspace-layout {
     padding: 16px;
