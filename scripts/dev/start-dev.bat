@@ -6,9 +6,11 @@ title ViralDNA Launcher
 set "PROJECT_ROOT=%~dp0..\.."
 for %%I in ("%PROJECT_ROOT%") do set "PROJECT_ROOT=%%~fI"
 set "LOCAL_ENV_FILE=%PROJECT_ROOT%\.env.local"
+if not defined VIRAL_DNA_BROWSER_ASSIST_ENABLED set "VIRAL_DNA_BROWSER_ASSIST_ENABLED=1"
 if exist "%LOCAL_ENV_FILE%" (
   for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%LOCAL_ENV_FILE%") do (
     if /I "%%A"=="VIRAL_DNA_YTDLP_COOKIE_FILE" set "VIRAL_DNA_YTDLP_COOKIE_FILE=%%B"
+    if /I "%%A"=="VIRAL_DNA_BROWSER_ASSIST_ENABLED" set "VIRAL_DNA_BROWSER_ASSIST_ENABLED=%%B"
     if /I "%%A"=="VIRAL_DNA_ASR_PROVIDER" set "VIRAL_DNA_ASR_PROVIDER=%%B"
     if /I "%%A"=="VIRAL_DNA_ASR_MODEL" set "VIRAL_DNA_ASR_MODEL=%%B"
     if /I "%%A"=="VIRAL_DNA_ASR_DEVICE" set "VIRAL_DNA_ASR_DEVICE=%%B"
@@ -148,10 +150,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
-"%PYTHON_EXE%" -c "import httpx, numpy, onnxruntime, opencc, uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
+"%PYTHON_EXE%" -c "import httpx, numpy, onnxruntime, opencc, playwright, uvicorn, viral_dna_api, yt_dlp" >nul 2>&1
 if errorlevel 1 (
   echo [ViralDNA] Installing API dependencies...
-  "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev]"
+  "%PYTHON_EXE%" -m pip install -e "%PROJECT_ROOT%\services\api[dev,browser-assist]"
   if errorlevel 1 exit /b 1
 )
 

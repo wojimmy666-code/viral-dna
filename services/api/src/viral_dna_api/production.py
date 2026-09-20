@@ -165,9 +165,11 @@ from .production_media import (
     playback_alignment,
 )
 from .production_seeds import AnalysisProductionSeedBuilder, ProductionSeed
+from .production_seeds.builders import with_authored_shots
 from .production_seeds.contracts import (
     ProductionSeedOrigin,
     ProductionSeedReference,
+    ProductionSeedShot,
     frame_to_seconds,
 )
 from .project_prompts import (
@@ -1577,6 +1579,9 @@ class ProductionService:
         self,
         record_id: UUID,
         payload: ProductionProjectCreate,
+        *,
+        authored_shots: list[ProductionSeedShot] | None = None,
+        creative_brief: dict | None = None,
     ) -> ProductionProjectDetail:
         record = await self.repository.get_record(record_id)
         if record is None:
@@ -1608,6 +1613,8 @@ class ProductionService:
             output_width=width,
             output_height=height,
         )
+        if authored_shots is not None:
+            seed = with_authored_shots(seed, authored_shots, creative_brief or {})
         return await self.create_project_from_seed(
             seed,
             analysis_report=report,
@@ -1691,7 +1698,9 @@ class ProductionService:
                     )
                 linked_references.append(linked)
                 reference_by_usage_id[reference.id] = linked
-        if analysis_report is not None:
+        if analysis_report is not None and "creative_concept" in seed.style_bible_snapshot:
+            plans = self._authored_shot_plans(project, seed, revision_id)
+        elif analysis_report is not None:
             plans = self._initial_shot_plans(project, analysis_report, revision_id)
             seed_by_order = {item.order: item for item in seed.shots}
             plans = [
@@ -3627,9 +3636,11 @@ class ProductionService:
                 if item.lifecycle_status == ShotLifecycleStatus.ACTIVE
             }
             requested_ids = payload.ordered_shot_plan_ids
-            scope_ids = {
-                item.id for item in self._video_stage_plans(project, plans)
-            } if payload.scope == "shot_videos" else set(active_by_id)
+            scope_ids = (
+                {item.id for item in self._video_stage_plans(project, plans)}
+                if payload.scope == "shot_videos"
+                else set(active_by_id)
+            )
             if set(requested_ids) != scope_ids:
                 raise _fail(
                     422,
@@ -3644,8 +3655,7 @@ class ProductionService:
             if payload.scope == "shot_videos":
                 ordered = iter(requested_ids)
                 requested_ids = [
-                    next(ordered) if item_id in scope_ids else item_id
-                    for item_id in current_ids
+                    next(ordered) if item_id in scope_ids else item_id for item_id in current_ids
                 ]
             if requested_ids == current_ids:
                 return await self.list_shots(project.id)
@@ -4966,6 +4976,9 @@ class ProductionService:
                 raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
             evidence = report.evidence_timeline
             media_evidence = report.media_evidence
+            seed = await self._authored_seed(project)
+            if seed is not None:
+                evidence = media_evidence = None
             source_audio_url = media_evidence.audio_url if media_evidence else None
             audio_mode = (
                 payload.audio_mode
@@ -7182,8 +7195,10 @@ class ProductionService:
                         beat
                         for beat in target_beats
                         if beat.approved_image_candidate_id is not None
-                        and (not approved_mentions
-                             or beat.approved_image_candidate_id in approved_mentions)
+                        and (
+                            not approved_mentions
+                            or beat.approved_image_candidate_id in approved_mentions
+                        )
                     ),
                     key=lambda beat: (
                         approved_mentions.get(beat.approved_image_candidate_id).order
@@ -8669,14 +8684,13 @@ class ProductionService:
         return True
 
     @staticmethod
-    def _video_stage_plans(
-        project: ProductionProject, plans: list[ShotPlan]
-    ) -> list[ShotPlan]:
+    def _video_stage_plans(project: ProductionProject, plans: list[ShotPlan]) -> list[ShotPlan]:
         scope = (
             set(project.video_stage_shot_ids) if project.video_stage_shot_ids is not None else None
         )
         return [
-            plan for plan in sorted(plans, key=lambda item: item.index)
+            plan
+            for plan in sorted(plans, key=lambda item: item.index)
             if plan.lifecycle_status == ShotLifecycleStatus.ACTIVE
             and (scope is None or plan.id in scope)
         ]
@@ -8685,7 +8699,8 @@ class ProductionService:
     def _require_video_stage_member(project: ProductionProject, plan: ShotPlan) -> None:
         if project.video_stage_shot_ids is not None and plan.id not in project.video_stage_shot_ids:
             raise _fail(
-                409, "shot_outside_video_stage",
+                409,
+                "shot_outside_video_stage",
                 "该分镜未选入本次视频阶段，请先在分镜图片中采用图片并重新进入分镜视频",
             )
 
@@ -8697,10 +8712,12 @@ class ProductionService:
         for plan in sorted(plans, key=lambda item: item.index):
             if plan.lifecycle_status != ShotLifecycleStatus.ACTIVE:
                 continue
-            count = sum([
-                await self._has_valid_approved_image_beat(project, plan, beat)
-                for beat in plan.visual_beats
-            ])
+            count = sum(
+                [
+                    await self._has_valid_approved_image_beat(project, plan, beat)
+                    for beat in plan.visual_beats
+                ]
+            )
             picture_count += count
             if count or (
                 plan.output_mode == ShotOutputMode.SOURCE_VIDEO
@@ -8870,6 +8887,9 @@ class ProductionService:
             report = await self.repository.get_report_by_analysis(project.base_analysis_id)
             if report is None:
                 raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
+        if await self._authored_seed(project) is not None:
+            # Provenance is not a source media timeline for a newly authored film.
+            report = None
         source_audio_url = (
             report.media_evidence.audio_url
             if report is not None and report.media_evidence
@@ -9092,21 +9112,28 @@ class ProductionService:
                 raise _fail(409, "workflow_gate_blocked", "请至少采用一张分镜图")
             selected_ids = [plan.id for plan in selected]
             already_entered = project.active_step in {
-                ProductionStep.SHOT_VIDEOS, ProductionStep.EDITING, ProductionStep.EXPORT,
+                ProductionStep.SHOT_VIDEOS,
+                ProductionStep.EDITING,
+                ProductionStep.EXPORT,
             }
             # Repeated entry is idempotent; refreshing a page never calls this.
             if not already_entered or project.video_stage_shot_ids != selected_ids:
-                next_project = project.model_copy(update={
-                    "video_stage_shot_ids": selected_ids,
-                    "active_step": (
-                        project.active_step if already_entered else ProductionStep.SHOT_VIDEOS
-                    ),
-                    "status": project.status if already_entered else ProductionProjectStatus.ACTIVE,
-                    "updated_at": utc_now(),
-                })
+                next_project = project.model_copy(
+                    update={
+                        "video_stage_shot_ids": selected_ids,
+                        "active_step": (
+                            project.active_step if already_entered else ProductionStep.SHOT_VIDEOS
+                        ),
+                        "status": project.status
+                        if already_entered
+                        else ProductionProjectStatus.ACTIVE,
+                        "updated_at": utc_now(),
+                    }
+                )
                 next_project, revision = await self._prepare_revision(
                     next_project,
-                    ProductionChangeKind.VIDEO_STAGE_SELECTION_CHANGED if already_entered
+                    ProductionChangeKind.VIDEO_STAGE_SELECTION_CHANGED
+                    if already_entered
                     else ProductionChangeKind.WORKFLOW_ADVANCED,
                     f"选入 {len(selected_ids)} 个分镜，进入分镜视频",
                 )
@@ -9120,7 +9147,9 @@ class ProductionService:
     ) -> ProductionProjectDetail:
         initial_project = await self._require_project(project_id)
         video_steps = {
-            ProductionStep.SHOT_VIDEOS, ProductionStep.EDITING, ProductionStep.EXPORT,
+            ProductionStep.SHOT_VIDEOS,
+            ProductionStep.EDITING,
+            ProductionStep.EXPORT,
         }
         if (
             payload.target_step == ProductionStep.SHOT_VIDEOS
@@ -9142,7 +9171,8 @@ class ProductionService:
                 raise _fail(409, "workflow_already_advanced", f"当前方案已进入{label}阶段")
             if project.active_step in {ProductionStep.EDITING, ProductionStep.EXPORT}:
                 raise _fail(
-                    409, "unsupported_target_step",
+                    409,
+                    "unsupported_target_step",
                     "已进入剪辑或导出；如需调整参与分镜，请从分镜图片重新进入分镜视频",
                 )
             expected_target = (
@@ -9861,6 +9891,55 @@ class ProductionService:
                 )
         return bindings
 
+    @staticmethod
+    def _authored_shot_plans(project, seed, revision_id):
+        plans = []
+        for item in seed.shots:
+            start = frame_to_seconds(item.start_frame, seed.fps)
+            duration = frame_to_seconds(item.duration_frames, seed.fps)
+            image_prompt = sanitize_still_image_prompt(item.image_prompt)
+            beat = ShotVisualBeat(
+                index=1,
+                title=item.description[:120] or f"分镜 {item.order}",
+                start_ratio=0,
+                end_ratio=1,
+                source_origin="blank",
+                image_prompt=image_prompt,
+                image_negative_constraints=item.image_negative_constraints,
+                image_status=WorkflowItemStatus.READY,
+            )
+            plans.append(
+                ShotPlan(
+                    project_id=project.id,
+                    revision_id=revision_id,
+                    source_shot_id=item.stable_shot_key,
+                    stable_shot_key=item.stable_shot_key,
+                    index=item.order,
+                    order=item.order,
+                    timing_fps=seed.fps,
+                    start_frame=item.start_frame,
+                    duration_frames=item.duration_frames,
+                    source_kind=ShotSourceKind.BLANK,
+                    source_keyframe_origin="blank",
+                    start_seconds=start,
+                    end_seconds=start + duration,
+                    duration_seconds=duration,
+                    image_prompt=image_prompt,
+                    video_prompt=item.video_prompt,
+                    image_negative_constraints=item.image_negative_constraints,
+                    video_negative_constraints=item.video_negative_constraints,
+                    image_status=WorkflowItemStatus.READY,
+                    visual_beats=[beat],
+                )
+            )
+        return plans
+
+    async def _authored_seed(self, project):
+        if project.production_seed_id is None:
+            return None
+        seed = await self.repository.get_production_seed(project.production_seed_id)
+        return seed if seed and "creative_concept" in seed.style_bible_snapshot else None
+
     def _initial_shot_plans(
         self,
         project: ProductionProject,
@@ -10284,7 +10363,12 @@ class ProductionService:
             if report is None or report.video_id != project.video_id:
                 raise _fail(409, "analysis_report_missing", "创作方案的基础分析报告不存在")
             revision_id = uuid4()
-            plans = self._initial_shot_plans(project, report, revision_id)
+            seed = await self._authored_seed(project)
+            plans = (
+                self._authored_shot_plans(project, seed, revision_id)
+                if seed is not None
+                else self._initial_shot_plans(project, report, revision_id)
+            )
             plans = await self._materialize_visual_beat_source_frames(
                 project,
                 plans,

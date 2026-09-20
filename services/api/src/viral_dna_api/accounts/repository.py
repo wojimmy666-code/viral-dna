@@ -22,6 +22,9 @@ from .workspace_layout import (
 
 SESSION_SECONDS = 12 * 60 * 60
 ADMIN_SESSION_SECONDS = 2 * 60 * 60
+SESSION_MAX_SECONDS = 7 * 24 * 60 * 60
+ADMIN_SESSION_MAX_SECONDS = 24 * 60 * 60
+SESSION_RENEW_INTERVAL = 5 * 60
 LEASE_SECONDS = 120
 INVITATION_SECONDS = 72 * 60 * 60
 MIN_PASSWORD_LENGTH = 8
@@ -715,7 +718,16 @@ class AccountRepository:
             db.execute("DELETE FROM project_edit_leases WHERE user_id=?", (row["user_id"],))
             self.audit(db, row["user_id"], "password_set", row["account_id"], row["user_id"])
 
-    def login(self, username: str, password: str, *, admin: bool, remote: str) -> str:
+    def login(
+        self,
+        username: str,
+        password: str,
+        *,
+        admin: bool,
+        remote: str,
+        expected_principal_id: str | None = None,
+        replace_token: str = "",
+    ) -> str:
         username = username.strip().casefold() if admin else username_key(username)
         validate_password_length(password)
         failed_message = (
@@ -760,8 +772,15 @@ class AccountRepository:
                 ).fetchone()
                 if current["status"] != "active" or not account or account["status"] != "active":
                     raise AccountError(401, "login_failed", failed_message)
+            if expected_principal_id is not None and current["id"] != expected_principal_id:
+                raise AccountError(
+                    409,
+                    "reauth_account_mismatch",
+                    "请使用原用户重新登录，当前草稿不能转移到其他用户",
+                )
             db.execute("DELETE FROM auth_login_attempts WHERE attempt_key=?", (keys[1],))
             token = secrets.token_urlsafe(32)
+            now = time.time()
             duration = ADMIN_SESSION_SECONDS if admin else SESSION_SECONDS
             db.execute(
                 "INSERT INTO auth_sessions VALUES(?,?,?,?,?)",
@@ -773,53 +792,87 @@ class AccountRepository:
                     now,
                 ),
             )
+            if expected_principal_id is not None and replace_token:
+                previous = token_hash(replace_token)
+                deleted = db.execute(
+                    "DELETE FROM auth_sessions WHERE token_hash=? AND principal_id=? "
+                    "AND principal_type=?",
+                    (previous, current["id"], "platform_admin" if admin else "user"),
+                )
+                if deleted.rowcount:
+                    db.execute("DELETE FROM project_edit_leases WHERE session_hash=?", (previous,))
             self.audit(db, row["id"], "login")
             return token
 
     def session(self, token: str, *, admin: bool = False) -> dict:
         with self.connect() as db:
-            session = db.execute(
-                "SELECT * FROM auth_sessions WHERE token_hash=? AND "
-                "principal_type=? AND expires_at>?",
-                (token_hash(token), "platform_admin" if admin else "user", time.time()),
-            ).fetchone()
-            if not session:
-                raise AccountError(401, "login_required", "请先登录")
-            if admin:
-                row = db.execute(
-                    "SELECT id FROM auth_admins WHERE id=?", (session["principal_id"],)
-                ).fetchone()
-                if not row:
-                    raise AccountError(401, "login_required", "请先登录")
-                return {
-                    "admin_id": row["id"],
-                    "display_name": "admin",
-                    "principal_type": "platform_admin",
-                    "auth_mode": "password",
-                    "csrf_token": csrf_token(token),
-                }
-            user = db.execute(
-                "SELECT * FROM auth_users WHERE id=?", (session["principal_id"],)
-            ).fetchone()
-            account = (
+            return self._session(db, token, admin=admin, now=time.time())
+
+    def renew_session(self, token: str, *, admin: bool = False) -> dict:
+        # Validate and update under the same write lock: revocation always wins,
+        # and simultaneous tabs cannot recreate a deleted/expired session.
+        with self.connect(write=True) as db:
+            now = time.time()
+            session = self._session(db, token, admin=admin, now=now)
+            if now >= session["session_renew_after"]:
+                duration = ADMIN_SESSION_SECONDS if admin else SESSION_SECONDS
+                expires_at = min(now + duration, session["session_absolute_expires_at"])
                 db.execute(
-                    "SELECT * FROM auth_accounts WHERE id=?", (user["account_id"],)
-                ).fetchone()
-                if user
-                else None
-            )
-            if (
-                not user
-                or user["status"] != "active"
-                or not account
-                or account["status"] != "active"
-            ):
-                raise AccountError(401, "login_required", "账户已停用或成员资格已撤销")
+                    "UPDATE auth_sessions SET expires_at=MAX(expires_at,?) WHERE token_hash=?",
+                    (expires_at, token_hash(token)),
+                )
+            return self._session(db, token, admin=admin, now=now)
+
+    def _session(self, db, token: str, *, admin: bool, now: float) -> dict:
+        maximum = ADMIN_SESSION_MAX_SECONDS if admin else SESSION_MAX_SECONDS
+        session = db.execute(
+            "SELECT * FROM auth_sessions WHERE token_hash=? AND "
+            "principal_type=? AND expires_at>? AND created_at>?",
+            (token_hash(token), "platform_admin" if admin else "user", now, now - maximum),
+        ).fetchone()
+        if not session:
+            raise AccountError(401, "login_required", "请先登录")
+        duration = ADMIN_SESSION_SECONDS if admin else SESSION_SECONDS
+        metadata = {
+            "session_started_at": session["created_at"],
+            "session_expires_at": min(session["expires_at"], session["created_at"] + maximum),
+            "session_absolute_expires_at": session["created_at"] + maximum,
+            "session_renew_after": max(session["created_at"], session["expires_at"] - duration)
+            + SESSION_RENEW_INTERVAL,
+            "session_server_time": now,
+        }
+        if metadata["session_expires_at"] >= metadata["session_absolute_expires_at"]:
+            metadata["session_renew_after"] = metadata["session_absolute_expires_at"]
+        if admin:
+            row = db.execute(
+                "SELECT id FROM auth_admins WHERE id=?", (session["principal_id"],)
+            ).fetchone()
+            if not row:
+                raise AccountError(401, "login_required", "请先登录")
             return {
-                "access": self.access(account, user, token_hash(token)),
-                "username": user["username"],
+                **metadata,
+                "admin_id": row["id"],
+                "display_name": "admin",
+                "principal_type": "platform_admin",
+                "auth_mode": "password",
                 "csrf_token": csrf_token(token),
             }
+        user = db.execute(
+            "SELECT * FROM auth_users WHERE id=?", (session["principal_id"],)
+        ).fetchone()
+        account = (
+            db.execute("SELECT * FROM auth_accounts WHERE id=?", (user["account_id"],)).fetchone()
+            if user
+            else None
+        )
+        if not user or user["status"] != "active" or not account or account["status"] != "active":
+            raise AccountError(401, "login_required", "账户已停用或成员资格已撤销")
+        return {
+            **metadata,
+            "access": self.access(account, user, token_hash(token)),
+            "username": user["username"],
+            "csrf_token": csrf_token(token),
+        }
 
     def logout(self, token: str) -> None:
         digest = token_hash(token)
@@ -864,9 +917,9 @@ class AccountRepository:
             valid = db.execute(
                 "SELECT 1 FROM auth_sessions s JOIN auth_users u ON u.id=s.principal_id "
                 "JOIN auth_accounts a ON a.id=u.account_id WHERE s.token_hash=? "
-                "AND s.principal_type='user' AND s.expires_at>? AND u.id=? "
+                "AND s.principal_type='user' AND s.expires_at>? AND s.created_at>? AND u.id=? "
                 "AND a.id=? AND u.status='active' AND a.status='active'",
-                (access.session_hash, now, user_id, account_id),
+                (access.session_hash, now, now - SESSION_MAX_SECONDS, user_id, account_id),
             ).fetchone()
             if not valid:
                 raise AccountError(401, "login_required", "登录已失效，请重新登录")

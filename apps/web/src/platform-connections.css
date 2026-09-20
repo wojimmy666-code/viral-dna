@@ -102,6 +102,33 @@
   gap: 16px;
 }
 
+.platform-link-test {
+  margin-top: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--type-caption-size);
+}
+
+.platform-link-test summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding-block: var(--space-2);
+}
+
+.platform-link-test form {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+
+.platform-link-test p {
+  margin: 0;
+  line-height: var(--type-leading-copy);
+}
+
+.platform-link-test button {
+  justify-self: start;
+}
+
 .platform-card {
   display: flex;
   flex-direction: column;

@@ -22,6 +22,7 @@ from ..contracts import (
     ProviderResult,
     ResultT,
 )
+from ..response_diagnostics import response_diagnostics
 
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -57,6 +58,7 @@ def _json_content(value: object) -> str:
         ).strip()
     else:
         content = ""
+    content = content.lstrip("\ufeff").strip()
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
     return content.strip()
@@ -262,7 +264,7 @@ class DashScopeProvider:
             ],
             "response_format": {"type": "json_object"},
             "enable_thinking": request.target.thinking,
-            "temperature": 0.1,
+            "temperature": request.temperature,
         }
         response_payload, latency_ms, request_id, usage = await self._request_json(
             payload,
@@ -271,21 +273,33 @@ class DashScopeProvider:
         )
         resolved_model = str(response_payload.get("model") or request.target.model)
         content = ""
+        finish_reason = None
         try:
             choice = response_payload["choices"][0]
+            finish_reason = choice.get("finish_reason")
             content = _json_content(choice["message"]["content"])
             parsed = json.loads(content)
             data = response_schema.model_validate(parsed)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError, ValidationError) as exc:
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+            AttributeError,
+            json.JSONDecodeError,
+            ValidationError,
+        ) as exc:
+            diagnostics = response_diagnostics(exc, response_schema, content, finish_reason)
+            issue = diagnostics.issues[0]
             raise ModelProviderError(
                 "model_schema_invalid",
-                _safe_message(exc),
+                f"Model response validation failed: {issue.path} ({issue.code})",
                 retryable=True,
                 provider_request_id=request_id,
                 usage=usage if usage.total_tokens else None,
                 resolved_model=resolved_model,
                 latency_ms=latency_ms,
                 raw_content=content or None,
+                diagnostics=diagnostics,
             ) from exc
 
         return ProviderResult(

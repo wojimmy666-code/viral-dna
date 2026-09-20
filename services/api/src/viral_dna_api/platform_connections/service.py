@@ -5,15 +5,17 @@ import os
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from yt_dlp import YoutubeDL
-
 from ..link_ingestion import (
+    LinkCollector,
     LinkCredentialError,
     LinkCredentialSession,
+    LinkIngestionError,
+    _YtDlpLogger,
     identify_platform,
     normalize_platform_url,
 )
@@ -92,6 +94,7 @@ class PlatformConnectionService:
         self.account_context_service = account_context_service
         self.repository = repository
         self.secret_store = secret_store
+        self.browser_assist = None
         self.browser_detector = browser_detector or BrowserProfileDetector()
         normalized_legacy_path = legacy_cookie_path.strip()
         self.legacy_cookie_path = (
@@ -179,7 +182,7 @@ class PlatformConnectionService:
                 session_cookie_count=metadata.session_cookie_count,
                 earliest_expiry_at=metadata.earliest_expiry_at,
                 health=PlatformConnectionHealth.READY,
-                last_validated_at=now,
+                last_checked_at=now,
                 created_at=existing.created_at if existing else now,
                 updated_at=now,
             )
@@ -238,7 +241,7 @@ class PlatformConnectionService:
                 session_cookie_count=metadata.session_cookie_count,
                 earliest_expiry_at=metadata.earliest_expiry_at,
                 health=PlatformConnectionHealth.READY,
-                last_validated_at=now,
+                last_checked_at=now,
                 created_at=existing.created_at if existing else now,
                 updated_at=now,
             )
@@ -288,32 +291,37 @@ class PlatformConnectionService:
                 platform=platform,
             )
 
+        normalized_test_url = None
+        if test_url:
+            try:
+                normalized_test_url = normalize_platform_url(test_url)
+                expected = identify_platform(normalized_test_url)
+            except LinkIngestionError as exc:
+                raise self._translate_probe_error(exc, platform) from exc
+            if expected.value != platform.value:
+                raise PlatformConnectionServiceError(
+                    "platform_connection_test_url_mismatch", "测试链接与当前平台不一致",
+                    platform=platform,
+                )
+            if connection.usage_strategy == PlatformUsageStrategy.DISABLED:
+                raise PlatformConnectionServiceError(
+                    "platform_connection_disabled", "请先启用该平台连接，再测试视频链接。",
+                    platform=platform,
+                )
         try:
             metadata = await self._inspect_connection(connection)
             network_tested = False
-            if test_url:
-                normalized_test_url = normalize_platform_url(test_url)
-                expected = identify_platform(normalized_test_url)
-                if expected.value != platform.value:
-                    raise PlatformConnectionServiceError(
-                        "platform_connection_test_url_mismatch",
-                        "测试链接与当前平台不一致",
-                        platform=platform,
-                    )
+            if normalized_test_url:
                 async with self.session_for(platform) as session:
-                    await asyncio.to_thread(
-                        self._probe_url,
-                        normalized_test_url,
-                        session,
-                    )
+                    await self._probe_url(normalized_test_url, session)
                 network_tested = True
         except PlatformConnectionServiceError:
             raise
         except (BrowserCookieError, CookieFileError, PlatformSecretStoreError) as exc:
-            await self.report_failure(
+            await self._update_health(
                 platform,
-                getattr(exc, "code", "platform_connection_error"),
-                str(exc),
+                success=False, code=getattr(exc, "code", "platform_connection_error"),
+                message=str(exc), expected_connection=connection,
             )
             if isinstance(exc, BrowserCookieError):
                 raise self._from_browser_error(exc, platform) from exc
@@ -322,35 +330,43 @@ class PlatformConnectionService:
             raise PlatformConnectionServiceError(exc.code, str(exc), platform=platform) from exc
         except Exception as exc:
             translated = self._translate_probe_error(exc, platform)
-            await self.report_failure(platform, translated.code, str(translated))
+            await self._update_health(
+                platform, success=False, code=translated.code, message=str(translated),
+                expected_connection=connection,
+            )
             raise translated from exc
 
         now = utc_now()
-        updated = connection.model_copy(
-            update={
+        async with self._lock:
+            current_state = await self._load_state()
+            current = self._find(current_state, context.account.id, context.device.id, platform)
+            if current is None or current.updated_at != connection.updated_at:
+                raise PlatformConnectionServiceError(
+                    "platform_connection_changed", "连接已更新，请重新检查当前配置。",
+                    status_code=409, platform=platform, retryable=True,
+                )
+            updates = {
                 "cookie_count": metadata.cookie_count,
                 "session_cookie_count": metadata.session_cookie_count,
                 "earliest_expiry_at": metadata.earliest_expiry_at,
-                "health": (
-                    PlatformConnectionHealth.VALID
-                    if network_tested
-                    else PlatformConnectionHealth.READY
-                ),
-                "last_validated_at": now,
-                "last_success_at": now if network_tested else connection.last_success_at,
-                "last_error_code": None,
-                "last_error_message": None,
+                "last_checked_at": now,
                 "updated_at": now,
             }
-        )
-        async with self._lock:
-            current_state = await self._load_state()
+            if network_tested:
+                updates.update({
+                    "health": PlatformConnectionHealth.VALID,
+                    "last_tested_at": now, "last_validated_at": now,
+                    "last_success_at": now, "last_error_code": None, "last_error_message": None,
+                })
+            # A local read must never erase an actual access failure or a successful
+            # network result; reading a Cookie is not checking it with the platform.
+            updated = current.model_copy(update=updates)
             self._replace(current_state, updated)
             await self._save_state(current_state)
         message = (
-            "平台链接测试通过，登录状态可用"
+            "已读取该视频的信息；正式分析时会自动下载并继续分析。"
             if network_tested
-            else "已读取该平台登录信息，实际可用性将在采集时继续验证"
+            else "本机登录信息可读取，未请求平台；此前的视频读取结果保持不变。"
         )
         return PlatformConnectionValidationResponse(
             connection=self._summary(platform, updated),
@@ -506,7 +522,7 @@ class PlatformConnectionService:
                     session_cookie_count=metadata.session_cookie_count,
                     earliest_expiry_at=metadata.earliest_expiry_at,
                     health=PlatformConnectionHealth.READY,
-                    last_validated_at=now,
+                    last_checked_at=now,
                     legacy_imported=True,
                     created_at=now,
                     updated_at=now,
@@ -524,6 +540,7 @@ class PlatformConnectionService:
         success: bool,
         code: str | None = None,
         message: str | None = None,
+        expected_connection: PlatformConnection | None = None,
     ) -> None:
         context = await self.account_context_service.ensure_current()
         async with self._lock:
@@ -531,9 +548,13 @@ class PlatformConnectionService:
             connection = self._find(state, context.account.id, context.device.id, platform)
             if connection is None:
                 return
+            if expected_connection and (
+                connection.id != expected_connection.id
+                or connection.updated_at != expected_connection.updated_at
+            ):
+                return
             now = utc_now()
             expired_codes = {
-                "link_auth_required",
                 "platform_cookie_expired",
                 "platform_browser_cookie_missing",
             }
@@ -548,6 +569,10 @@ class PlatformConnectionService:
                     ),
                     "last_success_at": now if success else connection.last_success_at,
                     "last_validated_at": now,
+                    "last_tested_at": (
+                        now if success or (code or "").startswith("link_")
+                        else connection.last_tested_at
+                    ),
                     "last_error_code": None if success else code,
                     "last_error_message": None if success else (message or "平台连接不可用")[:300],
                     "updated_at": now,
@@ -580,6 +605,8 @@ class PlatformConnectionService:
             session_cookie_count=connection.session_cookie_count,
             earliest_expiry_at=connection.earliest_expiry_at,
             health=connection.health,
+            last_checked_at=connection.last_checked_at,
+            last_tested_at=connection.last_tested_at,
             last_validated_at=connection.last_validated_at,
             last_success_at=connection.last_success_at,
             last_error_code=connection.last_error_code,
@@ -631,6 +658,10 @@ class PlatformConnectionService:
     def _replace(state: PlatformConnectionState, connection: PlatformConnection) -> None:
         for index, existing in enumerate(state.connections):
             if existing.id == connection.id:
+                # Windows clocks may repeat the same timestamp for rapid saves.
+                # Every revision must still invalidate an in-flight older probe.
+                if connection.updated_at <= existing.updated_at:
+                    connection.updated_at = existing.updated_at + timedelta(microseconds=1)
                 state.connections[index] = connection
                 return
         state.connections.append(connection)
@@ -659,23 +690,8 @@ class PlatformConnectionService:
             platform=platform,
         )
 
-    @staticmethod
-    def _probe_url(url: str, session: LinkCredentialSession) -> None:
-        options: dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-            "playlist_items": "1",
-            "socket_timeout": 20,
-            "retries": 1,
-        }
-        if session.cookie_file is not None:
-            options["cookiefile"] = str(session.cookie_file)
-        if session.cookies_from_browser is not None:
-            options["cookiesfrombrowser"] = session.cookies_from_browser
-        with YoutubeDL(options) as downloader:
-            downloader.extract_info(url, download=False)
+    async def _probe_url(self, url: str, session: LinkCredentialSession) -> None:
+        await LinkCollector(self).probe_url(url, session)
 
     @staticmethod
     def _materialize_cookie(payload: bytes) -> Path:
@@ -698,25 +714,11 @@ class PlatformConnectionService:
         error: Exception,
         platform: PlatformKind,
     ) -> PlatformConnectionServiceError:
-        details = str(error).lower()
-        if any(marker in details for marker in ("login", "cookie", "captcha", "verify")):
-            return PlatformConnectionServiceError(
-                "platform_connection_auth_required",
-                "平台仍要求登录或人机验证，请更新登录状态后重试",
-                retryable=True,
-                platform=platform,
-            )
-        if any(marker in details for marker in ("decrypt", "dpapi", "app-bound")):
-            return PlatformConnectionServiceError(
-                "platform_browser_cookie_decryption_failed",
-                "浏览器安全保护阻止了 Cookie 解密，请改用 cookies.txt 导入",
-                platform=platform,
-            )
+        translated = error if isinstance(error, (LinkIngestionError, LinkCredentialError)) else (
+            LinkCollector()._translate_download_error(error, _YtDlpLogger())
+        )
         return PlatformConnectionServiceError(
-            "platform_connection_test_failed",
-            "平台连接测试失败，请确认链接可访问后重试",
-            retryable=True,
-            platform=platform,
+            translated.code, str(translated), retryable=translated.retryable, platform=platform,
         )
 
 

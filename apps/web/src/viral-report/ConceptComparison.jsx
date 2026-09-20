@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { PromptSectionView } from "../prompt-presentation/PromptSectionView.jsx";
+import { CreativeBriefChecks } from "./CreativeBriefChecks.jsx";
 import { findConceptDuplicateFields, STRATEGY_META } from "./viral-report-ui.js";
 
 const LEVEL_LABELS = { low: "较低", medium: "中等", high: "较高" };
@@ -17,15 +18,16 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
   if (!conceptSet || !selected) return null;
   const duplicateFields = findConceptDuplicateFields(conceptSet.concepts);
   const isStale = conceptSet.status === "stale";
+  const creative = conceptSet.phase === "expanded";
 
   return (
     <section className="concept-comparison">
       <header className="viral-section-header">
         <div>
-          <h2>{historical ? "最近生成的方案" : "比较并选择新视频方案"}</h2>
+          <h2>{creative ? selected.name : historical ? "历史完整方案" : "比较并选择新视频方案"}</h2>
           {!historical && (
             <p>
-              {conceptSet.category_profile
+              {creative ? "确认后创建可编辑制作方案，不会自动生成图片或视频。" : conceptSet.category_profile
                 ? `三套方案均基于“${conceptSet.category_profile.display_name}”生成；选择后只创建可编辑方案。`
                 : "选择后只创建可编辑方案，不会立即生成图片或视频。"}
             </p>
@@ -40,7 +42,7 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
         </div>
       )}
 
-      <div className="concept-summary-grid" role="radiogroup" aria-label="复刻方案">
+      {!creative && <div className="concept-summary-grid" role="radiogroup" aria-label="复刻方案">
         {conceptSet.concepts.map((concept) => {
           const meta = STRATEGY_META[concept.strategy] || { label: concept.strategy, tone: "faithful" };
           const active = concept.id === selected.id;
@@ -56,7 +58,7 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
             </button>
           );
         })}
-      </div>
+      </div>}
 
       <article className="concept-detail">
         <div className="concept-creative-brief">
@@ -71,9 +73,11 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
         <div className="concept-detail-actions">
           <button className="primary-button" type="button" onClick={() => onPublish(selected)} disabled={Boolean(publishingId) || isStale}>
             {publishingId === selected.id ? <CircleNotch className="spin" size={18} /> : <MagicWand size={18} weight="fill" />}
-            {isStale ? "重新生成后可创建" : "创建创作方案"}
+            {isStale ? "重新生成后可创建" : conceptSet.published_result ? "进入已创建方案" : creative ? "确认分镜，进入制作" : "创建创作方案"}
           </button>
         </div>
+        {creative && selected.required_assets.length > 0 && <details className="concept-risk-disclosure"><summary>所需资产 · {selected.required_assets.length} 项</summary><ul>{selected.required_assets.map((item, index) => <li key={index}>{item}</li>)}</ul></details>}
+        {creative && selected.brief_checks?.length > 0 && <details className="concept-risk-disclosure"><summary>补充想法落实说明</summary><CreativeBriefChecks checks={selected.brief_checks} /></details>}
         {selected.risks.length > 0 && (
           <details className="concept-risk-disclosure">
             <summary>
@@ -92,11 +96,12 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
           </summary>
           <div className="concept-shot-list">
             {selected.shots.map((shot) => (
-              <article key={shot.source_shot_id}>
+              <article key={shot.index}>
                 <span className="concept-shot-number">{String(shot.index).padStart(2, "0")}</span>
                 <div className="concept-shot-content">
                   <span className="concept-shot-meta">{shot.traffic_role} · {shot.duration_seconds.toFixed(1)} 秒</span>
                   <h4>{shot.title}</h4>
+                  {creative && <><p>{shot.description}</p><details><summary>图片提示词</summary><PromptSectionView prompt={shot.image_prompt} /></details><strong>视频提示词</strong></>}
                   <PromptSectionView prompt={shot.video_prompt} />
                 </div>
               </article>

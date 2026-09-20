@@ -75,13 +75,29 @@ export function connectionHealthMeta(connection) {
   if (!connection?.configured) {
     return { label: "未配置", tone: "muted", usable: false };
   }
+  if (connection.usage_strategy === "disabled") {
+    return { label: "已暂停", tone: "muted", usable: false };
+  }
   const health = connection.health || "needs_validation";
-  if (health === "valid") return { label: "连接可用", tone: "success", usable: true };
-  if (health === "ready") return { label: "已读取", tone: "success", usable: true };
+  if (health === "valid") return { label: "视频读取成功", tone: "success", usable: true };
+  if (health === "ready") return { label: "已导入 · 未验证", tone: "warning", usable: true };
   if (health === "needs_validation") {
     return { label: "待验证", tone: "warning", usable: true };
   }
   if (health === "expired") return { label: "登录已失效", tone: "danger", usable: false };
+  const errorLabels = {
+    link_access_denied: "访问受限",
+    link_rate_limited: "请求过于频繁",
+    link_metadata_unavailable: "视频信息未获取",
+    link_probe_timeout: "链接测试超时",
+    link_download_timeout: "读取超时",
+    link_network_failed: "网络连接失败",
+    link_platform_unavailable: "平台暂时不可用",
+    link_auth_required: "需要登录验证",
+  };
+  if (errorLabels[connection.last_error_code]) {
+    return { label: errorLabels[connection.last_error_code], tone: "danger", usable: false };
+  }
   return { label: "需要处理", tone: "danger", usable: false };
 }
 

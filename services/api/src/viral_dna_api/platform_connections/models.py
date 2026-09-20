@@ -65,6 +65,8 @@ class PlatformConnection(BaseModel):
     session_cookie_count: int = Field(default=0, ge=0)
     earliest_expiry_at: datetime | None = None
     health: PlatformConnectionHealth = PlatformConnectionHealth.NEEDS_VALIDATION
+    last_checked_at: datetime | None = None
+    last_tested_at: datetime | None = None
     last_validated_at: datetime | None = None
     last_success_at: datetime | None = None
     last_error_code: str | None = Field(default=None, max_length=120)
@@ -93,6 +95,8 @@ class PlatformConnectionSummary(BaseModel):
     session_cookie_count: int = Field(default=0, ge=0)
     earliest_expiry_at: datetime | None = None
     health: PlatformConnectionHealth = PlatformConnectionHealth.UNCONFIGURED
+    last_checked_at: datetime | None = None
+    last_tested_at: datetime | None = None
     last_validated_at: datetime | None = None
     last_success_at: datetime | None = None
     last_error_code: str | None = None

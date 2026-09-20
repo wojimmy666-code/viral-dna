@@ -66,6 +66,10 @@ def _concept_set_stale_reason(
     concept_set: ViralConceptSet,
     insight: ViralInsightReport,
 ) -> str | None:
+    if concept_set.phase != "legacy":
+        # New creative batches freeze their own source and category. Changes are
+        # advisory, never a reason to silently rewrite or invalidate the draft.
+        return None
     if (
         concept_set.schema_version != CONCEPT_SCHEMA_VERSION
         or concept_set.generator_id != CONCEPT_GENERATOR_ID
@@ -112,12 +116,8 @@ class ViralInsightService:
 
     async def get_insight(self, analysis_id: UUID) -> ViralInsightReport:
         source = await self._source_report(analysis_id)
-        if source.viral_reasoning is None and self.reasoning is not None:
-            analysis = await self.repository.get_analysis(analysis_id)
-            if analysis is not None and analysis.model_plan is not None:
-                enriched = await self.reasoning.enrich(analysis, source)
-                if enriched != source:
-                    source = await self.repository.save_report(enriched)
+        # A GET must not initiate a paid model request. Enrichment belongs to the
+        # explicit analysis pipeline; ideation has its own explicit POST task.
         current = await self.repository.get_viral_insight(analysis_id)
         fingerprint = report_fingerprint(source)
         if current is not None and current.input_fingerprint == fingerprint:
@@ -172,9 +172,7 @@ class ViralInsightService:
                 "品类档案服务尚未就绪",
             )
         try:
-            category_profile = await self.category_profiles.snapshot(
-                payload.category_profile_id
-            )
+            category_profile = await self.category_profiles.snapshot(payload.category_profile_id)
         except CategoryProfileServiceError as exc:
             raise ViralInsightServiceError(exc.status_code, exc.code, str(exc)) from exc
         known_entities = {item.entity_id for item in insight.replacement_opportunities}
@@ -228,6 +226,12 @@ class ViralInsightService:
                 "concept_set_not_ready",
                 "复刻方案尚未成功生成，不能创建创作方案",
             )
+        if concept_set.phase == "ideas":
+            raise ViralInsightServiceError(
+                409, "concept_not_expanded", "请先选择创意并展开完整分镜"
+            )
+        if concept_set.published_result and concept_set.published_result.concept_id == concept_id:
+            return concept_set.published_result
         concept = next((item for item in concept_set.concepts if item.id == concept_id), None)
         if concept is None:
             raise ViralInsightServiceError(404, "concept_not_found", "复刻方案不存在")
@@ -237,8 +241,11 @@ class ViralInsightService:
                 "concept_publisher_unavailable",
                 "创作方案发布服务尚未就绪",
             )
-        return await self.publisher.publish(
+        result = await self.publisher.publish(
             analysis_id=concept_set.analysis_id,
             concept=concept,
             payload=payload,
         )
+        concept_set.published_result = result
+        await self.repository.save_viral_concept_set(concept_set)
+        return result

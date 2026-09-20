@@ -9,10 +9,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from viral_dna_api.link_ingestion import LinkIngestionResult
+from viral_dna_api.link_ingestion import LinkCollector, normalize_platform_url
 from viral_dna_api.main import app
 from viral_dna_api.media import MAX_VIDEO_SECONDS, MediaProcessor
-from viral_dna_api.models import SourceType
 from viral_dna_api.records import resolve_record_name_from_video
 
 FFMPEG = shutil.which("ffmpeg")
@@ -254,40 +253,38 @@ def test_real_upload_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         assert thumbnail_metadata["analysis_id"] == analysis_id
 
 
-def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("source_url", [
+    "https://www.xiaohongshu.com/explore/note-123?xsec_token=test",
+    "https://www.douyin.com/user/self?modal_id=7686022704168443034&showTab=favorite_collection",
+])
+def test_real_link_analysis_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_url: str,
+) -> None:
     source_path = tmp_path / "linked-two-scenes.mp4"
     storage_root = tmp_path / "storage"
     create_two_scene_video(source_path)
     monkeypatch.setenv("VIRAL_DNA_STORAGE_ROOT", str(storage_root))
     monkeypatch.setenv("VIRAL_DNA_ANALYZER_MODE", "hybrid")
 
-    class FakeLinkCollector:
-        def __init__(self, _credential_resolver=None) -> None:
-            pass
+    downloads = []
 
-        async def collect(self, video) -> LinkIngestionResult:
-            target_dir = storage_root / "links" / str(video.id)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            downloaded_path = target_dir / "source.mp4"
-            shutil.copy2(source_path, downloaded_path)
-            return LinkIngestionResult(
-                path=downloaded_path,
-                platform=SourceType.XIAOHONGSHU,
-                resolved_url=str(video.source_url),
-                source_video_id="note-123",
-                title="真实链接采集测试",
-                author="测试作者",
-                duration_seconds=2.0,
-                file_size_bytes=downloaded_path.stat().st_size,
-            )
+    async def download(self, url, target_dir, session):
+        downloads.append(url)
+        downloaded_path = target_dir / "source.mp4"
+        shutil.copy2(source_path, downloaded_path)
+        return {
+            "filepath": str(downloaded_path), "webpage_url": url,
+            "id": "note-123", "title": "真实链接采集测试", "uploader": "测试作者",
+            "duration": 2.0,
+        }
 
-    monkeypatch.setattr("viral_dna_api.real_pipeline.LinkCollector", FakeLinkCollector)
+    monkeypatch.setattr(LinkCollector, "_download_process", download)
 
     with TestClient(app) as client:
         video_response = client.post(
             "/api/v1/videos/link",
             json={
-                "url": "https://www.xiaohongshu.com/explore/note-123?xsec_token=test",
+                "url": source_url,
                 "target_model": "seedance",
                 "rights_confirmed": True,
             },
@@ -321,7 +318,8 @@ def test_real_link_analysis_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         assert status_payload["stage"] == "completed", status_payload.get("error")
         processed_video = client.get(f"/api/v1/videos/{video_id}").json()
         assert processed_video["title"] == "真实链接采集测试"
-        assert processed_video["resolved_source_url"].startswith("https://www.xiaohongshu.com/")
+        assert processed_video["resolved_source_url"] == normalize_platform_url(source_url)
+        assert downloads == [normalize_platform_url(source_url)]
         assert processed_video["source_video_id"] == "note-123"
         assert processed_video["source_author"] == "测试作者"
         assert processed_video["ingested_at"] is not None

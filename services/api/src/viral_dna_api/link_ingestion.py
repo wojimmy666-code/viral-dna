@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import math
 import os
 import re
-from contextlib import AbstractAsyncContextManager
+import signal
+import subprocess
+import sys
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,12 +18,16 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 from uuid import UUID
 
 from yt_dlp import YoutubeDL
+from yt_dlp.networking.exceptions import HTTPError
 from yt_dlp.utils import YoutubeDLError
 from yt_dlp.version import __version__ as yt_dlp_version
 
+from .browser_budget import HumanPauseBudget
+from .douyin_extractor import DouyinPageIE
 from .media import MAX_VIDEO_SECONDS, get_storage_root
 from .models import SourceType, Video
 from .platform_catalog import PLATFORM_SPECS, SUPPORTED_PLATFORM_TEXT
+from .runtime_config import get_config_value
 
 COLLECTOR_VERSION = "yt-dlp-link-v1"
 DEFAULT_MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
@@ -30,6 +38,11 @@ PLATFORM_DOMAINS = {
     for domain in spec.link_domains
 }
 DOUYIN_CANONICAL_HOST = "www.douyin.com"
+WORKER_IMPORT_ROOT = str(Path(__file__).resolve().parent.parent)
+BROWSER_FALLBACK_CODES = {
+    "link_auth_required", "link_access_denied", "link_metadata_unavailable",
+    "link_download_failed", "link_browser_cookie_failed",
+}
 DOUYIN_VIDEO_PATH = re.compile(
     r"(?:^|/)video/(?P<video_id>[0-9]{1,30})(?:/|$)"
 )
@@ -85,6 +98,7 @@ class LinkIngestionResult:
 class _YtDlpLogger:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.http_status: int | None = None
 
     def debug(self, message: str) -> None:
         return None
@@ -93,10 +107,23 @@ class _YtDlpLogger:
         return None
 
     def warning(self, message: str) -> None:
-        self.messages.append(message)
+        self.messages = [*self.messages[-7:], message[:2000]]
 
     def error(self, message: str) -> None:
-        self.messages.append(message)
+        self.warning(message)
+
+
+class _ObservedYoutubeDL(YoutubeDL):
+    """Keep the HTTP cause when an extractor replaces it with a generic Cookie error."""
+
+    def urlopen(self, request):
+        try:
+            return super().urlopen(request)
+        except HTTPError as exc:
+            logger = self.params.get("logger")
+            if isinstance(logger, _YtDlpLogger):
+                logger.http_status = exc.status
+            raise
 
 
 def identify_platform(url: str) -> SourceType:
@@ -183,16 +210,73 @@ def get_link_storage_root(video_id: UUID, record_id: UUID | None = None) -> Path
 
 
 class LinkCollector:
-    def __init__(self, credential_resolver: LinkCredentialResolver | None = None) -> None:
+    def __init__(
+        self, credential_resolver: LinkCredentialResolver | None = None,
+        *, browser_assist=None, browser_progress=None,
+    ) -> None:
         self.credential_resolver = credential_resolver
+        self.browser_assist = browser_assist or getattr(credential_resolver, "browser_assist", None)
+        self.browser_progress = browser_progress
+        self._budget: HumanPauseBudget | None = None
         self.max_download_bytes = _positive_int(
             "VIRAL_DNA_LINK_MAX_BYTES",
             DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         self.socket_timeout = _positive_float("VIRAL_DNA_LINK_SOCKET_TIMEOUT", 20.0)
         self.retries = _non_negative_int("VIRAL_DNA_LINK_RETRIES", 2)
+        self.timeout_seconds = configured_timeout("VIRAL_DNA_LINK_TIMEOUT_SECONDS", 120)
 
     async def collect(self, video: Video) -> LinkIngestionResult:
+        try:
+            async with HumanPauseBudget(self.timeout_seconds) as budget:
+                self._budget = budget
+                return await self._collect(video)
+        except TimeoutError as exc:
+            failure = LinkIngestionError(
+                "link_download_timeout",
+                f"读取或下载平台视频超过 {self.timeout_seconds:g} 秒，已停止。"
+                "请检查网络和平台登录状态后重试，或直接上传视频文件。",
+                retryable=True,
+            )
+            await self._report_failure(video.source_type, failure.code, str(failure))
+            raise failure from exc
+        finally:
+            self._budget = None
+
+    async def _browser_state(self, event: dict) -> None:
+        if self._budget:
+            self._budget.waiting(event["state"] == "waiting_user")
+        if self.browser_progress:
+            await self.browser_progress(event)
+
+    async def _download_with_browser_fallback(self, url, target, platform, session):
+        enabled = (
+            platform == SourceType.DOUYIN and self.browser_assist
+            and self.browser_assist.available()
+        )
+        started = asyncio.get_running_loop().time()
+
+        async def regular():
+            if session is None:
+                return await self._attempt_download(url, target, None)
+            return await self._download_with_credentials(url, target, platform, session)
+
+        if not enabled:
+            return await regular()
+        try:
+            async with asyncio.timeout(min(30, self.timeout_seconds / 3)):
+                return await regular()
+        except LinkIngestionError as exc:
+            if exc.code not in BROWSER_FALLBACK_CODES:
+                raise
+        except TimeoutError:
+            pass
+        remaining = max(0.1, self.timeout_seconds - (asyncio.get_running_loop().time() - started))
+        return await self.browser_assist.download(
+            url, target, session, remaining, self.max_download_bytes, self._browser_state,
+        )
+
+    async def _collect(self, video: Video) -> LinkIngestionResult:
         if video.source_type == SourceType.UPLOAD or not video.source_url:
             raise LinkIngestionError(
                 "link_source_missing",
@@ -211,12 +295,16 @@ class LinkCollector:
         await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(self._remove_partial_files, target_dir)
 
+        report_success = False
         if self.credential_resolver is None:
-            info = await self._attempt_download(source_url, target_dir, None)
+            info = await self._download_with_browser_fallback(
+                source_url, target_dir, expected_platform, None,
+            )
         else:
             try:
                 async with self.credential_resolver.session_for(expected_platform) as session:
-                    info = await self._download_with_credentials(
+                    report_success = session.configured and session.strategy != "disabled"
+                    info = await self._download_with_browser_fallback(
                         source_url,
                         target_dir,
                         expected_platform,
@@ -224,7 +312,15 @@ class LinkCollector:
                     )
             except LinkCredentialError as exc:
                 await self._report_failure(expected_platform, exc.code, str(exc))
-                raise LinkIngestionError(exc.code, str(exc), retryable=exc.retryable) from exc
+                if (expected_platform == SourceType.DOUYIN and self.browser_assist
+                        and self.browser_assist.available()):
+                    report_success = False
+                    info = await self.browser_assist.download(
+                        source_url, target_dir, None, self.timeout_seconds,
+                        self.max_download_bytes, self._browser_state,
+                    )
+                else:
+                    raise LinkIngestionError(exc.code, str(exc), retryable=exc.retryable) from exc
 
         resolved_url = str(info.get("webpage_url") or info.get("original_url") or source_url)
         try:
@@ -275,6 +371,8 @@ class LinkCollector:
             file_size_bytes=file_size,
         )
         await asyncio.to_thread(self._write_manifest, target_dir, result)
+        if report_success:
+            await self._report_success(expected_platform)
         return result
 
     def _download_sync(
@@ -283,6 +381,9 @@ class LinkCollector:
         target_dir: Path,
         logger: _YtDlpLogger,
         credential_session: LinkCredentialSession | None = None,
+        *,
+        use_legacy_cookie: bool = True,
+        metadata_only: bool = False,
     ) -> dict[str, Any]:
         def duration_filter(info: dict[str, Any], incomplete: bool = False) -> str | None:
             if incomplete:
@@ -306,10 +407,12 @@ class LinkCollector:
             "continuedl": True,
             "overwrites": False,
             "quiet": True,
-            "no_warnings": True,
+            # Warnings are captured in memory, not printed: they often contain the
+            # actual transport failure which Douyin's generic error hides.
+            "no_warnings": False,
             "logger": logger,
             "match_filter": duration_filter,
-            "cachedir": str(get_storage_root() / "temp" / "yt-dlp-cache"),
+            "cachedir": False,
         }
         cookie_path = credential_session.cookie_file if credential_session else None
         if cookie_path is not None:
@@ -322,7 +425,7 @@ class LinkCollector:
             options["cookiefile"] = str(cookie_path)
         elif credential_session and credential_session.cookies_from_browser is not None:
             options["cookiesfrombrowser"] = credential_session.cookies_from_browser
-        elif self.credential_resolver is None:
+        elif self.credential_resolver is None and use_legacy_cookie:
             cookie_file = os.getenv("VIRAL_DNA_YTDLP_COOKIE_FILE", "").strip()
             if cookie_file:
                 legacy_cookie_path = Path(cookie_file).expanduser().resolve()
@@ -337,8 +440,9 @@ class LinkCollector:
         if proxy:
             options["proxy"] = proxy
 
-        with YoutubeDL(options) as downloader:
-            info = downloader.extract_info(source_url, download=True)
+        with _ObservedYoutubeDL(options) as downloader:
+            downloader.add_info_extractor(DouyinPageIE())
+            info = downloader.extract_info(source_url, download=not metadata_only)
         if not isinstance(info, dict):
             raise LinkIngestionError(
                 "link_metadata_missing",
@@ -363,7 +467,9 @@ class LinkCollector:
             )
         except LinkIngestionError as first_error:
             should_retry = (
-                first_error.code == "link_auth_required"
+                first_error.code in {
+                    "link_auth_required", "link_access_denied", "link_metadata_unavailable",
+                }
                 and session.configured
                 and session.strategy == "on_auth_required"
             )
@@ -377,11 +483,43 @@ class LinkCollector:
             except LinkIngestionError as credential_error:
                 await self._report_failure(platform, credential_error.code, str(credential_error))
                 raise
-            await self._report_success(platform)
             return info
-        if use_initially:
-            await self._report_success(platform)
         return info
+
+    async def probe_url(self, source_url: str, session: LinkCredentialSession) -> dict[str, Any]:
+        """Test a real video's metadata with the same collector, without downloading it."""
+        source_url = normalize_platform_url(source_url)
+        seconds = min(self.timeout_seconds, 45)
+        enabled = (
+            identify_platform(source_url) == SourceType.DOUYIN
+            and self.browser_assist and self.browser_assist.available()
+        )
+        try:
+            async with HumanPauseBudget(seconds) as budget:
+                self._budget = budget
+                started = asyncio.get_running_loop().time()
+                try:
+                    async with asyncio.timeout(min(15, seconds / 3) if enabled else seconds):
+                        return await self._download_process(
+                            source_url, get_storage_root() / "temp", session, metadata_only=True,
+                        )
+                except LinkIngestionError as exc:
+                    if not enabled or exc.code not in BROWSER_FALLBACK_CODES:
+                        raise
+                except TimeoutError:
+                    if not enabled:
+                        raise
+                remaining = max(0.1, seconds - (asyncio.get_running_loop().time() - started))
+                return await self.browser_assist.probe(
+                    source_url, session, remaining, self._browser_state,
+                )
+        except TimeoutError as exc:
+            raise LinkIngestionError(
+                "link_probe_timeout", "视频链接测试超时，已停止；请检查网络后重试。",
+                retryable=True,
+            ) from exc
+        finally:
+            self._budget = None
 
     async def _attempt_download(
         self,
@@ -391,20 +529,7 @@ class LinkCollector:
     ) -> dict[str, Any]:
         logger = _YtDlpLogger()
         try:
-            if credential_session is None:
-                return await asyncio.to_thread(
-                    self._download_sync,
-                    source_url,
-                    target_dir,
-                    logger,
-                )
-            return await asyncio.to_thread(
-                self._download_sync,
-                source_url,
-                target_dir,
-                logger,
-                credential_session,
-            )
+            return await self._download_process(source_url, target_dir, credential_session)
         except LinkIngestionError:
             raise
         except YoutubeDLError as exc:
@@ -413,6 +538,77 @@ class LinkCollector:
             raise LinkIngestionError(
                 "link_storage_failed",
                 "链接视频无法写入本地存储",
+                retryable=True,
+            ) from exc
+
+    async def _download_process(
+        self,
+        source_url: str,
+        target_dir: Path,
+        credential_session: LinkCredentialSession | None,
+        *,
+        metadata_only: bool = False,
+    ) -> dict[str, Any]:
+        # A thread cannot be stopped by asyncio cancellation. Use a dedicated child
+        # so the deadline also stops yt-dlp, its network retries and FFmpeg children.
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+            WORKER_IMPORT_ROOT, environment.get("PYTHONPATH"),
+        )))
+        environment["VIRAL_DNA_WORKSPACE_ROOT"] = str(get_storage_root())
+        environment["VIRAL_DNA_STORAGE_ROOT"] = str(get_storage_root())
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+            sys.executable, "-m", "viral_dna_api.link_worker",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW}
+               if os.name == "nt" else {"start_new_session": True}),
+        ))
+        try:
+            process = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            process = await spawn
+            await _stop_download_process(process)
+            raise
+        session = credential_session
+        request = {
+            "source_url": source_url,
+            "target_dir": str(target_dir),
+            "max_download_bytes": self.max_download_bytes,
+            "socket_timeout": self.socket_timeout,
+            "retries": self.retries,
+            "use_legacy_cookie": self.credential_resolver is None,
+            "metadata_only": metadata_only,
+            "cookie_file": str(session.cookie_file) if session and session.cookie_file else None,
+            "cookies_from_browser": session.cookies_from_browser if session else None,
+        }
+        communication = asyncio.create_task(
+            process.communicate(json.dumps(request).encode("utf-8"))
+        )
+        try:
+            stdout, _stderr = await asyncio.shield(communication)
+        except BaseException:
+            await _stop_download_process(process)
+            with suppress(Exception):
+                await communication
+            raise
+        try:
+            response = json.loads(stdout)
+            if process.returncode != 0 or not isinstance(response, dict):
+                raise ValueError("worker failed")
+            if "error" in response:
+                error = response["error"]
+                raise LinkIngestionError(
+                    error["code"], error["message"], retryable=error["retryable"],
+                )
+            if not isinstance(response.get("info"), dict):
+                raise ValueError("missing metadata")
+            return response["info"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise LinkIngestionError(
+                "link_worker_failed", "视频读取进程异常退出，请重试或直接上传视频文件。",
                 retryable=True,
             ) from exc
 
@@ -498,10 +694,40 @@ class LinkCollector:
                 "platform_browser_cookie_decryption_failed",
                 "浏览器安全保护阻止了 Cookie 解密，请改用 cookies.txt 导入",
             )
+        # A transport refusal is not evidence that a readable Cookie has expired.
+        status = logger.http_status
+        if status == 429 or "http error 429" in details:
+            return LinkIngestionError(
+                "link_rate_limited", "平台限制了请求频率（HTTP 429），已停止；请稍后重试。",
+                retryable=True,
+            )
+        if status == 403 or "http error 403" in details:
+            return LinkIngestionError(
+                "link_access_denied",
+                "平台拒绝视频访问（HTTP 403），不代表 Cookie 未导入或已失效。"
+                "请在当前设备浏览器确认视频可播放；若出现验证，请先手动完成后重试。",
+                retryable=True,
+            )
+        if status is not None and status >= 500:
+            return LinkIngestionError(
+                "link_platform_unavailable", "平台服务暂时异常，已停止；请稍后重试。",
+                retryable=True,
+            )
+        if any(marker in details for marker in ("timed out", "timeout", "connection reset")):
+            return LinkIngestionError(
+                "link_download_timeout", "连接平台超时，已停止；请稍后重试。", retryable=True,
+            )
+        if any(marker in details for marker in (
+            "certificate_verify_failed", "certificate verify failed", "name resolution",
+            "getaddrinfo failed", "unable to connect", "connection refused", "proxyerror",
+        )):
+            return LinkIngestionError(
+                "link_network_failed", "无法连接平台，请检查服务器网络、代理和证书配置。",
+                retryable=True,
+            )
         if any(
             marker in details
             for marker in (
-                "fresh cookies",
                 "login required",
                 "sign in",
                 "captcha",
@@ -513,16 +739,22 @@ class LinkCollector:
                 "平台要求登录或人机验证；请到“平台连接”更新登录状态后重试",
                 retryable=True,
             )
+        if status == 401:
+            return LinkIngestionError(
+                "link_auth_required", "平台要求登录；请到“平台连接”更新登录信息后重试。",
+                retryable=True,
+            )
+        if "fresh cookies" in details or "link_douyin_metadata_missing" in details:
+            return LinkIngestionError(
+                "link_metadata_unavailable",
+                "抖音未返回可解析的视频信息，可能是访问限制或采集兼容问题；"
+                "不能据此判断 Cookie 失效。请确认链接可播放后重试。",
+                retryable=True,
+            )
         if any(marker in details for marker in ("404", "private", "unavailable", "deleted")):
             return LinkIngestionError(
                 "link_unavailable",
                 "视频不存在、已删除、非公开或链接已失效",
-            )
-        if any(marker in details for marker in ("timed out", "timeout", "connection reset")):
-            return LinkIngestionError(
-                "link_download_timeout",
-                "连接平台超时，请稍后重试",
-                retryable=True,
             )
         if "unsupported url" in details:
             return LinkIngestionError(
@@ -564,6 +796,41 @@ class LinkCollector:
         legacy_manifest = target_dir / "ingestion.json"
         if legacy_manifest != manifest_path:
             legacy_manifest.write_text(manifest_path.read_text("utf-8"), encoding="utf-8")
+
+
+async def _stop_download_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "nt":
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill.exe", "/PID", str(process.pid), "/T", "/F",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            await asyncio.wait_for(killer.wait(), 5)
+        except TimeoutError:
+            killer.kill()
+            await killer.wait()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    await process.wait()
+
+
+def configured_timeout(name: str, default: float) -> float:
+    try:
+        value = float(get_config_value(name, str(default)))
+        return value if math.isfinite(value) and value > 0 else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _positive_int(name: str, default: int) -> int:

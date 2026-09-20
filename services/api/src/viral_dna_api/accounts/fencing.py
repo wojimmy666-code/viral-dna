@@ -8,7 +8,7 @@ import sqlite3
 import time
 
 from ..access_context import database_edit_fence, request_edit_fence
-from .repository import AccountError
+from .repository import SESSION_MAX_SECONDS, AccountError
 
 
 class FencedRepository:
@@ -57,7 +57,8 @@ class FencedConnection(sqlite3.Connection):
                     "JOIN authz.auth_accounts a ON a.id=l.account_id "
                     "WHERE l.account_id=? AND l.project_id=? AND l.session_hash=? "
                     "AND l.editor_id=? AND l.token_hash=? AND l.expires_at>? "
-                    "AND s.expires_at>? AND u.status='active' AND a.status='active'",
+                    "AND s.expires_at>? AND s.created_at>? "
+                    "AND u.status='active' AND a.status='active'",
                     (
                         fence.account_id,
                         project_id,
@@ -66,6 +67,7 @@ class FencedConnection(sqlite3.Connection):
                         fence.token_hash,
                         time.time(),
                         time.time(),
+                        time.time() - SESSION_MAX_SECONDS,
                     ),
                 )
                 .fetchone()

@@ -13,7 +13,8 @@ const accountHeader = readFileSync(new URL("../src/accounts/AccountHeader.jsx", 
 const accountRoot = readFileSync(new URL("../src/accounts/AccountRoot.jsx", import.meta.url), "utf8");
 
 test("shares one account header without dropping standalone routes or escaping lost-lease controls", () => {
-  assert.match(accountRoot, /<AccountHeader toolbarDisabled=\{!!lease\?\.lost\}/);
+  assert.match(accountRoot, /<AccountHeader toolbarDisabled=\{sessionBlocked \|\| !!lease\?\.lost\}/);
+  assert.match(accountRoot, /ref=\{content\} inert=\{sessionBlocked \|\| !!lease\?\.lost\}/);
   assert.match(accountHeader, /createPortal\(actions, slots\.actions/);
   assert.match(accountHeader, /inert=\{toolbarDisabled\}/);
   assert.match(accountHeader, /if \(!slots\) return <header/);

@@ -316,10 +316,14 @@ async def test_connection_validation_normalizes_douyin_modal_links(
         cookie_file(cookie_row(".douyin.com", "sid", "private-value")),
     )
     probed_urls: list[str] = []
+
+    async def probe(url, _session):
+        probed_urls.append(url)
+
     monkeypatch.setattr(
         service,
         "_probe_url",
-        lambda url, _session: probed_urls.append(url),
+        probe,
     )
 
     response = await service.validate(
@@ -332,6 +336,107 @@ async def test_connection_validation_normalizes_douyin_modal_links(
 
     assert response.connection.health == "valid"
     assert probed_urls == ["https://www.douyin.com/video/7665298660867001638"]
+    assert response.connection.last_tested_at is not None
+
+
+@pytest.mark.asyncio
+async def test_local_check_never_clears_network_failure_or_fakes_success():
+    service = PlatformConnectionService(
+        FakeAccountContext(), InMemoryPlatformConnectionRepository(), InMemoryPlatformSecretStore(),
+    )
+    imported = await service.import_cookie_file(
+        PlatformKind.DOUYIN, cookie_file(cookie_row(".douyin.com", "sid", "private-value")),
+    )
+    assert imported.health == "ready"
+    assert imported.last_checked_at is not None
+    assert imported.last_tested_at is None and imported.last_success_at is None
+    await service.report_failure(PlatformKind.DOUYIN, "link_access_denied", "平台拒绝访问")
+    failed = (await service.list_connections()).items[0]
+    response = await service.validate(PlatformKind.DOUYIN)
+    assert response.network_tested is False
+    assert response.connection.health == "error"
+    assert response.connection.last_error_code == "link_access_denied"
+    assert response.connection.last_tested_at == failed.last_tested_at
+    assert response.connection.last_success_at is None
+    await service.report_success(PlatformKind.DOUYIN)
+    success = await service.validate(PlatformKind.DOUYIN)
+    assert success.connection.health == "valid"
+    assert success.connection.last_error_code is None
+
+
+@pytest.mark.asyncio
+async def test_network_probe_preserves_precise_error_and_cookie_cleanup(monkeypatch):
+    from viral_dna_api.link_ingestion import LinkIngestionError
+    from viral_dna_api.platform_connections.service import PlatformConnectionServiceError
+
+    service = PlatformConnectionService(
+        FakeAccountContext(), InMemoryPlatformConnectionRepository(), InMemoryPlatformSecretStore(),
+    )
+    await service.import_cookie_file(
+        PlatformKind.DOUYIN, cookie_file(cookie_row(".douyin.com", "sid", "private-value")),
+    )
+    paths = []
+
+    async def probe(url, session):
+        paths.append(session.cookie_file)
+        assert session.cookie_file.exists()
+        raise LinkIngestionError("link_access_denied", "平台拒绝访问", retryable=True)
+
+    monkeypatch.setattr(service, "_probe_url", probe)
+    with pytest.raises(PlatformConnectionServiceError) as caught:
+        await service.validate(PlatformKind.DOUYIN, test_url="https://www.douyin.com/video/123")
+    assert caught.value.code == "link_access_denied"
+    assert not paths[0].exists()
+    summary = (await service.list_connections()).items[0]
+    assert summary.health == "error" and summary.last_tested_at is not None
+    assert summary.last_success_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["replace", "disconnect", "fail"])
+async def test_stale_probe_cannot_overwrite_updated_or_disconnected_connection(
+    monkeypatch, operation,
+):
+    from viral_dna_api.link_ingestion import LinkIngestionError
+    from viral_dna_api.platform_connections.service import PlatformConnectionServiceError
+
+    service = PlatformConnectionService(
+        FakeAccountContext(), InMemoryPlatformConnectionRepository(), InMemoryPlatformSecretStore(),
+    )
+    content = cookie_file(cookie_row(".douyin.com", "sid", "private-value"))
+    await service.import_cookie_file(PlatformKind.DOUYIN, content)
+
+    async def probe(url, session):
+        if operation == "disconnect":
+            await service.disconnect(PlatformKind.DOUYIN)
+        else:
+            await service.import_cookie_file(PlatformKind.DOUYIN, content)
+        if operation == "fail":
+            raise LinkIngestionError("link_access_denied", "old connection failed")
+
+    monkeypatch.setattr(service, "_probe_url", probe)
+    with pytest.raises(PlatformConnectionServiceError):
+        await service.validate(PlatformKind.DOUYIN, test_url="https://www.douyin.com/video/123")
+    summary = (await service.list_connections()).items[0]
+    assert summary.last_tested_at is None and summary.last_error_code is None
+    assert summary.configured is (operation != "disconnect")
+
+
+@pytest.mark.asyncio
+async def test_wrong_platform_url_does_not_change_health():
+    from viral_dna_api.platform_connections.service import PlatformConnectionServiceError
+
+    service = PlatformConnectionService(
+        FakeAccountContext(), InMemoryPlatformConnectionRepository(), InMemoryPlatformSecretStore(),
+    )
+    await service.import_cookie_file(
+        PlatformKind.DOUYIN, cookie_file(cookie_row(".douyin.com", "sid", "private-value")),
+    )
+    with pytest.raises(PlatformConnectionServiceError) as caught:
+        await service.validate(PlatformKind.DOUYIN, test_url="https://www.instagram.com/reel/123")
+    assert caught.value.code == "platform_connection_test_url_mismatch"
+    summary = (await service.list_connections()).items[0]
+    assert summary.health == "ready" and summary.last_error_code is None
 
 
 def test_platform_connection_api_imports_independent_cookie_files() -> None:

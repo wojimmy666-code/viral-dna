@@ -8,12 +8,14 @@ from uuid import UUID
 from .ai.shot_facts import ShotFactsOutcome, ShotFactsService
 from .ai.shot_segmentation import SegmentationOutcome, ShotSegmentationService
 from .ai.viral_reasoning import ViralReasoningService
+from .browser_budget import HumanPauseBudget
 from .evidence import EvidenceTimelineBuilder
 from .link_ingestion import (
     LinkCollector,
     LinkCredentialResolver,
     LinkIngestionError,
     LinkIngestionResult,
+    configured_timeout,
 )
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
@@ -87,12 +89,15 @@ class HybridAnalysisPipeline:
         repository: AnalysisRepository,
         credential_resolver: LinkCredentialResolver | None = None,
         viral_reasoning: ViralReasoningService | None = None,
+        browser_assist=None,
     ) -> None:
         self.repository = repository
         self.credential_resolver = credential_resolver
         self.viral_reasoning = viral_reasoning
+        self.browser_assist = browser_assist
         self.simulated = SimulatedAnalysisPipeline(repository)  # type: ignore[arg-type]
         self._tasks: set[asyncio.Task[Any]] = set()
+        self.timeout_seconds = configured_timeout("VIRAL_DNA_ANALYSIS_TIMEOUT_SECONDS", 900)
 
     def start(self, analysis_id: UUID) -> None:
         task = asyncio.create_task(self.run(analysis_id))
@@ -112,6 +117,24 @@ class HybridAnalysisPipeline:
             return
 
         try:
+            async with HumanPauseBudget(self.timeout_seconds) as budget:
+                await self._run_analysis(analysis, video, budget)
+        except TimeoutError:
+            await self._fail(
+                analysis, video, "analysis_timeout",
+                f"分析超过 {self.timeout_seconds:g} 秒，已停止。"
+                "已下载的视频和已有报告会保留，可稍后重新分析。",
+                True, context="分析",
+            )
+
+    async def shutdown(self) -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_analysis(self, analysis: AnalysisJob, video: Video, budget=None) -> None:
+        try:
             video.status = VideoStatus.ANALYZING
             await self.repository.save_video(video)
 
@@ -125,7 +148,26 @@ class HybridAnalysisPipeline:
             is_link = is_platform_source(video.source_type)
             if is_link and not (video.stored_path or video.stored_relative_path):
                 await progress(AnalysisStage.INGESTING, 3, "正在校验平台链接并读取视频信息")
-                collected = await LinkCollector(self.credential_resolver).collect(video)
+
+                async def browser_progress(event):
+                    waiting = event["state"] == "waiting_user"
+                    if budget:
+                        budget.waiting(waiting)
+                    analysis.browser_session_id = UUID(event["id"])
+                    analysis.browser_state = event["state"]
+                    await progress(
+                        AnalysisStage.WAITING_USER if waiting else AnalysisStage.INGESTING,
+                        max(
+                            analysis.progress,
+                            8 if waiting else 16 if event["state"] == "downloading" else 7,
+                        ),
+                        event["message"],
+                    )
+
+                collected = await LinkCollector(
+                    self.credential_resolver, browser_assist=self.browser_assist,
+                    browser_progress=browser_progress,
+                ).collect(video)
                 self._apply_ingestion(video, collected)
                 await self._sync_ingested_record_name(video)
                 await self.repository.save_video(video)

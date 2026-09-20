@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import "./analysis-progress.test.mjs";
 
 const APP_URL = new URL("../src/App.jsx", import.meta.url);
 const WORKSPACE_PAGES_URL = new URL("../src/WorkspacePages.jsx", import.meta.url);

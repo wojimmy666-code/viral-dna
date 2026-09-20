@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
 
@@ -20,6 +27,7 @@ class ViralClaimKind(StrEnum):
 
 
 class ViralStrategy(StrEnum):
+    CREATIVE = "creative"
     FAITHFUL = "faithful"
     SCENARIO = "scenario"
     PROOF = "proof"
@@ -184,7 +192,8 @@ class ViralConceptGenerateRequest(BaseModel):
 
 
 class ViralConceptShot(BaseModel):
-    source_shot_id: str = Field(min_length=1, max_length=160)
+    # A reference, never the identity, order or timing of a newly authored shot.
+    source_shot_id: str | None = Field(default=None, min_length=1, max_length=120)
     index: int = Field(ge=1)
     duration_seconds: float = Field(gt=0, le=60)
     title: str = Field(min_length=1, max_length=160)
@@ -196,9 +205,9 @@ class ViralConceptShot(BaseModel):
     retained_mechanisms: list[str] = Field(default_factory=list, max_length=20)
 
 
-class ViralConcept(BaseModel):
-    id: UUID = Field(default_factory=uuid4)
-    strategy: ViralStrategy
+class ViralConceptContent(BaseModel):
+    """Creative content, without application-owned identity or strategy metadata."""
+
     name: str = Field(min_length=1, max_length=160)
     one_liner: str = Field(min_length=1, max_length=500)
     thesis: str = Field(default="", max_length=1000)
@@ -219,21 +228,118 @@ class ViralConcept(BaseModel):
     shots: list[ViralConceptShot] = Field(min_length=1, max_length=200)
 
 
+class CreativeBriefEvidence(BaseModel):
+    scene_index: int = Field(ge=1, le=200)
+    quote: str = Field(min_length=2, max_length=300)
+
+
+class CreativeBriefCheck(BaseModel):
+    requirement_index: int = Field(ge=1, le=24)
+    satisfied: StrictBool
+    explanation: str = Field(min_length=8, max_length=400)
+    scene_scope: Literal["selected", "all"] = "selected"
+    evidence: list[CreativeBriefEvidence] = Field(default_factory=list, max_length=200)
+
+
+class CreativeBriefFulfillment(CreativeBriefCheck):
+    requirement: str = Field(min_length=1, max_length=2000)
+
+
+class ViralConcept(ViralConceptContent):
+    id: UUID = Field(default_factory=uuid4)
+    strategy: ViralStrategy
+    brief_checks: list[CreativeBriefFulfillment] = Field(default_factory=list, max_length=24)
+
+
+CreativeSceneText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
+]
+
+
+class CreativeIdeaContent(BaseModel):
+    """Only the fields the creative model is responsible for authoring."""
+
+    name: str = Field(min_length=1, max_length=80)
+    summary: str = Field(min_length=1, max_length=220)
+    visual_memory: str = Field(min_length=1, max_length=160)
+    key_scenes: list[CreativeSceneText] = Field(min_length=2, max_length=3)
+    category_fit: str = Field(min_length=1, max_length=240)
+    borrowed: str = Field(min_length=1, max_length=240)
+    changed: str = Field(min_length=1, max_length=240)
+    # Semantic axes, not fixed strategy names. Shared montage grammar is allowed.
+    creative_intent: str = Field(min_length=1, max_length=240)
+    visual_organization: str = Field(min_length=1, max_length=240)
+    product_role: str = Field(min_length=1, max_length=240)
+    assumptions: list[CreativeSceneText] = Field(default_factory=list, max_length=10)
+
+
+class CreativeIdea(CreativeIdeaContent):
+    id: UUID = Field(default_factory=uuid4)
+    brief_checks: list[CreativeBriefFulfillment] = Field(default_factory=list, max_length=24)
+
+
+class CreativeGenerateRequest(BaseModel):
+    request_id: UUID
+    category_profile_id: UUID
+    feedback: str | None = Field(default=None, max_length=2000)
+    replacements: list[ViralReplacementSelection] = Field(default_factory=list, max_length=30)
+
+
+class CreativeActionRequest(BaseModel):
+    request_id: UUID
+    feedback: str | None = Field(default=None, max_length=2000)
+
+
+class CreativePlanEdit(BaseModel):
+    expected_revision: int = Field(ge=1)
+    concept: ViralConcept
+
+
+class CreativeResultRecovery(BaseModel):
+    version: Literal["ellipsis-citation-v1"] = "ellipsis-citation-v1"
+    recovered_at: datetime = Field(default_factory=utc_now)
+    source_model_run_id: UUID
+    source_response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    previous_error_code: str
+    previous_error_message: str | None = None
+
+
 class ViralConceptSet(BaseModel):
     schema_version: Literal[
         "viral-dna-concepts-v1",
         "viral-dna-concepts-v2",
         "viral-dna-concepts-v3",
-    ] = (
-        "viral-dna-concepts-v3"
-    )
+        "viral-dna-concepts-v4",
+    ] = "viral-dna-concepts-v3"
     id: UUID = Field(default_factory=uuid4)
     analysis_id: UUID
     video_id: UUID
     insight_report_id: UUID
     input_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
-    status: Literal["completed", "stale", "failed"] = "completed"
-    concepts: list[ViralConcept] = Field(min_length=1, max_length=3)
+    status: Literal["queued", "running", "completed", "stale", "failed", "cancelled"] = "completed"
+    concepts: list[ViralConcept] = Field(default_factory=list, max_length=3)
+    phase: Literal["legacy", "ideas", "expanded"] = "legacy"
+    operation: Literal["generate", "regenerate", "expand", "edit"] = "generate"
+    ideas: list[CreativeIdea] = Field(default_factory=list, max_length=3)
+    parent_set_id: UUID | None = None
+    source_idea_id: UUID | None = None
+    request_id: UUID | None = None
+    request_signature: str | None = None
+    feedback: str = Field(default="", max_length=2000)
+    input_snapshot: dict[str, Any] = Field(default_factory=dict)
+    model_runs: list[UUID] = Field(default_factory=list)
+    requested_model: str | None = None
+    resolved_model: str | None = None
+    cost_status: Literal["not_started", "measured", "unreported"] = "not_started"
+    estimated_cost_micros: int = Field(default=0, ge=0)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    model_elapsed_ms: int = Field(default=0, ge=0)
+    error_code: str | None = None
+    error_message: str | None = Field(default=None, max_length=500)
+    recovery: CreativeResultRecovery | None = None
+    revision: int = Field(default=1, ge=1)
+    published_result: ViralConceptPublishResult | None = None
     generator_id: str = Field(default="replication-rules-v1", min_length=1, max_length=120)
     strategy_contract_version: str = Field(
         default="strategy-contract-v1",
@@ -251,6 +357,15 @@ class ViralConceptSet(BaseModel):
     model_cost_micros: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
 
+    @model_validator(mode="after")
+    def validate_result(self) -> ViralConceptSet:
+        if self.status in {"completed", "stale"}:
+            if self.phase == "ideas" and len(self.ideas) != 3:
+                raise ValueError("创意阶段必须有三个简短方向")
+            if self.phase != "ideas" and not self.concepts:
+                raise ValueError("完整方案必须包含分镜")
+        return self
+
 
 class ViralConceptPublishRequest(BaseModel):
     record_id: UUID
@@ -264,3 +379,6 @@ class ViralConceptPublishResult(BaseModel):
     project_name: str
     concept_id: UUID
     shot_count: int = Field(ge=1)
+
+
+ViralConceptSet.model_rebuild()

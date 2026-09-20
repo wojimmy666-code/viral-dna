@@ -1057,10 +1057,11 @@ class InMemoryStore:
 
     async def list_viral_concept_sets(
         self,
-        analysis_id: UUID,
+        analysis_id: UUID | None,
     ) -> list[ViralConceptSet]:
         return sorted(
-            (item for item in self.viral_concept_sets.values() if item.analysis_id == analysis_id),
+            (item for item in self.viral_concept_sets.values()
+             if analysis_id is None or item.analysis_id == analysis_id),
             key=lambda item: item.created_at,
         )
 

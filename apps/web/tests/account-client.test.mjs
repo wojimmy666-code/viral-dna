@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   accountFetch, accountHeaders, accountRequest, accountStorageKey,
-  flushAccountDrafts, registerAccountFlusher, setAccountSession, setProjectEditing,
+  flushAccountDrafts, registerAccountFlusher, setAccountSession, setProjectEditing, pauseAccountSession,
 } from "../src/accounts/account-client.js";
 
 const originalFetch = globalThis.fetch;
@@ -88,4 +88,25 @@ test("failed draft saving stops account navigation and unregister removes stale 
   stop(); await flushAccountDrafts(); assert.equal(called, 1);
   const success = registerAccountFlusher(async () => { called++; return true; });
   try { await flushAccountDrafts(); assert.equal(called, 2); } finally { success(); }
+});
+
+test("paused sessions block background reads and unsaved writes, but allow same-page reauthentication", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ ok: true }); };
+  pauseAccountSession();
+  await assert.rejects(accountRequest("/projects"), error => error.code === "session_paused");
+  await assert.rejects(accountRequest("/productions/a", { method: "PUT", body: { draft: "private" } }), error => error.status === 401);
+  assert.equal(calls, 0);
+  await accountRequest("/auth/reauthenticate", { method: "POST", body: {} });
+  await accountRequest("/session"); assert.equal(calls, 2);
+  setAccountSession(user()); await accountRequest("/projects"); assert.equal(calls, 3);
+});
+
+test("cross-tab principal changes freeze the old editor and protected requests carry its original identity", async () => {
+  assert.equal(accountHeaders("/api/v1/projects").get("X-Session-Principal"), "owner-a");
+  assert.equal(accountHeaders("/api/v1/auth/refresh").get("X-Session-Principal"), "owner-a");
+  assert.equal(accountHeaders("/api/v1/session").has("X-Session-Principal"), false);
+  globalThis.fetch = async () => Response.json({ detail: { code: "session_changed" } }, { status: 409 });
+  await accountFetch("/api/v1/projects");
+  assert.equal(events[0].type, "viraldna:session-expired"); assert.equal(events[0].detail.changed, true);
 });

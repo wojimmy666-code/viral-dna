@@ -23,6 +23,9 @@ function connect(url) {
     socket.addEventListener("error", rejectConnection, { once: true });
     socket.addEventListener("message", event => {
       const result = JSON.parse(event.data), task = pending.get(result.id);
+      if (result.method === "Page.javascriptDialogOpening" && result.params.type === "beforeunload") {
+        socket.send(JSON.stringify({ id: ++nextId, method: "Page.handleJavaScriptDialog", params: { accept: true } }));
+      }
       if (!task) return;
       pending.delete(result.id); clearTimeout(task.timer);
       result.error ? task.reject(new Error(JSON.stringify(result.error))) : task.resolve(result.result);
@@ -81,7 +84,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
   const js = bundle.outputFiles.find(file => file.path.endsWith(".js")).contents;
   const css = bundle.outputFiles.find(file => file.path.endsWith(".css")).contents;
   const html = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/fixture.css"><div id="root"></div><script type="module" src="/fixture.js"></script></html>';
-  const user = { user_id: "user-1", account_id: "account-1", auth_mode: "password", role: "owner", account_kind: "enterprise", account_name: "企业账户", display_name: "负责人", csrf_token: "user-csrf" };
+  const user = { user_id: "user-1", username: "13800000001", account_id: "account-1", auth_mode: "password", role: "owner", account_kind: "enterprise", account_name: "企业账户", display_name: "负责人", csrf_token: "user-csrf" };
   const admin = { admin_id: "admin-1", auth_mode: "password", principal_type: "platform_admin", display_name: "admin", csrf_token: "admin-csrf" };
   const state = { lease: null, requests: [], rejectWrite: false, initialized: false,
     quota: 10000000000, storageConnection: {}, historyTrashed: false, storageFailed: false,
@@ -105,8 +108,17 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       response.setHeader("Set-Cookie", `${isAdmin ? "test_admin" : "test_user"}=active; Path=/; HttpOnly; SameSite=Lax`);
       return send(isAdmin ? admin : user);
     }
+    if (path.endsWith("/auth/reauthenticate")) {
+      if (body.password === "wrong-password") return send({ detail: { code: "login_failed", message: "手机号或密码不正确" } }, 401);
+      if (!isAdmin && body.username !== user.username) return send({ detail: { code: "reauth_account_mismatch", message: "请使用原用户重新登录" } }, 409);
+      if (state.reauthHold) await new Promise(resolveReauth => { state.releaseReauth = resolveReauth; });
+      state.sessionExpired = false;
+      return send(isAdmin ? admin : user);
+    }
     const cookieName = isAdmin ? "test_admin=active" : "test_user=active";
     if (!request.headers.cookie?.includes(cookieName)) return send({ detail: { code: "login_required", message: "请先登录" } }, 401);
+    if (!isAdmin && state.sessionExpired) return send({ detail: { code: "login_required", message: "登录已过期" } }, 401);
+    if (path.endsWith("/auth/refresh")) return send(isAdmin ? admin : user);
     if (path.endsWith("/session")) return send(isAdmin ? admin : user);
     const quota = () => ({ used_bytes: 8500000000, limit_bytes: state.quota, reserved_bytes: 1000000, available_bytes: state.quota - 8501000000 });
     if (path === "/api/v1/admin/storage/server") return send({ url: "https://server.example.com" });
@@ -196,15 +208,26 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     }
     async function ready(expression) {
       for (let attempt = 0; attempt < 120; attempt++) { if (await evaluate(`Boolean(${expression})`)) return; await pause(25); }
-      assert.fail(`Timed out: ${expression}; ${await evaluate("document.body.innerText")}`);
+      assert.fail(`Timed out: ${expression}; ${await evaluate("JSON.stringify({width:innerWidth,active:document.activeElement?.outerHTML?.slice(0,240),text:document.body.innerText})")}`);
     }
     async function escape() {
-      for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+      await evaluate("window.fixtureKeys=[];document.addEventListener('keydown',event=>window.fixtureKeys.push({key:event.key,target:event.target.tagName}),{once:true,capture:true})");
+      await send("Page.bringToFront");
+      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+      await pause(50);
+      if (!await evaluate("window.fixtureKeys.some(event=>event.key==='Escape')")) {
+        // Windows headless sessions can suppress native input. Still exercise
+        // React's key handler and native-dialog cancel handler, not test hooks.
+        t.diagnostic("Headless native Escape unavailable; testing DOM key/cancel handlers.");
+        await evaluate("(()=>{const el=document.activeElement;const event=new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true,cancelable:true});if(el.dispatchEvent(event)){document.querySelector('dialog[open]')?.dispatchEvent(new Event('cancel',{cancelable:true}));}})()");
+      }
     }
     async function load(path, width = 1280) {
       await send("Emulation.setDeviceMetricsOverride", { width, height: 860, deviceScaleFactor: 1, mobile: false });
+      const previousDocument = await evaluate("performance.timeOrigin");
       await send("Page.navigate", { url: base + path });
-      await ready("document.querySelector('.account-login-panel,.account-session-bar')");
+      await ready(`performance.timeOrigin!==${previousDocument} && document.readyState==='complete' && document.querySelector('.account-login-panel,.account-session-bar')`);
     }
     async function fill(name, value) {
       await evaluate(`(()=>{const el=document.querySelector('[name="${name}"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,${JSON.stringify(value)});el.dispatchEvent(new Event('input',{bubbles:true}));})()`);
@@ -223,6 +246,8 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       await writeFile(join(process.env.ACCOUNT_SCREENSHOT_DIR, `${name}-${width}.png`), Buffer.from(shot.data, "base64"));
     }
     await send("Page.enable"); await send("Runtime.enable");
+    await send("Emulation.setFocusEmulationEnabled", { enabled: true });
+    await send("Page.bringToFront");
     await t.test("initial setup needs no code and submits mobile plus eight-character passwords", async () => {
       await load("/login");
       await ready("document.querySelector('input[name=admin_password]')");
@@ -307,6 +332,9 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
           await escape();
           await ready("!document.querySelector('.app-navigation-drawer')?.open");
           await ready("document.activeElement===document.querySelector('.mobile-navigation-toggle')");
+          // Native dialog close events are queued; allow the prior interaction
+          // to finish before immediately reopening from this synthetic click.
+          await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
           await evaluate("document.querySelector('.mobile-navigation-toggle').click()");
           await ready("document.querySelector('.app-navigation-drawer')?.open");
           await evaluate("document.querySelector('.app-navigation-drawer [aria-label=关闭导航]').click()");
@@ -431,6 +459,54 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       const write = state.requests.find(item => item.path.endsWith("/fixture"));
       assert.equal(write.headers["x-csrf-token"], "user-csrf"); assert.ok(write.headers["x-edit-token"]);
       state.rejectWrite = false;
+    });
+    await t.test("expired session reauthenticates in place, retains the exact editor, and respects another member's lease", async () => {
+      try {
+      for (const width of [1280, 390]) {
+        state.lease = null; state.sessionExpired = false; state.requests = [];
+        await load(`/projects/${projectId}`, width); await ready("document.querySelector('textarea')");
+        await evaluate("(()=>{const el=document.querySelector('textarea');window.retainedEditor=el;Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(el,'登录过期时仍须保留的局部提示词');el.dispatchEvent(new Event('input',{bubbles:true}));})()");
+        state.sessionExpired = true;
+        await evaluate("document.querySelector('main button').click()");
+        await ready("document.querySelector('.account-session-notice button')?.textContent==='重新登录'");
+        assert.equal(await evaluate("document.querySelector('textarea')===window.retainedEditor"), true);
+        assert.equal(await evaluate("Boolean(window.retainedEditor.closest('[inert]'))"), true);
+        await evaluate("document.querySelector('.account-session-notice button').focus();document.querySelector('.account-session-notice button').click()");
+        await ready("document.querySelector('.account-reauth-dialog')?.open");
+        assert.equal(await evaluate("document.activeElement.name"), "reauth_password");
+        assert.equal(await evaluate("document.documentElement.scrollWidth > innerWidth"), false);
+        await screenshot("session-reauth", width);
+        await fill("reauth_password", "wrong-password");
+        await evaluate("document.querySelector('.account-reauth-dialog form').requestSubmit()");
+        await ready("document.querySelector('.account-reauth-dialog .account-error')");
+        assert.equal(await evaluate("window.retainedEditor.value"), "登录过期时仍须保留的局部提示词");
+        await fill("reauth_password", "12345678"); await fill("reauth_username", "13800000002");
+        await evaluate("document.querySelector('.account-reauth-dialog form').requestSubmit()");
+        await ready("document.querySelector('.account-reauth-dialog .account-error')?.textContent.includes('原用户')");
+        await escape(); await ready("!document.querySelector('.account-reauth-dialog')");
+        assert.equal(await evaluate("document.activeElement.textContent"), "重新登录");
+        await evaluate("document.querySelector('.account-session-notice button').click()");
+        await fill("reauth_password", "12345678");
+        state.lease = { token: "another-member" };
+        state.reauthHold = true;
+        await evaluate("document.querySelector('.account-reauth-dialog form').requestSubmit()");
+        await ready("document.querySelector('.account-reauth-dialog fieldset').disabled");
+        assert.equal(await evaluate("window.retainedEditor.isConnected"), true);
+        for (let attempt = 0; attempt < 100 && !state.releaseReauth; attempt++) await pause(10);
+        assert.ok(state.releaseReauth); state.releaseReauth(); state.reauthHold = false; state.releaseReauth = null;
+        await ready("!document.querySelector('.account-reauth-dialog') && document.querySelector('.account-edit-notice')?.textContent.includes('另一位成员')");
+        assert.equal(await evaluate("document.querySelector('textarea')===window.retainedEditor"), true);
+        assert.equal(await evaluate("Boolean(window.retainedEditor.closest('[inert]'))"), true);
+        const reauth = state.requests.filter(item => item.path.endsWith('/auth/reauthenticate')).at(-1);
+        assert.equal(reauth.body.expected_principal_id, "user-1");
+        assert.equal(state.requests.filter(item => item.path.endsWith('/fixture')).length, 1, "never replays a failed generation/save");
+        await screenshot("session-retained-conflict", width);
+        state.lease = null;
+        await evaluate("[...document.querySelectorAll('.account-edit-notice button')].find(button=>button.textContent==='重新取得编辑权').click()");
+        await ready("!window.retainedEditor.closest('[inert]')");
+        assert.equal(await evaluate("window.retainedEditor.value"), "登录过期时仍须保留的局部提示词");
+      }
+      } finally { state.sessionExpired = false; state.reauthHold = false; state.releaseReauth?.(); state.releaseReauth = null; state.lease = null; }
     });
     await t.test("occupied project never mounts the editable form or writes drafts", async () => {
       state.lease = { token: "another-browser" }; state.requests = [];
@@ -705,6 +781,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
       assert.equal(state.historyDeleted, true);
     });
   } finally {
+    state.releaseReauth?.();
     state.releasePhone?.();
     await client?.send("Browser.close").catch(() => {}); client?.close();
     if (chrome.exitCode === null) await Promise.race([exited, pause(3000)]);

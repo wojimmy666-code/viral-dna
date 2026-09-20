@@ -117,6 +117,20 @@ class AnalysisProductionSeedBuilder:
         return _seal(payload)
 
 
+def with_authored_shots(
+    seed: ProductionSeed, shots: list[ProductionSeedShot], brief: dict
+) -> ProductionSeed:
+    """Retain analysis provenance, replacing only the newly approved storyboard."""
+    payload = seed.model_dump(mode="python", exclude={"content_hash"})
+    payload.update(
+        shots=shots,
+        style_bible_snapshot={"creative_concept": brief},
+        audio_intent=ProductionSeedAudioIntent(clip_audio_strategy="muted"),
+        subtitle_intent=seed.subtitle_intent,
+    )
+    return _seal(payload)
+
+
 class SkillProductionSeedBuilder:
     def build(
         self,

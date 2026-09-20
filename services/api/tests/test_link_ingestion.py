@@ -122,10 +122,10 @@ def test_collect_persists_sanitized_metadata(
         title="小红书链接视频",
     )
 
-    def fake_download(
+    async def fake_download(
         source_url: str,
         target_dir: Path,
-        _logger: object,
+        _session: object,
     ) -> dict[str, object]:
         assert source_url.endswith("xsec_token=test")
         output_path = target_dir / "source.mp4"
@@ -139,7 +139,7 @@ def test_collect_persists_sanitized_metadata(
             "_filename": str(output_path),
         }
 
-    monkeypatch.setattr(collector, "_download_sync", fake_download)
+    monkeypatch.setattr(collector, "_download_process", fake_download)
     result = asyncio.run(collector.collect(video))
 
     assert result.platform == SourceType.XIAOHONGSHU
@@ -169,10 +169,10 @@ def test_collect_translates_platform_auth_failure(
         title="抖音链接视频",
     )
 
-    def fail_download(*_args: object) -> dict[str, object]:
-        raise DownloadError("Fresh cookies are needed")
+    async def fail_download(*_args: object) -> dict[str, object]:
+        raise DownloadError("Login required")
 
-    monkeypatch.setattr(collector, "_download_sync", fail_download)
+    monkeypatch.setattr(collector, "_download_process", fail_download)
     with pytest.raises(LinkIngestionError) as caught:
         asyncio.run(collector.collect(video))
 
@@ -219,7 +219,7 @@ def test_collect_retries_auth_failure_with_platform_connection(
     )
     attempts: list[LinkCredentialSession | None] = []
 
-    def fake_download(source_url, target_dir, _logger, credential_session=None):
+    async def fake_download(source_url, target_dir, credential_session=None):
         assert source_url == "https://www.douyin.com/video/123"
         attempts.append(credential_session)
         if credential_session is None:
@@ -234,7 +234,7 @@ def test_collect_retries_auth_failure_with_platform_connection(
             "_filename": str(output_path),
         }
 
-    monkeypatch.setattr(collector, "_download_sync", fake_download)
+    monkeypatch.setattr(collector, "_download_process", fake_download)
     result = asyncio.run(collector.collect(video))
 
     assert result.path.read_bytes() == b"authenticated-video"

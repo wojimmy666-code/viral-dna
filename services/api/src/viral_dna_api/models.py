@@ -91,6 +91,7 @@ class AnalysisMode(StrEnum):
 class AnalysisStage(StrEnum):
     QUEUED = "queued"
     INGESTING = "ingesting"
+    WAITING_USER = "waiting_user"
     PREPROCESSING = "preprocessing"
     SEGMENTING = "segmenting"
     TRANSCRIBING = "transcribing"
@@ -1214,6 +1215,8 @@ class AnalysisJob(BaseModel):
     message: str = "等待分析"
     simulated: bool = True
     error: AnalysisError | None = None
+    browser_session_id: UUID | None = None
+    browser_state: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
@@ -1783,6 +1786,23 @@ class PriceSnapshot(BaseModel):
     source_url: str
 
 
+class ModelResponseIssue(BaseModel):
+    path: str = Field(min_length=1, max_length=200)
+    code: str = Field(min_length=1, max_length=80)
+    limit: int | None = Field(default=None, ge=0)
+
+
+class ModelResponseDiagnostics(BaseModel):
+    # Do not store raw model content, validation input/ctx, prompts or credentials here.
+    stage: Literal["response_envelope", "json_parse", "schema_validation"]
+    issues: list[ModelResponseIssue] = Field(default_factory=list, max_length=12)
+    response_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    response_chars: int = Field(default=0, ge=0)
+    finish_reason: Literal["stop", "length", "content_filter", "tool_calls", "other"] | None = None
+    json_line: int | None = Field(default=None, ge=1)
+    json_column: int | None = Field(default=None, ge=1)
+
+
 class ModelRun(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     analysis_id: UUID
@@ -1809,6 +1829,7 @@ class ModelRun(BaseModel):
     result_payload: dict[str, Any] | None = None
     error_code: str | None = Field(default=None, max_length=100)
     error_message: str | None = Field(default=None, max_length=500)
+    response_diagnostics: ModelResponseDiagnostics | None = None
     created_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
 
@@ -2370,7 +2391,7 @@ class ShotPlan(BaseModel):
             self.start_frame = round(self.start_seconds * self.timing_fps)
         if self.duration_frames is None:
             self.duration_frames = max(1, round(self.duration_seconds * self.timing_fps))
-        if self.source_kind != ShotSourceKind.SKILL_GENERATED:
+        if self.source_kind not in {ShotSourceKind.SKILL_GENERATED, ShotSourceKind.BLANK}:
             if self.source_start_frame is None:
                 self.source_start_frame = self.start_frame
             if self.source_duration_frames is None:

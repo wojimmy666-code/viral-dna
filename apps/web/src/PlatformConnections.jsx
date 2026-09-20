@@ -19,6 +19,7 @@ import {
   platformLabel,
 } from "./platform-connection-ui.js";
 import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
+import { BrowserAssistConnection } from "./BrowserAssist.jsx";
 import "./platform-connections.css";
 
 const STRATEGIES = [
@@ -73,6 +74,7 @@ export function PlatformConnections({
   const [consent, setConsent] = useState(false);
   const [cookieFile, setCookieFile] = useState(null);
   const [testUrl, setTestUrl] = useState("");
+  const [testUrls, setTestUrls] = useState({});
   const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState("");
   const fileInputRef = useRef(null);
@@ -211,17 +213,17 @@ export function PlatformConnections({
     }
   }
 
-  async function validateConnection(platform) {
+  async function validateConnection(platform, videoUrl = "") {
     setBusy(`validate-${platform}`);
     setActionError("");
     try {
       const payload = await request(`/settings/platform-connections/${platform}/validate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ test_url: editorPlatform === platform ? testUrl.trim() || null : null }),
+        body: JSON.stringify({ test_url: videoUrl.trim() || null }),
       });
       await onRefresh();
-      onNotice({ type: "success", message: payload.message });
+      onNotice({ type: payload.network_tested ? "success" : "info", message: payload.message });
     } catch (requestError) {
       setActionError(requestError.message);
       await onRefresh().catch(() => undefined);
@@ -324,8 +326,8 @@ export function PlatformConnections({
                 <>
                   <dl className="platform-card-metadata">
                     <div><dt>Cookie</dt><dd>{connection.cookie_count || 0} 条</dd></div>
-                    <div><dt>最近验证</dt><dd>{formatDate(connection.last_validated_at)}</dd></div>
-                    <div><dt>最近成功</dt><dd>{formatDate(connection.last_success_at, "尚未采集")}</dd></div>
+                    <div><dt>本机检查</dt><dd>{formatDate(connection.last_checked_at, "未记录")}</dd></div>
+                    <div><dt>视频读取成功</dt><dd>{formatDate(connection.last_success_at, "尚无成功记录")}</dd></div>
                   </dl>
                   {connection.last_error_message && (
                     <div className="platform-card-warning">{connection.last_error_message}</div>
@@ -355,7 +357,7 @@ export function PlatformConnections({
                       {busy === `validate-${platform}`
                         ? <CircleNotch className="spin" size={16} />
                         : <CheckCircle size={16} />}
-                      检查状态
+                      检查本机信息
                     </button>
                     <button disabled={Boolean(busy)} onClick={() => openEditor(platform)} type="button">
                       <ArrowClockwise size={16} /> 更新
@@ -369,6 +371,37 @@ export function PlatformConnections({
                       断开
                     </button>
                   </div>
+                  <details className="platform-link-test">
+                    <summary>测试视频链接</summary>
+                    <form onSubmit={(event) => {
+                      event.preventDefault();
+                      validateConnection(platform, testUrls[platform] || "");
+                    }}>
+                      <label className="platform-field">
+                        <span>{platformLabel(platform)}视频链接</span>
+                        <input
+                          type="url"
+                          required
+                          maxLength={2048}
+                          disabled={Boolean(busy)}
+                          value={testUrls[platform] || ""}
+                          onChange={(event) => setTestUrls((current) => ({
+                            ...current, [platform]: event.target.value,
+                          }))}
+                          placeholder="粘贴要分析的视频链接"
+                        />
+                      </label>
+                      <p>仅测试视频信息，不下载、不调用分析模型。新建项目时会自动下载并分析，无需提前测试。</p>
+                      <button
+                        className="secondary-button compact"
+                        disabled={Boolean(busy) || !testUrls[platform]?.trim() || connection.usage_strategy === "disabled"}
+                        type="submit"
+                      >
+                        {busy === `validate-${platform}` ? "正在检查" : "测试读取"}
+                      </button>
+                      <p>最近链接测试：{formatDate(connection.last_tested_at, "尚未测试")}</p>
+                    </form>
+                  </details>
                 </>
               ) : (
                 <div className="platform-empty-state">
@@ -383,6 +416,7 @@ export function PlatformConnections({
                   </div>
                 </div>
               )}
+              {platform === "douyin" && <BrowserAssistConnection request={request} />}
             </article>
           );
         })}
@@ -536,10 +570,10 @@ export function PlatformConnections({
                 <button
                   className="platform-secondary-button"
                   disabled={Boolean(busy)}
-                  onClick={() => validateConnection(editorPlatform)}
+                  onClick={() => validateConnection(editorPlatform, testUrl)}
                   type="button"
                 >
-                  检查现有连接
+                  {testUrl.trim() ? "测试视频链接" : "检查本机信息"}
                 </button>
               )}
               <button

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from uuid import UUID
 
 from viral_dna_api.models import (
@@ -8,6 +9,11 @@ from viral_dna_api.models import (
     ShotPlanBulkUpdate,
 )
 from viral_dna_api.production import ProductionService, ProductionServiceError
+from viral_dna_api.production_seeds.contracts import (
+    ProductionSeedShot,
+    canonical_digest,
+    seconds_to_frame,
+)
 
 from .contracts import (
     ViralConcept,
@@ -31,6 +37,8 @@ class ProductionConceptPublisher:
         payload: ViralConceptPublishRequest,
     ) -> ViralConceptPublishResult:
         try:
+            if concept.strategy == "creative":
+                return await self._publish_creative(analysis_id, concept, payload)
             detail = await self.production_service.create_project(
                 payload.record_id,
                 ProductionProjectCreate(
@@ -89,3 +97,41 @@ class ProductionConceptPublisher:
             raise
         except ProductionServiceError as exc:
             raise ViralInsightServiceError(exc.status_code, exc.code, str(exc)) from exc
+
+    async def _publish_creative(self, analysis_id, concept, payload):
+        shots = []
+        cursor = 0
+        for index, shot in enumerate(concept.shots, start=1):
+            duration = max(1, seconds_to_frame(shot.duration_seconds, 30))
+            material = {
+                "stable_shot_key": "shot_"
+                + sha256(f"{concept.id}:{index}".encode()).hexdigest()[:24],
+                "order": index,
+                "narrative_role": shot.traffic_role[:80],
+                "start_frame": cursor,
+                "duration_frames": duration,
+                "description": shot.title,
+                "image_prompt": shot.image_prompt,
+                "video_prompt": shot.video_prompt,
+                "image_negative_constraints": list(dict.fromkeys(shot.negative_constraints)),
+                "video_negative_constraints": list(dict.fromkeys(shot.negative_constraints)),
+            }
+            shots.append(ProductionSeedShot(**material, input_hash=canonical_digest(material)))
+            cursor += duration
+        detail = await self.production_service.create_project(
+            payload.record_id,
+            ProductionProjectCreate(
+                base_analysis_id=analysis_id,
+                name=payload.name or concept.name[:120],
+                output_aspect_ratio=payload.output_aspect_ratio,
+                budget_limit_micros=payload.budget_limit_micros,
+            ),
+            authored_shots=shots,
+            creative_brief=concept.model_dump(mode="json"),
+        )
+        return ViralConceptPublishResult(
+            project_id=detail.project.id,
+            project_name=detail.project.name,
+            concept_id=concept.id,
+            shot_count=len(shots),
+        )

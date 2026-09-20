@@ -44,6 +44,11 @@ from .asset_library import AssetLibraryService
 from .asset_promotion import GeneratedAssetPromotionService
 from .asset_promotion.routes import create_generated_asset_promotion_router
 from .asset_routes import create_asset_router
+from .browser_assist import (
+    BrowserAssistService,
+    browser_assist_router,
+    browser_request_context,
+)
 from .category_profiles.routes import create_category_profile_router
 from .category_profiles.service import CategoryProfileService
 from .chinese import to_simplified
@@ -261,6 +266,7 @@ from .video_generation.settings import (
     VideoGenerationSettingsServiceError,
 )
 from .video_references.routes import create_video_reference_router
+from .viral_insights.creative_service import CreativeConceptService
 from .viral_insights.publisher import ProductionConceptPublisher
 from .viral_insights.routes import create_viral_insight_router
 from .viral_insights.service import ViralInsightService
@@ -332,6 +338,9 @@ async def account_lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        await pipeline.shutdown()
+        await creative_concept_service.shutdown()
+        await browser_assist_service.shutdown()
         await skill_presentation_service.shutdown()
         await server_sync_service.shutdown()
         await durable_storage_service.shutdown()
@@ -351,6 +360,7 @@ async def initialize_account_runtime():
     durable_storage_service.start_inventory()
     server_sync_service.ensure_worker()
     await record_service.bootstrap(recover_interrupted=True)
+    await creative_concept_service.recover()
     await project_service.bootstrap_analysis_projects()
     await production_service.recover_generation_runs()
     await skill_workflow_service.recover()
@@ -382,7 +392,7 @@ app = FastAPI(
     version=__version__,
     description="Phase 1 single-video analysis orchestration API",
     lifespan=lifespan,
-    dependencies=[Depends(create_project_authorizer(store))],
+    dependencies=[Depends(create_project_authorizer(store)), Depends(browser_request_context)],
 )
 app.add_middleware(AccountAuthenticationMiddleware, initialize=ensure_account_runtime)
 app.add_middleware(
@@ -438,11 +448,15 @@ project_service = ProjectService(
 user_preferences_service = UserPreferencesService(account_context_service)
 category_profile_service = CategoryProfileService(account_context_service)
 platform_connection_service = create_platform_connection_service(account_context_service)
+browser_assist_service = BrowserAssistService(account_context_service, platform_connection_service)
+platform_connection_service.browser_assist = browser_assist_service
+app.include_router(browser_assist_router(browser_assist_service), prefix=API_PREFIX)
 viral_reasoning_service = ViralReasoningService(store)
 pipeline = HybridAnalysisPipeline(
     store,
     credential_resolver=platform_connection_service,
     viral_reasoning=viral_reasoning_service,
+    browser_assist=browser_assist_service,
 )
 notification_service = create_notification_service(account_context_service)
 storage_manager = StorageManager(store, workspace_manager)
@@ -535,6 +549,9 @@ viral_insight_service = ViralInsightService(
     publisher=ProductionConceptPublisher(production_service),
     category_profiles=category_profile_service,
     reasoning=viral_reasoning_service,
+)
+creative_concept_service = CreativeConceptService(
+    store, viral_insight_service, preferences=user_preferences_service,
 )
 prompt_draft_service = PromptDraftService(store)
 timeline_service = TimelineService(
@@ -639,7 +656,9 @@ app.include_router(
 app.include_router(create_user_preferences_router(user_preferences_service), prefix=API_PREFIX)
 app.include_router(create_category_profile_router(category_profile_service), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
-app.include_router(create_viral_insight_router(viral_insight_service), prefix=API_PREFIX)
+app.include_router(
+    create_viral_insight_router(viral_insight_service, creative_concept_service), prefix=API_PREFIX
+)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)
 app.include_router(
     create_platform_skill_router(

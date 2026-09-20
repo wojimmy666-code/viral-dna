@@ -6,7 +6,7 @@ from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
-from ..models import ModelTargetSnapshot, ModelTask, ModelUsage
+from ..models import ModelResponseDiagnostics, ModelTargetSnapshot, ModelTask, ModelUsage
 
 ResultT = TypeVar("ResultT", bound=BaseModel)
 
@@ -24,6 +24,7 @@ class ModelProviderError(RuntimeError):
         resolved_model: str | None = None,
         latency_ms: int = 0,
         raw_content: str | None = None,
+        diagnostics: ModelResponseDiagnostics | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -34,6 +35,7 @@ class ModelProviderError(RuntimeError):
         self.resolved_model = resolved_model
         self.latency_ms = latency_ms
         self.raw_content = raw_content
+        self.diagnostics = diagnostics
 
 
 class ModelProviderUnavailable(ModelProviderError):
@@ -52,6 +54,7 @@ class ModelRequest:
     video_path: Path | None = None
     video_fps: float = 4.0
     video_duration_seconds: float = 0.0
+    temperature: float = 0.1
 
 
 @dataclass(frozen=True, slots=True)

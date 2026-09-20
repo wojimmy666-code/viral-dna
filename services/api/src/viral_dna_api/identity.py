@@ -23,7 +23,15 @@ class AuthMode(StrEnum):
     EXTERNAL = "external"
 
 
-class UserSession(BaseModel):
+class SessionLifetime(BaseModel):
+    session_started_at: float | None = None
+    session_expires_at: float | None = None
+    session_absolute_expires_at: float | None = None
+    session_renew_after: float | None = None
+    session_server_time: float | None = None
+
+
+class UserSession(SessionLifetime):
     principal_type: PrincipalType = PrincipalType.USER
     user_id: UUID
     display_name: str
@@ -36,7 +44,7 @@ class UserSession(BaseModel):
     csrf_token: str | None = None
 
 
-class PlatformAdminSession(BaseModel):
+class PlatformAdminSession(SessionLifetime):
     principal_type: PrincipalType = PrincipalType.PLATFORM_ADMIN
     admin_id: UUID
     display_name: str

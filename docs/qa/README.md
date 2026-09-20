@@ -6,6 +6,8 @@
 
 ## 视频分析与记录
 
+- [复刻与改进：两阶段创意验收](analysis/two-stage-creative-concepts.md)
+- [平台链接读取、分析超时与本机浏览器辅助采集](analysis/platform-link-timeouts.md)
 - [Phase2_Batch4.7_分析记录生命周期与批量管理执行验收](analysis/Phase2_Batch4.7_分析记录生命周期与批量管理执行验收.md)
 - [Phase2_分镜运镜与遮挡转场理解_v2_执行验收](analysis/Phase2_分镜运镜与遮挡转场理解_v2_执行验收.md)
 
@@ -39,6 +41,7 @@
 
 ## 共用工作台
 
+- [登录续期与原地恢复验收](accounts/session-renewal.md)
 - [侧边栏展开收起验收](workbench/侧边栏展开收起验收.md)
 - [统一创作工作台验收](workbench/统一创作工作台验收.md)
 

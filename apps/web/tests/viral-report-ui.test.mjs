@@ -12,6 +12,90 @@ const PROMPT_EDITOR_URL = new URL("../src/prompt-editor/PromptEditor.jsx", impor
 const PROMPT_SHOT_URL = new URL("../src/prompt-editor/PromptShotEditor.jsx", import.meta.url);
 const UI_HELPERS_URL = new URL("../src/viral-report/viral-report-ui.js", import.meta.url);
 const CSS_URL = new URL("../src/viral-report/viral-report.css", import.meta.url);
+
+test("a failed or pending creative batch never silently displays previous results", async () => {
+  const { visibleCreativeBatch } = await import("../src/viral-report/creative-workflow.js");
+  const previous = { id: "old", phase: "ideas", status: "completed", ideas: [{ name: "旧创意" }] };
+  assert.equal(visibleCreativeBatch(), null);
+  for (const status of ["failed", "cancelled", "queued", "running"]) {
+    assert.equal(visibleCreativeBatch({ ...previous, id: "new", status }), null);
+  }
+  assert.equal(visibleCreativeBatch(previous), previous);
+  const plan = { phase: "expanded", status: "completed" };
+  assert.equal(visibleCreativeBatch(plan), plan);
+  const legacy = { phase: "legacy", status: "stale" };
+  assert.equal(visibleCreativeBatch(legacy), legacy);
+  const source = await readFile(REPLICATION_URL, "utf8");
+  assert.match(source, /const display = visibleCreativeBatch\(current\)/);
+  assert.doesNotMatch(source, /const fallback =|current : fallback/);
+});
+
+test("creative brief restores the frozen text and preserves an intentional empty brief", async () => {
+  const { creativeBriefText } = await import("../src/viral-report/creative-workflow.js");
+  const feedback = "多场景切换，并且都是全世界标志性的场景";
+  assert.equal(creativeBriefText(), "");
+  assert.equal(creativeBriefText({ phase: "legacy", feedback }), "");
+  assert.equal(creativeBriefText({ phase: "ideas", feedback }), feedback);
+  assert.equal(creativeBriefText({ phase: "expanded", input_snapshot: { original_creative_brief: feedback } }), feedback);
+  assert.equal(creativeBriefText({ phase: "ideas", feedback, input_snapshot: { creative_brief: { text: "" }, original_creative_brief: feedback } }), "");
+  assert.equal(creativeBriefText({ phase: "ideas", feedback: "old", input_snapshot: { creative_brief: { text: feedback } } }), feedback);
+});
+
+test("creative actions submit the full visible brief and keep copy concise", async () => {
+  const source = await readFile(REPLICATION_URL, "utf8");
+  assert.match(source, /feedback \?\? creativeBriefText\(current \|\| display\)/);
+  assert.match(source, /textarea value=\{effectiveFeedback\}/);
+  assert.equal((source.match(/feedback: effectiveFeedback/g) || []).length, 2);
+  assert.match(source, /setFeedback\(\(value\) => value === feedback \? null : value\)/);
+  assert.match(source, /setCurrentId\(event\.target\.value\); setFeedback\(null\)/);
+  for (const copy of [
+    "先选创意，再展开分镜。借鉴原片的表达方式，不照搬原片画面",
+    "本批次依据",
+    "后续品类或报告更新不会改写已有创意",
+    "旧批次和已创建的方案不会被覆盖",
+  ]) assert.equal(source.includes(copy), false, copy);
+  assert.match(source, /历史批次/);
+});
+
+test("brief fulfillment stays in closed details and legacy ideas need no new fields", async () => {
+  const ideas = await readFile(new URL("../src/viral-report/CreativeIdeas.jsx", import.meta.url), "utf8");
+  const concept = await readFile(CONCEPT_URL, "utf8");
+  const checks = await readFile(new URL("../src/viral-report/CreativeBriefChecks.jsx", import.meta.url), "utf8");
+  assert.match(ideas, /<details>\s*<summary>关键画面与品类适配<\/summary>[\s\S]*<CreativeBriefChecks checks=\{idea\.brief_checks\}/);
+  assert.match(concept, /brief_checks\?\.length > 0 && <details className="concept-risk-disclosure">/);
+  assert.match(checks, /if \(!checks\?\.length\) return null/);
+  assert.match(checks, /\{item\.requirement\}/);
+  assert.match(checks, /\{item\.explanation\}/);
+  assert.doesNotMatch(checks, /dangerouslySetInnerHTML/);
+});
+
+test("creative batches merge without dropping history and keep unreported costs honest", async () => {
+  const { mergeCreativeBatch, creativeCost, creativeTiming, isCreativeRunning } = await import("../src/viral-report/creative-workflow.js");
+  const first = { id: "one", created_at: "2026-09-19T00:00:00Z", status: "completed" };
+  const next = { id: "two", created_at: "2026-09-19T00:01:00Z", status: "running" };
+  const merged = mergeCreativeBatch([first, next], { ...next, status: "completed" });
+  assert.deepEqual(merged.map((item) => item.id), ["two", "one"]);
+  assert.equal(merged[1], first);
+  assert.equal(isCreativeRunning(merged[0]), false);
+  assert.equal(isCreativeRunning(next), true);
+  assert.match(creativeCost({ cost_status: "unreported", model_cost_micros: 0 }), /不代表免费/);
+  assert.match(creativeCost({ cost_status: "measured", model_cost_micros: 1200 }), /0\.0012/);
+  assert.equal(creativeTiming({ ...first, started_at: "2026-09-19T00:00:02Z", completed_at: "2026-09-19T00:00:20Z", model_elapsed_ms: 15000 }), "总计 20 秒 · 排队 2 秒 · 模型 15 秒");
+});
+
+test("two-stage UI requires explicit selection, reuses request IDs and only polls on reload", async () => {
+  const source = await readFile(REPLICATION_URL, "utf8");
+  const ideas = await readFile(new URL("../src/viral-report/CreativeIdeas.jsx", import.meta.url), "utf8");
+  assert.match(source, /request_id: crypto\.randomUUID\(\)/);
+  assert.match(source, /body: retry \? body/);
+  assert.match(source, /disabled=\{!idea \|\| busy/);
+  assert.match(source, /AbortController/);
+  assert.match(source, /version !== epoch\.current/);
+  assert.match(source, /停止任务/);
+  assert.match(ideas, /type="radio"/);
+  assert.match(ideas, /只换这一条/);
+  assert.doesNotMatch(ideas, /faithful|scenario|proof/);
+});
 const PROMPT_PRESENTATION_CSS_URL = new URL("../src/prompt-presentation/prompt-presentation.css", import.meta.url);
 const PROMPT_SECTION_PARSER_URL = new URL("../src/prompt-presentation/prompt-section-parser.js", import.meta.url);
 const STYLES_URL = new URL("../src/styles.css", import.meta.url);
@@ -100,7 +184,7 @@ test("concept details expose the creative brief while keeping locked DNA in disc
   assert.match(source, /保留 \{selected\.retained_dna\.length\} 项 DNA/);
   assert.match(source, /concept-detail-actions/);
   assert.match(source, /selected\.thesis \|\| selected\.why_it_can_work/);
-  assert.doesNotMatch(source, /selected\.name|concept-detail-heading/);
+  assert.match(source, /creative \? selected\.name/);
   assert.doesNotMatch(source, /本策略锁定|<strong>保留 DNA<\/strong>/);
 });
 
@@ -110,7 +194,7 @@ test("shot creation instructions adapt to available width without leaving a dead
 
   assert.match(component, /concept-shot-content/);
   assert.match(component, /<PromptSectionView prompt=\{shot\.video_prompt\}/);
-  assert.doesNotMatch(component, /concept-shot-image-prompt|shot\.image_prompt/);
+  assert.match(component, /creative &&.*图片提示词/s);
   assert.match(source, /\.concept-shot-list\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit, minmax\(min\(100%, 32rem\), 1fr\)\)[^}]*align-items:\s*start/s);
   assert.match(source, /\.concept-shot-list > article:only-child\s*\{\s*grid-column:\s*1 \/ -1/);
   assert.doesNotMatch(source, /\.concept-shot-list p\s*\{/);
@@ -183,14 +267,16 @@ test("replication concepts expose distinct change levels and stale-batch recover
   assert.doesNotMatch(concept, /本方案重点改进|本策略锁定|concept-strategy-goal|meta\.goal/);
   assert.match(concept, /重新生成后可创建/);
   assert.doesNotMatch(concept, /历史方案基于|不会自动成为本次品类选择/);
-  assert.match(replication, /conceptSet\?\.status === "stale"/);
-  assert.match(replication, /现有三套方案需要更新/);
+  assert.match(replication, /旧版规则方案/);
+  assert.match(replication, /历史批次/);
   assert.match(replication, /category_profile_id: selectedCategoryId/);
-  assert.match(replication, /historical=\{!selectedCategoryId\}/);
+  assert.match(replication, /historical=\{display\?\.phase === "legacy"\}/);
   assert.doesNotMatch(replication, /历史方案不会自动回填/);
   assert.doesNotMatch(replication, /尚未选择品类档案/);
   assert.doesNotMatch(replication, /setSelectedCategoryId\(payload/);
-  assert.match(replication, /\["faithful", "scenario", "proof"\]/);
+  assert.doesNotMatch(replication, /\["faithful", "scenario", "proof"\]/);
+  assert.match(replication, /展开这个创意/);
+  assert.match(replication, /生成 3 个简短创意/);
   assert.match(replication, /仅生成创意与分镜，不会立即生成图片或视频/);
 });
 
@@ -199,7 +285,7 @@ test("viral report modules receive the request boundary instead of calling fetch
   const mechanism = await readFile(MECHANISM_URL, "utf8");
   assert.doesNotMatch(replication, /\bfetch\s*\(/);
   assert.doesNotMatch(mechanism, /\bfetch\s*\(/);
-  assert.match(replication, /request\(`\/analyses\/\$\{analysisId\}\/viral-concepts`/);
+  assert.match(replication, /submit\(`\/analyses\/\$\{analysisId\}\/viral-concepts`/);
   assert.match(replication, /onPublished/);
 });
 
@@ -219,7 +305,7 @@ test("viral workspaces use the same dense report frame without redundant DNA pre
   const source = await readFile(CSS_URL, "utf8");
   assert.match(mechanism, /viral-report-page viral-mechanism-workspace/);
   assert.match(replication, /viral-report-page replication-workspace/);
-  assert.match(replication, /replacement-opportunities/);
+  assert.match(replication, /<details className="creative-replacements"/);
   assert.doesNotMatch(replication, /replication-preparation-grid|replication-dna-locks/);
   assert.match(source, /\.viral-report-page\s*\{[^}]*width:\s*100%[^}]*padding:\s*1\.25rem/s);
   assert.doesNotMatch(source, /\.replication-preparation-grid|\.replication-dna-locks|\.dna-lock-list/);

@@ -1,0 +1,38 @@
+.browser-assist-connection {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color, #e7e7ef);
+}
+
+.browser-assist-connection h3 {
+  margin: 0 0 6px;
+  font-size: var(--type-subheading-size);
+}
+
+.browser-assist-connection p,
+.browser-assist-controls p,
+.browser-assist-unavailable {
+  margin: 8px 0 12px;
+  color: var(--text-secondary);
+  font-size: var(--type-body-size);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.browser-assist-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.browser-assist-controls .browser-assist-actions button,
+.browser-assist-connection > button.secondary-button {
+  min-height: 44px;
+  max-width: 100%;
+}
+
+.browser-assist-controls .inline-error,
+.browser-assist-connection .inline-error {
+  color: var(--status-danger-text, #c32946);
+}

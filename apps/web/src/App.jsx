@@ -53,6 +53,7 @@ import {
 } from "@phosphor-icons/react";
 import { AssetLibrary } from "./AssetLibrary.jsx";
 import { apiErrorMessage } from "./api-errors.js";
+import { latestAnalysis, watchAnalysis } from "./analysis-progress.js";
 import { AppSidebar } from "./app-sidebar/AppSidebar.jsx";
 import { Topbar } from "./WorkspaceTopbar.jsx";
 import { useSidebarLayout } from "./app-sidebar/useSidebarLayout.js";
@@ -63,6 +64,7 @@ import { DepthGenerationSettings } from "./depth-settings/DepthGenerationSetting
 import { MediaStagingSettingsPanel } from "./media-staging/MediaStagingSettingsPanel.jsx";
 import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
+import { BrowserAssistControls } from "./BrowserAssist.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
 import { accountFetch } from "./accounts/account-client.js";
 import {
@@ -340,6 +342,7 @@ function buildPaginationItems(currentPage, totalPages) {
 const stageLabels = {
   queued: "排队中",
   ingesting: "读取来源",
+  waiting_user: "等待平台验证",
   preprocessing: "媒体预处理",
   segmenting: "分镜检测",
   transcribing: "语音与字幕",
@@ -715,6 +718,7 @@ export function App() {
   const [error, setError] = useState("");
   const [analysisErrorCode, setAnalysisErrorCode] = useState("");
   const [analysisErrorPlatform, setAnalysisErrorPlatform] = useState("");
+  const [analysisConnectionError, setAnalysisConnectionError] = useState("");
   const [video, setVideo] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [analysisVersions, setAnalysisVersions] = useState([]);
@@ -738,7 +742,6 @@ export function App() {
   const [notificationTarget, setNotificationTarget] = useState(null);
   const [recordRouteLoading, setRecordRouteLoading] = useState(false);
   const [recordRouteError, setRecordRouteError] = useState("");
-  const eventSourceRef = useRef(null);
   const toastSequenceRef = useRef(0);
   const notificationSnapshotRef = useRef(new Map());
   const notificationFeedInitializedRef = useRef(false);
@@ -818,8 +821,35 @@ export function App() {
   }, [showNotice]);
 
   useEffect(() => {
-    return () => eventSourceRef.current?.close();
-  }, []);
+    setAnalysisConnectionError("");
+    if (appRoute.name !== "record-workspace" || video?.record_id !== appRoute.recordId
+      || !analysis?.id || analysis.stage === "failed") return undefined;
+    if (analysis.stage === "completed") {
+      if (report?.analysis_id === analysis.id) return undefined;
+      let current = true;
+      loadReport(video.id, { isCurrent: () => current }).catch((requestError) => {
+        if (current) setAnalysisConnectionError(requestError.message);
+      });
+      return () => { current = false; };
+    }
+    // Bind to the visible job, including refresh/deep links and project re-entry.
+    // Cleanup prevents a previous project's late response from changing this page.
+    return watchAnalysis({
+      analysisId: analysis.id,
+      request: apiRequest,
+      eventsUrl: `${API_BASE}/analyses/${analysis.id}/events`,
+      onUpdate: (next) => {
+        rememberAnalysis(next);
+        if (next.stage === "failed") {
+          setError(next.error?.message || next.message || "分析失败");
+          setAnalysisErrorCode(next.error?.code || "");
+          setAnalysisErrorPlatform(detectPlatformFromUrl(video?.source_url || "") || "");
+        }
+      },
+      onComplete: (next, isCurrent) => loadReport(next.video_id, { isCurrent }),
+      onConnectionError: setAnalysisConnectionError,
+    });
+  }, [appRoute.name, appRoute.recordId, analysis?.id, video?.id]);
 
   useEffect(() => {
     if (appRoute.name === "platform-admin") return;
@@ -1231,7 +1261,7 @@ export function App() {
     if (saved.productionId || saved.section) setRecordWorkspaceMode("production");
     setVideo(detail.video);
     setAnalysisVersions(detail.analyses || []);
-    setAnalysis(detail.analyses?.[0] || null);
+    setAnalysis((current) => latestAnalysis(current, detail.analyses?.[0] || null));
     setReport(detail.latest_report || null);
     setReplacementVersion(null);
     setActiveShotId(detail.latest_report?.shots?.[0]?.id || null);
@@ -1783,65 +1813,19 @@ export function App() {
   }
 
   function rememberAnalysis(next) {
-    setAnalysis(next);
+    setAnalysis((current) => latestAnalysis(current, next));
     setAnalysisVersions((current) => {
       const merged = [next, ...current.filter((item) => item.id !== next.id)];
       return merged.sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
     });
   }
 
-  async function pollAnalysis(analysisId) {
-    for (let index = 0; index < 60; index += 1) {
-      const next = await apiRequest(`/analyses/${analysisId}`);
-      rememberAnalysis(next);
-      if (next.stage === "completed") {
-        setAnalysisErrorCode("");
-        setAnalysisErrorPlatform("");
-        await loadReport(next.video_id);
-        return;
-      }
-      if (next.stage === "failed") {
-        setError(next.error?.message || next.message || "分析失败");
-        setAnalysisErrorCode(next.error?.code || "");
-        setAnalysisErrorPlatform(detectPlatformFromUrl(video?.source_url || url) || "");
-        return;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
-    }
-    setError("分析仍在后台运行，请稍后刷新状态");
-  }
-
-  function connectToProgress(analysisId) {
-    eventSourceRef.current?.close();
-    const source = new EventSource(`${API_BASE}/analyses/${analysisId}/events`, { withCredentials: true });
-    eventSourceRef.current = source;
-    source.addEventListener("progress", async (event) => {
-      const next = JSON.parse(event.data);
-      rememberAnalysis(next);
-      if (next.stage === "completed") {
-        setAnalysisErrorCode("");
-        setAnalysisErrorPlatform("");
-        source.close();
-        await loadReport(next.video_id);
-      }
-      if (next.stage === "failed") {
-        setError(next.error?.message || next.message || "分析失败");
-        setAnalysisErrorCode(next.error?.code || "");
-        setAnalysisErrorPlatform(detectPlatformFromUrl(video?.source_url || url) || "");
-        source.close();
-      }
-    });
-    source.onerror = () => {
-      source.close();
-      pollAnalysis(analysisId).catch((requestError) => setError(requestError.message));
-    };
-  }
-
-  async function loadReport(videoId) {
+  async function loadReport(videoId, { isCurrent = () => true } = {}) {
     const [nextReport, processedVideo] = await Promise.all([
       apiRequest(`/videos/${videoId}/report`),
       apiRequest(`/videos/${videoId}`),
     ]);
+    if (!isCurrent()) return;
     setReport(nextReport);
     setVideo(processedVideo);
     setAnalysisErrorCode("");
@@ -1871,7 +1855,6 @@ export function App() {
       }),
     });
     rememberAnalysis(createdAnalysis);
-    connectToProgress(createdAnalysis.id);
     return createdAnalysis;
   }
 
@@ -2145,7 +2128,6 @@ export function App() {
       setReport(null);
       setReplacementVersion(null);
       resetProductionWorkspace();
-      connectToProgress(next.id);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -2649,9 +2631,24 @@ export function App() {
                   onNavigate={navigateRecordBreadcrumb}
                 />
                 {analysis && analysis.stage !== "completed" && (
-                  <AnalysisProgress analysis={analysis} video={video} />
+                  <AnalysisProgress
+                    analysis={analysis}
+                    video={video}
+                    connectionError={analysisConnectionError}
+                    submitting={submitting}
+                    retryError={error}
+                    onRetry={reanalyzeCurrent}
+                    onConfigurePlatform={() => openPlatformConnections(video?.source_type)}
+                    onRefresh={() => loadRecordWorkspace(appRoute.recordId).catch(() => undefined)}
+                  />
                 )}
-                {analysis?.stage === "completed" && !report && (
+                {analysis?.stage === "completed" && analysisConnectionError && (
+                  <RecordWorkspaceState
+                    error={analysisConnectionError}
+                    onRetry={() => loadRecordWorkspace(appRoute.recordId).catch(() => undefined)}
+                  />
+                )}
+                {analysis?.stage === "completed" && !report && !analysisConnectionError && (
                   <RecordWorkspaceState loading />
                 )}
                 {!analysis && !report && (
@@ -4761,7 +4758,7 @@ const ImportPanel = forwardRef(function ImportPanel({
           </div>
           <p className="link-ingestion-hint">
             <DownloadSimple size={15} />
-            系统会采集公开源视频并进入真实分镜流程；平台验证、私密或失效链接会明确报错。
+            粘贴链接后自动下载并分析，无需手动上传；平台拒绝访问、登录验证或超时会停止并提示原因。
           </p>
           {detectedPlatform && (
             <div className={`link-platform-status ${connectionEnabled ? "ready" : "attention"}`}>
@@ -4773,9 +4770,9 @@ const ImportPanel = forwardRef(function ImportPanel({
                 <strong>{platformLabel(detectedPlatform)}</strong>
                 <small>
                   {connectionEnabled
-                    ? `${health.label} · 平台要求登录时自动使用`
+                    ? `${health.label} · ${connection.usage_strategy === "always" ? "采集时自动使用" : "需要时自动使用"}`
                     : connection?.configured
-                      ? `${health.label} · 请更新登录状态`
+                      ? `${health.label} · 可在平台连接中查看详情`
                       : "未配置登录状态；公开链接仍会先匿名采集"}
                 </small>
               </span>
@@ -4900,7 +4897,10 @@ const ImportPanel = forwardRef(function ImportPanel({
   );
 });
 
-function AnalysisProgress({ analysis, video }) {
+function AnalysisProgress({ analysis, video, connectionError, submitting, retryError,
+  onRetry, onConfigurePlatform, onRefresh }) {
+  const failed = analysis.stage === "failed";
+  const waiting = analysis.stage === "waiting_user";
   const stages = [
     "ingesting",
     "preprocessing",
@@ -4911,24 +4911,56 @@ function AnalysisProgress({ analysis, video }) {
     "compiling_prompts",
     "validating",
   ];
-  const activeIndex = stages.indexOf(analysis.stage);
+  const activeIndex = stages.indexOf(waiting ? "ingesting" : analysis.stage);
   return (
     <section className={`progress-card ${analysis.stage === "failed" ? "failed" : ""}`} aria-live="polite">
       <div className="progress-header">
         <span className="progress-icon">
           {analysis.stage === "failed" ? (
             <X size={22} weight="bold" />
+          ) : waiting ? (
+            <ShieldCheck size={22} />
           ) : (
             <CircleNotch className="spin" size={22} />
           )}
         </span>
         <div>
-          <span className="eyebrow">分析任务</span>
+          <span className="eyebrow">{failed ? "分析未完成" : "分析任务"}</span>
           <h2>{video?.title || "正在拆解视频"}</h2>
           <p>{analysis.message}</p>
         </div>
-        <strong>{analysis.progress}%</strong>
+        <strong>{failed ? "已停止" : waiting ? "等待操作" : `${analysis.progress}%`}</strong>
       </div>
+      {!failed && analysis.browser_session_id && (
+        <BrowserAssistControls
+          session={{ id: analysis.browser_session_id, state: analysis.browser_state, mode: "download" }}
+          request={apiRequest}
+          onChange={onRefresh}
+        />
+      )}
+      {failed && (
+        <div className="credential-error-actions">
+          {isCredentialAnalysisError(analysis.error?.code) && (
+            <button className="secondary-button compact" type="button" onClick={onConfigurePlatform}>
+              配置{platformLabel(video?.source_type)}登录状态
+            </button>
+          )}
+          {analysis.error?.retryable && (
+            <button className="primary-button compact" type="button" disabled={submitting} onClick={onRetry}>
+              {submitting ? "正在提交" : "重新分析"}
+            </button>
+          )}
+        </div>
+      )}
+      {failed && retryError && retryError !== analysis.error?.message && retryError !== analysis.message && (
+        <div className="inline-error" role="alert">{retryError}</div>
+      )}
+      {connectionError && (
+        <div className="inline-error" role="alert">
+          <span>{connectionError}</span>
+          <button className="text-button" type="button" onClick={onRefresh}>刷新状态</button>
+        </div>
+      )}
       <div className="progress-track">
         <span style={{ transform: `scaleX(${analysis.progress / 100})` }} />
       </div>

@@ -24,11 +24,14 @@ export async function checkLoginState(signal) {
 
 // Both the public dialog and the existing standalone account forms use this path.
 // Callers own navigation/session state so an abandoned request cannot redirect.
-export async function requestPasswordLogin(draft, { admin = false, signal } = {}) {
+export async function requestPasswordLogin(draft, { admin = false, signal, expectedPrincipalId } = {}) {
   const validation = (!admin && phoneError(draft.username)) || passwordError(draft.password);
   if (validation) throw new Error(validation);
-  const session = await accountRequest(admin ? "/admin/auth/login" : "/auth/login", {
-    method: "POST", signal, body: { username: draft.username.trim(), password: draft.password },
+  const action = expectedPrincipalId ? "reauthenticate" : "login";
+  const session = await accountRequest(`${admin ? "/admin" : ""}/auth/${action}`, {
+    method: "POST", signal, body: { username: draft.username.trim(), password: draft.password,
+      ...(expectedPrincipalId ? { expected_principal_id: expectedPrincipalId } : {}),
+    },
   });
   if (!session || (admin ? !session.admin_id : !session.user_id || !session.account_id)) throw invalidResponse();
   return session;

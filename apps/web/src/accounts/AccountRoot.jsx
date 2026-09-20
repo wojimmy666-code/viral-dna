@@ -10,6 +10,8 @@ import {
 import { AccountManagement } from "./AccountManagement.jsx";
 import { AccountHeader } from "./AccountHeader.jsx";
 import { StorageManagement } from "./StorageManagement.jsx";
+import { startSessionActivity } from "./session-activity.js";
+import { SessionReauthentication } from "./SessionReauthentication.jsx";
 import {
   PASSWORD_MIN_LENGTH, PHONE_INPUT_PROPS,
   passwordError, pastePhone, phoneError, setupRequestBody,
@@ -121,6 +123,9 @@ export function AccountRoot({ children }) {
   const [lease, setLease] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [sessionHealth, setSessionHealth] = useState("active");
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const activity = useRef(null), recoveryHandler = useRef(null);
   const [menu, setMenu] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [password, setPassword] = useState({ current_password: "", new_password: "" });
@@ -133,6 +138,37 @@ export function AccountRoot({ children }) {
   const match = location.pathname.match(/^\/projects\/([a-f0-9-]{36})(?:\/skill)?$/i);
   const projectId = match?.[1] || "";
   const activation = location.pathname === "/activate" ? new URLSearchParams(location.hash.slice(1)).get("token") : null;
+  const sessionBlocked = sessionHealth === "expired" || sessionHealth === "changed";
+  recoveryHandler.current = next => {
+    setSession(next); setSessionHealth("active"); setReauthOpen(false); setError("");
+    if (projectId) {
+      activeLease.current = null; requestedLease.current = null; setProjectEditing(null);
+      void acquire(Boolean(lease?.editable || lease?.lost));
+    }
+  };
+  useEffect(() => {
+    if (auth.auth_mode !== "password" || !session) return;
+    setSessionHealth("active");
+    const tracker = startSessionActivity({ admin,
+      onRecovered: next => recoveryHandler.current?.(next),
+      onState: state => {
+        setSessionHealth(state);
+        if (state === "expired" || state === "changed") {
+          ++generation.current;
+          activeLease.current = null; requestedLease.current = null; setProjectEditing(null);
+          setLease(current => current ? { ...current, loading: false, lost: true, editable: false } : current);
+        }
+      },
+    });
+    activity.current = tracker;
+    return () => { tracker.stop(); if (activity.current === tracker) activity.current = null; };
+  }, [admin, auth.auth_mode, session?.user_id, session?.admin_id]);
+  useEffect(() => {
+    if (!sessionBlocked && !lease?.lost) return;
+    const protect = event => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", protect);
+    return () => window.removeEventListener("beforeunload", protect);
+  }, [sessionBlocked, lease?.lost]);
 
   useEffect(() => {
     if (!menu) return;
@@ -175,9 +211,8 @@ export function AccountRoot({ children }) {
   useEffect(() => {
     const expired = event => {
       if (event.detail.admin !== admin) return;
-      // Do not unmount unsaved editor state when a session expires.
-      if (activeLease.current) { setLease(current => ({ ...current, lost: true, editable: false })); setError("登录已失效，请先复制未提交内容，再重新登录。"); }
-      else { setSession(null); setAccountSession(null, admin); }
+      // Retain all editors (including account forms), not only leased projects.
+      activity.current?.expire(event.detail.changed);
     };
     window.addEventListener("viraldna:session-expired", expired);
     return () => window.removeEventListener("viraldna:session-expired", expired);
@@ -189,9 +224,9 @@ export function AccountRoot({ children }) {
       method: "POST", body: { editor_id: target.editor_id, token: target.token }, keepalive: true,
     }).catch(() => undefined);
   }
-  async function acquire() {
+  async function acquire(preserveDraft = false) {
     const version = ++generation.current;
-    setError(""); setLease({ projectId, loading: true });
+    setError(""); setLease({ projectId, loading: true, lost: preserveDraft });
     // Reuse an in-flight acquisition across React StrictMode effects, but never
     // reuse an abandoned project's token when navigating back to it.
     if (requestedLease.current?.projectId !== projectId) requestedLease.current = newLease(projectId);
@@ -203,8 +238,8 @@ export function AccountRoot({ children }) {
       const result = await next.pending;
       if (version !== generation.current) { if (result.editable && requestedLease.current !== next) await release(next); return; }
       if (result.editable) { activeLease.current = next; setProjectEditing(next); }
-      setLease({ projectId, ...result });
-    } catch (failure) { if (version === generation.current) { setError(failure.message); setLease({ projectId, editable: false }); } }
+      setLease({ projectId, ...result, lost: preserveDraft && !result.editable });
+    } catch (failure) { if (version === generation.current) { setError(failure.message); setLease({ projectId, editable: false, lost: preserveDraft }); } }
   }
   useEffect(() => {
     const previous = activeLease.current;
@@ -217,12 +252,19 @@ export function AccountRoot({ children }) {
   useEffect(() => {
     if (!projectId || !lease?.editable) return;
     let alive = true;
+    let lastConfirmed = Date.now();
     const lost = event => { if (event.detail.projectId === projectId) setLease(current => ({ ...current, lost: true, editable: false })); };
     const renew = async () => {
       const current = activeLease.current;
       if (!current || current.projectId !== projectId) return;
-      try { await accountRequest(`/projects/${projectId}/edit-lease/renew`, { method: "POST", body: { editor_id: current.editor_id, token: current.token } }); }
-      catch (failure) { if (alive) { setLease(value => ({ ...value, lost: true, editable: false })); setError(failure.message); } }
+      try { await accountRequest(`/projects/${projectId}/edit-lease/renew`, { method: "POST", body: { editor_id: current.editor_id, token: current.token } }); lastConfirmed = Date.now(); }
+      catch (failure) {
+        if (!alive || activeLease.current !== current || failure.status === 401 || failure.code === "session_changed") return;
+        if (failure.status === 423 || Date.now() - lastConfirmed >= 120000) {
+          setLease(value => ({ ...value, lost: true, editable: false })); setProjectEditing(null);
+          setError(failure.status === 423 ? failure.message : "连接暂时中断，无法确认编辑权限。内容仍保留，请连接恢复后重新取得编辑权。");
+        }
+      }
     };
     const onHide = () => { void release(activeLease.current); };
     const timer = window.setInterval(renew, 20000);
@@ -280,7 +322,7 @@ export function AccountRoot({ children }) {
   const editingReady = !projectId || (held && (lease.editable || lease.lost));
   const management = location.pathname === "/admin/accounts" || location.pathname === "/account/members";
   return <div className="account-root">
-    <AccountHeader toolbarDisabled={!!lease?.lost} onHomeNavigation={() => setMenu(false)}
+    <AccountHeader toolbarDisabled={sessionBlocked || !!lease?.lost} onHomeNavigation={() => setMenu(false)}
       identity={<span className="account-identity">{session.account_kind === "enterprise" ? <Buildings size={17} aria-hidden="true" /> : <UserCircle size={17} aria-hidden="true" />}<span className="account-name" title={session.account_name || "平台管理后台"}>{session.account_name || "平台管理后台"}</span><small>{session.account_kind === "enterprise" ? "企业账户" : admin ? "admin" : "个人账户"}</small></span>}
       accountMenu={<div className="account-menu" ref={menuElement}><button className="text-button" aria-expanded={menu} onClick={() => setMenu(!menu)} title={session.display_name}><span className="account-menu-name">{session.display_name}</span><CaretDown size={14} aria-hidden="true" /></button>
         {menu && <div className="account-menu-panel">
@@ -293,17 +335,22 @@ export function AccountRoot({ children }) {
         </div>}
       </div>}>
     <ErrorMessage error={error} />
+    {sessionBlocked && <div className="account-session-notice" role="status"><span>{sessionHealth === "changed" ? "登录用户已改变，请使用原用户重新登录。" : "登录已过期，请重新登录后继续。"}当前页面的未提交内容仍保留，暂时不要刷新页面。</span><button className="primary-button" onClick={() => setReauthOpen(true)}>重新登录</button></div>}
+    {sessionHealth === "offline" && <div className="account-session-notice" role="status"><span>连接暂时中断，正在重试登录状态检查。当前内容仍保留。</span><button className="text-button" onClick={() => void activity.current?.retry()}>重试连接</button></div>}
+    {reauthOpen && <SessionReauthentication session={session} admin={admin} onClose={() => setReauthOpen(false)} onDone={next => activity.current?.recover(next)} />}
     {notice && <p className="account-help" role="status">{notice}</p>}
     {passwordOpen && <form className="account-password-form" onSubmit={changePassword}>
       <h2>修改密码</h2>{["current_password", "new_password"].map(name => <label className="account-field" key={name}><span>{name === "current_password" ? "当前密码" : "新密码（至少 8 位）"}</span><input type="password" value={password[name]} autoComplete={name === "current_password" ? "current-password" : "new-password"} minLength={PASSWORD_MIN_LENGTH} required onChange={e => setPassword({ ...password, [name]: e.target.value })} /></label>)}
       <div className="account-actions"><button type="submit" className="primary-button">修改并重新登录</button><button type="button" className="secondary-button" onClick={() => setPasswordOpen(false)}>取消</button></div>
     </form>}
-    {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? "编辑权已失效，请先备份当前修改，再刷新重试。" : lease.occupied ? `${lease.display_name} 正在编辑，当前为只读查看。` : "当前为只读查看。"}</span>{lease.lost ? <><button className="text-button" onClick={copyDraft}>复制未提交内容</button><button className="text-button" onClick={downloadDraft}>下载备份</button></> : <button className="text-button" onClick={acquire}>进入编辑</button>}</div>}
+    {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? (sessionBlocked ? "当前修改已暂停提交。" : lease.occupied ? `${lease.display_name || "其他成员"} 正在编辑。当前修改仍保留，暂不能提交。` : "编辑权已失效，当前修改仍保留。") : lease.occupied ? `${lease.display_name} 正在编辑，当前为只读查看。` : "当前为只读查看。"}</span>{lease.lost ? <>{!sessionBlocked && <button className="text-button" onClick={() => void acquire(true)}>重新取得编辑权</button>}<button className="text-button" onClick={copyDraft}>复制未提交内容</button><button className="text-button" onClick={downloadDraft}>下载备份</button></> : <button className="text-button" onClick={() => void acquire()}>进入编辑</button>}</div>}
+    <div ref={content} inert={sessionBlocked || !!lease?.lost}>
     {location.pathname === "/account/storage" && !admin ? <StorageManagement session={session} /> : management ? <AccountManagement admin={admin} session={session} /> : <>
-      {projectId && (!held || lease?.loading) && <main className="account-loading" role="status">正在检查项目编辑状态…</main>}
-      {editingReady && <div ref={content} inert={!!lease?.lost}>{children}</div>}
+      {projectId && (!held || (lease?.loading && !lease?.lost)) && <main className="account-loading" role="status">正在检查项目编辑状态…</main>}
+      {editingReady && <div>{children}</div>}
       {projectId && held && !lease.loading && !lease.editable && !lease.lost && <ReadOnlyProject projectId={projectId} />}
     </>}
+    </div>
     </AccountHeader>
   </div>;
 }

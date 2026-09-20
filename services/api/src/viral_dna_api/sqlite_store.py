@@ -1814,12 +1814,12 @@ class SQLiteStore:
 
     async def list_viral_concept_sets(
         self,
-        analysis_id: UUID,
+        analysis_id: UUID | None,
     ) -> list[ViralConceptSet]:
         payloads = await asyncio.to_thread(self._read_all, "viral_concept_sets")
         items = [ViralConceptSet.model_validate_json(payload) for payload in payloads]
         return sorted(
-            (item for item in items if item.analysis_id == analysis_id),
+            (item for item in items if analysis_id is None or item.analysis_id == analysis_id),
             key=lambda item: item.created_at,
         )
 

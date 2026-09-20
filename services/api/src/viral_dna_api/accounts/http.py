@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hmac
 import json
+from math import ceil
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -32,6 +33,8 @@ PUBLIC = {
     "/api/v1/auth/status",
     "/api/v1/auth/login",
     "/api/v1/admin/auth/login",
+    "/api/v1/auth/reauthenticate",
+    "/api/v1/admin/auth/reauthenticate",
     "/api/v1/auth/activate",
     "/api/v1/auth/setup",
 }
@@ -74,6 +77,7 @@ def user_payload(session: dict) -> dict:
         "account_kind": access.account_kind,
         "role": access.role,
         "csrf_token": session["csrf_token"],
+        **{key: value for key, value in session.items() if key.startswith("session_")},
     }
 
 
@@ -145,6 +149,15 @@ class AccountAuthenticationMiddleware:
                 session = await asyncio.to_thread(repo.storage_token_session, transfer_token[7:])
             else:
                 session = await asyncio.to_thread(repo.session, cookie, admin=admin)
+            # A cookie can change in another tab. Never let an old account's
+            # mounted editor read or write through a different principal.
+            expected = request.headers.get("x-session-principal", "")
+            if expected and not transfer:
+                actual = session["admin_id"] if admin else str(session["access"].user_id)
+                if expected != actual:
+                    raise AccountError(
+                        409, "session_changed", "登录用户已改变，请使用原用户重新登录"
+                    )
             if not transfer and scope["method"] not in {"GET", "HEAD"}:
                 check_csrf(request, cookie)
             scope.setdefault("state", {})["authenticated_session"] = session
@@ -192,6 +205,14 @@ class LoginInput(StrictInput):
 
 
 class UserLoginInput(LoginInput):
+    username: PhoneNumber
+
+
+class ReauthenticateInput(LoginInput):
+    expected_principal_id: UUID
+
+
+class UserReauthenticateInput(ReauthenticateInput):
     username: PhoneNumber
 
 
@@ -361,6 +382,20 @@ def create_account_router(account_context, repository) -> APIRouter:
             )
         return {"initialized": True}
 
+    def set_session_cookie(
+        response: Response, request: Request, token: str, session: dict, admin: bool
+    ):
+        response.set_cookie(
+            ADMIN_COOKIE if admin else USER_COOKIE,
+            token,
+            secure=request.url.scheme == "https",
+            httponly=True,
+            samesite="lax",
+            path="/",
+            max_age=max(0, ceil(session["session_expires_at"] - session["session_server_time"])),
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+
     async def login_response(
         payload: LoginInput, request: Request, response: Response, admin: bool
     ):
@@ -378,17 +413,15 @@ def create_account_router(account_context, repository) -> APIRouter:
                 payload.password.get_secret_value(),
                 admin=admin,
                 remote=request.client.host if request.client else "unknown",
+                expected_principal_id=str(payload.expected_principal_id)
+                if isinstance(payload, ReauthenticateInput)
+                else None,
+                replace_token=request.cookies.get(ADMIN_COOKIE if admin else USER_COOKIE, "")
+                if isinstance(payload, ReauthenticateInput)
+                else "",
             )
-        response.set_cookie(
-            ADMIN_COOKIE if admin else USER_COOKIE,
-            token,
-            secure=request.url.scheme == "https",
-            httponly=True,
-            samesite="lax",
-            path="/",
-            max_age=7200 if admin else 43200,
-        )
         session = await asyncio.to_thread(account_repository().session, token, admin=admin)
+        set_session_cookie(response, request, token, session, admin)
         return session if admin else user_payload(session)
 
     @router.post("/auth/login")
@@ -398,6 +431,27 @@ def create_account_router(account_context, repository) -> APIRouter:
     @router.post("/admin/auth/login")
     async def admin_login(payload: LoginInput, request: Request, response: Response):
         return await login_response(payload, request, response, True)
+
+    @router.post("/auth/reauthenticate")
+    async def reauthenticate(
+        payload: UserReauthenticateInput, request: Request, response: Response
+    ):
+        return await login_response(payload, request, response, False)
+
+    @router.post("/admin/auth/reauthenticate")
+    async def admin_reauthenticate(
+        payload: ReauthenticateInput, request: Request, response: Response
+    ):
+        return await login_response(payload, request, response, True)
+
+    @router.post("/auth/refresh")
+    @router.post("/admin/auth/refresh")
+    async def refresh_session(request: Request, response: Response):
+        admin = request.url.path.startswith("/api/v1/admin/")
+        token = request.cookies.get(ADMIN_COOKIE if admin else USER_COOKIE, "")
+        session = await asyncio.to_thread(account_repository().renew_session, token, admin=admin)
+        set_session_cookie(response, request, token, session, admin)
+        return session if admin else user_payload(session)
 
     @router.post("/auth/activate")
     async def activate(payload: ActivateInput):
