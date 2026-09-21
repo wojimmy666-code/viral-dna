@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from .contracts import (
     CreativeActionRequest,
     CreativeGenerateRequest,
+    CreativeIdeaEdit,
     CreativePlanEdit,
     ViralConceptGenerateRequest,
     ViralConceptPublishRequest,
@@ -16,6 +17,7 @@ from .contracts import (
     ViralInsightReport,
 )
 from .creative_errors import present_batch_error
+from .creative_idea_edit import edit_idea
 from .service import ViralInsightService, ViralInsightServiceError
 
 
@@ -98,6 +100,16 @@ def create_viral_insight_router(service: ViralInsightService, creative=None) -> 
         async def regenerate(concept_set_id: UUID, idea_id: UUID, payload: CreativeActionRequest):
             try:
                 return await creative.act(concept_set_id, idea_id, payload, expand=False)
+            except ViralInsightServiceError as exc:
+                raise http_error(exc) from exc
+
+        @router.post(
+            "/viral-concept-sets/{concept_set_id}/ideas/{idea_id}/edit",
+            response_model=ViralConceptSet,
+        )
+        async def revise_idea(concept_set_id: UUID, idea_id: UUID, payload: CreativeIdeaEdit):
+            try:
+                return await edit_idea(creative, concept_set_id, idea_id, payload)
             except ViralInsightServiceError as exc:
                 raise http_error(exc) from exc
 

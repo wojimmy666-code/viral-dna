@@ -1,7 +1,20 @@
 export const isCreativeRunning = (batch) => ["queued", "running"].includes(batch?.status);
 
 export function visibleCreativeBatch(batch) {
-  return batch?.status === "completed" || batch?.phase === "legacy" ? batch : null;
+  return batch?.status === "completed" || batch?.phase === "legacy"
+    || (batch?.status === "failed" && batch.phase === "ideas" && batch.ideas?.length > 0) ? batch : null;
+}
+
+export function ideaReviewState(idea, brief) {
+  if (idea.review_brief != null && idea.review_brief !== brief) return "needs_review";
+  return idea.review_state && idea.review_state !== "unreviewed"
+    ? idea.review_state : idea.review_issues?.length ? "needs_review" : "ready";
+}
+
+export function creativeRequirements(text) {
+  const clauses = String(text || "").split(/[，,；;。\n]+/).map(value => value.trim()).filter(Boolean);
+  const size = Math.max(1, Math.ceil(clauses.length / 24));
+  return Array.from({ length: Math.ceil(clauses.length / size) }, (_, i) => ({ index: i + 1, text: clauses.slice(i * size, (i + 1) * size).join("；") }));
 }
 
 export function creativeBriefText(batch) {
@@ -36,8 +49,10 @@ export function creativeCost(batch) {
 }
 
 export function batchLabel(batch) {
-  const action = batch.phase === "legacy" ? "旧版完整方案" : batch.operation === "edit" ? "人工修改"
+  const action = batch.phase === "legacy" ? "旧版完整方案" : batch.operation === "localize" ? "中文校正" : batch.operation === "edit" ? "人工修改"
     : batch.phase === "expanded" ? "展开分镜" : batch.operation === "regenerate" ? "单条重写" : "简短创意";
-  const state = { queued: "排队中", running: "生成中", failed: "失败", cancelled: "已取消", stale: "旧版" }[batch.status];
+  const reviewCount = batch.phase === "ideas" ? batch.ideas?.filter(idea => ideaReviewState(idea, creativeBriefText(batch)) !== "ready").length : 0;
+  const state = batch.status === "completed" && reviewCount ? "待修订"
+    : { queued: "排队中", running: "生成中", failed: "失败", cancelled: "已取消", stale: "旧版" }[batch.status];
   return `${new Date(batch.created_at).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} · ${action}${state ? ` · ${state}` : ""}`;
 }

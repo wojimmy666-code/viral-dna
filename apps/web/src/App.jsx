@@ -66,7 +66,8 @@ import { PlatformBrandLogo } from "./PlatformBrandLogo.jsx";
 import { PlatformConnections } from "./PlatformConnections.jsx";
 import { BrowserAssistControls } from "./BrowserAssist.jsx";
 import { UserSettingsPage } from "./settings/UserSettingsPage.jsx";
-import { accountFetch } from "./accounts/account-client.js";
+import { accountFetch, flushAccountDrafts } from "./accounts/account-client.js";
+import { PromptWorkspace } from "./prompt-editor/PromptWorkspace.jsx";
 import {
   SkillDetail,
   SkillPlaza,
@@ -80,7 +81,6 @@ import {
   normalizeTextModelOverrides,
 } from "./settings/text-model-settings.js";
 import {
-  PromptEditor,
   promptPackageToPlainText,
   promptTextFilename,
 } from "./prompt-editor/index.js";
@@ -723,7 +723,11 @@ export function App() {
   const [analysis, setAnalysis] = useState(null);
   const [analysisVersions, setAnalysisVersions] = useState([]);
   const [report, setReport] = useState(null);
-  const [activeReportTab, setActiveReportTab] = useState("overview");
+  const [activeReportTab, setActiveReportTab] = useState(() => new URLSearchParams(location.search).get("reportTab") || "overview");
+  useEffect(() => {
+    const tab = new URLSearchParams(location.search).get("reportTab");
+    if (["overview", "shots", "viral", "replicate", "prompts"].includes(tab)) setActiveReportTab(tab);
+  }, [location.search]);
   const [activeShotId, setActiveShotId] = useState(null);
   const [replacementVersion, setReplacementVersion] = useState(null);
   const [recordWorkspaceMode, setRecordWorkspaceMode] = useState("analysis");
@@ -1258,14 +1262,15 @@ export function App() {
   function applyRecordWorkspaceDetail(detail) {
     resetProductionWorkspace();
     const saved = savedWorkspaceLocation(detail.record.id, window.location.search);
-    if (saved.productionId || saved.section) setRecordWorkspaceMode("production");
+    if (new URLSearchParams(window.location.search).has("reportTab")) setRecordWorkspaceMode("analysis");
+    else if (saved.productionId || saved.section) setRecordWorkspaceMode("production");
     setVideo(detail.video);
     setAnalysisVersions(detail.analyses || []);
     setAnalysis((current) => latestAnalysis(current, detail.analyses?.[0] || null));
     setReport(detail.latest_report || null);
     setReplacementVersion(null);
     setActiveShotId(detail.latest_report?.shots?.[0]?.id || null);
-    setActiveReportTab("overview");
+    setActiveReportTab(new URLSearchParams(window.location.search).get("reportTab") || "overview");
     loadProductions(detail.record.id).catch(() => undefined);
   }
 
@@ -2224,6 +2229,10 @@ export function App() {
 
   async function openPublishedConcept(result) {
     if (!video?.record_id || !result?.project_id) return;
+    const params = new URLSearchParams(location.search);
+    params.set("promptSource", `production:${result.project_id}`);
+    params.delete("reportTab");
+    navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
     await loadProductions(video.record_id, { quiet: true });
     setRecordWorkspaceMode("production");
     setProductionListSignal((current) => current + 1);
@@ -2235,6 +2244,29 @@ export function App() {
       step: "shot_images",
       token: `viral-concept:${result.project_id}:${Date.now()}`,
     });
+  }
+
+  async function changeReportTab(tab, source) {
+    try {
+      await flushAccountDrafts();
+      const params = new URLSearchParams(location.search);
+      params.set("reportTab", tab);
+      if (source) params.set("promptSource", source);
+      for (const key of ["production", "studio", "shot", "beat", "candidate"]) params.delete(key);
+      setActiveReportTab(tab);
+      setRecordWorkspaceMode("analysis");
+      navigate({ pathname: location.pathname, search: params.toString() });
+    } catch (error) { showNotice({ type: "error", message: error.message }); }
+  }
+
+  async function editProductionPrompt(projectId, shotId, step) {
+    await flushAccountDrafts();
+    await loadProductions(video.record_id, { quiet: true });
+    const params = new URLSearchParams(location.search);
+    params.delete("reportTab");
+    navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+    setRecordWorkspaceMode("production");
+    setNotificationTarget({ candidateId: "", projectId, recordId: video.record_id, shotPlanId: shotId, step, token: `prompt-document:${Date.now()}` });
   }
 
   async function testLocalCodexSandbox() {
@@ -2673,7 +2705,7 @@ export function App() {
                   />
                   {recordWorkspaceMode === "analysis" ? (
                   <>
-                    <ReportTabs active={activeReportTab} onChange={setActiveReportTab} mode={report.analysis_mode} />
+                    <ReportTabs active={activeReportTab} onChange={changeReportTab} mode={report.analysis_mode} />
                     <div className="report-content">
                   {activeReportTab === "overview" && (
                     <>
@@ -2725,16 +2757,19 @@ export function App() {
                       recordId={video.record_id}
                       request={apiRequest}
                       onPublished={openPublishedConcept}
+                      onPromptPreview={batch => changeReportTab("prompts", batch.published_result ? `production:${batch.published_result.project_id}` : `concept:${batch.id}`)}
                       onNotice={showNotice}
                       onManageCategories={() => navigate(pathForNav("categories"))}
-                      textModelLabel={effectiveTextModelLabel(
-                        userPreferences,
-                        TEXT_MODEL_PURPOSES.replicationPlan,
-                      )}
                     />
                   )}
                   {activeReportTab === "prompts" && (
-                    <PromptEditor
+                    <PromptWorkspace
+                      key={report.analysis_id}
+                      recordId={video.record_id}
+                      selectedSource={new URLSearchParams(location.search).get("promptSource") || "source"}
+                      onSourceChange={source => changeReportTab("prompts", source)}
+                      onEditProduction={editProductionPrompt}
+                      onPublished={openPublishedConcept}
                       analysisId={report.analysis_id}
                       promptPackage={currentPromptPackage}
                       request={apiRequest}

@@ -13,12 +13,13 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from ...models import ModelUsage
+from ...models import ModelResponseDiagnostics, ModelUsage
 from ...runtime_config import get_config_value
 from ..contracts import (
     ModelProviderError,
     ModelProviderUnavailable,
     ModelRequest,
+    ModelTimeouts,
     ProviderResult,
     ResultT,
 )
@@ -129,13 +130,25 @@ class DashScopeProvider:
         *,
         image_count: int = 0,
         video_seconds: float = 0.0,
+        timeouts: ModelTimeouts | None = None,
     ) -> tuple[dict[str, Any], int, str | None, ModelUsage]:
         if not self.api_key.strip():
             raise ModelProviderUnavailable("未配置百炼 API Key")
 
         started_at = perf_counter()
+        # Do not mutate the shared provider: only this request uses the override.
+        timeout = (
+            httpx.Timeout(
+                connect=timeouts.connect_seconds,
+                read=timeouts.read_seconds,
+                write=timeouts.write_seconds,
+                pool=timeouts.pool_seconds,
+            )
+            if timeouts is not None
+            else httpx.Timeout(self.timeout_seconds)
+        )
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers={
@@ -145,10 +158,31 @@ class DashScopeProvider:
                     json=payload,
                 )
         except httpx.TimeoutException as exc:
+            phase = next(
+                (
+                    name
+                    for kind, name in (
+                        (httpx.ConnectTimeout, "connect"),
+                        (httpx.ReadTimeout, "read"),
+                        (httpx.WriteTimeout, "write"),
+                        (httpx.PoolTimeout, "pool"),
+                    )
+                    if isinstance(exc, kind)
+                ),
+                "unknown",
+            )
+            elapsed_ms = max(0, round((perf_counter() - started_at) * 1000))
             raise ModelProviderError(
                 "model_timeout",
                 "百炼模型请求超时",
                 retryable=True,
+                latency_ms=elapsed_ms,
+                diagnostics=ModelResponseDiagnostics(
+                    stage="request_timeout",
+                    timeout_phase=phase,
+                    timeout_seconds=getattr(timeout, phase, None),
+                    elapsed_ms=elapsed_ms,
+                ),
             ) from exc
         except httpx.HTTPError as exc:
             raise ModelProviderError(
@@ -270,6 +304,7 @@ class DashScopeProvider:
             payload,
             image_count=0 if request.video_path is not None else len(request.image_paths),
             video_seconds=video_seconds,
+            timeouts=request.timeouts,
         )
         resolved_model = str(response_payload.get("model") or request.target.model)
         content = ""

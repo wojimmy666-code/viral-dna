@@ -127,7 +127,7 @@ def test_wire_response_is_normalized_locally_and_ids_are_generated_by_server(mon
         assert len(expanded.concepts[0].shots) == 5
         runs = await repo.list_model_runs(report.analysis_id)
         assert all(run.status == "completed" and run.measured_cost_micros > 0 for run in runs)
-        assert all(run.schema_version == "creative-content-v3" for run in runs)
+        assert all(run.schema_version == "creative-content-v6" for run in runs)
 
     asyncio.run(scenario())
     assert len(calls) == 2

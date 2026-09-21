@@ -93,19 +93,18 @@ def test_every_generated_direction_needs_grounded_fulfillment(monkeypatch, tmp_p
             assert result.ideas[0].brief_checks[1].requirement == "并且都是全世界标志性的场景"
             reopened = CreativeConceptService(SQLiteStore(tmp_path / "brief.db"), service.insights)
             assert (await reopened.get(result.id)).ideas == result.ideas
+        elif mode == "omitted":
+            assert result.status == "completed" and result.error_code is None
+            assert all(idea.review_issues for idea in result.ideas)
+            assert all(idea.review_state == "needs_review" for idea in result.ideas)
         else:
-            expected_code = (
-                "creative_brief_evidence_invalid"
-                if mode == "fake_quote"
-                else "creative_brief_unmet"
-            )
-            assert result.status == "failed" and result.error_code == expected_code
-            assert not result.ideas and not result.concepts
-            assert (
-                "引用校验失败" in result.error_message
-                if mode == "fake_quote"
-                else "补充" in result.error_message
-            )
+            assert result.status == "completed"
+            rejected = [idea for idea in result.ideas if idea.review_issues]
+            assert len(rejected) == 1
+            assert len(rejected[0].brief_checks) < 2
+            assert len([idea for idea in result.ideas if not idea.review_issues]) == 2
+            with pytest.raises(Exception, match="需要修订"):
+                await service.act(result.id, rejected[0].id, CreativeActionRequest(request_id=uuid4()), expand=True)
         assert result.model_cost_micros > 0 and result.cost_status == "measured"
         assert len(result.model_runs) == 1
         # The valid JSON response remains available for diagnosis, even if its meaning failed.

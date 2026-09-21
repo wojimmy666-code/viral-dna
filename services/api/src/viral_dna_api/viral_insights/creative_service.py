@@ -19,19 +19,29 @@ from ..ai.billing import (
     estimate_text_tokens,
 )
 from ..ai.catalog import ModelCatalogError, default_analysis_profile, load_model_plan
-from ..ai.contracts import ModelProviderError, ModelRequest
+from ..ai.contracts import ModelProviderError, ModelRequest, ModelTimeouts
 from ..ai.router import ModelRouter
 from ..ai.text_model_routing import preferred_text_model_aliases
 from ..category_profiles.service import CategoryProfileServiceError
-from ..models import ModelRun, ModelRunStatus, ModelTask, ModelUsage
-from .contracts import CreativeIdea, ViralConcept, ViralConceptSet, utc_now
+from ..models import ModelResponseDiagnostics, ModelRun, ModelRunStatus, ModelTask, ModelUsage
+from .contracts import ViralConcept, ViralConceptSet, utc_now
 from .creative_brief import (
     CreativeBriefError,
     freeze_brief,
     resolve_brief,
-    validate_brief_checks,
 )
-from .creative_errors import FORMAT_ERROR_CODES, format_error_message, present_batch_error
+from .creative_errors import (
+    FORMAT_ERROR_CODES,
+    REQUEST_ERROR_CODES,
+    format_error_message,
+    present_batch_error,
+    request_error_message,
+)
+from .creative_language import (
+    CreativePromptLanguageError,
+    present_language_state,
+    require_chinese_prompts,
+)
 from .creative_prompts import (
     SYSTEM_PROMPT,
     IdeaResponse,
@@ -41,10 +51,16 @@ from .creative_prompts import (
     validate_plan,
 )
 from .engine import report_fingerprint
+from .creative_review import (
+    assess, compile_common_rules, idea_ready, present_reviews, review_idea,
+)
 from .service import ViralInsightServiceError
 
 ACTIVE = {"queued", "running"}
 GENERATOR = "category-creative-model-v1"
+CREATIVE_MODEL_TIMEOUTS = ModelTimeouts(
+    connect_seconds=10, read_seconds=180, write_seconds=30, pool_seconds=10
+)
 
 
 def digest(value):
@@ -114,7 +130,7 @@ class CreativeConceptService:
         items = await self.repository.list_viral_concept_sets(analysis_id)
         return sorted(
             (
-                present_batch_error(item)
+                present_reviews(present_language_state(present_batch_error(item)))
                 for item in items
                 if category_profile_id is None
                 or (item.category_profile and item.category_profile.id == category_profile_id)
@@ -127,7 +143,7 @@ class CreativeConceptService:
         item = await self.repository.get_viral_concept_set(identifier)
         if item is None:
             raise ViralInsightServiceError(404, "concept_set_not_found", "创意批次不存在")
-        return present_batch_error(item)
+        return present_reviews(present_language_state(present_batch_error(item)))
 
     async def generate(self, analysis_id, payload):
         async with self.lock(analysis_id):
@@ -215,11 +231,13 @@ class CreativeConceptService:
             previous = await self._deduplicate(parent.analysis_id, payload, **signature)
             if previous:
                 return previous
-            if parent.phase != "ideas" or parent.status != "completed":
+            if parent.phase != "ideas" or not parent.ideas or parent.status not in {"completed", "failed"}:
                 raise ViralInsightServiceError(409, "ideas_not_ready", "请先完成简短创意生成")
             selected = next((item for item in parent.ideas if item.id == idea_id), None)
             if selected is None:
                 raise ViralInsightServiceError(404, "idea_not_found", "该创意不属于所选批次")
+            if expand and not idea_ready(selected, resolve_brief(None, parent)):
+                raise ViralInsightServiceError(409, "idea_review_required", "这条创意需要修订，请先修改与核对，或使用 AI 修订本条")
             job = parent.model_copy(
                 deep=True,
                 update={
@@ -246,6 +264,8 @@ class CreativeConceptService:
                     "model_elapsed_ms": 0,
                     "error_code": None,
                     "error_message": None,
+                    "requirement_rules": [],
+                    "review_source_fingerprint": None,
                 },
             )
             existing = [] if expand else [item for item in parent.ideas if item.id != idea_id]
@@ -302,21 +322,13 @@ class CreativeConceptService:
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 result = await self._generate(job, targets, prompt)
+                job.requirement_rules = result.requirement_rules
                 if job.phase == "ideas":
                     expected = 1 if existing else 3
                     if len(result.ideas) != expected:
                         raise ValueError(f"模型应返回 {expected} 个新创意")
-                    fresh = [
-                        CreativeIdea(
-                            **item.model_dump(exclude={"brief_checks"}),
-                            brief_checks=validate_brief_checks(
-                                item,
-                                job.input_snapshot["creative_brief"],
-                                label=f"第 {index} 条创意",
-                            ),
-                        )
-                        for index, item in enumerate(result.ideas, 1)
-                    ]
+                    fresh = [review_idea(item, job.input_snapshot["creative_brief"], result.requirement_rules)
+                             for item in result.ideas]
                     if existing:
                         fresh = [
                             fresh[0] if item.id == job.source_idea_id else item
@@ -325,24 +337,21 @@ class CreativeConceptService:
                     validate_ideas(fresh)
                     job.ideas = fresh
                 else:
+                    draft = compile_common_rules(result.concept)
+                    issues, checks = assess(draft, job.input_snapshot["creative_brief"], result.requirement_rules, expanded=True)
                     concept = ViralConcept(
                         strategy="creative",
-                        **result.concept.model_dump(exclude={"brief_checks"}),
-                        brief_checks=validate_brief_checks(
-                            result.concept,
-                            job.input_snapshot["creative_brief"],
-                            label="展开分镜",
-                            expanded=True,
-                        ),
+                        **draft.model_dump(exclude={"brief_checks"}),
+                        brief_checks=checks,
                     )
                     validate_plan(concept, job.input_snapshot["source_shot_ids"])
                     job.concepts = [concept]
+                    if issues:
+                        raise CreativeBriefError("展开分镜需修订：" + "；".join(item.message for item in issues))
+                    require_chinese_prompts(concept)
                 job.status = "completed"
         except TimeoutError:
-            job.status, job.error_code = "failed", "creative_timeout"
-            job.error_message = (
-                f"创意任务超过 {self.timeout_seconds:g} 秒已停止；可保留现有结果并手动重试"
-            )
+            await self.record_task_timeout(job)
         except asyncio.CancelledError:
             job.status, job.error_code = "cancelled", "creative_cancelled"
             job.error_message = "本地任务已停止；上游请求可能已计费，不会自动重试"
@@ -351,6 +360,9 @@ class CreativeConceptService:
         except CreativeBriefError as exc:
             job.status, job.error_code = "failed", exc.code
             job.error_message = str(exc)[:500]
+        except CreativePromptLanguageError as exc:
+            job.status, job.error_code = "failed", exc.code
+            job.language_issues, job.error_message = exc.fields, str(exc)[:500]
         except (ValidationError, ValueError):
             job.status, job.error_code = "failed", "creative_output_invalid"
             job.error_message = (
@@ -363,17 +375,42 @@ class CreativeConceptService:
             job.completed_at = utc_now()
             await self.repository.save_viral_concept_set(job)
 
-    async def _generate(self, job, targets, prompt):
-        schema = PlanResponse if job.phase == "expanded" else IdeaResponse
+    async def record_task_timeout(self, job, *, label="创意任务"):
+        job.status, job.error_code = "failed", "creative_timeout"
+        job.error_message = (
+            f"{label}超过 {self.timeout_seconds:g} 秒总上限，已停止；"
+            "不会自动重试，可稍后手动重试。上游请求可能已计费"
+        )
+        if not job.model_runs:
+            return
+        # The task deadline cancels the pending request. Distinguish it from user cancellation.
+        for run in await self.repository.list_model_runs(job.analysis_id):
+            if run.id == job.model_runs[-1] and run.error_code == "creative_interrupted":
+                run.error_code, run.error_message = job.error_code, job.error_message
+                run.response_diagnostics = ModelResponseDiagnostics(
+                    stage="task_timeout",
+                    timeout_phase="total",
+                    timeout_seconds=self.timeout_seconds,
+                    elapsed_ms=max(0, round((utc_now() - job.started_at).total_seconds() * 1000)),
+                )
+                await self.repository.save_model_run(run)
+                break
+
+    async def _generate(
+        self, job, targets, prompt, *, schema=None, system_prompt=SYSTEM_PROMPT, prompt_version=None
+    ):
+        schema = schema or (PlanResponse if job.phase == "expanded" else IdeaResponse)
         for index, source_target in enumerate(targets):
             target = source_target.model_copy(
                 update={
-                    "prompt_version": f"creative-{job.phase}-v3",
-                    "schema_version": "creative-content-v3",
+                    "prompt_version": prompt_version or f"creative-{job.phase}-v6",
+                    "schema_version": "prompt-chinese-v1"
+                    if job.operation == "localize"
+                    else "creative-content-v6",
                 }
             )
             estimate = ModelUsage(
-                input_tokens=estimate_text_tokens(SYSTEM_PROMPT + prompt),
+                input_tokens=estimate_text_tokens(system_prompt + prompt),
                 output_tokens=(8000 if job.phase == "expanded" else 3000)
                 + len(job.input_snapshot["creative_brief"]["requirements"])
                 * (900 if job.operation == "generate" else 300),
@@ -425,9 +462,14 @@ class CreativeConceptService:
                     ModelRequest(
                         task=ModelTask.VIRAL_REASONING,
                         target=target,
-                        system_prompt=SYSTEM_PROMPT,
+                        system_prompt=system_prompt,
                         user_prompt=prompt,
-                        temperature=0.65 if job.phase == "expanded" else 0.85,
+                        timeouts=CREATIVE_MODEL_TIMEOUTS,
+                        temperature=0.1
+                        if job.operation == "localize"
+                        else 0.65
+                        if job.phase == "expanded"
+                        else 0.85,
                     ),
                     schema,
                 )
@@ -449,11 +491,17 @@ class CreativeConceptService:
                 }.get(exc.code, "创意模型请求失败；请检查模型配置、额度或网络")
                 if exc.code in FORMAT_ERROR_CODES:
                     reason = format_error_message(exc.diagnostics)
+                elif exc.code in REQUEST_ERROR_CODES:
+                    reason = request_error_message(exc.code, exc.diagnostics)
                 run.error_message = reason
                 run.provider_request_id = exc.provider_request_id
                 if exc.usage:
                     await self._measure(job, run, exc.usage, exc.resolved_model or target.model)
-                if exc.code in FORMAT_ERROR_CODES or index + 1 >= len(targets) or not exc.retryable:
+                if (
+                    exc.code in FORMAT_ERROR_CODES | REQUEST_ERROR_CODES
+                    or index + 1 >= len(targets)
+                    or not exc.retryable
+                ):
                     raise ViralInsightServiceError(502, exc.code, run.error_message) from exc
             except BaseException:
                 run.status, run.error_code = ModelRunStatus.FAILED, "creative_interrupted"

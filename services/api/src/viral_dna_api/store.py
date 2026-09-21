@@ -563,8 +563,28 @@ class InMemoryStore:
         generation_candidates: list[GenerationCandidate] | None = None,
         video_clip_preparations: list[VideoClipPreparation] | None = None,
         approval_events: list[ApprovalEvent] | None = None,
+        prompt_update=None,
     ) -> tuple[ProductionProject, ProductionRevision]:
         async with self._lock:
+            if prompt_update:
+                from .project_prompts import PromptRevisionConflict
+
+                update = prompt_update
+                current = self.production_projects.get(project.id)
+                context = max((item for item in self.project_prompt_revisions.values() if item.project_id == update["context"].project_id), key=lambda item: item.revision_number, default=None)
+                conflict = (current.current_revision_id if current else None) != update["expected_revision_id"] or (context.id if context else None) != update["expected_context_id"]
+                for identifier, expected in update["expected_drafts"].items():
+                    draft = self.shot_video_generation_drafts.get(identifier)
+                    conflict |= (draft.draft_version if draft else 0) != expected
+                if conflict:
+                    raise PromptRevisionConflict("方案或视频草稿已更新，本次提示词未写入")
+                for item in update["drafts"]:
+                    self.shot_video_generation_drafts[item.shot_plan_id] = item
+                for item in (update["baseline"], update["context"]):
+                    if item is not None:
+                        self.project_prompt_revisions[item.id] = item
+                if update.get("job"):
+                    self.viral_concept_sets[update["job"].id] = update["job"]
             self.production_projects[project.id] = project
             self.production_revisions[revision.id] = revision
             for asset in reference_assets or []:

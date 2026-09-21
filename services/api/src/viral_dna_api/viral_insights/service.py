@@ -230,11 +230,20 @@ class ViralInsightService:
             raise ViralInsightServiceError(
                 409, "concept_not_expanded", "请先选择创意并展开完整分镜"
             )
+        if concept_set.operation == "localize" and concept_set.input_snapshot.get("prompt_language_project_id"):
+            raise ViralInsightServiceError(409, "translation_requires_apply", "请预览后应用中文修订到原制作项目，不重复创建项目")
         if concept_set.published_result and concept_set.published_result.concept_id == concept_id:
             return concept_set.published_result
         concept = next((item for item in concept_set.concepts if item.id == concept_id), None)
         if concept is None:
             raise ViralInsightServiceError(404, "concept_not_found", "复刻方案不存在")
+        if concept.strategy == "creative":
+            from .creative_language import CreativePromptLanguageError, require_chinese_prompts
+
+            try:
+                require_chinese_prompts(concept)
+            except CreativePromptLanguageError as exc:
+                raise ViralInsightServiceError(422, exc.code, str(exc)) from exc
         if self.publisher is None:
             raise ViralInsightServiceError(
                 503,

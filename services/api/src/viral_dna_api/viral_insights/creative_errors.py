@@ -3,6 +3,25 @@
 from ..models import ModelResponseDiagnostics
 
 FORMAT_ERROR_CODES = {"model_schema_invalid", "schema_validation_failed", "invalid_json"}
+REQUEST_ERROR_CODES = {"model_timeout", "model_transport_error"}
+
+
+def request_error_message(code: str, diagnostics: ModelResponseDiagnostics | None = None) -> str:
+    reason = "模型连接异常，未取得完整响应"
+    if code == "model_timeout":
+        reason = "模型请求超时，未取得完整响应"
+        phases = {
+            "connect": ("连接模型服务", "连接"),
+            "read": ("等待模型响应", "读取"),
+            "write": ("发送模型请求", "写入"),
+            "pool": ("等待可用连接", "连接池"),
+        }
+        if diagnostics and diagnostics.timeout_phase in phases:
+            description, limit_label = phases[diagnostics.timeout_phase]
+            reason = f"模型请求超时：{description}"
+            if diagnostics.timeout_seconds is not None:
+                reason += f"（{limit_label}等待上限 {diagnostics.timeout_seconds:g} 秒）"
+    return reason + "；本地任务已停止，不会自动重试，可稍后手动重试。费用未回报不代表免费"
 
 
 def format_error_message(diagnostics: ModelResponseDiagnostics | None = None) -> str:
@@ -40,8 +59,13 @@ def present_batch_error(item):
     # Correct the known misleading legacy message at read time; do not rewrite history.
     if (
         item.status == "failed"
-        and item.error_code in FORMAT_ERROR_CODES
+        and item.error_code in FORMAT_ERROR_CODES | REQUEST_ERROR_CODES
         and item.error_message == "创意模型请求失败；请检查模型配置、额度或网络"
     ):
-        return item.model_copy(update={"error_message": format_error_message()})
+        reason = (
+            request_error_message(item.error_code)
+            if item.error_code in REQUEST_ERROR_CODES
+            else format_error_message()
+        )
+        return item.model_copy(update={"error_message": reason})
     return item

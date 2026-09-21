@@ -1652,6 +1652,7 @@ class ProductionService:
             production_seed_id=seed.id,
             style_bible_revision_id=seed.style_bible_revision_id,
             timing_fps=seed.fps,
+            clip_timing_policy="trim" if "creative_concept" in seed.style_bible_snapshot else "legacy",
             video_id=seed.source_video_id,
             base_analysis_id=seed.source_analysis_id,
             prompt_source_analysis_id=seed.source_analysis_id,
@@ -2232,6 +2233,7 @@ class ProductionService:
             ),
             status=ProductionProjectStatus.DRAFT,
             active_step=frozen_project.active_step,
+            clip_timing_policy=frozen_project.clip_timing_policy,
             output_aspect_ratio=frozen_project.output_aspect_ratio,
             output_width=frozen_project.output_width,
             output_height=frozen_project.output_height,
@@ -5934,6 +5936,24 @@ class ProductionService:
         self._schedule_video_run(run.id)
         return await self._run_response(run)
 
+    async def _group_video_plan(self, project, plan, payload):
+        from .video_groups import VideoGroups, execution_plan
+        containing = next((g for g in project.video_generation_groups if plan.id in g.shot_plan_ids), None)
+        if payload.generation_group_id is None:
+            if containing:
+                raise _fail(409, "video_group_required", "该分镜已加入视频生成组，请从生成组操作或先拆组")
+            return plan, {beat.id: plan for beat in plan.visual_beats}
+        group, members, aggregate, owners, fingerprint = await VideoGroups(self).projection(project, payload.generation_group_id)
+        if aggregate.id != plan.id:
+            raise _fail(422, "video_group_anchor_invalid", "请从本组第一个分镜发起生成")
+        if not payload.expected_group_fingerprint or fingerprint != payload.expected_group_fingerprint:
+            raise _fail(409, "video_group_inputs_changed", "生成组输入已改变，请重新核对并确认费用")
+        if payload.duration_seconds is not None:
+            if payload.duration_seconds < aggregate.duration_seconds:
+                raise _fail(422, "video_group_duration_short", "生成时长不能短于本组成片目标，请增加时长或拆分生成组")
+            aggregate, owners = execution_plan(group, members, payload.duration_seconds)
+        return aggregate, owners
+
     async def _validate_video_input_plan(
         self,
         project: ProductionProject,
@@ -5991,6 +6011,22 @@ class ProductionService:
             reference.reference_kind in capacity_reference_kinds
             for reference in payload.input_plan.references
         )
+        if payload.generation_group_id is not None:
+            if not (capability.multi_image_reference and capability.ordered_reference_images):
+                raise _fail(422, "ordered_multi_image_required", "本组需要有序多图视频能力；主体多图参考或首尾帧模式不能代替")
+            selected_reference_count = len(plan.visual_beats) + sum(
+                r.reference_kind in capacity_reference_kinds
+                and r.reference_kind != VideoPromptReferenceKind.APPROVED_IMAGE
+                for r in payload.input_plan.references
+            )
+            if not payload.input_plan.includes(VideoGenerationInputSource.APPROVED_IMAGES):
+                raise _fail(422, "group_images_required", "视频生成组必须使用本组全部已采用场景图")
+            selected_images = [r.reference_id for r in sorted(payload.input_plan.references, key=lambda r: r.order)
+                               if r.reference_kind == VideoPromptReferenceKind.APPROVED_IMAGE]
+            if selected_images != [b.approved_image_candidate_id for b in plan.visual_beats]:
+                raise _fail(422, "group_images_incomplete", "必须按分镜顺序传入本组全部场景图；不能省略或倒序")
+            if payload.audio_strategy != VideoGenerationAudioStrategy.MUTED:
+                raise _fail(422, "group_audio_unsupported", "多场景组当前以静音生成，音乐与对白请在剪辑阶段添加")
         if selected_reference_count > capability.maximum_reference_images:
             raise _fail(
                 422,
@@ -6037,7 +6073,12 @@ class ProductionService:
         }
         if sources & image_sources and not capability.image_to_video:
             raise _fail(422, "video_image_input_unsupported", "当前模型不支持图片输入")
-        if (
+        if payload.generation_group_id is not None:
+            _, owners = await self._group_video_plan(project, plan, payload)
+            for beat in plan.visual_beats:
+                if not await self._has_valid_approved_image_beat(project, owners[beat.id], beat):
+                    raise _fail(409, "approved_image_required", "组内图片已失效，请重新采用对应分镜图")
+        elif (
             VideoGenerationInputSource.APPROVED_IMAGES in sources
             and not await self._has_valid_approved_image_output(project, plan)
         ):
@@ -6097,6 +6138,10 @@ class ProductionService:
         self._require_generation_revision(project, plan, payload)
         payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
         self._require_video_stage_member(project, plan)
+        plan, _ = await self._group_video_plan(project, plan, payload)
+        if payload.generation_group_id is not None:
+            from .video_groups import VideoGroups, group_for
+            await VideoGroups(self).require_idle(project, set(group_for(project, payload.generation_group_id).shot_plan_ids))
         await self._validate_skill_video_contract(project, payload)
         allowed_video_steps = {
             ProductionStep.SHOT_VIDEOS,
@@ -7145,6 +7190,8 @@ class ProductionService:
             project = await self._require_project(plan.project_id)
             self._require_generation_revision(project, plan, payload)
             self._require_video_stage_member(project, plan)
+            persisted_plan = plan
+            plan, reference_owners = await self._group_video_plan(project, plan, payload)
             if project.active_step not in {
                 ProductionStep.SHOT_VIDEOS,
                 ProductionStep.EDITING,
@@ -7215,7 +7262,7 @@ class ProductionService:
                         )
                     candidate = await self._require_candidate(beat.approved_image_candidate_id)
                     source_run = await self._require_run(candidate.generation_run_id)
-                    if not _run_matches_visual_beat(source_run, plan, beat.id):
+                    if not _run_matches_visual_beat(source_run, reference_owners[beat.id], beat.id):
                         raise _fail(
                             409,
                             "approved_candidate_mismatch",
@@ -7371,7 +7418,7 @@ class ProductionService:
                 plan.video_status == WorkflowItemStatus.APPROVED
                 and plan.approved_video_candidate_id is not None
             )
-            updated_plan = plan.model_copy(
+            updated_plan = persisted_plan.model_copy(
                 update={
                     "revision_id": revision_id,
                     "video_status": (
@@ -7838,6 +7885,8 @@ class ProductionService:
             self._require_expected_revision(project, payload.expected_revision_id)
             if candidate.kind != run.kind:
                 raise _fail(409, "candidate_kind_mismatch", "候选类型与生成任务不匹配")
+            if run.request_payload.get("generation_group_id"):
+                raise _fail(409, "video_group_review_required", "请在生成组中确认全部场景和实际切点后采用")
             if run.kind == GenerationKind.IMAGE and _is_simulated_image_run(run):
                 raise _fail(
                     409,
@@ -7968,6 +8017,9 @@ class ProductionService:
             self._ensure_shot_active(plan)
             project = await self._require_project(run.project_id)
             self._require_expected_revision(project, payload.expected_revision_id)
+            if run.kind == GenerationKind.VIDEO and payload.decision == ApprovalDecision.APPROVED:
+                if run.request_payload.get("generation_group_id") or any(plan.id in g.shot_plan_ids for g in project.video_generation_groups):
+                    raise _fail(409, "video_group_review_required", "请在生成组中确认全部场景和实际切点后采用；独立采用需先拆组")
             if candidate.kind != run.kind:
                 raise _fail(409, "candidate_kind_mismatch", "候选类型与生成任务不匹配")
             if run.kind == GenerationKind.IMAGE and _is_simulated_image_run(run):
@@ -8202,6 +8254,7 @@ class ProductionService:
                     "video_status": next_status,
                     "approved_video_candidate_id": approved_candidate_id,
                     "video_inputs_changed": generated_before_input_change(run, plan, "video"),
+                    "video_group_clip": plan.video_group_clip if preserving_video_approval_on_reject else None,
                 }
                 active_step = project.active_step
                 updated_plan = plan.model_copy(
@@ -8672,11 +8725,22 @@ class ProductionService:
         if not (
             run is not None
             and run.project_id == project.id
-            and run.shot_plan_id == plan.id
+            and (run.shot_plan_id == plan.id or plan.video_group_clip is not None)
             and run.kind == GenerationKind.VIDEO
             and run.status in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}
         ):
             return False
+        if plan.video_group_clip is not None:
+            from .video_groups import VideoGroups
+            clip = plan.video_group_clip
+            if clip.candidate_id != candidate.id or str(run.request_payload.get("generation_group_id")) != str(clip.group_id):
+                return False
+            try:
+                _, members, _, _, fingerprint = await VideoGroups(self).projection(project, clip.group_id)
+            except ProductionServiceError:
+                return False
+            if plan.id not in {p.id for p in members} or clip.input_fingerprint != fingerprint:
+                return False
         try:
             await self.resolve_candidate_content(candidate.id)
         except ProductionServiceError:
@@ -8954,6 +9018,10 @@ class ProductionService:
                     timeline_duration = candidate_duration
                     playback_rate = 1.0
                     duration_alignment = "exact"
+                elif project.clip_timing_policy == "trim":
+                    trim_out = min(candidate_duration, round(float(plan.duration_seconds), 3))
+                    timeline_duration = trim_out
+                    playback_rate, duration_alignment = 1.0, "trim"
                 else:
                     timeline_duration = round(float(plan.duration_seconds), 3)
                     playback_rate, duration_alignment = playback_alignment(
@@ -9008,6 +9076,8 @@ class ProductionService:
                 ]
                 if not quality_report:
                     warning_messages.append("将在视频剪辑阶段完成基础质检")
+                if duration_alignment == "trim":
+                    warning_messages.append("按目标时长暂取视频开头，保持原速；请在剪辑中调整实际入出点")
                 if duration_alignment == "outside_safe_range":
                     warning_messages.append(_duration_alignment_warning(playback_rate))
                 if (
@@ -9021,6 +9091,15 @@ class ProductionService:
                     )
                 warning_messages = list(dict.fromkeys(warning_messages))
             timeline_start = round(timeline_cursor, 3)
+            if plan.video_group_clip is not None:
+                # One physical file, disjoint user-reviewed source ranges. Never
+                # repeat the complete group video for every logical film shot.
+                trim_in = plan.video_group_clip.trim_in_seconds
+                trim_out = plan.video_group_clip.trim_out_seconds
+                timeline_duration = round(trim_out - trim_in, 3)
+                playback_rate = 1.0
+                transcript_cues, subtitle_cues = [], []
+                warning_messages = ["生成组已人工核对场景与切点；目标时长与实际采用时长可不同"]
             timeline_end = round(timeline_start + timeline_duration, 3)
             clips.append(
                 EditingHandoffClip(
@@ -12745,6 +12824,7 @@ class ProductionService:
                     ),
                     "approved_image_candidate_id": None,
                     "approved_video_candidate_id": None,
+                    "video_group_clip": None,
                     "image_status": _visual_beat_image_status(cloned_visual_beats),
                     "video_status": WorkflowItemStatus.DRAFT,
                     "visual_beats": cloned_visual_beats,

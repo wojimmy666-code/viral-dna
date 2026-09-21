@@ -17,10 +17,13 @@ test("a failed or pending creative batch never silently displays previous result
   const { visibleCreativeBatch } = await import("../src/viral-report/creative-workflow.js");
   const previous = { id: "old", phase: "ideas", status: "completed", ideas: [{ name: "旧创意" }] };
   assert.equal(visibleCreativeBatch(), null);
-  for (const status of ["failed", "cancelled", "queued", "running"]) {
+  for (const status of ["cancelled", "queued", "running"]) {
     assert.equal(visibleCreativeBatch({ ...previous, id: "new", status }), null);
   }
   assert.equal(visibleCreativeBatch(previous), previous);
+  const failed = { ...previous, id: "failed-with-own-result", status: "failed" };
+  assert.equal(visibleCreativeBatch(failed), failed);
+  assert.equal(visibleCreativeBatch({ ...failed, ideas: [] }), null);
   const plan = { phase: "expanded", status: "completed" };
   assert.equal(visibleCreativeBatch(plan), plan);
   const legacy = { phase: "legacy", status: "stale" };
@@ -44,8 +47,8 @@ test("creative brief restores the frozen text and preserves an intentional empty
 test("creative actions submit the full visible brief and keep copy concise", async () => {
   const source = await readFile(REPLICATION_URL, "utf8");
   assert.match(source, /feedback \?\? creativeBriefText\(current \|\| display\)/);
-  assert.match(source, /textarea value=\{effectiveFeedback\}/);
-  assert.equal((source.match(/feedback: effectiveFeedback/g) || []).length, 2);
+  assert.match(source, /textarea[^>]*value=\{effectiveFeedback\}/);
+  assert.equal((source.match(/feedback: effectiveFeedback/g) || []).length, 3);
   assert.match(source, /setFeedback\(\(value\) => value === feedback \? null : value\)/);
   assert.match(source, /setCurrentId\(event\.target\.value\); setFeedback\(null\)/);
   for (const copy of [
@@ -277,7 +280,15 @@ test("replication concepts expose distinct change levels and stale-batch recover
   assert.doesNotMatch(replication, /\["faithful", "scenario", "proof"\]/);
   assert.match(replication, /展开这个创意/);
   assert.match(replication, /生成 3 个简短创意/);
-  assert.match(replication, /仅生成创意与分镜，不会立即生成图片或视频/);
+  assert.doesNotMatch(replication, /可选，对换新和展开都有效|creative-step-path|比较简短创意|展开并确认分镜/);
+  assert.match(replication, /<label className="creative-feedback"><span>补充想法<\/span><textarea/);
+  const creativeStyles = await readFile(new URL("../src/viral-report/creative-workflow.css", import.meta.url), "utf8");
+  assert.doesNotMatch(creativeStyles, /creative-step-path|\.creative-feedback small/);
+  assert.doesNotMatch(replication, /仅生成创意与分镜，不会立即生成图片或视频/);
+  assert.match(replication, /<section className="replication-generate-bar action-only"><button/);
+  assert.match(replication, /onClick=\{generateConcepts\}/);
+  assert.match(replication, /creative-run-meta/);
+  assert.match(replication, /creativeCost\(current\)/);
 });
 
 test("viral report modules receive the request boundary instead of calling fetch", async () => {
@@ -310,6 +321,7 @@ test("viral workspaces use the same dense report frame without redundant DNA pre
   assert.match(source, /\.viral-report-page\s*\{[^}]*width:\s*100%[^}]*padding:\s*1\.25rem/s);
   assert.doesNotMatch(source, /\.replication-preparation-grid|\.replication-dna-locks|\.dna-lock-list/);
   assert.match(source, /\.replication-generate-bar\s*\{[^}]*min-height:\s*var\(--control-height-prominent\)[^}]*align-items:\s*center/s);
+  assert.match(source, /\.replication-generate-bar\.action-only\s*\{[^}]*justify-content:\s*flex-end/s);
   assert.doesNotMatch(source, /\.replication-generate-bar\s*\{[^}]*padding:|\.replication-generate-bar\s*\{[^}]*background:/s);
   assert.doesNotMatch(replication, /一次生成结构迁移、场景叙事、证据说服三套独立方案/);
 });

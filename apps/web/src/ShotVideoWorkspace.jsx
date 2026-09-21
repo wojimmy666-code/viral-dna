@@ -336,6 +336,7 @@ export function ShotVideoWorkspace({
   const [promptSettingsOpen, setPromptSettingsOpen] = useState(true);
   const [globalPrompts, setGlobalPrompts] = useState({});
   const plan = shotDetail?.plan;
+  const generationGroup = project?.video_generation_groups?.find(group => group.shot_plan_ids.includes(plan?.id));
   const sourceVideoMode = plan?.output_mode === "source_video";
   const isSkill = project?.origin_type === "skill_run";
   const depthGeneration = useDepthControlJob({
@@ -1207,7 +1208,7 @@ export function ShotVideoWorkspace({
               </div>
             </details>
             <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" request={request} onChange={setGlobalPrompts} disabled={busy} />
-            <ShotVideoGenerationControls
+            {generationGroup ? <p role="status">此分镜已加入上方的视频生成组。下方编辑分镜动作和资产引用，保存后请回到生成组预览费用、生成并核对切点。</p> : <ShotVideoGenerationControls
               activeRun={activeRun}
               allReferencesApproved={!generationBlockedReason}
               busy={busy}
@@ -1251,10 +1252,10 @@ export function ShotVideoWorkspace({
               sourceAudioAvailable={sourceAudioAvailable}
               supportedResolutions={supportedResolutions}
               videoDraft={videoDraft}
-            />
+            />}
           </div>}
 
-          {!sourceVideoMode && displayedCandidate && (
+          {!sourceVideoMode && displayedCandidate && !generationGroup && (
             <footer className="shot-video-review-actions">
               <div>
                 <strong>

@@ -71,7 +71,7 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
           )}
         </div>
         <div className="concept-detail-actions">
-          <button className="primary-button" type="button" onClick={() => onPublish(selected)} disabled={Boolean(publishingId) || isStale}>
+          <button className="primary-button" type="button" onClick={() => onPublish(selected)} disabled={Boolean(publishingId) || isStale || (Boolean(conceptSet.language_issues?.length) && !conceptSet.published_result) || Boolean(conceptSet.input_snapshot?.prompt_language_project_id)}>
             {publishingId === selected.id ? <CircleNotch className="spin" size={18} /> : <MagicWand size={18} weight="fill" />}
             {isStale ? "重新生成后可创建" : conceptSet.published_result ? "进入已创建方案" : creative ? "确认分镜，进入制作" : "创建创作方案"}
           </button>

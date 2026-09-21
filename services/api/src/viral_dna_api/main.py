@@ -269,6 +269,8 @@ from .video_references.routes import create_video_reference_router
 from .viral_insights.creative_service import CreativeConceptService
 from .viral_insights.publisher import ProductionConceptPublisher
 from .viral_insights.routes import create_viral_insight_router
+from .viral_insights.prompt_document_routes import create_prompt_document_router
+from .video_groups import create_video_groups_router
 from .viral_insights.service import ViralInsightService
 from .workspace import WORKSPACE_SCHEMA_VERSION, WorkspaceError, workspace_manager
 from .workspace_catalog import (
@@ -659,6 +661,8 @@ app.include_router(create_continuity_router(continuity_service), prefix=API_PREF
 app.include_router(
     create_viral_insight_router(viral_insight_service, creative_concept_service), prefix=API_PREFIX
 )
+app.include_router(create_prompt_document_router(creative_concept_service, production_service), prefix=API_PREFIX)
+app.include_router(create_video_groups_router(production_service), prefix=API_PREFIX)
 app.include_router(create_prompt_draft_router(prompt_draft_service), prefix=API_PREFIX)
 app.include_router(
     create_platform_skill_router(

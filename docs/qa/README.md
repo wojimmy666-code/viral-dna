@@ -6,6 +6,7 @@
 
 ## 视频分析与记录
 
+- [提示词来源与中文校正验收](analysis/prompt-source-and-language.md)
 - [复刻与改进：两阶段创意验收](analysis/two-stage-creative-concepts.md)
 - [平台链接读取、分析超时与本机浏览器辅助采集](analysis/platform-link-timeouts.md)
 - [Phase2_Batch4.7_分析记录生命周期与批量管理执行验收](analysis/Phase2_Batch4.7_分析记录生命周期与批量管理执行验收.md)
@@ -13,6 +14,7 @@
 
 ## 分镜图片与视频
 
+- [独立创意编排与多分镜视频生成组](generation/creative-video-groups.md)
 - [Phase2_Batch4.2_分镜生图输入模式与关键帧工作流](generation/Phase2_Batch4.2_分镜生图输入模式与关键帧工作流.md)
 - [Phase2_Batch4.2_图片生成双模式执行验收](generation/Phase2_Batch4.2_图片生成双模式执行验收.md)
 - [Phase2_Batch4.3_分镜编排与提示词资产关联验收](generation/Phase2_Batch4.3_分镜编排与提示词资产关联验收.md)

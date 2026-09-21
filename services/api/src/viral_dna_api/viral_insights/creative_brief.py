@@ -87,7 +87,7 @@ def validate_brief_checks(draft, brief, *, label, expanded=False):
             for shot in draft.shots
         ]
         if expanded
-        else draft.key_scenes
+        else ([scene.description for scene in draft.scene_plan] if draft.scene_plan else draft.key_scenes)
     )
     mapped = {item.requirement_index: item for item in checks}
     result = []
@@ -103,7 +103,7 @@ def validate_brief_checks(draft, brief, *, label, expanded=False):
             ):
                 raise CreativeBriefEvidenceError(
                     f"{label}的第 {requirement['index']} 项落实说明引用校验失败；"
-                    "引用片段须按顺序来自同一指定画面，本批次未采用"
+                    "引用片段须按顺序来自同一指定画面，此方向暂不可展开"
                 )
             covered.add(evidence.scene_index)
         if check.scene_scope == "all" and covered != set(range(1, len(scenes) + 1)):

@@ -44,6 +44,16 @@ class ModelProviderUnavailable(ModelProviderError):
 
 
 @dataclass(frozen=True, slots=True)
+class ModelTimeouts:
+    """Per-request HTTP phase limits; task deadlines remain owned by the caller."""
+
+    connect_seconds: float
+    read_seconds: float
+    write_seconds: float
+    pool_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class ModelRequest:
     task: ModelTask
     target: ModelTargetSnapshot
@@ -55,6 +65,7 @@ class ModelRequest:
     video_fps: float = 4.0
     video_duration_seconds: float = 0.0
     temperature: float = 0.1
+    timeouts: ModelTimeouts | None = None
 
 
 @dataclass(frozen=True, slots=True)

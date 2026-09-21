@@ -19,6 +19,7 @@ from pydantic import (
 
 from .control_assets.domain import DepthControlAsset
 from .editing_guidance import separate_shot_editing_guidance
+from .video_group_models import VideoGenerationGroup, VideoGroupClip
 from .prompt_engine.contracts import PromptShotDraft
 from .reference_routes.domain import VideoReferenceRouteCapability
 from .schema import WORKSPACE_SCHEMA_VERSION
@@ -1794,13 +1795,18 @@ class ModelResponseIssue(BaseModel):
 
 class ModelResponseDiagnostics(BaseModel):
     # Do not store raw model content, validation input/ctx, prompts or credentials here.
-    stage: Literal["response_envelope", "json_parse", "schema_validation"]
+    stage: Literal[
+        "response_envelope", "json_parse", "schema_validation", "request_timeout", "task_timeout"
+    ]
     issues: list[ModelResponseIssue] = Field(default_factory=list, max_length=12)
     response_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     response_chars: int = Field(default=0, ge=0)
     finish_reason: Literal["stop", "length", "content_filter", "tool_calls", "other"] | None = None
     json_line: int | None = Field(default=None, ge=1)
     json_column: int | None = Field(default=None, ge=1)
+    timeout_phase: Literal["connect", "read", "write", "pool", "unknown", "total"] | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    elapsed_ms: int | None = Field(default=None, ge=0)
 
 
 class ModelRun(BaseModel):
@@ -1928,6 +1934,10 @@ class ProductionProject(BaseModel):
     # None preserves legacy projects until the user explicitly enters from images.
     # A saved list is a scope snapshot, not a projection of changing adoptions.
     video_stage_shot_ids: list[UUID] | None = None
+    # Explicit only: legacy projects retain one-shot generation.
+    video_generation_groups: list[VideoGenerationGroup] = Field(default_factory=list, max_length=100)
+    # Legacy films retain their existing alignment. Newly authored films trim at 1x.
+    clip_timing_policy: Literal["legacy", "trim"] = "legacy"
     current_revision_id: UUID | None = None
     output_aspect_ratio: str = Field(
         default="9:16",
@@ -2190,6 +2200,7 @@ class ProviderManagedAssetBinding(BaseModel):
 
 
 class ShotPlan(BaseModel):
+    video_group_clip: VideoGroupClip | None = None
     editing_guidance: str | None = Field(default=None, max_length=4000)
 
     @model_validator(mode="before")
@@ -3312,6 +3323,8 @@ class ImageGenerationCreate(ImageGenerationOverrides):
 
 
 class VideoGenerationCreate(BaseModel):
+    generation_group_id: UUID | None = None
+    expected_group_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     expected_revision_id: UUID
     expected_shot_revision_id: UUID | None = None
     candidate_count: int = Field(default=1, ge=1, le=4)

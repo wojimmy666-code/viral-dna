@@ -47,6 +47,8 @@ def saved_failure(monkeypatch, tmp_path):
         )
         await repo.save_viral_concept_set(failed)
         (run,) = await repo.list_model_runs(report.analysis_id)
+        run = run.model_copy(update={"prompt_version": "creative-ideas-v3", "schema_version": "creative-content-v3"})
+        await repo.save_model_run(run)
         return failed, run
 
     failed, run = asyncio.run(seed())

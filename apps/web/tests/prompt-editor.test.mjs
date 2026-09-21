@@ -47,7 +47,8 @@ test("prompt report keeps structured autosave while downloading plain text", asy
   const app = await readFile(APP_URL, "utf8");
   const editor = await readFile(EDITOR_URL, "utf8");
 
-  assert.match(app, /PromptEditor,[\s\S]*promptPackageToPlainText,[\s\S]*promptTextFilename/);
+  assert.match(app, /PromptWorkspace/);
+  assert.match(app, /promptPackageToPlainText,[\s\S]*promptTextFilename/);
   assert.match(app, /function downloadPromptText\(/);
   assert.match(app, /type: "text\/plain;charset=utf-8"/);
   assert.match(app, /document\.body\.appendChild\(anchor\)/);
@@ -61,6 +62,22 @@ test("prompt report keeps structured autosave while downloading plain text", asy
   assert.match(editor, /onDownload\?\.\(packageRef\.current\)/);
   assert.match(editor, /下载 TXT/);
   assert.doesNotMatch(editor, /下载 JSON|机器可读 Prompt Package/);
+});
+
+test("scheme selection is explicit and exports only its own live prompt bodies", async () => {
+  const { parsePromptSource, promptDocumentBody, productionPromptsToText } = await import("../src/prompt-editor/prompt-sources.js");
+  const id = "11111111-1111-4111-8111-111111111111";
+  assert.equal(parsePromptSource(`production:${id}`).id, id);
+  assert.equal(parsePromptSource("latest").kind, "source");
+  assert.equal(parsePromptSource("scheme").kind, "scheme");
+  const document = { name: "世界地标里的格纹呼吸", token: "token", common_image_prompt: "冷光", common_video_prompt: "硬切", shots: [{ id, index: 1, duration_seconds: 1.5, images: [{ id, prompt: "冰岛黑沙滩", negative_constraints: ["不要文字"], mentions: [] }], video_prompt: "裙摆随风轻动", video_negative_constraints: [] }] };
+  const payload = promptDocumentBody(document);
+  assert.equal(payload.expected_token, "token");
+  assert.equal(payload.shots[0].video_prompt, "裙摆随风轻动");
+  assert.equal(payload.shots[0].images[0].mentions, undefined);
+  const text = productionPromptsToText(document);
+  assert.match(text, /世界地标里的格纹呼吸[\s\S]*1 个分镜[\s\S]*冰岛黑沙滩[\s\S]*裙摆随风轻动/);
+  assert.doesNotMatch(text, /11111111|expected_token/);
 });
 
 test("direction A uses independent collapsed rows and one continuous editor", async () => {

@@ -47,6 +47,7 @@ import {
 } from "./production-ui.js";
 import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
 import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
+import { VideoGroupsPanel } from "./video-groups/VideoGroupsPanel.jsx";
 import { VideoEditorWorkspace } from "./video-editor/index.js";
 import { ProductionExportWorkspace } from "./ProductionExportWorkspace.jsx";
 import {
@@ -1572,6 +1573,7 @@ export function ProductionHub({
   const location = useLocation();
   const navigate = useNavigate();
   const editorRef = useRef(null);
+  const videoGroupsRef = useRef(null);
   const globalPromptRef = useRef(null);
   const locationRef = useRef(location);
   locationRef.current = location;
@@ -1692,6 +1694,7 @@ export function ProductionHub({
     await flushGlobalPrompts();
     await flushShotDraft();
     await flushVideoDraft();
+    if (await videoGroupsRef.current?.flush() === false) throw new Error("请先保存视频生成组要求，再继续操作");
     const timeline = await editorRef.current?.flush();
     if (await workflow?.beforeNavigate?.() === false) throw new Error("请先完成当前修改的保存");
     return timeline;
@@ -4000,6 +4003,8 @@ export function ProductionHub({
               />
             )}
             {activeSection === "shot_videos" && (
+              <>
+              <VideoGroupsPanel key={detail.project.id} flushRef={videoGroupsRef} beforeGenerate={async () => { await flushGlobalPrompts(); await flushVideoDraft(); }} project={detail.project} shots={videoStageShots(shots, detail.project)} settings={videoGenerationSettings} request={request} resolveUrl={resolveUrl} disabled={busy} onChanged={() => refreshProject(detail.project.id, selectedShotId)} onAdvance={advanceToEditing} />
               <ShotVideoWorkspace
                 upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 onAddAssets={openAssetPicker}
@@ -4057,6 +4062,7 @@ export function ProductionHub({
                 videoGenerationSettingsStatus={videoGenerationSettingsStatus}
                 textModelLabel={videoTextModelLabel}
               />
+              </>
             )}
             {["editing", "audio_caption"].includes(activeSection) && (
               <VideoEditorWorkspace

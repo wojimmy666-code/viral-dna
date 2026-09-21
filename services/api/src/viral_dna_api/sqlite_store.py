@@ -605,10 +605,25 @@ class SQLiteStore:
         self,
         entries: list[tuple[str, str, str]],
         deletions: list[tuple[str, str]] | None = None,
+        prompt_update=None,
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if prompt_update:
+                    from .project_prompts import PromptRevisionConflict
+
+                    update = prompt_update
+                    row = connection.execute("SELECT payload FROM production_projects WHERE record_key=?", (str(update["project_id"]),)).fetchone()
+                    current_revision = json.loads(row[0]).get("current_revision_id") if row else None
+                    contexts = connection.execute("SELECT payload FROM project_prompt_revisions WHERE json_extract(payload, '$.project_id')=?", (str(update["context"].project_id),)).fetchall()
+                    context = max((json.loads(row[0]) for row in contexts), key=lambda item: item["revision_number"], default=None)
+                    conflict = current_revision != str(update["expected_revision_id"]) or (context["id"] if context else None) != (str(update["expected_context_id"]) if update["expected_context_id"] else None)
+                    for identifier, expected in update["expected_drafts"].items():
+                        row = connection.execute("SELECT payload FROM shot_video_generation_drafts WHERE record_key=?", (str(identifier),)).fetchone()
+                        conflict |= (json.loads(row[0])["draft_version"] if row else 0) != expected
+                    if conflict:
+                        raise PromptRevisionConflict("方案或视频草稿已更新，本次提示词未写入")
                 for table, key, payload in entries:
                     safe_table = self._table(table)
                     connection.execute(
@@ -1231,6 +1246,7 @@ class SQLiteStore:
         generation_candidates: list[GenerationCandidate] | None = None,
         video_clip_preparations: list[VideoClipPreparation] | None = None,
         approval_events: list[ApprovalEvent] | None = None,
+        prompt_update=None,
     ) -> tuple[ProductionProject, ProductionRevision]:
         entries = [
             (
@@ -1275,8 +1291,15 @@ class SQLiteStore:
             ("reference_bindings", str(binding_id))
             for binding_id in remove_reference_binding_ids or []
         ]
+        if prompt_update:
+            prompt_update = {**prompt_update, "project_id": project.id}
+            entries.extend(("shot_video_generation_drafts", str(item.shot_plan_id), self._serialize(item)) for item in prompt_update["drafts"])
+            entries.extend(("project_prompt_revisions", str(item.id), self._serialize(item)) for item in (prompt_update["baseline"], prompt_update["context"]) if item is not None)
+            if prompt_update.get("job"):
+                item = prompt_update["job"]
+                entries.append(("viral_concept_sets", str(item.id), self._serialize(item)))
         async with self._lock:
-            await asyncio.to_thread(self._upsert_many, entries, deletions)
+            await asyncio.to_thread(self._upsert_many, entries, deletions, prompt_update)
         return project, revision
 
     async def save_image_batch(self, batch: ImageBatch) -> ImageBatch:

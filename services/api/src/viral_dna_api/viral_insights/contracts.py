@@ -15,6 +15,10 @@ from pydantic import (
 )
 
 from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
+from .creative_review_models import (
+    CreativeCommonRule, CreativeHumanReview, CreativeRequirementCheck,
+    CreativeRequirementRule, CreativeReviewIssue,
+)
 
 
 def utc_now() -> datetime:
@@ -226,6 +230,8 @@ class ViralConceptContent(BaseModel):
     required_assets: list[str] = Field(default_factory=list, max_length=30)
     risks: list[str] = Field(default_factory=list, max_length=20)
     shots: list[ViralConceptShot] = Field(min_length=1, max_length=200)
+    common_rules: list[CreativeCommonRule] = Field(default_factory=list, max_length=24)
+    requirement_checks: list[CreativeRequirementCheck] = Field(default_factory=list, max_length=24)
 
 
 class CreativeBriefEvidence(BaseModel):
@@ -256,13 +262,24 @@ CreativeSceneText = Annotated[
 ]
 
 
+class CreativePlannedScene(BaseModel):
+    index: int = Field(ge=1, le=200)
+    description: str = Field(min_length=1, max_length=1200)
+    duration_seconds: float = Field(gt=0, le=60)
+    transition: Literal["cut", "continuous", "dissolve"] = "cut"
+
+
 class CreativeIdeaContent(BaseModel):
     """Only the fields the creative model is responsible for authoring."""
 
     name: str = Field(min_length=1, max_length=80)
     summary: str = Field(min_length=1, max_length=220)
     visual_memory: str = Field(min_length=1, max_length=160)
-    key_scenes: list[CreativeSceneText] = Field(min_length=2, max_length=3)
+    key_scenes: list[CreativeSceneText] = Field(min_length=1, max_length=3)
+    # Complete film plan, independent of the two/three illustrative highlights.
+    # Empty remains valid for immutable historical batches.
+    scene_plan: list[CreativePlannedScene] = Field(default_factory=list, max_length=200)
+    rhythm: str = Field(default="", max_length=500)
     category_fit: str = Field(min_length=1, max_length=240)
     borrowed: str = Field(min_length=1, max_length=240)
     changed: str = Field(min_length=1, max_length=240)
@@ -271,11 +288,29 @@ class CreativeIdeaContent(BaseModel):
     visual_organization: str = Field(min_length=1, max_length=240)
     product_role: str = Field(min_length=1, max_length=240)
     assumptions: list[CreativeSceneText] = Field(default_factory=list, max_length=10)
+    common_rules: list[CreativeCommonRule] = Field(default_factory=list, max_length=24)
+    requirement_checks: list[CreativeRequirementCheck] = Field(default_factory=list, max_length=24)
+    highlight_scene_indices: list[int] = Field(default_factory=list, max_length=3)
 
 
 class CreativeIdea(CreativeIdeaContent):
     id: UUID = Field(default_factory=uuid4)
     brief_checks: list[CreativeBriefFulfillment] = Field(default_factory=list, max_length=24)
+    review_issues: list[str] = Field(default_factory=list, max_length=24)
+    review_state: Literal["unreviewed", "ready", "needs_review", "needs_revision"] = "unreviewed"
+    review_details: list[CreativeReviewIssue] = Field(default_factory=list, max_length=100)
+    review_brief: str | None = None
+    human_review: CreativeHumanReview | None = None
+
+
+class CreativeIdeaEdit(BaseModel):
+    request_id: UUID
+    expected_revision: int = Field(ge=1)
+    source_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    feedback: str | None = Field(default=None, max_length=2000)
+    idea: CreativeIdeaContent
+    requirement_rules: list[CreativeRequirementRule] = Field(default_factory=list, max_length=24)
+    confirmed_requirements: list[int] = Field(default_factory=list, max_length=24)
 
 
 class CreativeGenerateRequest(BaseModel):
@@ -319,8 +354,14 @@ class ViralConceptSet(BaseModel):
     status: Literal["queued", "running", "completed", "stale", "failed", "cancelled"] = "completed"
     concepts: list[ViralConcept] = Field(default_factory=list, max_length=3)
     phase: Literal["legacy", "ideas", "expanded"] = "legacy"
-    operation: Literal["generate", "regenerate", "expand", "edit"] = "generate"
+    operation: Literal["generate", "regenerate", "expand", "edit", "localize"] = "generate"
+    language_issues: list[str] = Field(default_factory=list, max_length=800)
+    language_result: dict[str, Any] | None = None
+    language_applied_revision_id: UUID | None = None
     ideas: list[CreativeIdea] = Field(default_factory=list, max_length=3)
+    requirement_rules: list[CreativeRequirementRule] = Field(default_factory=list, max_length=24)
+    # Read-only fingerprint for optimistic edits; never an authority supplied by the model.
+    review_source_fingerprint: str | None = None
     parent_set_id: UUID | None = None
     source_idea_id: UUID | None = None
     request_id: UUID | None = None

@@ -9,6 +9,7 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { registerAccountFlusher } from "../accounts/account-client.js";
 import {
   promptPackageToPlainText,
 } from "./prompt-document.js";
@@ -114,6 +115,21 @@ export function PromptEditor({
       saveChainRef.current = saveChainRef.current.then(flushPending, flushPending);
     }, PROMPT_AUTOSAVE_DELAY_MS);
   }, [flushPending, readOnly]);
+
+  useEffect(() => registerAccountFlusher(async () => {
+    window.clearTimeout(saveTimerRef.current);
+    saveChainRef.current = saveChainRef.current.then(flushPending, flushPending);
+    await saveChainRef.current;
+    return pendingDraftsRef.current.size === 0;
+  }), [flushPending]);
+
+  useEffect(() => {
+    const warn = event => {
+      if (pendingDraftsRef.current.size) { event.preventDefault(); event.returnValue = ""; }
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
