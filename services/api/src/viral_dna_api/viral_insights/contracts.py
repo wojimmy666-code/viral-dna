@@ -323,6 +323,16 @@ class CreativeGenerateRequest(BaseModel):
 class CreativeActionRequest(BaseModel):
     request_id: UUID
     feedback: str | None = Field(default=None, max_length=2000)
+    revision_notes: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("revision_notes")
+    @classmethod
+    def validate_revision_notes(cls, value):
+        if value is not None:
+            value = value.strip()
+            if not value:
+                raise ValueError("请填写本条创意的修改意见")
+        return value
 
 
 class CreativePlanEdit(BaseModel):
@@ -367,6 +377,7 @@ class ViralConceptSet(BaseModel):
     request_id: UUID | None = None
     request_signature: str | None = None
     feedback: str = Field(default="", max_length=2000)
+    revision_notes: str | None = Field(default=None, max_length=2000)
     input_snapshot: dict[str, Any] = Field(default_factory=dict)
     model_runs: list[UUID] = Field(default_factory=list)
     requested_model: str | None = None

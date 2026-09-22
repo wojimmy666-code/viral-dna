@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, DownloadSimple } from "@phosphor-icons/react";
 import { registerAccountFlusher } from "../accounts/account-client.js";
@@ -79,9 +80,9 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
       <div className="prompt-document-title"><span><h2>{working.name}</h2><small>{working.shots.length} 个分镜 · {readOnly ? "只读预览" : "与制作阶段共用提示词"}</small></span></div>
       <div className="prompt-document-toolbar-actions">
         {!readOnly && <span className={`prompt-save-state ${status}`} role="status">{{ saved: "已保存", dirty: "待保存", saving: "保存中…", error: "未保存" }[status]}</span>}
-        {status === "error" && <button type="button" className="secondary-button compact" onClick={flush}>重试保存</button>}
-        <button type="button" className="secondary-button compact" onClick={async () => { if (await flush()) onCopy(productionPromptsToText(state.current.document), "方案提示词已复制"); }}><Copy size={16} />复制全文</button>
-        <button type="button" className="primary-button compact" onClick={download}><DownloadSimple size={16} />下载 TXT</button>
+        {status === "error" && <Button type="button" className="secondary-button compact" onClick={flush}>重试保存</Button>}
+        <Button type="button" className="secondary-button compact" onClick={async () => { if (await flush()) onCopy(productionPromptsToText(state.current.document), "方案提示词已复制"); }}><Copy size={16} />复制全文</Button>
+        <Button type="button" className="primary-button compact" onClick={download}><DownloadSimple size={16} />下载 TXT</Button>
       </div>
     </header>
     {error && <p className="scheme-prompt-error" role="alert">{error}</p>}
@@ -97,10 +98,10 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
           <div>{shot.images.map((image, index) => <div key={image.id}>
             <BodyEditor label={`局部图片提示词${shot.images.length > 1 ? ` ${index + 1}` : ""}`} value={image.prompt} mentions={image.mentions} readOnly={readOnly} onChange={value => changeImage(shot.id, image.id, row => ({ ...row, prompt: value }))} />
             {constraints("图片负面约束", image.negative_constraints, values => changeImage(shot.id, image.id, row => ({ ...row, negative_constraints: values })))}
-          </div>)}{!readOnly && onEditProduction && <button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_images"); }}>到分镜图片编辑资产引用</button>}</div>
+          </div>)}{!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_images"); }}>到分镜图片编辑资产引用</Button>}</div>
           <div><BodyEditor label={shot.video_group_id ? "分镜动作说明（由生成组合并）" : "局部视频提示词"} value={shot.video_prompt} mentions={shot.video_mentions} readOnly={readOnly} onChange={value => changeShot(shot.id, row => ({ ...row, video_prompt: value }))} />
             {constraints("视频负面约束", shot.video_negative_constraints, values => changeShot(shot.id, row => ({ ...row, video_negative_constraints: values })))}
-            {!readOnly && onEditProduction && <button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_videos"); }}>到分镜视频编辑资产引用</button>}
+            {!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_videos"); }}>到分镜视频编辑资产引用</Button>}
           </div>
         </div>
       </details>)}
@@ -109,7 +110,7 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
         <BodyEditor label="合并后的分段提示词（自动汇总）" value={group.compiled_prompt} readOnly />
         {status !== "saved" && <p role="status">分镜修改保存后，合并提示词会重新汇总。</p>}
         {group.error && <p role="alert">{group.error}</p>}
-        {!readOnly && onEditProduction && <button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, group.shot_plan_ids[0], "shot_videos"); }}>调整分组与生成参数</button>}
+        {!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, group.shot_plan_ids[0], "shot_videos"); }}>调整分组与生成参数</Button>}
       </details>)}
     </div>
   </section>;

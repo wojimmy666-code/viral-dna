@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   ArrowCounterClockwise,
   CircleNotch,
@@ -165,18 +166,18 @@ export function CategoryProfileLibrary({ onNotice, request }) {
         title="品类库"
         description="为当前账户沉淀品牌、受众和卖点约束。生成方案时只需选择一个档案，历史方案会保留当时的完整快照。"
         actions={(
-          <button className="primary-button" onClick={createProfile} type="button">
+          <Button className="primary-button" onClick={createProfile} type="button">
             <Plus size={18} weight="bold" />新建品类档案
-          </button>
+          </Button>
         )}
       />
 
       {lastDeleted && (
         <InlineMessage className="category-undo-message" tone="success">
           <span>“{lastDeleted.display_name}”已删除，历史方案仍可查看。</span>
-          <button className="text-button compact" disabled={saving} onClick={restoreProfile} type="button">
+          <Button className="text-button compact" disabled={saving} onClick={restoreProfile} type="button">
             <ArrowCounterClockwise size={16} />撤销删除
-          </button>
+          </Button>
         </InlineMessage>
       )}
       {error && <InlineMessage tone="danger">{error}</InlineMessage>}
@@ -264,22 +265,22 @@ export function CategoryProfileLibrary({ onNotice, request }) {
             <InlineMessage className="category-delete-confirm" tone="danger">
               <span>删除后不再出现在选择器中，但历史方案仍保留此档案快照。</span>
               <span>
-                <button className="secondary-button compact" onClick={() => setDeletePending(false)} type="button">取消</button>
-                <button className="danger-button compact" disabled={saving} onClick={deleteProfile} type="button">确认删除</button>
+                <Button className="secondary-button compact" onClick={() => setDeletePending(false)} type="button">取消</Button>
+                <Button className="danger-button compact" disabled={saving} onClick={deleteProfile} type="button">确认删除</Button>
               </span>
             </InlineMessage>
           )}
 
           <footer>
             {selectedId && !deletePending ? (
-              <button className="secondary-button category-delete-trigger" onClick={() => setDeletePending(true)} type="button">
+              <Button className="secondary-button category-delete-trigger" onClick={() => setDeletePending(true)} type="button">
                 <Trash size={17} />删除档案
-              </button>
+              </Button>
             ) : <span />}
-            <button className="primary-button" disabled={saving} type="submit">
+            <Button className="primary-button" disabled={saving} type="submit">
               {saving && <CircleNotch className="spin" size={18} />}
               {selectedId ? "保存修改" : "创建档案"}
-            </button>
+            </Button>
           </footer>
         </form>
       </SurfacePanel>

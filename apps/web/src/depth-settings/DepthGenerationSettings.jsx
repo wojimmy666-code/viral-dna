@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowClockwise,
@@ -117,7 +118,7 @@ export function DepthGenerationSettings({ request }) {
           <h3 id="depth-generation-settings-title">深度视频生成</h3>
           <p>同一任务接口支持 CPU 与 GPU 两套引擎；设置只影响之后创建的新任务。</p>
         </div>
-        <button
+        <Button
           className="secondary-button compact"
           disabled={Boolean(busy)}
           onClick={() => load(true)}
@@ -125,7 +126,7 @@ export function DepthGenerationSettings({ request }) {
         >
           {busy === "probing" ? <CircleNotch className="spin" size={15} /> : <ArrowClockwise size={15} />}
           重新检测
-        </button>
+        </Button>
       </div>
 
       {busy === "loading" && !settings ? (
@@ -179,14 +180,14 @@ export function DepthGenerationSettings({ request }) {
 
       <div className="depth-settings-actions">
         {modes.cpu?.installable && (
-          <button className="secondary-button compact" disabled={Boolean(busy) || installation?.status === "running"} onClick={installCpu} type="button">
+          <Button className="secondary-button compact" disabled={Boolean(busy) || installation?.status === "running"} onClick={installCpu} type="button">
             <DownloadSimple size={16} />安装 CPU 模型
-          </button>
+          </Button>
         )}
-        <button className="primary-button compact" disabled={Boolean(busy) || !settings || preference === settings.execution_preference} onClick={save} type="button">
+        <Button className="primary-button compact" disabled={Boolean(busy) || !settings || preference === settings.execution_preference} onClick={save} type="button">
           {busy === "saving" ? <CircleNotch className="spin" size={16} /> : <CheckCircle size={16} />}
           应用深度设置
-        </button>
+        </Button>
       </div>
     </section>
   );

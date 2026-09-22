@@ -109,6 +109,10 @@ def validate_brief_checks(draft, brief, *, label, expanded=False):
         if check.scene_scope == "all" and covered != set(range(1, len(scenes) + 1)):
             raise CreativeBriefError(message + "；全场景要求不能只在部分画面实现")
         result.append(
-            CreativeBriefFulfillment(**check.model_dump(), requirement=requirement["text"])
+            # Persisted fulfillments already contain this server-owned field.
+            # Always use the frozen brief, for both new model checks and history reads.
+            CreativeBriefFulfillment(
+                **check.model_dump(exclude={"requirement"}), requirement=requirement["text"]
+            )
         )
     return result

@@ -1653,27 +1653,6 @@
   margin: 2px -20px -20px;
 }
 
-.danger-button {
-  min-height: 42px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 17px;
-  border: 1px solid var(--status-danger-text);
-  border-radius: 10px;
-  color: var(--text-on-accent);
-  background: var(--status-danger-text);
-  cursor: pointer;
-  font-size: var(--type-label-size);
-  font-weight: var(--type-weight-semibold);
-}
-
-.danger-button.compact {
-  min-height: 36px;
-  padding-inline: 13px;
-}
-
 .archive-dialog-copy,
 .production-lifecycle-dialog-copy {
   display: flex;

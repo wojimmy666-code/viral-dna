@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { ArrowLeft, Check, LockSimple } from "@phosphor-icons/react";
 import { PageShell } from "../ui/system/index.js";
 import { mainCreationStep } from "./workspace-ui.js";
@@ -22,7 +23,7 @@ export function CreationWorkspace({ title, subtitle, source, metrics, actions, b
     <PageShell className="production-workspace creation-workspace">
       <header className="creation-workspace-header">
         <div className="creation-heading">
-          {onBack && <button className="text-button creation-back" onClick={onBack} type="button"><ArrowLeft size={16} />{backLabel}</button>}
+          {onBack && <Button className="text-button creation-back" onClick={onBack} type="button"><ArrowLeft size={16} />{backLabel}</Button>}
           <div><h1>{title}</h1><div className="creation-meta">{source && <span>{source}</span>}{subtitle && <span>{subtitle}</span>}{metrics}</div></div>
         </div>
         <div className="creation-header-actions">{actions}</div>

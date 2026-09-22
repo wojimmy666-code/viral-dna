@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useId, useMemo, useRef, useState } from "react";
 import {
   CaretUp,
@@ -127,16 +128,16 @@ export function ImageGenerationCommandBar({
         )}
         <div className="shot-image-command-actions">
           {latestRunBusy && (
-            <button
+            <Button
               className="text-button compact"
               disabled={busy || latestRun.status === "cancellation_requested"}
               onClick={() => onCancelRun(latestRun.id)}
               type="button"
             >
               <Prohibit size={15} />取消任务
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             aria-label={`生成 ${candidateCount} 张图片`}
             className="primary-button compact shot-image-generate-button"
             disabled={generateDisabled}
@@ -154,7 +155,7 @@ export function ImageGenerationCommandBar({
               : busy
                 ? "正在保存并提交"
                 : "生成"}
-          </button>
+          </Button>
         </div>
       </div>
       <ImageModelPopover

@@ -1,3 +1,5 @@
+@import "./ui/system/buttons.css";
+
 :root {
   color: var(--text-primary);
   background: var(--surface-canvas);
@@ -45,6 +47,7 @@
   --status-warning-bg: #fff7e8;
   --status-warning-border: #efdcb7;
   --status-danger-text: #b42336;
+  --action-danger-hover: #921d2b;
   --status-danger-bg: #fff1f2;
   --status-danger-border: #f0cbd0;
   --status-info-text: #4c3ee6;
@@ -260,29 +263,6 @@ button:disabled {
 .global-search .global-search-toggle { display: none; }
 .global-search:focus-within { border-color: var(--accent); }
 
-.icon-button {
-  width: 36px;
-  height: 36px;
-  position: relative;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 9px;
-  color: var(--text-secondary);
-  background: transparent;
-  cursor: pointer;
-}
-
-.icon-button:hover {
-  color: var(--text-primary);
-  background: #f1f1f5;
-}
-
-.icon-button.bordered {
-  border: 1px solid var(--border-default);
-  background: #fff;
-}
-
 .notification-dot {
   position: absolute;
   top: 7px;
@@ -316,67 +296,6 @@ button:disabled {
   font-size: var(--type-caption-size);
   font-weight: var(--type-weight-bold);
   line-height: 1;
-}
-
-.primary-button,
-.secondary-button,
-.text-button {
-  min-height: var(--control-height);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 17px;
-  border-radius: 10px;
-  cursor: pointer;
-  font-size: var(--type-label-size);
-  font-weight: var(--type-weight-semibold);
-  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
-}
-
-.primary-button {
-  border: 1px solid var(--accent);
-  color: var(--text-on-accent);
-  background: var(--accent);
-  box-shadow: none;
-}
-
-.primary-button:hover:not(:disabled) {
-  background: var(--accent-hover);
-  transform: translateY(-1px);
-}
-
-.secondary-button {
-  border: 1px solid var(--border-strong);
-  color: var(--text-primary);
-  background: var(--surface-panel);
-}
-
-.secondary-button:hover:not(:disabled) {
-  border-color: var(--accent-border);
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.text-button {
-  border: 0;
-  color: var(--accent);
-  background: transparent;
-}
-
-.text-button:hover:not(:disabled) {
-  background: var(--accent-soft);
-}
-
-.primary-button.compact,
-.secondary-button.compact {
-  min-height: var(--control-height-compact);
-  padding-inline: 13px;
-}
-
-.primary-button.full,
-.secondary-button.full {
-  width: 100%;
 }
 
 .workspace-layout {

@@ -1,3 +1,4 @@
+import { Button } from "../../ui/system/Button.jsx";
 import { ArrowCounterClockwise, Plus, WarningCircle, X } from "@phosphor-icons/react";
 import { useMemo, useRef, useState } from "react";
 import {
@@ -140,9 +141,9 @@ export function GenerationReferenceComposer({
             )}
           </div>
           {excludedAutomaticCount > 0 && (
-            <button onClick={onRestoreAutomaticReferences} type="button">
+            <Button variant="text" size="compact" onClick={onRestoreAutomaticReferences} type="button">
               <ArrowCounterClockwise size={14} />恢复默认
-            </button>
+            </Button>
           )}
         </div>
         <div className="generation-reference-content">

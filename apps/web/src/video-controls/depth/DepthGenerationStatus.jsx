@@ -1,3 +1,4 @@
+import { Button } from "../../ui/system/Button.jsx";
 import {
   ArrowClockwise,
   CaretDown,
@@ -53,9 +54,9 @@ export function DepthGenerationStatus({ error = "", job, onCancel, onRetry }) {
         <progress aria-label="全场景深度生成进度" max="100" value={percent}>{percent}%</progress>
         <footer>
           <span>{[frameLabel, etaLabel, job.device_name].filter(Boolean).join(" · ")}</span>
-          <button className="secondary-button compact" disabled={job.status === "cancellation_requested"} onClick={onCancel} type="button">
+          <Button variant="warning" size="compact" disabled={job.status === "cancellation_requested"} onClick={onCancel} type="button">
             <XCircle size={16} />{job.status === "cancellation_requested" ? "正在停止" : "取消任务"}
-          </button>
+          </Button>
         </footer>
       </section>
     );
@@ -71,9 +72,9 @@ export function DepthGenerationStatus({ error = "", job, onCancel, onRetry }) {
             <span>{error || job?.error_message || "任务没有生成可用的深度视频。"}</span>
           </div>
           {onRetry && (
-            <button className="secondary-button compact" onClick={onRetry} type="button">
+            <Button className="secondary-button compact" onClick={onRetry} type="button">
               <ArrowClockwise size={16} />快速重试
-            </button>
+            </Button>
           )}
         </header>
         {job?.technical_detail && (

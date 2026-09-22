@@ -1,3 +1,4 @@
+import { Button } from "./ui/system/Button.jsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowCounterClockwise,
@@ -429,16 +430,16 @@ export function VideoCandidateLibrary({
           {managing ? (
             <>
               <span>已选 {selectedActiveIds.length} 个</span>
-              <button
+              <Button variant="text" size="compact"
                 disabled={interactionBusy || archivableIds.length === 0}
                 onClick={toggleAllActiveCandidates}
                 type="button"
               >
                 {allArchivableSelected ? "清空选择" : "全选可删除"}
-              </button>
-              <button disabled={interactionBusy} onClick={leaveManagement} type="button">
+              </Button>
+              <Button variant="text" size="compact" disabled={interactionBusy} onClick={leaveManagement} type="button">
                 <X size={14} />取消
-              </button>
+              </Button>
               <button
                 className="danger"
                 disabled={interactionBusy || selectedActiveIds.length === 0}
@@ -480,14 +481,14 @@ export function VideoCandidateLibrary({
                   回收站 {archivedCandidates.length}
                 </button>
               )}
-              <button
+              <Button variant="text" size="compact"
                 disabled={interactionBusy || archivableIds.length === 0}
                 onClick={enterManagement}
                 title={archivableIds.length === 0 ? "当前只有已采用视频，无法删除" : "管理视频候选"}
                 type="button"
               >
                 管理
-              </button>
+              </Button>
             </>
           )}
         </div>
@@ -497,7 +498,7 @@ export function VideoCandidateLibrary({
         <div className="candidate-lifecycle-confirm" role="status">
           <span>将 {selectedActiveIds.length} 个视频候选移入回收站？候选文件会保留，可随时恢复。</span>
           <div>
-            <button disabled={interactionBusy} onClick={() => setPendingAction("")} type="button">取消</button>
+            <Button variant="secondary" size="compact" disabled={interactionBusy} onClick={() => setPendingAction("")} type="button">取消</Button>
             <button className="danger" disabled={interactionBusy} onClick={submitArchive} type="button">
               <Trash size={14} />确认移入
             </button>
@@ -566,30 +567,30 @@ export function VideoCandidateLibrary({
             <div><strong>回收站</strong><small>候选文件仍被保留，恢复后回到可采用状态。</small></div>
             <div>
               <span>已选 {selectedArchivedIds.length} 个</span>
-              <button
+              <Button variant="text" size="compact"
                 disabled={interactionBusy || archivedIds.length === 0}
                 onClick={toggleAllArchivedCandidates}
                 type="button"
               >
                 {allArchivedSelected ? "清空选择" : "全选可恢复"}
-              </button>
-              <button
+              </Button>
+              <Button variant="secondary" size="compact"
                 disabled={interactionBusy || selectedArchivedIds.length === 0}
                 onClick={() => setPendingAction("restore")}
                 type="button"
               >
                 <ArrowCounterClockwise size={14} />恢复所选
-              </button>
+              </Button>
             </div>
           </header>
           {pendingAction === "restore" && (
             <div className="candidate-lifecycle-confirm restore" role="status">
               <span>恢复 {selectedArchivedIds.length} 个视频候选？恢复后需要重新选择或采用。</span>
               <div>
-                <button disabled={interactionBusy} onClick={() => setPendingAction("")} type="button">取消</button>
-                <button disabled={interactionBusy} onClick={submitRestore} type="button">
+                <Button variant="secondary" size="compact" disabled={interactionBusy} onClick={() => setPendingAction("")} type="button">取消</Button>
+                <Button variant="primary" size="compact" disabled={interactionBusy} onClick={submitRestore} type="button">
                   <ArrowCounterClockwise size={14} />确认恢复
-                </button>
+                </Button>
               </div>
             </div>
           )}

@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   CaretDown,
   Check,
@@ -71,10 +72,10 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
           )}
         </div>
         <div className="concept-detail-actions">
-          <button className="primary-button" type="button" onClick={() => onPublish(selected)} disabled={Boolean(publishingId) || isStale || (Boolean(conceptSet.language_issues?.length) && !conceptSet.published_result) || Boolean(conceptSet.input_snapshot?.prompt_language_project_id)}>
+          <Button className="primary-button" type="button" onClick={() => onPublish(selected)} disabled={Boolean(publishingId) || isStale || (Boolean(conceptSet.language_issues?.length) && !conceptSet.published_result) || Boolean(conceptSet.input_snapshot?.prompt_language_project_id)}>
             {publishingId === selected.id ? <CircleNotch className="spin" size={18} /> : <MagicWand size={18} weight="fill" />}
             {isStale ? "重新生成后可创建" : conceptSet.published_result ? "进入已创建方案" : creative ? "确认分镜，进入制作" : "创建创作方案"}
-          </button>
+          </Button>
         </div>
         {creative && selected.required_assets.length > 0 && <details className="concept-risk-disclosure"><summary>所需资产 · {selected.required_assets.length} 项</summary><ul>{selected.required_assets.map((item, index) => <li key={index}>{item}</li>)}</ul></details>}
         {creative && selected.brief_checks?.length > 0 && <details className="concept-risk-disclosure"><summary>补充想法落实说明</summary><CreativeBriefChecks checks={selected.brief_checks} /></details>}

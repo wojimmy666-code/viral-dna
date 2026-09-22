@@ -1,3 +1,4 @@
+import { IconButton, Button } from "../ui/system/Button.jsx";
 import { memo } from "react";
 import { ArrowUp, ArrowDown, Trash } from "@phosphor-icons/react";
 import { shotImageStatus } from "./image-batch-ui.js";
@@ -14,8 +15,8 @@ export const SkillShotNavigation = memo(function SkillShotNavigation({ shots, di
           generationRuns: shotDetail?.plan.id === plan.id ? shotDetail.generation_runs : undefined,
         })}</small></span>
       </button>
-      {selectedId === plan.id && <div className="skill-shot-actions"><button aria-label="上移分镜" disabled={busy || index === 0} onClick={() => handlers.current.move(plan.id, -1)} type="button"><ArrowUp size={14} /></button><button aria-label="下移分镜" disabled={busy || index === shots.length - 1} onClick={() => handlers.current.move(plan.id, 1)} type="button"><ArrowDown size={14} /></button><button aria-label="舍弃分镜" disabled={busy || shots.length <= 1} onClick={() => handlers.current.discard(plan.id)} type="button"><Trash size={14} /></button></div>}
+      {selectedId === plan.id && <div className="skill-shot-actions"><IconButton aria-label="上移分镜" disabled={busy || index === 0} onClick={() => handlers.current.move(plan.id, -1)} type="button"><ArrowUp size={14} /></IconButton><IconButton aria-label="下移分镜" disabled={busy || index === shots.length - 1} onClick={() => handlers.current.move(plan.id, 1)} type="button"><ArrowDown size={14} /></IconButton><IconButton aria-label="舍弃分镜" disabled={busy || shots.length <= 1} onClick={() => handlers.current.discard(plan.id)} type="button"><Trash size={14} /></IconButton></div>}
     </div>)}</div>
-    {discarded.length > 0 && <details className="shot-discarded-section"><summary>已舍弃 {discarded.length}</summary>{discarded.map(({ plan }) => <div key={plan.id} className="shot-discarded-item"><span>分镜 {plan.index}</span><button disabled={busy} onClick={() => handlers.current.restore(plan.id)} type="button">恢复</button></div>)}</details>}
+    {discarded.length > 0 && <details className="shot-discarded-section"><summary>已舍弃 {discarded.length}</summary>{discarded.map(({ plan }) => <div key={plan.id} className="shot-discarded-item"><span>分镜 {plan.index}</span><Button variant="text" size="compact" disabled={busy} onClick={() => handlers.current.restore(plan.id)} type="button">恢复</Button></div>)}</details>}
   </aside>;
 });

@@ -23,9 +23,9 @@ details[open] > summary.prompt-section-header::before { content: "▾"; }
 .prompt-preview { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); margin-block: var(--space-2); min-width: 0; font-size: var(--type-caption-size); }
 .prompt-preview details[open] { flex-basis: 100%; }
 .prompt-preview summary { cursor: pointer; color: var(--text-secondary); }
-.prompt-preview > .text-button, .prompt-preview details > .text-button, .prompt-preview summary { min-height: 36px; padding: var(--space-1) 0; align-content: center; font-size: var(--type-caption-size); font-weight: var(--type-weight-regular); line-height: var(--type-leading-ui); color: var(--text-secondary); }
+.prompt-preview > .text-button, .prompt-preview details > .text-button, .prompt-preview summary, .prompt-preview .ui-button.text-button { min-height: 36px; padding: var(--space-1) 0; align-content: center; font-size: var(--type-caption-size); font-weight: var(--type-weight-regular); line-height: var(--type-leading-ui); color: var(--text-secondary); }
 .prompt-preview .text-button:hover, .prompt-preview .text-button:focus-visible, .prompt-preview summary:hover, .prompt-preview summary:focus-visible { color: var(--text-primary); }
-@media (pointer: coarse) { .prompt-section-header.is-quiet, .prompt-preview > .text-button, .prompt-preview details > .text-button, .prompt-preview summary { min-height: 44px; } }
+@media (pointer: coarse), (max-width: 600px) { .prompt-section-header.is-quiet, .prompt-preview > .text-button, .prompt-preview details > .text-button, .prompt-preview summary, .prompt-preview .ui-button.text-button { min-height: 44px; } }
 .prompt-preview p { color: var(--text-secondary); font-size: var(--type-caption-size); }
 .prompt-context-error { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); color: var(--status-danger-text); font-size: var(--type-body-size); }
 @media (max-width: 760px) { .global-prompt-fields textarea, .prompt-preview textarea { font-size: var(--type-subheading-size); } }

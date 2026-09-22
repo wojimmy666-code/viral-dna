@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useRef, useState } from 'react';
 
 // Only mounted after the user explicitly opens the library. Automatic matching
@@ -31,11 +32,11 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
     return () => { current = false; clearTimeout(timer); };
   }, [workspaceId, query, page, request]);
   return <dialog ref={dialog} className="prompt-asset-picker" onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
-    <header><h3>添加项目资产</h3><button className="secondary-button compact" type="button" disabled={busy} onClick={onClose}>关闭</button></header>
+    <header><h3>添加项目资产</h3><Button className="secondary-button compact" type="button" disabled={busy} onClick={onClose}>关闭</Button></header>
     <input aria-label="搜索资产库" placeholder="搜索资产名称" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} />
     {error && <p role="alert">{error}</p>}
     {loading ? <p role="status">正在读取资产…</p> : <div className="prompt-asset-picker-list">
-      {displayedItems.map((asset) => <button type="button" key={asset.id}
+      {displayedItems.map((asset) => <button data-ui="selection-card" type="button" key={asset.id}
         disabled={busy || selectedIds.includes(asset.id) || !asset.rights_confirmed}
         onClick={async () => { setBusy(true); try { await onSelect(asset); } catch (failure) { setError(failure.message); } finally { setBusy(false); } }}>
         <img src={resolveUrl?.(asset.thumbnail_url) || asset.thumbnail_url} loading="lazy" alt="" onError={(event) => { event.currentTarget.hidden = true; }} />
@@ -43,6 +44,6 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
       </button>)}
       {!displayedItems.length && <p>本页没有可引用的图片资产，可更换搜索词或翻页。</p>}
     </div>}
-    <footer><button className="secondary-button compact" disabled={page === 1 || busy} onClick={() => setPage(page - 1)}>上一页</button><span>第 {page} 页</span><button className="secondary-button compact" disabled={page * 30 >= total || busy} onClick={() => setPage(page + 1)}>下一页</button></footer>
+    <footer><Button className="secondary-button compact" disabled={page === 1 || busy} onClick={() => setPage(page - 1)}>上一页</Button><span>第 {page} 页</span><Button className="secondary-button compact" disabled={page * 30 >= total || busy} onClick={() => setPage(page + 1)}>下一页</Button></footer>
   </dialog>;
 }

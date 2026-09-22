@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   CheckCircle,
   CircleNotch,
@@ -222,15 +223,15 @@ export function PromptEditor({
         <div className="prompt-document-toolbar-actions">
           <SaveState promptPackage={workingPackage} status={saveStatus} />
           {saveStatus === "error" && pendingDraftsRef.current.size > 0 && (
-            <button
+            <Button
               className="secondary-button compact"
               type="button"
               onClick={retrySave}
             >
               重试保存
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             className="secondary-button compact"
             type="button"
             disabled={saveStatus === "loading"}
@@ -241,8 +242,8 @@ export function PromptEditor({
           >
             <Copy size={16} />
             复制全文
-          </button>
-          <button
+          </Button>
+          <Button
             className="primary-button compact"
             type="button"
             disabled={saveStatus === "loading"}
@@ -250,7 +251,7 @@ export function PromptEditor({
           >
             <DownloadSimple size={16} />
             下载 TXT
-          </button>
+          </Button>
         </div>
       </header>
 

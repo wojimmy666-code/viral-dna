@@ -1,3 +1,4 @@
+import { IconButton, Button } from "./ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
@@ -178,7 +179,7 @@ function KeyframePicker({
             <h4>从源视频选择关键帧</h4>
             <p>仅可选择当前分镜 {seconds(start)}s 到 {seconds(end)}s 的画面。</p>
           </div>
-          <button aria-label="关闭" disabled={busy} onClick={onClose} type="button"><X size={17} /></button>
+          <IconButton aria-label="关闭" disabled={busy} onClick={onClose} type="button"><X size={17} /></IconButton>
         </header>
         <div className="keyframe-picker-video">
           <video
@@ -214,8 +215,8 @@ function KeyframePicker({
           </label>
         </div>
         <footer>
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-          <button
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button
             className="primary-button compact"
             disabled={busy}
             onClick={() => {
@@ -226,7 +227,7 @@ function KeyframePicker({
           >
             <ImageSquare size={16} />
             使用这一帧
-          </button>
+          </Button>
         </footer>
       </section>
     </div>
@@ -272,7 +273,7 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
       >
         <header>
           <div><h4>新增分镜</h4><p>新分镜将插入到当前分镜之后。</p></div>
-          <button aria-label="关闭" disabled={busy} onClick={onClose} type="button"><X size={17} /></button>
+          <IconButton aria-label="关闭" disabled={busy} onClick={onClose} type="button"><X size={17} /></IconButton>
         </header>
         <div className="shot-create-options">
           <label className={mode === "duplicate" ? "active" : ""}>
@@ -302,8 +303,8 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
           </label>
         )}
         <footer>
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-          <button className="primary-button compact" disabled={busy} type="submit"><Plus size={16} />新增分镜</button>
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button className="primary-button compact" disabled={busy} type="submit"><Plus size={16} />新增分镜</Button>
         </footer>
       </form>
     </div>
@@ -926,7 +927,7 @@ export function ShotImageWorkspace({
                   </span>
                 </button>
                 <span className="shot-candidate-tile-actions">
-                  <button
+                  <IconButton
                     aria-label="放大查看图片候选"
                     disabled={busy}
                     onClick={() => setLightboxCandidateId(candidate.id)}
@@ -934,7 +935,7 @@ export function ShotImageWorkspace({
                     type="button"
                   >
                     <MagnifyingGlassPlus size={14} />
-                  </button>
+                  </IconButton>
                   {!isApproved && (
                     <button
                       aria-label="删除图片候选"
@@ -968,7 +969,7 @@ export function ShotImageWorkspace({
         </div>
         <div className="shot-gate-summary">
           <span>已采用 {gate?.approved_image_count || 0} 张</span>
-          <button
+          <Button
             className="primary-button compact"
             disabled={busy || !gate?.allowed}
             onClick={onAdvance}
@@ -976,7 +977,7 @@ export function ShotImageWorkspace({
           >
             进入分镜视频
             <ArrowRight size={15} />
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -1082,9 +1083,9 @@ export function ShotImageWorkspace({
                     <span>保留</span>
                   </label>}
                   <div className="shot-navigation-actions">
-                    <button aria-label="上移分镜" disabled={busy || itemIndex === 0} onClick={() => moveShot(shot.id, -1)} title="上移" type="button"><ArrowUp size={13} /></button>
-                    <button aria-label="下移分镜" disabled={busy || itemIndex === activeShots.length - 1} onClick={() => moveShot(shot.id, 1)} title="下移" type="button"><ArrowDown size={13} /></button>
-                    <button aria-label="舍弃分镜" disabled={busy || activeShots.length <= 1} onClick={() => onDiscardShot(shot.id)} title="舍弃" type="button"><Trash size={13} /></button>
+                    <IconButton aria-label="上移分镜" disabled={busy || itemIndex === 0} onClick={() => moveShot(shot.id, -1)} title="上移" type="button"><ArrowUp size={13} /></IconButton>
+                    <IconButton aria-label="下移分镜" disabled={busy || itemIndex === activeShots.length - 1} onClick={() => moveShot(shot.id, 1)} title="下移" type="button"><ArrowDown size={13} /></IconButton>
+                    <IconButton variant="warning" size="compact" aria-label="舍弃分镜" disabled={busy || activeShots.length <= 1} onClick={() => onDiscardShot(shot.id)} title="舍弃" type="button"><Trash size={13} /></IconButton>
                   </div>
                 </div>
               );
@@ -1092,7 +1093,7 @@ export function ShotImageWorkspace({
           </div>
           {discardedShots.length > 0 && (
             <div className="shot-discarded-section">
-              <button onClick={() => setShowDiscarded((value) => !value)} type="button">
+              <button data-ui="navigation" onClick={() => setShowDiscarded((value) => !value)} type="button">
                 <span>已舍弃 {discardedShots.length}</span>
                 <small>{showDiscarded ? "收起" : "展开"}</small>
               </button>
@@ -1111,7 +1112,7 @@ export function ShotImageWorkspace({
                     ]}
                   />
                   <span className="shot-discarded-copy">分镜 {item.plan.index}</span>
-                  <button disabled={busy} onClick={() => onRestoreShot(item.plan.id)} type="button"><ArrowCounterClockwise size={13} />恢复</button>
+                  <Button variant="text" size="compact" disabled={busy} onClick={() => onRestoreShot(item.plan.id)} type="button"><ArrowCounterClockwise size={13} />恢复</Button>
                 </div>
               ))}
             </div>
@@ -1150,14 +1151,14 @@ export function ShotImageWorkspace({
                     </span>
                   )}
                   {!sourceVideoMode && visualBeats.length === 1 && (
-                    <button
+                    <Button
                       className="text-button compact"
                       disabled={busy}
                       onClick={onCreateVisualBeat}
                       type="button"
                     >
                       <Plus size={14} />新增画面
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
@@ -1200,14 +1201,14 @@ export function ShotImageWorkspace({
                       <strong>画面轨道</strong>
                       <small>{visualBeats.length} 张有序参考图 · 图号按此顺序传给视频模型</small>
                     </div>
-                    <button
+                    <Button
                       className="secondary-button compact"
                       disabled={busy || visualBeats.length >= 20}
                       onClick={onCreateVisualBeat}
                       type="button"
                     >
                       <Plus size={14} />新增画面
-                    </button>
+                    </Button>
                   </header>
                   <div className="visual-beat-rail">
                     {visualBeats.map((beat, beatIndex) => {
@@ -1240,24 +1241,24 @@ export function ShotImageWorkspace({
                             )}
                           </button>
                           <div className="visual-beat-actions">
-                            <button
+                            <IconButton
                               aria-label="前移画面"
                               disabled={busy || beatIndex === 0}
                               onClick={() => moveVisualBeat(beat.id, -1)}
                               type="button"
-                            ><ArrowLeft size={13} /></button>
-                            <button
+                            ><ArrowLeft size={13} /></IconButton>
+                            <IconButton
                               aria-label="后移画面"
                               disabled={busy || beatIndex === visualBeats.length - 1}
                               onClick={() => moveVisualBeat(beat.id, 1)}
                               type="button"
-                            ><ArrowRight size={13} /></button>
-                            <button
+                            ><ArrowRight size={13} /></IconButton>
+                            <IconButton variant="warning" size="compact"
                               aria-label="删除画面"
                               disabled={busy || visualBeats.length <= 1}
                               onClick={() => onDeleteVisualBeat(beat.id)}
                               type="button"
-                            ><Trash size={13} /></button>
+                            ><Trash size={13} /></IconButton>
                           </div>
                         </article>
                       );
@@ -1296,7 +1297,7 @@ export function ShotImageWorkspace({
                     />
                   </div>
                   {hasSourceVideo && <div className="shot-source-actions">
-                    <button
+                    <Button variant="secondary" size="compact"
                       disabled={busy || !sourceVideoUrl}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -1306,7 +1307,7 @@ export function ShotImageWorkspace({
                     >
                       <VideoCamera size={15} />
                       从视频重选
-                    </button>
+                    </Button>
                   </div>}
                 </figure>}
                 <figure
@@ -1417,7 +1418,7 @@ export function ShotImageWorkspace({
                   <strong>图片待恢复 · {latestRun.recovery_candidate_count} 张</strong>
                   <p>ImageGen 已完成生成，但图片尚未导入当前分镜。</p>
                   <small>{generationFailureGuidance(latestRun)}</small>
-                  <button
+                  <Button
                     className="secondary-button"
                     disabled={busy}
                     onClick={() => onRecoverRun?.(latestRun.id)}
@@ -1425,7 +1426,7 @@ export function ShotImageWorkspace({
                   >
                     <ArrowCounterClockwise size={16} />
                     恢复图片
-                  </button>
+                  </Button>
                 </div>
               )}
 
@@ -1463,7 +1464,7 @@ export function ShotImageWorkspace({
 
                   <div className="shot-review-actions">
                 {plan.image_status === "approved" && (
-                  <button
+                  <Button
                     className="secondary-button compact"
                     disabled={busy || latestRunBusy}
                     onClick={onRevokeApproval}
@@ -1471,9 +1472,9 @@ export function ShotImageWorkspace({
                   >
                     <ArrowCounterClockwise size={16} />
                     取消采用
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button
                   className="primary-button compact"
                   disabled={
                     busy
@@ -1497,7 +1498,7 @@ export function ShotImageWorkspace({
                         ? "改用当前关键帧"
                         : "改用此候选"
                       : "采用所选画面"}
-                </button>
+                </Button>
                   </div>
                 </>
               )}

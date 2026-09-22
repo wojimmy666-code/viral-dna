@@ -1,3 +1,4 @@
+import { IconButton } from "../../ui/system/Button.jsx";
 import { createPortal } from "react-dom";
 import { useEffect } from "react";
 import { X } from "@phosphor-icons/react";
@@ -34,7 +35,7 @@ export function ReferencePreviewDialog({ item, onClose, resolveUrl, shotPlanId }
       <section className="generation-reference-preview-dialog">
         <header>
           <div><strong>{item.label}</strong><small>{item.description}</small></div>
-          <button aria-label="关闭参考预览" onClick={onClose} type="button"><X size={20} /></button>
+          <IconButton aria-label="关闭参考预览" onClick={onClose} type="button"><X size={20} /></IconButton>
         </header>
         <div className="generation-reference-preview-media">
           {isVideo && urls.content ? (

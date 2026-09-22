@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ImageSquare, Plus, X } from "@phosphor-icons/react";
@@ -362,26 +363,26 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         {popup.reference.description && <p>{popup.reference.description}</p>}
         {popup.reference.available === false && <p role="status">此引用暂不可用，请重新选择</p>}
         <div className="asset-reference-actions">
-          <button className="secondary-button compact" type="button" onClick={() => {
+          <Button className="secondary-button compact" type="button" onClick={() => {
             const start = value.indexOf(referenceToken(popup.reference)); setPopup(null); editorRef.current.focus();
             setSelection(editorRef.current, start, start + referenceToken(popup.reference).length);
-          }}>定位</button>
-          <button className="secondary-button compact" disabled={disabled} type="button" onClick={() => menu(null, popup.reference)}>替换</button>
-          <button className="secondary-button compact" disabled={disabled} type="button" onClick={() => {
+          }}>定位</Button>
+          <Button className="secondary-button compact" disabled={disabled} type="button" onClick={() => menu(null, popup.reference)}>替换</Button>
+          <Button className="secondary-button compact" disabled={disabled} type="button" onClick={() => {
             const next = replaceReference(value, references, popup.reference, null); commit(next.value, next.references); setPopup(null);
-          }}>移除</button>
+          }}>移除</Button>
         </div>
       </> : <>
         <input aria-label="搜索项目已选资产" placeholder="搜索项目已选资产" value={query} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} />
         <div role="listbox" id={popupId} aria-label="项目已选资产">
           {!matching.length && <p>没有合适的已选资产，可继续编辑文字或添加资产。</p>}
-          {matching.map((reference, index) => <button id={`${popupId}-${index}`} type="button" role="option" aria-selected={activeIndex === index}
+          {matching.map((reference, index) => <button data-ui="selection-card" id={`${popupId}-${index}`} type="button" role="option" aria-selected={activeIndex === index}
             key={referenceKey(reference)} onMouseDown={(event) => event.preventDefault()} onClick={() => insert(reference)} onMouseEnter={() => setActiveIndex(index)}>
             <span className="asset-reference-option-image"><Thumbnail reference={reference} resolveUrl={resolveUrl} /></span>
             <span><strong>{reference.label}</strong>{reference.description && <small>{reference.description}</small>}</span>
           </button>)}
         </div>
-        {onAddAssets && <button className="text-button" type="button" onClick={addAsset}>添加资产</button>}
+        {onAddAssets && <Button className="text-button" type="button" onClick={addAsset}>添加资产</Button>}
       </>}
     </div>, document.body)}
   </div>;

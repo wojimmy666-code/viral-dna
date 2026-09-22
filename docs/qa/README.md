@@ -43,6 +43,7 @@
 
 ## 共用工作台
 
+- [统一操作按钮验收](workbench/shared-buttons.md)
 - [登录续期与原地恢复验收](accounts/session-renewal.md)
 - [侧边栏展开收起验收](workbench/侧边栏展开收起验收.md)
 - [统一创作工作台验收](workbench/统一创作工作台验收.md)

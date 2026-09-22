@@ -1,3 +1,4 @@
+import { Button } from "./ui/system/Button.jsx";
 import { useEffect, useRef, useState } from "react";
 import { ArrowSquareOut, CircleNotch } from "@phosphor-icons/react";
 import "./browser-assist.css";
@@ -30,18 +31,18 @@ export function BrowserAssistControls({ session, request, onChange }) {
   return (
     <div className="browser-assist-controls">
       <div className="browser-assist-actions">
-        <button className="secondary-button compact" type="button" disabled={Boolean(busy) || session.state === "starting"} onClick={() => act("focus")}>
+        <Button className="secondary-button compact" type="button" disabled={Boolean(busy) || session.state === "starting"} onClick={() => act("focus")}>
           <ArrowSquareOut size={16} aria-hidden="true" />
           {waiting ? "打开验证窗口" : "查看采集窗口"}
-        </button>
+        </Button>
         {waiting && (
-          <button className="primary-button compact" type="button" disabled={Boolean(busy)} onClick={() => act("continue")}>
+          <Button className="primary-button compact" type="button" disabled={Boolean(busy)} onClick={() => act("continue")}>
             {busy === "continue" ? "正在继续" : session.mode === "connect" ? "已完成登录" : "我已完成，继续读取"}
-          </button>
+          </Button>
         )}
-        <button className="text-button" type="button" disabled={Boolean(busy) || session.state === "starting"} onClick={() => act("cancel")}>
+        <Button className="text-button" type="button" disabled={Boolean(busy) || session.state === "starting"} onClick={() => act("cancel")}>
           {busy === "cancel" ? "正在取消" : "取消采集"}
-        </button>
+        </Button>
       </div>
       {waiting && <p>请在本机专用窗口操作，不是在日常浏览器中。验证完成后继续同一任务；等待超时会自动停止。</p>}
       {error && <p className="inline-error" role="alert">{error}</p>}
@@ -118,10 +119,10 @@ export function BrowserAssistConnection({ request }) {
       {active ? (
         <BrowserAssistControls session={status.session} request={request} onChange={updateSession} />
       ) : (
-        <button className="secondary-button compact" type="button" disabled={busy} onClick={connect}>
+        <Button className="secondary-button compact" type="button" disabled={busy} onClick={connect}>
           {busy && <CircleNotch size={16} className="spin" aria-hidden="true" />}
           {busy ? "正在打开" : "连接专用浏览器"}
-        </button>
+        </Button>
       )}
       {error && <p className="inline-error" role="alert">{error}</p>}
       {pollError && <p className="inline-error" role="status">{pollError}</p>}

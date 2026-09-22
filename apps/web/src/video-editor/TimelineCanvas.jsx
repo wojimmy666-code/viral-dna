@@ -91,7 +91,7 @@ function TrackLabel({ children, icon, action, actionLabel }) {
     <div className="timeline-canvas-track-label">
       <span>{icon}{children}</span>
       {action && (
-        <button aria-label={actionLabel} onClick={action} title={actionLabel} type="button">
+        <button data-ui="timeline-control" aria-label={actionLabel} onClick={action} title={actionLabel} type="button">
           <Plus size={14} />
         </button>
       )}
@@ -447,7 +447,7 @@ export function TimelineCanvas({
         <div className="timeline-disabled-clips">
           <span>未参与成片</span>
           {disabledClips.map((clip) => (
-            <button key={clip.id} onClick={() => onSelectClip(clip.id)} type="button">
+            <button data-ui="timeline-control" key={clip.id} onClick={() => onSelectClip(clip.id)} type="button">
               分镜 {clip.shot_index}
             </button>
           ))}

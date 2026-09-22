@@ -1,3 +1,4 @@
+import { Button } from "./ui/system/Button.jsx";
 import {
   ArrowRight,
   ShieldCheck,
@@ -47,8 +48,8 @@ export function RecordWorkspaceState({ error = "", loading = false, onBack, onRe
         <p>{error || "可以返回项目列表选择其他项目，或为当前视频重新发起分析。"}</p>
       </div>
       <div className="record-route-actions">
-        <button className="secondary-button compact" onClick={onBack} type="button">返回项目列表</button>
-        {error && <button className="primary-button compact" onClick={onRetry} type="button">重新加载</button>}
+        <Button className="secondary-button compact" onClick={onBack} type="button">返回项目列表</Button>
+        {error && <Button className="primary-button compact" onClick={onRetry} type="button">重新加载</Button>}
       </div>
     </section>
   );

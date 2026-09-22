@@ -73,7 +73,7 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
             <strong>{activeItem.title || "图片预览"}</strong>
             {activeItem.meta && <small>{activeItem.meta}</small>}
           </div>
-          <button aria-label="关闭图片预览" onClick={onClose} type="button">
+          <button data-ui="media-control" aria-label="关闭图片预览" onClick={onClose} type="button">
             <X size={20} />
           </button>
         </header>
@@ -125,7 +125,7 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
         <footer>
           <span>{activeIndex + 1} / {items.length}</span>
           <div>
-            <button
+            <button data-ui="media-control"
               aria-label="缩小图片"
               disabled={scale <= MIN_SCALE}
               onClick={() => setScale((current) => clampScale(current - SCALE_STEP))}
@@ -134,7 +134,7 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
               <MagnifyingGlassMinus size={18} />
             </button>
             <output>{Math.round(scale * 100)}%</output>
-            <button
+            <button data-ui="media-control"
               aria-label="放大图片"
               disabled={scale >= MAX_SCALE}
               onClick={() => setScale((current) => clampScale(current + SCALE_STEP))}
@@ -142,7 +142,7 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
             >
               <MagnifyingGlassPlus size={18} />
             </button>
-            <button onClick={() => setScale(1)} type="button">
+            <button data-ui="media-control" onClick={() => setScale(1)} type="button">
               <ArrowsOutSimple size={18} />适应窗口
             </button>
           </div>

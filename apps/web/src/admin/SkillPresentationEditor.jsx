@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useRef, useState } from "react";
 import { SkillCover } from "../skill-workflow/SkillCover.jsx";
 import { presentationPayload } from "../skill-workflow/skill-presentation-ui.js";
@@ -125,15 +126,15 @@ export function SkillPresentationEditor({ skill, request, onClose, onSaved }) {
           <small>{kind === "image" ? "JPG / PNG / WebP，最大 20MB" : "MP4 / MOV / WebM，最大 200MB、120 秒"}</small>
           {isUploading && <div role="status"><small>正在上传{uploading[kind] == null ? "…" : ` ${uploading[kind]}%`}</small><progress aria-label="文件上传进度" max={100} value={uploading[kind] ?? undefined} /></div>}
           {asset && <><small>{asset.original_filename} · {asset.phase}</small>{["uploaded", "processing"].includes(asset.status) && <progress aria-label="素材处理进度" max={100} value={asset.progress || 0} />}<div>
-            <button type="button" className="text-button" disabled={saving || isUploading} onClick={() => setDraft(current => ({...current,[kind]:null}))}>移除{kind === "image" ? "图片" : "视频"}</button>
-            {asset.status === "failed" && asset.retryable && <button type="button" className="text-button" onClick={() => retry(asset)}>重试处理</button>}
+            <Button type="button" className="text-button" disabled={saving || isUploading} onClick={() => setDraft(current => ({...current,[kind]:null}))}>移除{kind === "image" ? "图片" : "视频"}</Button>
+            {asset.status === "failed" && asset.retryable && <Button type="button" className="text-button" onClick={() => retry(asset)}>重试处理</Button>}
           </div>{asset.error_message && <p role="alert">{asset.error_message}</p>}</>}
         </div>;
       })}
       {!draft.image && draft.video && <small>使用视频第一帧作为封面</small>}
     </div><div className="skill-presentation-preview"><SkillCover skill={previewSkill} /><p>效果预览 · 悬停或点击播放，视频静音循环</p></div></div>
     {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
-    {(notice || error) && <button type="button" className="text-button" disabled={saving || !!Object.keys(uploading).length} onClick={reloadSaved}>放弃未保存设置，重新加载</button>}
-    <div className="skill-presentation-actions"><button type="button" className="primary-button compact" disabled={!canSave} onClick={save}>{saving ? "正在保存…" : "保存封面"}</button><button type="button" className="secondary-button compact" disabled={saving} onClick={() => { discard(); onClose(); }}>取消</button></div>
+    {(notice || error) && <Button type="button" className="text-button" disabled={saving || !!Object.keys(uploading).length} onClick={reloadSaved}>放弃未保存设置，重新加载</Button>}
+    <div className="skill-presentation-actions"><Button type="button" className="primary-button compact" disabled={!canSave} onClick={save}>{saving ? "正在保存…" : "保存封面"}</Button><Button type="button" className="secondary-button compact" disabled={saving} onClick={() => { discard(); onClose(); }}>取消</Button></div>
   </section>;
 }

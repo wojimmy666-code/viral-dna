@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { PromptSectionHeader } from "./PromptSectionHeader.jsx";
 import { combinePrompt, createGlobalPromptSession } from "./global-prompt-session.js";
@@ -90,8 +91,8 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
         {parts.map(type => <label key={type}>{parts.length === 2 && <span>{type === "image" ? "图片" : "视频"}提示词</span>}<textarea aria-label={`全局${type === "image" ? "图片" : "视频"}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ""} placeholder="可留空；只填写整片共同要求" onBlur={() => void flush()} onChange={event => edit(type, event.target.value)} /></label>)}
       </div>
     </details>
-    {(error || state?.error) && <div className="prompt-context-error" role="alert"><span>{error || state.error}</span>{!recovery && <><button className="text-button" type="button" onClick={() => state ? void flush() : setReload(value => value + 1)}>重试保存</button><button className="text-button" type="button" onClick={() => setReload(value => value + 1)}>重新加载并核对</button></>}</div>}
-    {recovery && <details className="prompt-recovery"><summary>核对未保存的全局草稿</summary>{["image", "video"].map(type => <label key={type}>本地全局{type === "image" ? "图片" : "视频"}草稿<textarea readOnly rows={5} value={recovery[`common_${type}_prompt`]} /></label>)}<button className="secondary-button" type="button" onClick={() => resolveRecovery(true)}>使用本地草稿</button><button className="text-button" type="button" onClick={() => resolveRecovery(false)}>保留服务器版本</button></details>}
+    {(error || state?.error) && <div className="prompt-context-error" role="alert"><span>{error || state.error}</span>{!recovery && <><Button className="text-button" type="button" onClick={() => state ? void flush() : setReload(value => value + 1)}>重试保存</Button><Button className="text-button" type="button" onClick={() => setReload(value => value + 1)}>重新加载并核对</Button></>}</div>}
+    {recovery && <details className="prompt-recovery"><summary>核对未保存的全局草稿</summary>{["image", "video"].map(type => <label key={type}>本地全局{type === "image" ? "图片" : "视频"}草稿<textarea readOnly rows={5} value={recovery[`common_${type}_prompt`]} /></label>)}<Button className="secondary-button" type="button" onClick={() => resolveRecovery(true)}>使用本地草稿</Button><Button className="text-button" type="button" onClick={() => resolveRecovery(false)}>保留服务器版本</Button></details>}
   </div>;
 });
 
@@ -103,8 +104,8 @@ export function PromptPreview({ common = "", local = "", label = "提示词" }) 
     catch { setError("复制失败，请选中文本后复制"); }
   }
   return <div className="prompt-preview">
-    <button className="text-button" type="button" onClick={() => void copy(local, "local")}>{copied === "local" ? "已复制局部" : "复制局部"}</button>
-    <details><summary>查看完整提示词</summary><textarea aria-label={`完整${label}`} readOnly rows={8} value={combinePrompt(common, local)} /><p>生成时还会附加本次参考素材与模型参数。</p><button className="text-button" type="button" onClick={() => void copy(combinePrompt(common, local), "full")}>{copied === "full" ? "已复制完整提示词" : "复制完整提示词"}</button></details>
+    <Button className="text-button" type="button" onClick={() => void copy(local, "local")}>{copied === "local" ? "已复制局部" : "复制局部"}</Button>
+    <details><summary>查看完整提示词</summary><textarea aria-label={`完整${label}`} readOnly rows={8} value={combinePrompt(common, local)} /><p>生成时还会附加本次参考素材与模型参数。</p><Button className="text-button" type="button" onClick={() => void copy(combinePrompt(common, local), "full")}>{copied === "full" ? "已复制完整提示词" : "复制完整提示词"}</Button></details>
     {error && <span role="alert">{error}</span>}
   </div>;
 }

@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { destinationAfterLogin } from "./login-destination.js";
@@ -69,7 +70,7 @@ export function AccountLogin({ admin, setup, activation, onDone }) {
             {field("password", activation ? "新密码（至少 8 位）" : "密码（至少 8 位）", "password", { autoComplete: activation ? "new-password" : "current-password", minLength: PASSWORD_MIN_LENGTH })}
           </>}
           <ErrorMessage error={error} />
-          <button className="primary-button account-primary" type="submit">{busy ? "处理中…" : setup ? "确认归属并启用" : activation ? "设置密码" : "登录"}</button>
+          <Button className="primary-button account-primary" type="submit">{busy ? "处理中…" : setup ? "确认归属并启用" : activation ? "设置密码" : "登录"}</Button>
         </fieldset>
       </form>
       {!setup && !activation && <footer><span>开通或重置密码，请联系管理员。</span><Link to={admin ? "/login" : "/admin/login"}>{admin ? "前端登录" : "后台登录"}</Link></footer>}
@@ -309,7 +310,7 @@ export function AccountRoot({ children }) {
     catch (failure) { setError(failure.message); }
   }
   if (auth.loading) return <main className="account-loading" role="status">正在检查登录状态…</main>;
-  if (auth.failed) return <main className="account-loading"><ErrorMessage error={error} /><button className="secondary-button" onClick={loadSession}>重试</button></main>;
+  if (auth.failed) return <main className="account-loading"><ErrorMessage error={error} /><Button className="secondary-button" onClick={loadSession}>重试</Button></main>;
   const loginRoute = location.pathname === "/login" || location.pathname === "/admin/login";
   if (auth.auth_mode !== "password") return loginRoute ? <Navigate to={destinationAfterLogin(location, admin)} replace /> : children;
   if (!auth.initialized && auth.setup_allowed === false) return <main className="account-loading">请在部署本机打开应用完成首次账户设置，完成后即可登录。</main>;
@@ -324,26 +325,26 @@ export function AccountRoot({ children }) {
   return <div className="account-root">
     <AccountHeader toolbarDisabled={sessionBlocked || !!lease?.lost} onHomeNavigation={() => setMenu(false)}
       identity={<span className="account-identity">{session.account_kind === "enterprise" ? <Buildings size={17} aria-hidden="true" /> : <UserCircle size={17} aria-hidden="true" />}<span className="account-name" title={session.account_name || "平台管理后台"}>{session.account_name || "平台管理后台"}</span><small>{session.account_kind === "enterprise" ? "企业账户" : admin ? "admin" : "个人账户"}</small></span>}
-      accountMenu={<div className="account-menu" ref={menuElement}><button className="text-button" aria-expanded={menu} onClick={() => setMenu(!menu)} title={session.display_name}><span className="account-menu-name">{session.display_name}</span><CaretDown size={14} aria-hidden="true" /></button>
+      accountMenu={<div className="account-menu" ref={menuElement}><Button className="text-button" aria-expanded={menu} onClick={() => setMenu(!menu)} title={session.display_name}><span className="account-menu-name">{session.display_name}</span><CaretDown size={14} aria-hidden="true" /></Button>
         {menu && <div className="account-menu-panel">
           <div className="account-menu-identity">{session.account_name || "平台管理后台"}<small>{session.account_kind === "enterprise" ? "企业账户" : admin ? "admin" : "个人账户"}</small></div>
           {admin && <Link to="/admin/accounts" onClick={event => accountNavigate(event, "/admin/accounts")}>账户管理</Link>}
           {!admin && <Link to="/account/storage" onClick={event => accountNavigate(event, "/account/storage")}>存储管理与生成历史</Link>}
           {!admin && session.account_kind === "enterprise" && session.role === "owner" && <Link to="/account/members" onClick={event => accountNavigate(event, "/account/members")}>企业成员</Link>}
-          <button className="text-button" onClick={() => { setPasswordOpen(true); setMenu(false); }}>修改密码</button>
-          <button className="text-button" onClick={logout}><SignOut size={16} />退出登录</button>
+          <Button className="text-button" onClick={() => { setPasswordOpen(true); setMenu(false); }}>修改密码</Button>
+          <Button className="text-button" onClick={logout}><SignOut size={16} />退出登录</Button>
         </div>}
       </div>}>
     <ErrorMessage error={error} />
-    {sessionBlocked && <div className="account-session-notice" role="status"><span>{sessionHealth === "changed" ? "登录用户已改变，请使用原用户重新登录。" : "登录已过期，请重新登录后继续。"}当前页面的未提交内容仍保留，暂时不要刷新页面。</span><button className="primary-button" onClick={() => setReauthOpen(true)}>重新登录</button></div>}
-    {sessionHealth === "offline" && <div className="account-session-notice" role="status"><span>连接暂时中断，正在重试登录状态检查。当前内容仍保留。</span><button className="text-button" onClick={() => void activity.current?.retry()}>重试连接</button></div>}
+    {sessionBlocked && <div className="account-session-notice" role="status"><span>{sessionHealth === "changed" ? "登录用户已改变，请使用原用户重新登录。" : "登录已过期，请重新登录后继续。"}当前页面的未提交内容仍保留，暂时不要刷新页面。</span><Button className="primary-button" onClick={() => setReauthOpen(true)}>重新登录</Button></div>}
+    {sessionHealth === "offline" && <div className="account-session-notice" role="status"><span>连接暂时中断，正在重试登录状态检查。当前内容仍保留。</span><Button className="text-button" onClick={() => void activity.current?.retry()}>重试连接</Button></div>}
     {reauthOpen && <SessionReauthentication session={session} admin={admin} onClose={() => setReauthOpen(false)} onDone={next => activity.current?.recover(next)} />}
     {notice && <p className="account-help" role="status">{notice}</p>}
     {passwordOpen && <form className="account-password-form" onSubmit={changePassword}>
       <h2>修改密码</h2>{["current_password", "new_password"].map(name => <label className="account-field" key={name}><span>{name === "current_password" ? "当前密码" : "新密码（至少 8 位）"}</span><input type="password" value={password[name]} autoComplete={name === "current_password" ? "current-password" : "new-password"} minLength={PASSWORD_MIN_LENGTH} required onChange={e => setPassword({ ...password, [name]: e.target.value })} /></label>)}
-      <div className="account-actions"><button type="submit" className="primary-button">修改并重新登录</button><button type="button" className="secondary-button" onClick={() => setPasswordOpen(false)}>取消</button></div>
+      <div className="account-actions"><Button type="submit" className="primary-button">修改并重新登录</Button><Button type="button" className="secondary-button" onClick={() => setPasswordOpen(false)}>取消</Button></div>
     </form>}
-    {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? (sessionBlocked ? "当前修改已暂停提交。" : lease.occupied ? `${lease.display_name || "其他成员"} 正在编辑。当前修改仍保留，暂不能提交。` : "编辑权已失效，当前修改仍保留。") : lease.occupied ? `${lease.display_name} 正在编辑，当前为只读查看。` : "当前为只读查看。"}</span>{lease.lost ? <>{!sessionBlocked && <button className="text-button" onClick={() => void acquire(true)}>重新取得编辑权</button>}<button className="text-button" onClick={copyDraft}>复制未提交内容</button><button className="text-button" onClick={downloadDraft}>下载备份</button></> : <button className="text-button" onClick={() => void acquire()}>进入编辑</button>}</div>}
+    {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? (sessionBlocked ? "当前修改已暂停提交。" : lease.occupied ? `${lease.display_name || "其他成员"} 正在编辑。当前修改仍保留，暂不能提交。` : "编辑权已失效，当前修改仍保留。") : lease.occupied ? `${lease.display_name} 正在编辑，当前为只读查看。` : "当前为只读查看。"}</span>{lease.lost ? <>{!sessionBlocked && <Button className="text-button" onClick={() => void acquire(true)}>重新取得编辑权</Button>}<Button className="text-button" onClick={copyDraft}>复制未提交内容</Button><Button className="text-button" onClick={downloadDraft}>下载备份</Button></> : <Button className="text-button" onClick={() => void acquire()}>进入编辑</Button>}</div>}
     <div ref={content} inert={sessionBlocked || !!lease?.lost}>
     {location.pathname === "/account/storage" && !admin ? <StorageManagement session={session} /> : management ? <AccountManagement admin={admin} session={session} /> : <>
       {projectId && (!held || (lease?.loading && !lease?.lost)) && <main className="account-loading" role="status">正在检查项目编辑状态…</main>}

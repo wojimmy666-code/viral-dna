@@ -1,3 +1,4 @@
+import { IconButton, Button } from "./ui/system/Button.jsx";
 import {
   forwardRef,
   useCallback,
@@ -3085,9 +3086,9 @@ function HistoryPage({
               value={query}
             />
             {query && (
-              <button aria-label="清空搜索" onClick={() => onQueryChange("")} type="button">
+              <IconButton aria-label="清空搜索" onClick={() => onQueryChange("")} type="button">
                 <X size={15} />
-              </button>
+              </IconButton>
             )}
           </label>
           <label className="history-select">
@@ -3128,9 +3129,9 @@ function HistoryPage({
                 <span key={folder.id}>
                   <Folder size={15} />
                   <strong>{folder.name}</strong>
-                  <button aria-label={`重命名${folder.name}`} onClick={() => onRenameFolder(folder)} type="button">
+                  <IconButton aria-label={`重命名${folder.name}`} onClick={() => onRenameFolder(folder)} type="button">
                     <PencilSimple size={14} />
-                  </button>
+                  </IconButton>
                 </span>
               )) : <p>还没有自定义目录</p>}
             </div>
@@ -3150,9 +3151,9 @@ function HistoryPage({
             <h2>{query || folderFilter || statusFilter ? "没有匹配的项目" : lifecycleMeta.emptyTitle}</h2>
             <p>{query || folderFilter || statusFilter ? "调整搜索或筛选条件后再试。" : lifecycleMeta.emptyDescription}</p>
             {lifecycle === "active" && !query && !folderFilter && !statusFilter && (
-              <button className="primary-button compact" onClick={onCreate} type="button">
+              <Button className="primary-button compact" onClick={onCreate} type="button">
                 <Plus size={16} />新建项目
-              </button>
+              </Button>
             )}
           </section>
         ) : (
@@ -3257,7 +3258,7 @@ function HistoryPage({
                         <summary aria-label={`${record.name} 的更多操作`}><DotsThree size={20} weight="bold" /></summary>
                         <div>
                           {lifecycle !== "trashed" && (
-                            <button disabled={actionBusy} onClick={() => onRenameRecord(record)} type="button">
+                            <button data-ui="menu-item" disabled={actionBusy} onClick={() => onRenameRecord(record)} type="button">
                               <PencilSimple size={15} />改名
                             </button>
                           )}
@@ -3306,14 +3307,14 @@ function HistoryPage({
               </div>
 
               <div className="history-page-controls">
-                <button
+                <IconButton
                   aria-label="上一页"
                   disabled={loading || page <= 1}
                   onClick={() => selectHistoryPage(page - 1)}
                   type="button"
                 >
                   <CaretLeft size={15} />
-                </button>
+                </IconButton>
                 {paginationItems.map((item) => (
                   typeof item === "number" ? (
                     <button
@@ -3330,14 +3331,14 @@ function HistoryPage({
                     <span aria-hidden="true" className="history-page-ellipsis" key={item}>…</span>
                   )
                 ))}
-                <button
+                <IconButton
                   aria-label="下一页"
                   disabled={loading || page >= totalPages}
                   onClick={() => selectHistoryPage(page + 1)}
                   type="button"
                 >
                   <CaretRight size={15} />
-                </button>
+                </IconButton>
               </div>
             </nav>
             {selectedRecordIds.length > 0 && (
@@ -3500,7 +3501,7 @@ function ModelSettingsDialog({
             <h2 id="model-settings-title">模型与设置</h2>
             <p id="model-settings-description">验证成功后应用于新建项目；运行中的任务不会改变。</p>
           </div>
-          <button
+          <IconButton
             autoFocus
             aria-label="关闭模型设置"
             className="icon-button"
@@ -3509,7 +3510,7 @@ function ModelSettingsDialog({
             type="button"
           >
             <X size={19} />
-          </button>
+          </IconButton>
         </header>
 
         <div className="settings-body">
@@ -3541,7 +3542,7 @@ function ModelSettingsDialog({
               <small>可以填写现有文件夹或新文件夹；切换前会检查路径和写入权限。</small>
             </label>
             <div className="workspace-setting-actions">
-              <button
+              <Button
                 className="secondary-button compact"
                 disabled={workspaceSaving || saving || !workspaceDraft.trim()}
                 onClick={onValidateWorkspace}
@@ -3549,8 +3550,8 @@ function ModelSettingsDialog({
               >
                 {workspaceSaving ? <CircleNotch className="spin" size={15} /> : <ShieldCheck size={15} />}
                 验证路径
-              </button>
-              <button
+              </Button>
+              <Button
                 className="primary-button compact"
                 disabled={workspaceSaving || saving || !workspaceDraft.trim() || workspaceDraft === workspace.root_path}
                 onClick={onSwitchWorkspace}
@@ -3558,7 +3559,7 @@ function ModelSettingsDialog({
               >
                 {workspaceSaving ? <CircleNotch className="spin" size={15} /> : <FolderOpen size={15} weight="fill" />}
                 切换工作区
-              </button>
+              </Button>
             </div>
             {workspaceValidation && (
               <div className={`workspace-validation ${workspaceValidation.valid ? "valid" : "invalid"}`}>
@@ -3800,7 +3801,7 @@ function ModelSettingsDialog({
                       <strong>自动发现 Codex + ImageGen</strong>
                       <p>只检测本机安装、登录状态和版本，不会提交提示词或消耗图片额度。</p>
                     </div>
-                    <button
+                    <Button
                       className="secondary-button compact"
                       disabled={saving || codexApplying || codexDiscovering}
                       onClick={() => onDiscoverLocalCodex()}
@@ -3810,7 +3811,7 @@ function ModelSettingsDialog({
                         ? <CircleNotch className="spin" size={15} />
                         : <ArrowClockwise size={15} />}
                       {codexDiscovering ? "检测中" : "重新检测"}
-                    </button>
+                    </Button>
                   </div>
 
                   {codexDiscovering && !codexDiscovery ? (
@@ -3975,7 +3976,7 @@ function ModelSettingsDialog({
                           )}
                         </div>
                         <div className="codex-proxy-actions">
-                          <button
+                          <Button
                             className="secondary-button compact"
                             disabled={
                               saving
@@ -3993,7 +3994,7 @@ function ModelSettingsDialog({
                               ? <CircleNotch className="spin" size={15} />
                               : <ShieldCheck size={15} />}
                             {codexNetworkTesting ? "正在测试" : "测试网络与登录"}
-                          </button>
+                          </Button>
                           <small>只建立 HTTPS 连接并检查本机登录状态，不生成图片。</small>
                         </div>
                         {codexNetworkTest && (
@@ -4058,7 +4059,7 @@ function ModelSettingsDialog({
                           </label>
                         </div>
                         <div className="codex-proxy-actions">
-                          <button
+                          <Button
                             className="secondary-button compact"
                             disabled={
                               saving
@@ -4077,7 +4078,7 @@ function ModelSettingsDialog({
                               ? <CircleNotch className="spin" size={15} />
                               : <ShieldCheck size={15} />}
                             {codexSandboxTesting ? "正在预检" : "无费用预检"}
-                          </button>
+                          </Button>
                           <small>仅启动受限命令验证沙箱，不请求模型、不消耗订阅额度。</small>
                         </div>
                         {codexSandboxTest && (
@@ -4118,7 +4119,7 @@ function ModelSettingsDialog({
                           自动配置会先做无费用沙箱预检，再保存包装器与订阅配额口径；
                           首次生成仍由你手动触发。
                         </small>
-                        <button
+                        <Button
                           className="primary-button compact"
                           disabled={
                             saving
@@ -4137,7 +4138,7 @@ function ModelSettingsDialog({
                             ? <CircleNotch className="spin" size={15} />
                             : <MagicWand size={15} weight="fill" />}
                           {codexApplying ? "正在配置" : "应用推荐配置"}
-                        </button>
+                        </Button>
                       </div>
                     </>
                   ) : (
@@ -4242,7 +4243,7 @@ function ModelSettingsDialog({
                   )}
                 </div>
                 <div className="local-tool-actions">
-                  <button
+                  <Button
                     className="secondary-button compact"
                     disabled={
                       saving
@@ -4256,7 +4257,7 @@ function ModelSettingsDialog({
                       ? <CircleNotch className="spin" size={15} />
                       : <ShieldCheck size={15} />}
                     {imageToolDetecting ? "正在检测" : "检测工具"}
-                  </button>
+                  </Button>
                   {(imageToolDetection || imageServerSettings.local_tool_id) && (
                     <div className="local-tool-result">
                       <CheckCircle size={17} weight="fill" />
@@ -4684,14 +4685,14 @@ function ModelSettingsDialog({
         </div>
 
         <footer className="settings-footer">
-          <button className="text-button" disabled={saving || workspaceSaving || codexApplying || codexDiscovering} onClick={onReset} type="button">
+          <Button className="text-button" disabled={saving || workspaceSaving || codexApplying || codexDiscovering} onClick={onReset} type="button">
             恢复推荐值
-          </button>
+          </Button>
           <span />
-          <button className="secondary-button compact" disabled={saving || workspaceSaving || codexApplying || codexDiscovering} onClick={closeIfIdle} type="button">
+          <Button className="secondary-button compact" disabled={saving || workspaceSaving || codexApplying || codexDiscovering} onClick={closeIfIdle} type="button">
             取消
-          </button>
-          <button
+          </Button>
+          <Button
             className="primary-button compact"
             disabled={loading || saving || workspaceSaving || codexApplying || codexDiscovering}
             onClick={onSave}
@@ -4702,7 +4703,7 @@ function ModelSettingsDialog({
             ) : (
               <><ShieldCheck size={15} weight="bold" /> 验证并保存</>
             )}
-          </button>
+          </Button>
         </footer>
       </section>
     </div>
@@ -4786,9 +4787,9 @@ const ImportPanel = forwardRef(function ImportPanel({
               aria-label="视频链接"
             />
             {url && (
-              <button type="button" onClick={() => setUrl("")} aria-label="清空链接">
+              <IconButton type="button" onClick={() => setUrl("")} aria-label="清空链接">
                 <X size={16} />
-              </button>
+              </IconButton>
             )}
           </div>
           <p className="link-ingestion-hint">
@@ -4811,9 +4812,9 @@ const ImportPanel = forwardRef(function ImportPanel({
                       : "未配置登录状态；公开链接仍会先匿名采集"}
                 </small>
               </span>
-              <button onClick={() => onConfigurePlatform(detectedPlatform)} type="button">
+              <Button variant="text" size="compact" onClick={() => onConfigurePlatform(detectedPlatform)} type="button">
                 {connection?.configured ? "更新连接" : "配置平台"}
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -4902,17 +4903,17 @@ const ImportPanel = forwardRef(function ImportPanel({
             <p>{error}</p>
           </div>
           <div className="credential-error-actions">
-            <button
+            <Button
               className="secondary-button compact"
               onClick={() => onConfigurePlatform(activePlatform)}
               type="button"
             >
               配置{activePlatform ? platformLabel(activePlatform) : "平台"}
-            </button>
-            <button className="primary-button compact" disabled={submitting} onClick={onRetry} type="button">
+            </Button>
+            <Button className="primary-button compact" disabled={submitting} onClick={onRetry} type="button">
               {submitting ? <CircleNotch className="spin" size={16} /> : <ArrowClockwise size={16} />}
               更新后重试
-            </button>
+            </Button>
           </div>
         </div>
       ) : error && (
@@ -4923,10 +4924,10 @@ const ImportPanel = forwardRef(function ImportPanel({
       )}
 
       <div className="import-actions">
-        <button className="primary-button" type="button" onClick={() => onStart()} disabled={submitting}>
+        <Button className="primary-button" type="button" onClick={() => onStart()} disabled={submitting}>
           {submitting ? <CircleNotch className="spin" size={18} /> : <Sparkle size={18} weight="fill" />}
           {submitting ? "正在创建项目" : "创建项目并开始分析"}
-        </button>
+        </Button>
       </div>
     </section>
   );
@@ -4976,14 +4977,14 @@ function AnalysisProgress({ analysis, video, connectionError, submitting, retryE
       {failed && (
         <div className="credential-error-actions">
           {isCredentialAnalysisError(analysis.error?.code) && (
-            <button className="secondary-button compact" type="button" onClick={onConfigurePlatform}>
+            <Button className="secondary-button compact" type="button" onClick={onConfigurePlatform}>
               配置{platformLabel(video?.source_type)}登录状态
-            </button>
+            </Button>
           )}
           {analysis.error?.retryable && (
-            <button className="primary-button compact" type="button" disabled={submitting} onClick={onRetry}>
+            <Button className="primary-button compact" type="button" disabled={submitting} onClick={onRetry}>
               {submitting ? "正在提交" : "重新分析"}
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -4993,7 +4994,7 @@ function AnalysisProgress({ analysis, video, connectionError, submitting, retryE
       {connectionError && (
         <div className="inline-error" role="alert">
           <span>{connectionError}</span>
-          <button className="text-button" type="button" onClick={onRefresh}>刷新状态</button>
+          <Button className="text-button" type="button" onClick={onRefresh}>刷新状态</Button>
         </div>
       )}
       <div className="progress-track">
@@ -5045,7 +5046,7 @@ function RecordBreadcrumb({ items, onNavigate }) {
                 {item.label}
               </span>
             ) : (
-              <button onClick={() => onNavigate(item.id)} type="button">
+              <button data-ui="selection-card" onClick={() => onNavigate(item.id)} type="button">
                 {item.label}
               </button>
             )}
@@ -5145,11 +5146,11 @@ function ReportHeader({
               <CaretDown className="analysis-version-caret" size={13} />
             </label>
           )}
-          <button className="secondary-button compact" type="button" onClick={onRestart}>
+          <Button className="secondary-button compact" type="button" onClick={onRestart}>
             <ArrowClockwise size={16} />
             重新分析
-          </button>
-          <button
+          </Button>
+          <Button
             className="primary-button compact"
             type="button"
             onClick={
@@ -5160,7 +5161,7 @@ function ReportHeader({
           >
             <DownloadSimple size={16} />
             {isMediaEvidence ? "证据清单" : "导出"}
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -5501,10 +5502,10 @@ function OverviewTab({ analysis, report, filePreview, videoRef, onOpenShots }) {
             </div>
           </details>
         ) : <div className="audience-card"><span className="eyebrow">受众推断</span><p>{overview.audience_inference}</p></div>}
-        <button className="secondary-button full" type="button" onClick={onOpenShots}>
+        <Button className="secondary-button full" type="button" onClick={onOpenShots}>
           {isMediaEvidence ? "查看真实分镜证据" : isModel ? "查看 VLM 分镜事实" : "查看逐镜头拆解"}
           <CaretRight size={16} />
-        </button>
+        </Button>
       </aside>
     </div>
   );
@@ -5653,7 +5654,7 @@ function ShotsTab({ shots, segmentation, activeShotId, onSelect, onCopy, analysi
               <details className="prompt-box shot-prompt-disclosure">
                 <summary><span><MagicWand size={17} weight="fill" /><strong>逐镜头复刻提示词</strong></span><CaretDown size={16} /></summary>
                 <PromptSectionView prompt={activeShot.prompt} />
-                <button type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")}><Copy size={16} />复制提示词</button>
+                <Button variant="text" size="compact" type="button" onClick={() => onCopy(activeShot.prompt, "镜头提示词已复制")}><Copy size={16} />复制提示词</Button>
               </details>
             </>
           )}

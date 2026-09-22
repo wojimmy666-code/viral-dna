@@ -1,3 +1,4 @@
+import { Button } from "./ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
@@ -969,7 +970,7 @@ export function ShotVideoWorkspace({
             tabIndex={!gate?.allowed ? 0 : undefined}
             aria-label={!gate?.allowed ? "进入视频剪辑：请至少选择一个有效的已采用视频参与剪辑" : undefined}
           >
-            <button
+            <Button
               className="primary-button compact"
               disabled={busy || !gate?.allowed}
               onClick={onAdvance}
@@ -977,7 +978,7 @@ export function ShotVideoWorkspace({
             >
               {advanced ? "继续到视频剪辑" : "进入视频剪辑"}
               <ArrowRight size={16} />
-            </button>
+            </Button>
           </span>
         </div>
       </header>
@@ -1027,7 +1028,7 @@ export function ShotVideoWorkspace({
                 <CheckCircle size={18} weight="fill" />
                 <span><strong>已沿用原视频</strong><small>该分镜跳过视频生成，直接进入剪辑。</small></span>
               </div>
-              <button
+              <Button
                 className="secondary-button compact"
                 disabled={busy}
                 onClick={() => onSetOutputMode?.({
@@ -1037,7 +1038,7 @@ export function ShotVideoWorkspace({
                 type="button"
               >
                 改为重新生成
-              </button>
+              </Button>
             </div>
           )}
 
@@ -1132,7 +1133,7 @@ export function ShotVideoWorkspace({
                 <CaretDown aria-hidden="true" size={17} />
               </summary>
               <div className="shot-video-config-disclosure-body">
-                {(selectedManagedAssetCapability?.supported || managedAssetBinding) && <button className="secondary-button compact" type="button" disabled={busy} onClick={() => openManagedAssetPicker()}>托管人物资产</button>}
+                {(selectedManagedAssetCapability?.supported || managedAssetBinding) && <Button className="secondary-button compact" type="button" disabled={busy} onClick={() => openManagedAssetPicker()}>托管人物资产</Button>}
                 {sourceVideoUrl && (
                   <details
                     className="shot-video-depth-input-details"
@@ -1196,9 +1197,9 @@ export function ShotVideoWorkspace({
                   videoPromptMentions={videoDraft.videoPromptMentions || []}
                   videoReferenceBindings={plan?.video_reference_bindings || []}
                 />
-                {(videoDraft.autoReferenceExclusions || []).length > 0 && <button className="text-button" type="button" disabled={busy} onClick={() => setVideoDraft((current) => (
+                {(videoDraft.autoReferenceExclusions || []).length > 0 && <Button className="text-button" type="button" disabled={busy} onClick={() => setVideoDraft((current) => (
                   reconcileVideoDraftReferences(current, { restoreAutomaticReferences: true }, referenceFrames)
-                ))}>恢复默认分镜图引用</button>}
+                ))}>恢复默认分镜图引用</Button>}
                 <VideoPromptReferencePolicy
                   onNotice={onNotice}
                   prompt={videoDraft.videoPrompt}
@@ -1267,18 +1268,18 @@ export function ShotVideoWorkspace({
                 </span>
               </div>
               {plan.video_status === "approved" && plan.approved_video_candidate_id === displayedCandidate.id ? (
-                <button className="secondary-button compact" disabled={busy} onClick={onRevokeApproval} type="button">取消采用</button>
+                <Button className="secondary-button compact" disabled={busy} onClick={onRevokeApproval} type="button">取消采用</Button>
               ) : (
                 <>
                   {displayedCandidate.status !== "rejected" && (
-                    <button className="secondary-button compact" disabled={busy} onClick={rejectDisplayedCandidate} type="button">退回</button>
+                    <Button className="secondary-button compact" disabled={busy} onClick={rejectDisplayedCandidate} type="button">退回</Button>
                   )}
                   {displayedCandidate.status === "rejected" ? (
-                    <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />重新采用</button>
+                    <Button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />重新采用</Button>
                   ) : plan.video_status === "approved" ? (
-                    <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />改用此视频</button>
+                    <Button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />改用此视频</Button>
                   ) : (
-                    <button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />{plan.video_status === "stale" ? "仍然采用" : "采用此视频"}</button>
+                    <Button className="primary-button compact" disabled={busy} onClick={() => onApprove(displayedCandidate.id)} type="button"><CheckCircle size={16} weight="fill" />{plan.video_status === "stale" ? "仍然采用" : "采用此视频"}</Button>
                   )}
                 </>
               )}

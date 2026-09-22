@@ -1,28 +1,51 @@
-import { useState } from "react";
-import { CreativeBriefChecks } from "./CreativeBriefChecks.jsx";
-import { ideaReviewState } from "./creative-workflow.js";
+import { Button } from "../ui/system/Button.jsx";
+import { useEffect, useRef, useState } from "react";
+import { registerAccountFlusher } from "../accounts/account-client.js";
 
-export function CreativeIdeas({ ideas, brief = "", selectedId, onSelect, busy, onRegenerate, onEdit }) {
+export function CreativeIdeas({ ideas, selectedId, onSelect, busy, onRegenerate, onRevisionOpenChange, revisionSupported }) {
   const [confirmId, setConfirmId] = useState("");
+  const [drafts, setDrafts] = useState({});
+  const textarea = useRef(null);
+  const triggers = useRef({});
+  useEffect(() => {
+    if (!confirmId) return undefined;
+    onRevisionOpenChange(true);
+    textarea.current?.focus({ preventScroll: true });
+    textarea.current?.scrollIntoView({ block: "nearest", behavior: "instant" });
+    const unregister = registerAccountFlusher(() => { throw new Error("请先提交或取消本条修改，意见仍保留在当前页面"); });
+    const warn = event => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => {
+      onRevisionOpenChange(false);
+      unregister();
+      window.removeEventListener("beforeunload", warn);
+    };
+  }, [confirmId, onRevisionOpenChange]);
+  function cancel() {
+    const trigger = triggers.current[confirmId];
+    setConfirmId("");
+    trigger?.focus();
+  }
   return <section className="creative-ideas" aria-label="三个创意方向">
     {ideas.map((idea) => {
-      const state = ideaReviewState(idea, brief);
-      const stale = idea.review_brief != null && idea.review_brief !== brief;
+      const notes = drafts[idea.id] || "";
       return <article className={"creative-idea " + (selectedId === idea.id ? "is-selected" : "")} key={idea.id}>
-        <label className="creative-idea-choice"><input type="radio" name="creative-idea" checked={selectedId === idea.id} disabled={state !== "ready" || busy} onChange={() => onSelect(idea.id)} /><span>{idea.name}</span></label>
-        <p className={"creative-review-label " + (state === "ready" ? "" : "needs-attention")}>{state === "ready" ? (idea.human_review ? "人工核对 · 可展开" : "可展开") : state === "needs_revision" ? "待修订" : "待核对"}</p>
+        <label className="creative-idea-choice"><input type="radio" name="creative-idea" checked={selectedId === idea.id} disabled={busy || Boolean(confirmId)} onChange={() => onSelect(idea.id)} /><span>{idea.name}</span></label>
         <p className="creative-idea-summary">{idea.summary}</p>
         {idea.scene_plan?.length > 0 && <details><summary>{idea.scene_plan.length} 个成片分镜 · 约 {Number(idea.scene_plan.reduce((sum, scene) => sum + scene.duration_seconds, 0).toFixed(2))} 秒</summary><p>{idea.rhythm}</p><ol>{idea.scene_plan.map(scene => <li key={scene.index}>{scene.description}（{scene.duration_seconds} 秒）</li>)}</ol></details>}
-        {stale && <p className="creative-review-note">补充要求已变化，此方向仍保留原版本；请按当前要求修订后展开。</p>}
-        {idea.review_issues?.length > 0 && <details className="creative-review-note"><summary>查看 {idea.review_issues.length} 项具体问题</summary><ul>{idea.review_issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></details>}
         {idea.common_rules?.length > 0 && <details><summary>贯穿全片的公共设定</summary><ul>{idea.common_rules.map(rule => <li key={rule.requirement_index}>{[rule.image_rule, rule.video_rule].filter(Boolean).join("；")}</li>)}</ul></details>}
-        <p className="creative-memory"><strong>记忆画面</strong>{idea.visual_memory}</p>
-        <details><summary>关键画面与品类适配</summary><ul>{idea.key_scenes.map((scene, index) => <li key={index}>{scene}</li>)}</ul><dl><div><dt>品类适配</dt><dd>{idea.category_fit}</dd></div><div><dt>借鉴</dt><dd>{idea.borrowed}</dd></div><div><dt>改变</dt><dd>{idea.changed}</dd></div></dl><CreativeBriefChecks checks={idea.brief_checks} />{idea.assumptions.length > 0 && <p>待确认：{idea.assumptions.join("；")}</p>}</details>
         <div className="creative-idea-actions">
-          <button type="button" className="text-button" disabled={busy} onClick={() => onEdit?.(idea)}>修改与核对</button>
-          <button type="button" className="text-button" disabled={busy} onClick={() => setConfirmId(idea.id)} aria-label={"只重写" + idea.name}>{state === "ready" ? "只换这一条" : "AI 修订本条"}</button>
+          <Button type="button" className="text-button" ref={node => { triggers.current[idea.id] = node; }} disabled={busy || Boolean(confirmId && confirmId !== idea.id)} aria-expanded={confirmId === idea.id} aria-controls={"creative-revision-" + idea.id} onClick={() => setConfirmId(idea.id)} aria-label={"AI 修订本条：" + idea.name}>AI 修订本条</Button>
         </div>
-        {confirmId === idea.id && <div className="creative-rewrite-confirm"><p>将再次调用文案模型并计费，只处理此方向，另外两条保留。</p><button type="button" className="secondary-button" disabled={busy} onClick={() => { setConfirmId(""); onRegenerate(idea); }}>确认调用模型</button><button type="button" className="text-button" disabled={busy} onClick={() => setConfirmId("")}>取消</button></div>}
+        {confirmId === idea.id && <form id={"creative-revision-" + idea.id} className="creative-rewrite-confirm" aria-label={"修订《" + idea.name + "》"} onSubmit={event => {
+          event.preventDefault();
+          if (!busy && revisionSupported && notes.trim()) onRegenerate(idea, notes.trim());
+        }}>
+          <label className="creative-revision-notes"><span>修改意见</span><textarea ref={textarea} required maxLength={2000} rows={4} value={notes} disabled={busy} onChange={event => setDrafts(values => ({ ...values, [idea.id]: event.target.value }))} placeholder="例如：保留人物居中，把场景改为雨夜地标，加强裙摆与灯光的呼应。" /></label>
+          <p className="creative-revision-cost">将调用文案模型并计费，仅修改本条。</p>
+          {!revisionSupported && <p className="creative-failure" role="alert">服务版本尚未更新，请更新并重启服务后刷新页面。</p>}
+          <div className="creative-idea-actions"><Button type="submit" className="primary-button" disabled={busy || !revisionSupported || !notes.trim()}>确认并 AI 修订</Button><Button type="button" className="text-button" disabled={busy} onClick={cancel}>取消</Button></div>
+        </form>}
       </article>;
     })}
   </section>;

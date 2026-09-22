@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   CaretDown,
   Check,
@@ -60,11 +61,11 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
       {loading ? (
         <div className="category-picker-state"><CircleNotch className="spin" size={19} />正在读取品类库…</div>
       ) : error ? (
-        <div className="category-picker-state error"><WarningCircle size={19} />{error}<button className="text-button compact" onClick={load} type="button">重试</button></div>
+        <div className="category-picker-state error"><WarningCircle size={19} />{error}<Button className="text-button compact" onClick={load} type="button">重试</Button></div>
       ) : profiles.length === 0 ? (
         <div className="category-picker-empty">
           <span><Tag size={20} /><span><strong>还没有可用的品类档案</strong><small>先建立品牌与品类约束，再开始创作。</small></span></span>
-          <button className="primary-button" onClick={onManage} type="button"><Plus size={17} />新建品类档案</button>
+          <Button className="primary-button" onClick={onManage} type="button"><Plus size={17} />新建品类档案</Button>
         </div>
       ) : (
         <>
@@ -83,7 +84,7 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
               </span>
               <CaretDown size={17} />
             </button>
-            <button className="text-button compact" onClick={onManage} type="button">管理品类库</button>
+            <Button className="text-button compact" onClick={onManage} type="button">管理品类库</Button>
           </div>
           {open && (
             <div className="category-picker-options">
@@ -93,7 +94,7 @@ export function CategoryProfilePicker({ onChange, onManage, request, value }) {
               </label>
               <div role="listbox" aria-label="选择品类档案">
                 {filtered.map((profile) => (
-                  <button
+                  <button data-ui="selection-card"
                     aria-selected={profile.id === value}
                     key={profile.id}
                     onClick={() => choose(profile)}

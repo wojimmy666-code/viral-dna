@@ -37,20 +37,6 @@
 .viral-error-state > div { flex: 1; }
 .viral-error-state strong { color: var(--text-primary); }
 .viral-error-state p { margin: 0.25rem 0 0; }
-.viral-error-state button {
-  min-height: 2.5rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.45rem;
-  padding: 0 0.9rem;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
-  color: var(--text-primary);
-  background: var(--surface-panel);
-  cursor: pointer;
-}
-
 .viral-executive-summary {
   display: grid;
   gap: 0.75rem;
@@ -203,15 +189,6 @@
 
 .viral-inference-note button {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0;
-  border: 0;
-  color: var(--accent);
-  background: transparent;
-  font-weight: var(--type-weight-semibold);
-  cursor: pointer;
 }
 
 .viral-summary-actions {

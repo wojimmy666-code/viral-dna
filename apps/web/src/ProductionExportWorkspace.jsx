@@ -1,3 +1,4 @@
+import { Button, IconButton } from "./ui/system/Button.jsx";
 import { useEffect, useState } from "react";
 import {
   CircleNotch,
@@ -225,7 +226,7 @@ export function ProductionExportWorkspace({
           <div className="production-export-progress" aria-live="polite">
             <CircleNotch className="spin" size={17} />
             <span>高清导出 {activeJob.progress_percent}%</span>
-            <button onClick={cancelExport} type="button"><X size={14} />取消</button>
+            <Button variant="warning" size="compact" onClick={cancelExport} type="button"><X size={14} />取消</Button>
           </div>
         )}
       </header>
@@ -269,16 +270,16 @@ export function ProductionExportWorkspace({
             </div>
           </fieldset>
 
-          <button className="primary-button production-export-submit" disabled={busy || Boolean(activeJob) || !timeline} onClick={startExport} type="button">
+          <Button className="primary-button production-export-submit" disabled={busy || Boolean(activeJob) || !timeline} onClick={startExport} type="button">
             {busy || activeJob ? <CircleNotch className="spin" size={18} /> : <FilmSlate size={18} weight="fill" />}
             {activeJob ? "正在导出" : successfulJobs.length ? "重新导出高清成片" : "开始高清导出"}
-          </button>
+          </Button>
         </section>
 
         <section className="production-export-preview">
           <div className="production-export-section-heading">
             <div><strong>最新成片</strong><small>{latestSuccess ? `${formatDate(latestSuccess.completed_at)} · ${formatBytes(latestSuccess.file_size_bytes)}` : "完成导出后可在这里播放和下载"}</small></div>
-            {latestSuccess && <button aria-label="下载最新成片" onClick={() => download(latestSuccess)} type="button"><DownloadSimple size={18} /></button>}
+            {latestSuccess && <IconButton aria-label="下载最新成片" onClick={() => download(latestSuccess)} type="button"><DownloadSimple size={18} /></IconButton>}
           </div>
           {latestSuccess ? (
             <div
@@ -313,7 +314,7 @@ export function ProductionExportWorkspace({
                   {job.error_message && <p>{job.error_message}</p>}
                 </div>
                 <div className="production-export-job-actions">
-                  {job.status === "succeeded" && <button onClick={() => download(job)} type="button"><DownloadSimple size={16} />下载</button>}
+                  {job.status === "succeeded" && <Button variant="text" size="compact" onClick={() => download(job)} type="button"><DownloadSimple size={16} />下载</Button>}
                   {ACTIVE_STATUSES.has(job.status) && <span>{job.progress_percent}%</span>}
                 </div>
               </article>

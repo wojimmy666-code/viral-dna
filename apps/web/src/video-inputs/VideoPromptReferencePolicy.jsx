@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useMemo, useState } from "react";
 import { CaretDown, Check, Copy } from "@phosphor-icons/react";
 import {
@@ -64,10 +65,10 @@ export function VideoPromptReferencePolicy({ onNotice, prompt, references }) {
         </div>
       </details>
       <div className="video-reference-policy-actions">
-        <button onClick={() => copyPrompt("editable")} type="button">
+        <Button variant="text" size="compact" onClick={() => copyPrompt("editable")} type="button">
           {copied === "editable" ? <Check size={16} /> : <Copy size={16} />}
           复制可编辑提示词
-        </button>
+        </Button>
         <button className="primary" onClick={() => copyPrompt("compiled")} type="button">
           {copied === "compiled" ? <Check size={16} /> : <Copy size={16} />}
           复制模型输入

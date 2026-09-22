@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useRef, useState } from "react";
 import { activeImageBatch, changedBatchShots, imageBatchCounts } from "./image-batch-ui.js";
 import { readOnce } from "../creation-workspace/read-request.js";
@@ -145,11 +146,11 @@ export function ImageBatchToolbar({ projectId, request, onFlush, onResults, onSt
   const problems = batch?.items?.filter((item) => ["failed", "unknown"].includes(item.status)) || [];
   return <section className="image-batch-toolbar" aria-label="批量生成分镜图片">
     <div className="image-batch-actions">
-      {!running && <button className="primary-button compact" disabled={busy || working || pictureCount === 0} onClick={openSettings} type="button">一键生成全部分镜图</button>}
+      {!running && <Button className="primary-button compact" disabled={busy || working || pictureCount === 0} onClick={openSettings} type="button">一键生成全部分镜图</Button>}
       {batch && <span aria-live="polite">完成 {counts.completed}/{counts.total - counts.skipped} 个画面</span>}
       {batch && <small>耗时 {Math.floor(elapsed / 60)}分{elapsed % 60}秒{running ? ` · ${heartbeat} 秒前心跳` : ""}</small>}
-      {running && <button className="secondary-button compact" disabled={working || batch.status === "stopping"} onClick={() => control("stop")} type="button">停止排队</button>}
-      {!running && batch && (["interrupted", "cancelled"].includes(batch.status) || batch.items.some((item) => item.retryable || item.status === "unknown")) && <button className="secondary-button compact" disabled={working || busy || Boolean(pendingRequest.current)} onClick={() => control("resume")} type="button">继续未完成任务</button>}
+      {running && <Button variant="warning" size="compact" disabled={working || batch.status === "stopping"} onClick={() => control("stop")} type="button">{batch.status === "stopping" ? "正在停止…" : "停止排队"}</Button>}
+      {!running && batch && (["interrupted", "cancelled"].includes(batch.status) || batch.items.some((item) => item.retryable || item.status === "unknown")) && <Button className="secondary-button compact" disabled={working || busy || Boolean(pendingRequest.current)} onClick={() => control("resume")} type="button">继续未完成任务</Button>}
     </div>
     {running && <progress aria-label="批量图片生成进度" max={counts.total || 1} value={counts.done} />}
     <dialog ref={dialogRef} className="image-batch-dialog" aria-labelledby={`batch-settings-${projectId}`} onCancel={event => { event.preventDefault(); closeSettings(); }} onClose={() => setDialogOpen(false)} onClick={event => {
@@ -170,10 +171,10 @@ export function ImageBatchToolbar({ projectId, request, onFlush, onResults, onSt
         </div>}
         {pendingRequest.current && <p className="image-batch-hint">提交结果尚未确认，重试将核对同一批次，不会重复创建。</p>}
         {error && <p role="alert" className="image-batch-error">{error}</p>}
-        <footer><button className="secondary-button compact" disabled={working} type="button" onClick={closeSettings}>取消</button><button className="primary-button compact" disabled={working || busy || (!pendingRequest.current && (!selection.ready || running || pictureCount === 0))} type="button" onClick={prepare}>{working ? "正在提交…" : pendingRequest.current ? "重试确认提交" : "确认生成"}</button></footer>
+        <footer><Button className="secondary-button compact" disabled={working} type="button" onClick={closeSettings}>取消</Button><Button className="primary-button compact" disabled={working || busy || (!pendingRequest.current && (!selection.ready || running || pictureCount === 0))} type="button" onClick={prepare}>{working ? "正在提交…" : pendingRequest.current ? "重试确认提交" : "确认生成"}</Button></footer>
       </>}
     </dialog>
     {error && !dialogOpen && <p role="alert" className="image-batch-error">{error}</p>}
-    {problems.length > 0 && <details className="image-batch-problems"><summary>{problems.length} 个画面需要处理</summary>{problems.map((item) => <div key={item.visual_beat_id}><button className="text-button" onClick={() => callbacks.current.onSelectShot(item.shot_plan_id)} type="button">分镜 {item.shot_index} · 画面 {item.beat_index}</button><span>{item.error_message}</span></div>)}</details>}
+    {problems.length > 0 && <details className="image-batch-problems"><summary>{problems.length} 个画面需要处理</summary>{problems.map((item) => <div key={item.visual_beat_id}><Button className="text-button" onClick={() => callbacks.current.onSelectShot(item.shot_plan_id)} type="button">分镜 {item.shot_index} · 画面 {item.beat_index}</Button><span>{item.error_message}</span></div>)}</details>}
   </section>;
 }

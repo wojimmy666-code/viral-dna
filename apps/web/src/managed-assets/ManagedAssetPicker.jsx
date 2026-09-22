@@ -1,3 +1,4 @@
+import { IconButton, Button } from "../ui/system/Button.jsx";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
@@ -118,7 +119,7 @@ export function ManagedAssetPicker({
             <h3 id="managed-asset-picker-title">选择演员身份</h3>
             <p>目录由 Provider 返回；ViralDNA 不要求手动输入资产 ID。</p>
           </div>
-          <button aria-label="关闭" className="icon-button" onClick={onClose} type="button"><X size={20} /></button>
+          <IconButton aria-label="关闭" className="icon-button" onClick={onClose} type="button"><X size={20} /></IconButton>
         </header>
 
         <div className="managed-asset-kind-tabs" role="tablist" aria-label="资产类型">
@@ -144,7 +145,7 @@ export function ManagedAssetPicker({
             placeholder={`搜索${title}名称`}
             value={queryDraft}
           />
-          <button className="secondary-button compact" type="submit">搜索</button>
+          <Button className="secondary-button compact" type="submit">搜索</Button>
         </form>
 
         <div className="managed-asset-picker-body">
@@ -171,9 +172,9 @@ export function ManagedAssetPicker({
                 <WarningCircle size={28} weight="duotone" />
                 <strong>无法读取火山方舟资产目录</strong>
                 <p>{error.message}</p>
-                <button className="secondary-button compact" onClick={() => { onClose(); onOpenModelSettings?.(); }} type="button">
+                <Button className="secondary-button compact" onClick={() => { onClose(); onOpenModelSettings?.(); }} type="button">
                   <Gear size={16} />打开模型与设置
-                </button>
+                </Button>
               </div>
             ) : assets.length === 0 ? (
               <div className="managed-asset-picker-state">
@@ -208,8 +209,8 @@ export function ManagedAssetPicker({
           <footer className="managed-asset-picker-pagination">
             <span>第 {page} / {totalPages} 页 · 共 {catalog?.total || 0} 个</span>
             <div>
-              <button aria-label="上一页" className="icon-button" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} type="button"><ArrowLeft size={17} /></button>
-              <button aria-label="下一页" className="icon-button" disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} type="button"><ArrowRight size={17} /></button>
+              <IconButton aria-label="上一页" className="icon-button" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} type="button"><ArrowLeft size={17} /></IconButton>
+              <IconButton aria-label="下一页" className="icon-button" disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} type="button"><ArrowRight size={17} /></IconButton>
             </div>
           </footer>
         )}

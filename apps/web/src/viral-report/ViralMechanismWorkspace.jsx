@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   ArrowClockwise,
   CaretDown,
@@ -21,7 +22,7 @@ export function ViralMechanismWorkspace({ analysisId, request, resolveUrl, onSee
   const { insight, loading, error, reload } = useViralInsight({ analysisId, request });
   if (loading && !insight) return <div className="viral-loading-state"><CircleNotch className="spin" size={22} />正在提取机制证据…</div>;
   if (error && !insight) {
-    return <div className="viral-error-state"><ShieldWarning size={22} /><div><strong>无法读取爆款机制</strong><p>{error}</p></div><button type="button" onClick={() => reload()}><ArrowClockwise size={17} />重试</button></div>;
+    return <div className="viral-error-state"><ShieldWarning size={22} /><div><strong>无法读取爆款机制</strong><p>{error}</p></div><Button variant="secondary" size="compact" type="button" onClick={() => reload()}><ArrowClockwise size={17} />重试</Button></div>;
   }
   if (!insight) return null;
 
@@ -59,7 +60,7 @@ export function ViralMechanismWorkspace({ analysisId, request, resolveUrl, onSee
                   <summary><ImageSquare size={17} />查看 {mechanism.evidence.length} 条原始证据<CaretDown size={15} /></summary>
                   <div className="viral-evidence-grid">
                     {mechanism.evidence.map((evidence) => (
-                      <button type="button" key={evidence.id} onClick={() => onSeek?.(evidence.start_seconds)}>
+                      <button data-ui="selection-card" type="button" key={evidence.id} onClick={() => onSeek?.(evidence.start_seconds)}>
                         {evidence.frame_url ? <img src={resolveUrl(evidence.frame_url)} alt={evidence.source_label} /> : <span className="viral-evidence-placeholder">{evidence.kind.toUpperCase()}</span>}
                         <span><strong>{evidence.source_label}</strong><small>{formatInsightTime(evidence.start_seconds)} — {formatInsightTime(evidence.end_seconds)}</small><p>{evidence.text}</p></span>
                       </button>

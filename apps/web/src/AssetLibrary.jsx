@@ -1,3 +1,4 @@
+import { IconButton, Button } from "./ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { StorageUsageStrip } from "./accounts/StorageManagement.jsx";
 import {
@@ -702,9 +703,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           </label>
         </div>
         <div>
-          <button aria-label="上一页" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} type="button">
+          <IconButton aria-label="上一页" disabled={page <= 1 || loading} onClick={() => setPage(page - 1)} type="button">
             <CaretLeft size={15} />
-          </button>
+          </IconButton>
           {paginationItems.map((item) => typeof item === "number" ? (
             <button
               aria-current={item === page ? "page" : undefined}
@@ -717,14 +718,14 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               {item}
             </button>
           ) : <span aria-hidden="true" key={item}>…</span>)}
-          <button
+          <IconButton
             aria-label="下一页"
             disabled={page >= assetList.total_pages || loading}
             onClick={() => setPage(page + 1)}
             type="button"
           >
             <CaretRight size={15} />
-          </button>
+          </IconButton>
         </div>
       </nav>
     );
@@ -748,9 +749,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               <strong>未分类中还没有资产</strong>
               <p>上传时不选择目录的资产会显示在这里。</p>
             </div>
-            <button className="secondary-button compact" onClick={openUpload} type="button">
+            <Button className="secondary-button compact" onClick={openUpload} type="button">
               <Plus size={15} />上传资产
-            </button>
+            </Button>
           </div>
         );
       }
@@ -761,9 +762,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           <h2>{filtered ? "没有匹配的资产" : "工作区还没有资产"}</h2>
           <p>{filtered ? "调整目录或筛选条件后再试。" : "上传人物、产品、服装或场景图片，供后续分镜生图复用。"}</p>
           {!filtered && (
-            <button className="primary-button compact" onClick={openUpload} type="button">
+            <Button className="primary-button compact" onClick={openUpload} type="button">
               <Plus size={16} />上传第一个资产
-            </button>
+            </Button>
           )}
         </div>
       );
@@ -798,7 +799,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
             <DotsThree size={18} weight="bold" />
           </summary>
           <div>
-            <button
+            <button data-ui="menu-item"
               disabled={!folder.asset_count}
               onClick={(event) => {
                 event.currentTarget.closest("details")?.removeAttribute("open");
@@ -809,7 +810,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               <ImageSquare size={15} />设置封面
             </button>
             {folder.cover?.source === "manual" && (
-              <button
+              <button data-ui="menu-item"
                 disabled={coverSaving}
                 onClick={(event) => {
                   event.currentTarget.closest("details")?.removeAttribute("open");
@@ -820,7 +821,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 <ArrowClockwise size={15} />恢复自动封面
               </button>
             )}
-            <button
+            <button data-ui="menu-item"
               onClick={(event) => {
                 event.currentTarget.closest("details")?.removeAttribute("open");
                 setFolderDialog({ folder, name: folder.name });
@@ -860,10 +861,10 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           </div>
           <p>集中管理人物、产品、服装和场景参考。</p>
         </div>
-        <button className="primary-button compact" onClick={openUpload} type="button">
+        <Button className="primary-button compact" onClick={openUpload} type="button">
           <UploadSimple size={17} weight="bold" />
           上传资产
-        </button>
+        </Button>
       </section>
 
       <StorageUsageStrip />
@@ -874,13 +875,13 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
               <span>一级目录</span>
               <strong>资产分类</strong>
             </div>
-            <button
+            <IconButton
               aria-label="新建资产目录"
               onClick={() => setFolderDialog({ folder: null, name: "" })}
               type="button"
             >
               <FolderPlus size={18} />
-            </button>
+            </IconButton>
           </div>
           <button
             className={`asset-folder-item ${selectedFolder === "" ? "active" : ""}`}
@@ -901,22 +902,22 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           <div className="asset-folder-list">
             {folders.map((folder) => (
               <div className={`asset-folder-row ${selectedFolder === folder.id ? "active" : ""}`} key={folder.id}>
-                <button onClick={() => changeFolder(folder.id)} type="button">
+                <button data-ui="selection-card" onClick={() => changeFolder(folder.id)} type="button">
                   <Folder size={17} weight={selectedFolder === folder.id ? "fill" : "regular"} />
                   <span>{folder.name}</span>
                   <small>{folder.asset_count}</small>
                 </button>
                 <span className="asset-folder-actions">
-                  <button
+                  <IconButton
                     aria-label={`重命名${folder.name}`}
                     onClick={() => setFolderDialog({ folder, name: folder.name })}
                     type="button"
                   >
                     <PencilSimple size={13} />
-                  </button>
-                  <button aria-label={`删除${folder.name}`} onClick={() => deleteFolder(folder)} type="button">
+                  </IconButton>
+                  <IconButton variant="warning" size="compact" aria-label={`删除${folder.name}`} onClick={() => deleteFolder(folder)} type="button">
                     <Trash size={13} />
-                  </button>
+                  </IconButton>
                 </span>
               </div>
             ))}
@@ -941,9 +942,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 value={searchInput}
               />
               {searchInput && (
-                <button aria-label="清空资产搜索" onClick={() => setSearchInput("")} type="button">
+                <IconButton aria-label="清空资产搜索" onClick={() => setSearchInput("")} type="button">
                   <X size={14} />
-                </button>
+                </IconButton>
               )}
             </label>
             <select
@@ -980,7 +981,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
             <div className="asset-error" role="alert">
               <WarningCircle size={17} weight="fill" />
               <span>{error}</span>
-              <button aria-label="关闭错误提示" onClick={() => setError("")} type="button"><X size={14} /></button>
+              <IconButton aria-label="关闭错误提示" onClick={() => setError("")} type="button"><X size={14} /></IconButton>
             </div>
           )}
 
@@ -1003,13 +1004,13 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                       <ArrowClockwise className={loading ? "spin" : ""} size={16} />
                       刷新
                     </button>
-                    <button
+                    <Button
                       className="secondary-button compact"
                       onClick={() => setFolderDialog({ folder: null, name: "" })}
                       type="button"
                     >
                       <FolderPlus size={16} />新建目录
-                    </button>
+                    </Button>
                   </div>
                 </header>
                 {folders.length ? (
@@ -1023,9 +1024,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                       <strong>还没有资产目录</strong>
                       <p>按人物、产品或场景创建一级目录，之后查找会更快。</p>
                     </div>
-                    <button className="secondary-button compact" onClick={() => setFolderDialog({ folder: null, name: "" })} type="button">
+                    <Button className="secondary-button compact" onClick={() => setFolderDialog({ folder: null, name: "" })} type="button">
                       <Plus size={15} />新建目录
-                    </button>
+                    </Button>
                   </div>
                 )}
               </section>
@@ -1075,7 +1076,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 <span>资产详情</span>
                 <strong>{selectedAsset.name}</strong>
               </div>
-              <button aria-label="关闭资产详情" onClick={() => setSelectedAsset(null)} type="button"><X size={17} /></button>
+              <IconButton aria-label="关闭资产详情" onClick={() => setSelectedAsset(null)} type="button"><X size={17} /></IconButton>
             </header>
             <div
               className="asset-detail-preview"
@@ -1177,10 +1178,10 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 </button>
               )}
               <div className="asset-detail-primary-actions">
-                <button className="primary-button compact" disabled={detailSaving || Boolean(selectedAsset.archived_at)} type="submit">
+                <Button className="primary-button compact" disabled={detailSaving || Boolean(selectedAsset.archived_at)} type="submit">
                   {detailSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} weight="bold" />}
                   保存修改
-                </button>
+                </Button>
                 <a className="secondary-button compact" download href={resolveUrl(selectedAsset.content_url)}>
                   <DownloadSimple size={16} />
                   {selectedAsset.media_kind === "image" ? "原图" : "原视频"}
@@ -1200,7 +1201,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           <form onSubmit={submitUpload}>
             <header className="asset-modal-header">
               <div><span>工作区资产</span><h2>上传新资产</h2><p>当前版本保存在本机工作区，单张图片不超过 15 MB。</p></div>
-              <button aria-label="关闭上传资产" disabled={uploading} onClick={() => setUploadOpen(false)} type="button"><X size={18} /></button>
+              <IconButton aria-label="关闭上传资产" disabled={uploading} onClick={() => setUploadOpen(false)} type="button"><X size={18} /></IconButton>
             </header>
             <div className="asset-upload-body">
               <label className={`asset-file-drop ${uploadPreview ? "has-preview" : ""}`}>
@@ -1221,11 +1222,11 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
             </div>
             <footer className="asset-modal-footer">
               <span><HardDrive size={15} weight="fill" />存储策略：仅本地</span>
-              <button className="secondary-button compact" disabled={uploading} onClick={() => setUploadOpen(false)} type="button">取消</button>
-              <button className="primary-button compact" disabled={uploading || !uploadFile || !uploadDraft.rightsConfirmed} type="submit">
+              <Button className="secondary-button compact" disabled={uploading} onClick={() => setUploadOpen(false)} type="button">取消</Button>
+              <Button className="primary-button compact" disabled={uploading || !uploadFile || !uploadDraft.rightsConfirmed} type="submit">
                 {uploading ? <CircleNotch className="spin" size={16} /> : <UploadSimple size={16} weight="bold" />}
                 {uploading ? "正在保存…" : "上传资产"}
-              </button>
+              </Button>
             </footer>
           </form>
         </Modal>
@@ -1236,13 +1237,13 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
           <form className="asset-folder-dialog" onSubmit={saveFolder}>
             <header className="asset-modal-header">
               <div><span>一级目录</span><h2>{folderDialog.folder ? "重命名目录" : "新建目录"}</h2><p>资产目录暂时只支持一级分类。</p></div>
-              <button aria-label="关闭目录设置" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button"><X size={18} /></button>
+              <IconButton aria-label="关闭目录设置" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button"><X size={18} /></IconButton>
             </header>
             <label><span>目录名称</span><input autoFocus maxLength={120} onChange={(event) => setFolderDialog((current) => ({ ...current, name: event.target.value }))} placeholder="例如：主播人物" required value={folderDialog.name} /></label>
             <footer className="asset-modal-footer">
               <span />
-              <button className="secondary-button compact" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button">取消</button>
-              <button className="primary-button compact" disabled={folderSaving || !folderDialog.name.trim()} type="submit">{folderSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} />}{folderDialog.folder ? "保存" : "创建目录"}</button>
+              <Button className="secondary-button compact" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button">取消</Button>
+              <Button className="primary-button compact" disabled={folderSaving || !folderDialog.name.trim()} type="submit">{folderSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} />}{folderDialog.folder ? "保存" : "创建目录"}</Button>
             </footer>
           </form>
         </Modal>
@@ -1260,9 +1261,9 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 <h2>设置“{coverDialog.folder.name}”封面</h2>
                 <p>选择目录中的一张资产，或由系统自动使用最近更新的有效资产。</p>
               </div>
-              <button aria-label="关闭目录封面设置" disabled={coverSaving} onClick={() => setCoverDialog(null)} type="button">
+              <IconButton aria-label="关闭目录封面设置" disabled={coverSaving} onClick={() => setCoverDialog(null)} type="button">
                 <X size={18} />
-              </button>
+              </IconButton>
             </header>
             <div className="asset-cover-dialog-body">
               {coverDialog.error && (
@@ -1310,11 +1311,11 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
             </div>
             <footer className="asset-modal-footer">
               <span>{coverDialog.selectedAssetId ? "将使用所选资产作为固定封面" : "目录内容变化时，自动封面会同步更新"}</span>
-              <button className="secondary-button compact" disabled={coverSaving} onClick={() => setCoverDialog(null)} type="button">取消</button>
-              <button className="primary-button compact" disabled={coverSaving || coverDialog.loading} type="submit">
+              <Button className="secondary-button compact" disabled={coverSaving} onClick={() => setCoverDialog(null)} type="button">取消</Button>
+              <Button className="primary-button compact" disabled={coverSaving || coverDialog.loading} type="submit">
                 {coverSaving ? <CircleNotch className="spin" size={16} /> : <Check size={16} />}
                 保存封面
-              </button>
+              </Button>
             </footer>
           </form>
         </Modal>

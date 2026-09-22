@@ -1,3 +1,4 @@
+import { IconButton, Button } from "./ui/system/Button.jsx";
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { registerAccountFlusher } from "./accounts/account-client.js";
 import { readOnce } from "./creation-workspace/read-request.js";
@@ -582,9 +583,9 @@ function ProductionDialog({ title, description, children, busy, onClose, size = 
             <h3>{title}</h3>
             {description && <p>{description}</p>}
           </div>
-          <button aria-label="关闭" className="production-icon-button" disabled={busy} onClick={onClose} type="button">
+          <IconButton aria-label="关闭" className="production-icon-button" disabled={busy} onClick={onClose} type="button">
             <X size={18} />
-          </button>
+          </IconButton>
         </header>
         {children}
       </section>
@@ -685,22 +686,22 @@ function ProductionProjectCard({
           project.source_project_id && <span><GitBranch size={14} /> 历史分支</span>
         ) : (
           <span className="production-project-recycle-actions">
-            <button
+            <Button
               className="secondary-button compact"
               disabled={busy}
               onClick={() => onRestore(project)}
               type="button"
             >
               <ArrowClockwise size={15} />恢复
-            </button>
-            <button
+            </Button>
+            <Button
               className="danger-button compact"
               disabled={busy}
               onClick={() => onPurge(project)}
               type="button"
             >
               <Trash size={15} />永久删除
-            </button>
+            </Button>
           </span>
         )}
       </footer>
@@ -735,19 +736,19 @@ function ProductionList({
           </p>
         </div>
         <div className="production-section-actions">
-          <button
+          <Button
             className="secondary-button compact"
             onClick={() => onLifecycleChange(inRecycleBin ? "active" : "trashed")}
             type="button"
           >
             {inRecycleBin ? <ArrowLeft size={16} /> : <Trash size={16} />}
             {inRecycleBin ? "返回创作方案" : `回收站${trashedCount ? `（${trashedCount}）` : ""}`}
-          </button>
+          </Button>
           {!inRecycleBin && onCreate && (
-            <button className="primary-button compact" onClick={onCreate} type="button">
+            <Button className="primary-button compact" onClick={onCreate} type="button">
               <Plus size={16} weight="bold" />
               创建方案
-            </button>
+            </Button>
           )}
         </div>
       </header>
@@ -780,9 +781,9 @@ function ProductionList({
             </p>
           </div>
           {!inRecycleBin && onCreate && (
-            <button className="primary-button compact" onClick={onCreate} type="button">
+            <Button className="primary-button compact" onClick={onCreate} type="button">
               创建创作方案
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -830,10 +831,10 @@ function AnalysisUpdateBanner({ preview, open, onOpen }) {
           当前候选、参考资产和采用结果不会被覆盖。
         </p>
       </div>
-      <button className="secondary-button compact" onClick={onOpen} type="button">
+      <Button className="secondary-button compact" onClick={onOpen} type="button">
         {open ? "收起差异" : "查看差异"}
         <ArrowRight size={15} />
-      </button>
+      </Button>
     </section>
   );
 }
@@ -859,9 +860,9 @@ function AnalysisUpdatePanel({
             不改分镜结构、参考资产、图片/视频候选或采用状态。
           </p>
         </div>
-        <button aria-label="关闭差异预览" className="production-icon-button" onClick={onClose} type="button">
+        <IconButton aria-label="关闭差异预览" className="production-icon-button" onClick={onClose} type="button">
           <X size={18} />
-        </button>
+        </IconButton>
       </header>
 
       <div className="analysis-update-summary" aria-label="差异统计">
@@ -965,8 +966,8 @@ function AnalysisUpdatePanel({
       <footer className="analysis-update-footer">
         <p>同步后仍可从版本记录查看旧 Revision；历史候选继续保留并可重新选择。</p>
         <div>
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">稍后处理</button>
-          <button
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">稍后处理</Button>
+          <Button
             className="primary-button compact"
             disabled={busy || !preview.compatible || preview.changed_field_count === 0}
             onClick={onSync}
@@ -974,7 +975,7 @@ function AnalysisUpdatePanel({
           >
             {busy ? <CircleNotch className="spin" size={16} /> : <Check size={16} weight="bold" />}
             同步所选提示词并创建 Revision
-          </button>
+          </Button>
         </div>
       </footer>
     </section>
@@ -1003,10 +1004,10 @@ function ProjectSettings({ detail, draft, setDraft, busy, error, onSave, onOpenR
           <div>
             <h3>方案设置</h3>
           </div>
-          <button className="primary-button compact" disabled={busy || !dirty} type="submit">
+          <Button className="primary-button compact" disabled={busy || !dirty} type="submit">
             {busy ? <CircleNotch className="spin" size={16} /> : <FloppyDisk size={16} />}
             保存设置
-          </button>
+          </Button>
         </div>
         {error && <div className="production-inline-error" role="alert"><WarningCircle size={17} />{error}</div>}
         <label className="production-field production-field-wide">
@@ -1077,10 +1078,10 @@ function ProjectSettings({ detail, draft, setDraft, busy, error, onSave, onOpenR
           <div><dt>分镜图片</dt><dd>{detail.approved_image_count} / {detail.shot_count} 已确认</dd></div>
           <div><dt>实际成本</dt><dd>¥{(Number(project.actual_cost_micros || 0) / 1_000_000).toFixed(2)}</dd></div>
         </dl>
-        <button className="secondary-button compact" onClick={onOpenReferences} type="button">
+        <Button className="secondary-button compact" onClick={onOpenReferences} type="button">
           添加参考资产
           <ArrowRight size={15} />
-        </button>
+        </Button>
       </aside>
     </div>
   );
@@ -1099,19 +1100,19 @@ function ReferenceAssets({
           <p>需要替换人物、产品或场景时再添加；没有参考资产也可以直接进入分镜图片。</p>
         </div>
         <div className="production-reference-actions">
-          <button className="secondary-button compact" disabled={busy} onClick={onUpload} type="button">
+          <Button className="secondary-button compact" disabled={busy} onClick={onUpload} type="button">
             <UploadSimple size={16} />
             快速上传
-          </button>
-          <button className="secondary-button compact" disabled={busy} onClick={onOpenLibrary} type="button">
+          </Button>
+          <Button className="secondary-button compact" disabled={busy} onClick={onOpenLibrary} type="button">
             <FolderOpen size={16} />
             从资产库添加
-          </button>
+          </Button>
           {assets.length > 0 && (
-            <button className="primary-button compact" disabled={busy} onClick={onContinue} type="button">
+            <Button className="primary-button compact" disabled={busy} onClick={onContinue} type="button">
               {continueLabel}
               <ArrowRight size={15} />
-            </button>
+            </Button>
           )}
         </div>
       </header>
@@ -1124,13 +1125,13 @@ function ReferenceAssets({
             <p>如果不需要替换固定人物、产品或场景，可以直接使用原视频关键帧和文字提示词继续。</p>
           </div>
           <div className="reference-empty-actions">
-            <button className="secondary-button compact" disabled={busy} onClick={onOpenLibrary} type="button">
+            <Button className="secondary-button compact" disabled={busy} onClick={onOpenLibrary} type="button">
               从资产库添加
-            </button>
-            <button className="primary-button compact" disabled={busy} onClick={onContinue} type="button">
+            </Button>
+            <Button className="primary-button compact" disabled={busy} onClick={onContinue} type="button">
               {continueLabel}
               <ArrowRight size={15} />
-            </button>
+            </Button>
           </div>
         </div>
       ) : (
@@ -1155,7 +1156,7 @@ function ReferenceAssets({
                 </div>
               </div>
               <footer>
-                <button onClick={() => onEdit(asset)} type="button"><PencilSimple size={15} />编辑</button>
+                <Button variant="text" size="compact" onClick={() => onEdit(asset)} type="button"><PencilSimple size={15} />编辑</Button>
                 <button className="danger-text" onClick={() => onArchive(asset)} type="button"><Trash size={15} />移出项目</button>
               </footer>
             </article>
@@ -1240,11 +1241,11 @@ function AssetPickerDialog({
           </div>
         )}
         <footer className="production-modal-actions">
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-          <button className="primary-button compact" disabled={busy || !selectedId} onClick={onConfirm} type="button">
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button className="primary-button compact" disabled={busy || !selectedId} onClick={onConfirm} type="button">
             {busy ? <CircleNotch className="spin" size={16} /> : <Plus size={16} />}
             添加到项目
-          </button>
+          </Button>
         </footer>
       </div>
     </ProductionDialog>
@@ -1263,7 +1264,7 @@ function ChangeImpactPanel({ review, busy, onCancel, onConfirm }) {
           <strong>{review.title}</strong>
           <p>{impact.summary}</p>
         </div>
-        <button aria-label="关闭影响面板" disabled={busy} onClick={onCancel} type="button"><X size={16} /></button>
+        <IconButton aria-label="关闭影响面板" disabled={busy} onClick={onCancel} type="button"><X size={16} /></IconButton>
       </header>
       <dl>
         <div><dt>受影响分镜</dt><dd>{impact.impacted_shot_plan_ids?.length || 0} 个</dd></div>
@@ -1272,11 +1273,11 @@ function ChangeImpactPanel({ review, busy, onCancel, onConfirm }) {
       </dl>
       <p className="change-impact-note">旧结果和文件会继续保留，但不能作为后续阶段的有效输入。</p>
       <footer>
-        <button className="secondary-button compact" disabled={busy} onClick={onCancel} type="button">取消修改</button>
-        <button className="primary-button compact" disabled={busy} onClick={onConfirm} type="button">
+        <Button className="secondary-button compact" disabled={busy} onClick={onCancel} type="button">取消修改</Button>
+        <Button className="primary-button compact" disabled={busy} onClick={onConfirm} type="button">
           {busy ? <CircleNotch className="spin" size={15} /> : <Check size={15} />}
           确认并保存
-        </button>
+        </Button>
       </footer>
     </aside>
   );
@@ -1305,8 +1306,8 @@ function RevisionHistory({ revisions, currentRevisionId, busy, onPreview, onBran
                 <p>{productionChangeLabel(revision.change_kind)} · {formatProductionDate(revision.created_at)}</p>
               </div>
               <div className="revision-actions">
-                <button disabled={busy} onClick={() => onPreview(revision)} type="button">查看</button>
-                <button disabled={busy} onClick={() => onBranch(revision)} type="button"><GitBranch size={14} />创建分支</button>
+                <Button variant="text" size="compact" disabled={busy} onClick={() => onPreview(revision)} type="button">查看</Button>
+                <Button variant="text" size="compact" disabled={busy} onClick={() => onBranch(revision)} type="button"><GitBranch size={14} />创建分支</Button>
               </div>
             </article>
           );
@@ -1367,11 +1368,11 @@ function CreateProjectDialog({
           <input inputMode="decimal" onChange={(event) => setDraft((state) => ({ ...state, budgetYuan: event.target.value }))} placeholder="可稍后设置" value={draft.budgetYuan} />
         </label>
         <footer className="production-modal-actions">
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-          <button className="primary-button compact" disabled={busy} type="submit">
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button className="primary-button compact" disabled={busy} type="submit">
             {busy ? <CircleNotch className="spin" size={16} /> : <MagicWand size={16} />}
             创建方案
-          </button>
+          </Button>
         </footer>
       </form>
     </ProductionDialog>
@@ -1425,11 +1426,11 @@ function ReferenceAssetDialog({ mode, draft, setDraft, file, setFile, previewUrl
           </label>
         </div>
         <footer className="production-modal-actions reference-dialog-actions">
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-          <button className="primary-button compact" disabled={busy || (uploading && !file) || !draft.rightsConfirmed} type="submit">
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button className="primary-button compact" disabled={busy || (uploading && !file) || !draft.rightsConfirmed} type="submit">
             {busy ? <CircleNotch className="spin" size={16} /> : uploading ? <UploadSimple size={16} /> : <FloppyDisk size={16} />}
             {uploading ? "上传并保存" : "保存修改"}
-          </button>
+          </Button>
         </footer>
       </form>
     </ProductionDialog>
@@ -1445,11 +1446,11 @@ function ArchiveDialog({ asset, busy, error, onClose, onConfirm }) {
       </div>
       {error && <div className="production-inline-error modal-inline-error" role="alert"><WarningCircle size={17} />{error}</div>}
       <footer className="production-modal-actions">
-        <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-        <button className="danger-button compact" disabled={busy} onClick={onConfirm} type="button">
+        <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+        <Button className="danger-button compact" disabled={busy} onClick={onConfirm} type="button">
           {busy ? <CircleNotch className="spin" size={16} /> : <Trash size={16} />}
           确认移出
-        </button>
+        </Button>
       </footer>
     </ProductionDialog>
   );
@@ -1483,7 +1484,7 @@ function ProductionLifecycleDialog({ project, action, busy, error, onClose, onCo
         </div>
       )}
       <footer className="production-modal-actions">
-        <button
+        <Button
           autoFocus
           className="secondary-button compact"
           disabled={busy}
@@ -1491,11 +1492,11 @@ function ProductionLifecycleDialog({ project, action, busy, error, onClose, onCo
           type="button"
         >
           取消
-        </button>
-        <button className="danger-button compact" disabled={busy} onClick={onConfirm} type="button">
+        </Button>
+        <Button className="danger-button compact" disabled={busy} onClick={onConfirm} type="button">
           {busy ? <CircleNotch className="spin" size={16} /> : <Trash size={16} />}
           {permanent ? "永久删除" : "移入回收站"}
-        </button>
+        </Button>
       </footer>
     </ProductionDialog>
   );
@@ -1519,8 +1520,8 @@ function RevisionPreviewDialog({ revision, detail, busy, error, onClose, onBranc
         </div>
       )}
       <footer className="production-modal-actions">
-        <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">关闭</button>
-        <button className="primary-button compact" disabled={busy || !snapshot} onClick={onBranch} type="button"><GitBranch size={16} />从此版本创建分支</button>
+        <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">关闭</Button>
+        <Button className="primary-button compact" disabled={busy || !snapshot} onClick={onBranch} type="button"><GitBranch size={16} />从此版本创建分支</Button>
       </footer>
     </ProductionDialog>
   );
@@ -1533,8 +1534,8 @@ function BranchDialog({ revision, name, setName, busy, error, onClose, onSubmit 
         {error && <div className="production-inline-error" role="alert"><WarningCircle size={17} />{error}</div>}
         <label className="production-field"><span>分支名称</span><input autoFocus maxLength={120} onChange={(event) => setName(event.target.value)} required value={name} /></label>
         <footer className="production-modal-actions">
-          <button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</button>
-          <button className="primary-button compact" disabled={busy} type="submit">{busy ? <CircleNotch className="spin" size={16} /> : <GitBranch size={16} />}创建分支</button>
+          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button className="primary-button compact" disabled={busy} type="submit">{busy ? <CircleNotch className="spin" size={16} /> : <GitBranch size={16} />}创建分支</Button>
         </footer>
       </form>
     </ProductionDialog>
@@ -3841,12 +3842,12 @@ export function ProductionHub({
       backLabel={workflow ? "项目" : "所有方案"}
       onBack={leaveWorkspace}
       actions={<>
-        <button aria-pressed={activeSection === "reference_assets"} className="secondary-button compact" disabled={changingSection} onClick={() => void changeSection("reference_assets")} type="button"><FolderOpen size={16} />参考资产</button>
-        <button aria-pressed={activeSection === "revisions"} className="secondary-button compact" disabled={!detail || changingSection} onClick={() => void changeSection("revisions")} type="button"><ClockCounterClockwise size={16} />版本记录</button>
+        <Button aria-pressed={activeSection === "reference_assets"} className="secondary-button compact" disabled={changingSection} onClick={() => void changeSection("reference_assets")} type="button"><FolderOpen size={16} />参考资产</Button>
+        <Button aria-pressed={activeSection === "revisions"} className="secondary-button compact" disabled={!detail || changingSection} onClick={() => void changeSection("revisions")} type="button"><ClockCounterClockwise size={16} />版本记录</Button>
         {!workflow && detail && <details className="production-workspace-menu"><summary aria-label={`${detail.project.name}的更多操作`}><DotsThree size={20} /></summary><div role="menu"><button className="danger" disabled={projectLifecycleBusy} onClick={() => openProjectLifecycleAction(detail.project, "trash")} role="menuitem" type="button"><Trash size={16} />移入回收站</button></div></details>}
       </>}
       navigation={<CreationNavigation active={activeSection} busy={changingSection || busy || workflow?.busy} onChange={(section) => void changeSection(section)} steps={workflow?.steps || productionNavigation(detail?.project, gate)} />}
-    >{workflow?.subnavigation}{!workflow && ["editing", "audio_caption"].includes(activeSection) && <nav className="creation-subnav" aria-label="剪辑内容">{[{ id: "editing", label: "画面剪辑" }, { id: "audio_caption", label: "配乐与字幕" }].map((item) => <button aria-current={activeSection === item.id ? "page" : undefined} disabled={changingSection || busy} key={item.id} onClick={() => void changeSection(item.id)} type="button">{item.label}</button>)}</nav>}{workflow?.message}{actionError && !["project_setup", "reference_assets", "shot_images", "shot_videos"].includes(activeSection) && <div className="production-inline-error" role="alert">{actionError}</div>}{children}</CreationWorkspace>;
+    >{workflow?.subnavigation}{!workflow && ["editing", "audio_caption"].includes(activeSection) && <nav className="creation-subnav" aria-label="剪辑内容">{[{ id: "editing", label: "画面剪辑" }, { id: "audio_caption", label: "配乐与字幕" }].map((item) => <button data-ui="navigation" aria-current={activeSection === item.id ? "page" : undefined} disabled={changingSection || busy} key={item.id} onClick={() => void changeSection(item.id)} type="button">{item.label}</button>)}</nav>}{workflow?.message}{actionError && !["project_setup", "reference_assets", "shot_images", "shot_videos"].includes(activeSection) && <div className="production-inline-error" role="alert">{actionError}</div>}{children}</CreationWorkspace>;
   }
 
   if (!selectedProjectId && workflow) {

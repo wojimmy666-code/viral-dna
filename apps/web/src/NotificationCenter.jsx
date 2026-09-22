@@ -1,3 +1,4 @@
+import { IconButton } from "./ui/system/Button.jsx";
 import { useEffect, useState } from "react";
 import {
   ArrowRight,
@@ -71,7 +72,7 @@ function ToastItem({ toast, onDismiss }) {
           </button>
         )}
       </div>
-      <button aria-label="关闭提示" onClick={() => onDismiss(toast.id)} type="button">
+      <button data-ui="notification-action" aria-label="关闭提示" onClick={() => onDismiss(toast.id)} type="button">
         <X size={15} />
       </button>
     </article>
@@ -117,9 +118,9 @@ export function NotificationDrawer({
             <span>账户消息</span>
             <h2>消息中心</h2>
           </div>
-          <button className="icon-button" aria-label="关闭消息中心" onClick={onClose} type="button">
+          <IconButton className="icon-button" aria-label="关闭消息中心" onClick={onClose} type="button">
             <X size={19} />
-          </button>
+          </IconButton>
         </header>
 
         <div className="notification-drawer-toolbar">
@@ -165,7 +166,7 @@ export function NotificationDrawer({
                   {item.message && <p>{item.message}</p>}
                   <footer>
                     {item.action_kind && item.action_label ? (
-                      <button onClick={() => onAction(item)} type="button">
+                      <button data-ui="notification-action" onClick={() => onAction(item)} type="button">
                         {item.action_label}<ArrowRight size={14} />
                       </button>
                     ) : (

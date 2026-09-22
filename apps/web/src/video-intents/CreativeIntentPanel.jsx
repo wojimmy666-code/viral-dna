@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   ArrowCounterClockwise,
   CircleNotch,
@@ -114,7 +115,7 @@ export function CreativeIntentPanel({
           value={draft?.intentText || ""}
           videoReferenceBindings={videoReferenceBindings}
         />
-        <button
+        <Button
           className="primary-button creative-intent-generate"
           disabled={!canGenerate}
           onClick={onCompile}
@@ -125,7 +126,7 @@ export function CreativeIntentPanel({
             ? <CircleNotch className="spin" size={17} />
             : <MagicWand size={17} weight="fill" />}
           {busy ? "正在理解意图" : "生成引用与提示词"}
-        </button>
+        </Button>
       </div>
 
       {error && (
@@ -137,12 +138,12 @@ export function CreativeIntentPanel({
 
       {interpretation && (
         <div className="creative-intent-result-actions" aria-label="生成结果操作">
-          <button className="text-button" onClick={onOpenReferences} type="button">
+          <Button className="text-button" onClick={onOpenReferences} type="button">
             <Stack size={16} />查看引用（{referenceCount}）
-          </button>
-          <button className="text-button" onClick={onOpenPrompt} type="button">
+          </Button>
+          <Button className="text-button" onClick={onOpenPrompt} type="button">
             <PencilSimple size={16} />编辑提示词
-          </button>
+          </Button>
         </div>
       )}
 
@@ -163,9 +164,9 @@ export function CreativeIntentPanel({
       {draft?.autoBaseline && draft?.promptManuallyModified && (
         <div className="creative-intent-restore">
           <span>当前提示词含人工修改，重新生成时不会自动覆盖。</span>
-          <button className="text-button" onClick={onRestore} type="button">
+          <Button className="text-button" onClick={onRestore} type="button">
             <ArrowCounterClockwise size={15} />恢复最近自动版本
-          </button>
+          </Button>
         </div>
       )}
 

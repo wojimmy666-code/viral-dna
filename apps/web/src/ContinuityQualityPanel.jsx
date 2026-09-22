@@ -1,3 +1,4 @@
+import { Button } from "./ui/system/Button.jsx";
 import {
   ArrowClockwise,
   ArrowsLeftRight,
@@ -102,7 +103,7 @@ export function ContinuityQualityPanel({
           <p>{presentation.description}</p>
         </div>
         <span className="continuity-quality-status">{presentation.label}</span>
-        <button
+        <Button
           className="secondary-button compact"
           disabled={busy}
           onClick={onRun}
@@ -110,7 +111,7 @@ export function ContinuityQualityPanel({
         >
           <ArrowClockwise size={16} />
           {report ? "重新检查" : "开始检查"}
-        </button>
+        </Button>
       </header>
 
       {visibleFindingCount > 0 && (
@@ -145,23 +146,23 @@ export function ContinuityQualityPanel({
                   </div>
                 </div>
                 {finding.state === "open" ? (
-                  <button
+                  <Button
                     className="text-button"
                     disabled={busy}
                     onClick={() => onDecide(finding, "waive")}
                     type="button"
                   >
                     标记为有意变化
-                  </button>
+                  </Button>
                 ) : (
-                  <button
+                  <Button
                     className="text-button"
                     disabled={busy}
                     onClick={() => onDecide(finding, "reopen")}
                     type="button"
                   >
                     重新打开
-                  </button>
+                  </Button>
                 )}
               </article>
             ))}

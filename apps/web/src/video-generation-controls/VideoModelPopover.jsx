@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useId, useRef } from "react";
 import {
   ArrowClockwise,
@@ -151,9 +152,9 @@ export function VideoModelPopover({
           <div className="video-model-cache-warning" role="status">
             <WarningCircle size={18} weight="fill" />
             <span>模型目录刷新失败，当前仍使用上次成功读取的结果。</span>
-            <button className="text-button compact" onClick={retryLoad} type="button">
+            <Button className="text-button compact" onClick={retryLoad} type="button">
               重新加载
-            </button>
+            </Button>
           </div>
         )}
 
@@ -212,14 +213,14 @@ export function VideoModelPopover({
               <strong>模型目录读取失败</strong>
               <small>{loadError || "请检查 API 服务后重新加载。"}</small>
             </span>
-            <button
+            <Button
               className="secondary-button compact"
               data-model-retry
               onClick={retryLoad}
               type="button"
             >
               <ArrowClockwise size={15} />重新加载
-            </button>
+            </Button>
           </div>
         )}
 
@@ -230,9 +231,9 @@ export function VideoModelPopover({
               <strong>暂无可用视频模型</strong>
               <small>当前没有已开放且具备参考素材路由的模型。</small>
             </span>
-            <button className="secondary-button compact" onClick={openSettings} type="button">
+            <Button className="secondary-button compact" onClick={openSettings} type="button">
               <Gear size={15} />打开模型设置
-            </button>
+            </Button>
           </div>
         )}
       </div>

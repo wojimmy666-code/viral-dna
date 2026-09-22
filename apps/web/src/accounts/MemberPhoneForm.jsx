@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useId, useRef, useState } from "react";
 import { accountRequest } from "./account-client.js";
 import { PHONE_INPUT_PROPS, pastePhone, phoneError } from "./account-form.js";
@@ -63,10 +64,10 @@ export function MemberPhoneForm({ accountId, member, onClose, onChanged, onReloa
       {error && <p className="account-error" role="alert" id={errorId}>{error.message}</p>}
       <div className="account-actions">
         {error?.code === "username_changed"
-          ? <button type="button" className="secondary-button" onClick={onReload}>重新读取用户列表</button>
-          : <button type="submit" className="primary-button">{busy ? "正在修改…" : review ? "确认修改" : "下一步"}</button>}
-        {review && !error && <button type="button" className="secondary-button" onClick={() => setReview(false)}>返回修改</button>}
-        <button type="button" className="text-button" onClick={onClose}>取消</button>
+          ? <Button type="button" className="secondary-button" onClick={onReload}>重新读取用户列表</Button>
+          : <Button type="submit" className="primary-button">{busy ? "正在修改…" : review ? "确认修改" : "下一步"}</Button>}
+        {review && !error && <Button type="button" className="secondary-button" onClick={() => setReview(false)}>返回修改</Button>}
+        <Button type="button" className="text-button" onClick={onClose}>取消</Button>
       </div>
     </fieldset>
   </form>;

@@ -1,3 +1,4 @@
+import { Button, IconButton } from "../ui/system/Button.jsx";
 import {
   IdentificationCard,
   PencilSimple,
@@ -55,12 +56,12 @@ export function ManagedAssetBindingCard({
             <small>火山方舟 · ProjectName: {binding.project_name}</small>
           </div>
           <div className="managed-asset-binding-actions">
-            <button className="secondary-button compact" disabled={busy} onClick={onOpen} type="button">
+            <Button className="secondary-button compact" disabled={busy} onClick={onOpen} type="button">
               <PencilSimple size={15} />更换
-            </button>
-            <button className="icon-button danger" disabled={busy} onClick={onClear} title="解除演员身份绑定" type="button">
+            </Button>
+            <IconButton className="icon-button danger" disabled={busy} onClick={onClear} title="解除演员身份绑定" type="button">
               <Trash size={16} />
-            </button>
+            </IconButton>
           </div>
         </div>
       ) : (

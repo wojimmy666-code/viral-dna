@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowClockwise,
@@ -219,7 +220,7 @@ export function VideoEnhancementPanel({
                   >安装位置：<code>{enhancement.settings.capability.installation_path}</code></span>
                 )}
               </div>
-              <button
+              <Button
                 className="secondary-button compact"
                 disabled={!canInstall || installActive || Boolean(enhancement.busy)}
                 onClick={enhancement.install}
@@ -227,7 +228,7 @@ export function VideoEnhancementPanel({
               >
                 {installActive ? <CircleNotch className="spin" size={16} /> : <DownloadSimple size={16} />}
                 {installActive ? "安装中" : "安装引擎"}
-              </button>
+              </Button>
             </div>
           )}
 
@@ -247,12 +248,14 @@ export function VideoEnhancementPanel({
               <progress max="100" value={runningJob.progress_percent} />
               <footer>
                 <span>{formatRemaining(runningJob.estimated_seconds_remaining) || "可以离开此页面，任务将在后台继续"}</span>
-                <button
-                  className="secondary-button compact"
-                  disabled={enhancement.busy === "cancelling"}
+                <Button
+                  variant="warning"
+                  size="compact"
+                  loading={enhancement.busy === "cancelling"}
+                  loadingLabel="正在停止…"
                   onClick={() => enhancement.cancel(runningJob.id)}
                   type="button"
-                ><X size={15} />取消任务</button>
+                ><X size={15} />取消任务</Button>
               </footer>
             </div>
           )}
@@ -293,23 +296,23 @@ export function VideoEnhancementPanel({
                   selectedIsActive ? (
                     <span className="video-enhancement-active"><CheckCircle size={16} weight="fill" />成片使用中</span>
                   ) : (
-                    <button
+                    <Button
                       className="primary-button compact"
                       disabled={enhancement.busy === "activating"}
                       onClick={() => enhancement.useForFinal(selectedResult.job.id)}
                       type="button"
-                    >用于成片</button>
+                    >用于成片</Button>
                   )
                 ) : effectivePreviewVersion === "original" && (
                   originalIsActive ? (
                     <span className="video-enhancement-active"><CheckCircle size={16} weight="fill" />成片使用中</span>
                   ) : (
-                    <button
+                    <Button
                       className="secondary-button compact"
                       disabled={enhancement.busy === "activating"}
                       onClick={enhancement.useOriginal}
                       type="button"
-                    >成片改用原始版</button>
+                    >成片改用原始版</Button>
                   )
                 )}
               </div>
@@ -321,12 +324,12 @@ export function VideoEnhancementPanel({
               <WarningCircle size={17} />
               <span>{enhancement.error || latestFailure.error_message}</span>
               {latestFailure && latestFailure.status !== "cancelled" && (
-                <button
+                <Button
                   className="secondary-button compact"
                   disabled={Boolean(enhancement.busy)}
                   onClick={() => enhancement.retry(latestFailure.id)}
                   type="button"
-                ><ArrowClockwise size={15} />重试</button>
+                ><ArrowClockwise size={15} />重试</Button>
               )}
             </div>
           )}
@@ -334,7 +337,7 @@ export function VideoEnhancementPanel({
           {installed && !runningJob && availableTargets.length > 0 && (
             <footer className="video-enhancement-actions">
               <span>本地处理，不消耗模型额度；原视频始终保留。</span>
-              <button
+              <Button
                 className="primary-button compact"
                 disabled={Boolean(enhancement.busy)}
                 onClick={start}
@@ -342,7 +345,7 @@ export function VideoEnhancementPanel({
               >
                 {enhancement.busy === "starting" ? <CircleNotch className="spin" size={16} /> : <MagicWand size={16} />}
                 {successfulViews.some((item) => item.job.target === target) ? "重新清晰化" : "开始清晰化"}
-              </button>
+              </Button>
             </footer>
           )}
         </div>

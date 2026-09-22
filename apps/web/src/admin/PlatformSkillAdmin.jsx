@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useMemo, useState } from "react";
 import { SkillPresentationEditor } from "./SkillPresentationEditor.jsx";
 import {
@@ -137,13 +138,13 @@ export function PlatformSkillAdmin({ request }) {
     <section className="admin-settings-section platform-skill-admin">
       <header>
         <div><h2>平台 Skill 目录</h2><p>目录属于平台；已发布版本不可修改，项目创建时会冻结版本快照。</p></div>
-        <button className="secondary-button compact" onClick={() => setEditor({ version: null, text: "", changelog: "" })} type="button"><Code size={16} />新建清单</button>
+        <Button className="secondary-button compact" onClick={() => setEditor({ version: null, text: "", changelog: "" })} type="button"><Code size={16} />新建清单</Button>
       </header>
 
       <form className="platform-skill-import" onSubmit={importPackage}>
         <label><span>导入 Skill 包</span><input accept=".zip,application/zip" onChange={(event) => setPackageFile(event.target.files?.[0] || null)} type="file" /></label>
         <label><span>版本说明</span><input onChange={(event) => setChangelog(event.target.value)} placeholder="本次版本的变化" value={changelog} /></label>
-        <button className="primary-button compact" disabled={!packageFile || busyId === "import"} type="submit">{busyId === "import" ? <CircleNotch className="spin" size={16} /> : <UploadSimple size={16} />}导入并校验</button>
+        <Button className="primary-button compact" disabled={!packageFile || busyId === "import"} type="submit">{busyId === "import" ? <CircleNotch className="spin" size={16} /> : <UploadSimple size={16} />}导入并校验</Button>
       </form>
 
       {error && <div className="admin-settings-error" role="alert"><WarningCircle size={17} />{error}</div>}
@@ -164,7 +165,7 @@ export function PlatformSkillAdmin({ request }) {
               <div className="platform-skill-group-heading">
                 <div><strong>{skill.name}</strong><span>{skill.category} · {skill.id}</span></div>
                 <span className={`platform-skill-status is-${skill.lifecycle}`}>{STATUS_LABELS[skill.lifecycle]}</span>
-                <button className="secondary-button compact" type="button" onClick={() => setPresentationSkillId(current => current === skill.id ? null : skill.id)}>封面与预览</button>
+                <Button className="secondary-button compact" type="button" onClick={() => setPresentationSkillId(current => current === skill.id ? null : skill.id)}>封面与预览</Button>
               </div>
               {presentationSkillId === skill.id && <SkillPresentationEditor key={skill.id} skill={skill} request={request} onClose={() => setPresentationSkillId(null)} onSaved={() => { setPresentationSkillId(null); setValidation({valid:true,message:"封面与预览已更新"}); load(); }} />}
               <div className="platform-skill-version-list">
@@ -175,11 +176,11 @@ export function PlatformSkillAdmin({ request }) {
                     <span className={`platform-skill-status is-${version.status}`}>{STATUS_LABELS[version.status]}</span>
                     <div className="platform-skill-version-actions">
                       {version.status === "draft" && <>
-                        <button disabled={busyId === version.id} onClick={() => setEditor({ version, text: JSON.stringify(version.manifest, null, 2), changelog: version.changelog || "" })} type="button"><Code size={15} />编辑</button>
-                        <button disabled={busyId === version.id} onClick={() => runAction(version, "validate")} type="button"><ShieldCheckIcon />校验</button>
-                        <button disabled={busyId === version.id} onClick={() => runAction(version, "publish")} type="button"><SealCheck size={15} />发布</button>
+                        <Button variant="text" size="compact" disabled={busyId === version.id} onClick={() => setEditor({ version, text: JSON.stringify(version.manifest, null, 2), changelog: version.changelog || "" })} type="button"><Code size={15} />编辑</Button>
+                        <Button variant="text" size="compact" disabled={busyId === version.id} onClick={() => runAction(version, "validate")} type="button"><ShieldCheckIcon />校验</Button>
+                        <Button variant="text" size="compact" disabled={busyId === version.id} onClick={() => runAction(version, "publish")} type="button"><SealCheck size={15} />发布</Button>
                       </>}
-                      {version.status === "published" && <button disabled={busyId === version.id} onClick={() => runAction(version, "deprecate")} type="button">停用</button>}
+                      {version.status === "published" && <Button variant="warning" size="compact" disabled={busyId === version.id} onClick={() => runAction(version, "deprecate")} type="button">停用</Button>}
                       {version.status !== "blocked" && <button className="danger" disabled={busyId === version.id} onClick={() => runAction(version, "block")} type="button"><Prohibit size={15} />封禁</button>}
                     </div>
                   </div>
@@ -193,10 +194,10 @@ export function PlatformSkillAdmin({ request }) {
       {editor && (
         <div className="platform-skill-editor-backdrop">
           <form className="platform-skill-editor" onSubmit={saveManifest}>
-            <header><div><h2>{editor.version ? `编辑 ${editor.version.manifest.metadata.name}` : "新建 Skill 清单"}</h2><p>只接受 ViralDNA VideoSkill v1；禁止脚本、命令、密钥与回调地址。</p></div><button onClick={() => setEditor(null)} type="button">关闭</button></header>
+            <header><div><h2>{editor.version ? `编辑 ${editor.version.manifest.metadata.name}` : "新建 Skill 清单"}</h2><p>只接受 ViralDNA VideoSkill v1；禁止脚本、命令、密钥与回调地址。</p></div><Button variant="secondary" size="compact" onClick={() => setEditor(null)} type="button">关闭</Button></header>
             <label><span>Manifest JSON</span><textarea onChange={(event) => setEditor((current) => ({ ...current, text: event.target.value }))} placeholder="粘贴 viraldna.video-skill/v1 清单" spellCheck="false" value={editor.text} /></label>
             <label><span>版本说明</span><input onChange={(event) => setEditor((current) => ({ ...current, changelog: event.target.value }))} value={editor.changelog} /></label>
-            <footer><button className="secondary-button" onClick={() => setEditor(null)} type="button">取消</button><button className="primary-button" disabled={!editor.text.trim() || Boolean(busyId)} type="submit">保存草稿</button></footer>
+            <footer><Button className="secondary-button" onClick={() => setEditor(null)} type="button">取消</Button><Button className="primary-button" disabled={!editor.text.trim() || Boolean(busyId)} type="submit">保存草稿</Button></footer>
           </form>
         </div>
       )}

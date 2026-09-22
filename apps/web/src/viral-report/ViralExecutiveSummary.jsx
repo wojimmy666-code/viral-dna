@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import {
   ArrowClockwise,
   CaretRight,
@@ -29,7 +30,7 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms, o
       <section className="viral-error-state" role="alert">
         <ShieldWarning size={22} />
         <div><strong>爆款洞察暂时不可用</strong><p>{error}</p></div>
-        <button type="button" onClick={() => reload()}><ArrowClockwise size={17} />重试</button>
+        <Button variant="secondary" size="compact" type="button" onClick={() => reload()}><ArrowClockwise size={17} />重试</Button>
       </section>
     );
   }
@@ -99,7 +100,7 @@ export function ViralExecutiveSummary({ analysisId, request, onOpenMechanisms, o
       <div className="viral-inference-note">
         <span>当前未读取真实平台播放、完播或互动指标，结论用于创作决策。</span>
         <div className="viral-summary-actions">
-          <button type="button" onClick={onOpenMechanisms}>查看机制与证据<CaretRight size={16} /></button>
+          <Button variant="text" size="compact" type="button" onClick={onOpenMechanisms}>查看机制与证据<CaretRight size={16} /></Button>
           <button className="primary" type="button" onClick={onOpenReplication}>开始复刻<CaretRight size={16} /></button>
         </div>
       </div>

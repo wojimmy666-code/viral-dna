@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
@@ -160,11 +161,11 @@ export function UserSettingsPage({
             </button>
           ))}
           <div className="settings-nav-divider" />
-          <button onClick={onOpenConnections} type="button">
+          <button data-ui="navigation" onClick={onOpenConnections} type="button">
             <Cloud size={19} /> 平台连接
           </button>
           {adminAvailable && (
-            <button onClick={onOpenAdmin} type="button">
+            <button data-ui="navigation" onClick={onOpenAdmin} type="button">
               <Gear size={19} /> 平台管理后台
             </button>
           )}
@@ -395,22 +396,22 @@ export function UserSettingsPage({
                   <small>切换后，下载、分析、导出和资产默认写入新工作区。</small>
                 </label>
                 <div className="device-workspace-actions">
-                  <button
+                  <Button
                     className="secondary-button"
                     disabled={workspaceSaving}
                     onClick={onValidateWorkspace}
                     type="button"
                   >
                     检查文件夹
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     className="primary-button"
                     disabled={workspaceSaving || workspaceValidation?.valid === false}
                     onClick={onSwitchWorkspace}
                     type="button"
                   >
                     切换工作区
-                  </button>
+                  </Button>
                 </div>
                 {workspaceValidation?.valid && (
                   <p className="device-workspace-valid"><Check size={17} /> 文件夹可写</p>
@@ -423,14 +424,14 @@ export function UserSettingsPage({
           {error && <p className="settings-page-error" role="alert">{error}</p>}
           {section !== "device" && (
             <SettingsActions className="settings-page-actions">
-              <button
+              <Button
                 className="primary-button"
                 disabled={loading || saving}
                 onClick={save}
                 type="button"
               >
                 {saving ? "保存中…" : "保存账户设置"}
-              </button>
+              </Button>
             </SettingsActions>
           )}
         </SettingsPanel>

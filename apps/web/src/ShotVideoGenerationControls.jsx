@@ -1,3 +1,4 @@
+import { Button } from "./ui/system/Button.jsx";
 import { useId, useRef, useState } from "react";
 import {
   CaretUp,
@@ -163,26 +164,26 @@ export function ShotVideoGenerationControls({
 
         <div className="shot-video-command-actions">
           {activeRun && (
-            <button
+            <Button
               className="text-button compact"
               disabled={busy}
               onClick={() => onCancelRun(activeRun.id)}
               type="button"
             >
               <Prohibit size={15} />取消任务
-            </button>
+            </Button>
           )}
           {!activeRun && latestRun?.status === "cancelled" && (
-            <button
+            <Button
               className="secondary-button compact"
               disabled={busy}
               onClick={() => onRetryRun(latestRun.id)}
               type="button"
             >
               重试上次任务
-            </button>
+            </Button>
           )}
-          <button
+          <Button
             className="primary-button compact shot-video-generate-button"
             disabled={generateDisabled}
             onClick={onGenerate}
@@ -197,7 +198,7 @@ export function ShotVideoGenerationControls({
               : busy
                 ? "正在保存并提交"
                 : `生成 ${candidateCount} 个`}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -252,13 +253,13 @@ export function ShotVideoGenerationControls({
           <WarningCircle size={17} />
           <span>{generationBlockedReason}</span>
           {modelCatalog.failed ? (
-            <button className="text-button compact" onClick={reloadModels} type="button">
+            <Button className="text-button compact" onClick={reloadModels} type="button">
               重新加载模型
-            </button>
+            </Button>
           ) : modelCatalog.missingProviderKey ? (
-            <button className="text-button compact" onClick={openModelSettings} type="button">
+            <Button className="text-button compact" onClick={openModelSettings} type="button">
               打开模型设置
-            </button>
+            </Button>
           ) : null}
         </div>
       )}

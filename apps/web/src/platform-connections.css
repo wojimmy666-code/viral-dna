@@ -284,32 +284,9 @@
   height: 40px;
 }
 
-.platform-card-actions button,
-.platform-secondary-button,
-.platform-primary-button,
-.platform-method-heading button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 40px;
-  border: 1px solid #dedfe8;
-  border-radius: 11px;
-  padding: 0 14px;
-  background: white;
-  font-weight: var(--type-weight-semibold);
-  cursor: pointer;
-}
-
 .platform-card-actions button.danger {
   margin-left: auto;
   color: var(--status-danger-text);
-}
-
-.platform-primary-button {
-  border-color: var(--accent);
-  color: var(--text-on-accent);
-  background: var(--accent);
 }
 
 .platform-empty-state {
@@ -377,18 +354,6 @@
 .platform-editor header h2 {
   margin: 5px 0;
   font-size: var(--type-page-size);
-}
-
-.platform-editor header > button {
-  display: grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border: 0;
-  border-radius: 10px;
-  color: var(--text-secondary);
-  background: transparent;
-  cursor: pointer;
 }
 
 .platform-editor-body {

@@ -1,3 +1,5 @@
+import { Button } from "../ui/system/Button.jsx";
+import { Stop } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { flushAccountDrafts } from "../accounts/account-client.js";
 import { creativeCost, isCreativeRunning } from "../viral-report/creative-workflow.js";
@@ -127,8 +129,8 @@ export function PromptWorkspace({ selectedSource = "source", onSourceChange, onE
   return <div className="prompt-workspace">
     <div className="prompt-source-controls" aria-label="提示词来源">
       <div className="prompt-source-switch">
-        <button type="button" aria-pressed={parsed.kind === "source"} disabled={busy} onClick={() => choose("source")}>原片提示词</button>
-        <button type="button" aria-pressed={parsed.kind !== "source"} disabled={busy || !sources.length} onClick={() => {
+        <button data-ui="tabs" type="button" aria-pressed={parsed.kind === "source"} disabled={busy} onClick={() => choose("source")}>原片提示词</button>
+        <button data-ui="tabs" type="button" aria-pressed={parsed.kind !== "source"} disabled={busy || !sources.length} onClick={() => {
           if (parsed.kind === "source") choose(sources.length === 1 ? sources[0].key : "scheme");
         }}>方案提示词</button>
       </div>
@@ -138,25 +140,25 @@ export function PromptWorkspace({ selectedSource = "source", onSourceChange, onE
       </select></label>}
       {parsed.kind === "source" && <span className="prompt-source-caption">原视频分析 · {originalProps.promptPackage?.shots?.length || 0} 个分镜</span>}
     </div>
-    {sourceError && <p className="scheme-prompt-error" role="alert">{sourceError} <button type="button" className="text-button" onClick={() => setCatalogVersion(value => value + 1)}>重试读取列表</button></p>}
-    {error && <p className="scheme-prompt-error" role="alert">{error}{!document && <button type="button" className="text-button" disabled={busy} onClick={() => setRevision(value => value + 1)}>恢复查询</button>}</p>}
+    {sourceError && <p className="scheme-prompt-error" role="alert">{sourceError} <Button type="button" className="text-button" onClick={() => setCatalogVersion(value => value + 1)}>重试读取列表</Button></p>}
+    {error && <p className="scheme-prompt-error" role="alert">{error}{!document && <Button type="button" className="text-button" disabled={busy} onClick={() => setRevision(value => value + 1)}>恢复查询</Button>}</p>}
     {parsed.kind === "source" ? <PromptEditor {...originalProps} /> : <>
       {parsed.kind === "scheme" && <p className="scheme-prompt-status">请选择要查看的方案；不会自动切换到最新批次。</p>}
       {loading && <p className="scheme-prompt-status" role="status">正在读取所选方案…</p>}
-      {isCreativeRunning(job) && <div className="scheme-prompt-status" role="status"><span>正在生成中文预览，原提示词尚未修改。最长 240 秒。</span><button type="button" className="secondary-button compact" disabled={busy} onClick={cancel}>停止任务</button></div>}
+      {isCreativeRunning(job) && <div className="scheme-prompt-status" role="status"><span>正在生成中文预览，原提示词尚未修改。最长 240 秒。</span><Button variant="warning" size="compact" icon={<Stop />} loading={busy} loadingLabel="正在停止…" onClick={cancel}>停止任务</Button></div>}
       {job && <p className="prompt-source-caption">{job.resolved_model || job.requested_model} · {creativeCost(job)}</p>}
       {document && <ProductionPromptDocument key={`${selection}:${revision}`} document={document} request={request} onCopy={onCopy} onEditProduction={onEditProduction}>
-        {hasEnglish && <div className="scheme-language-notice"><span>检测到英文提示词。中文校正只处理描述文字，保留当前分镜和素材。</span>{batchId && <button type="button" className="secondary-button compact" disabled={busy || Boolean(estimate)} onClick={getEstimate}>转为中文</button>}</div>}
+        {hasEnglish && <div className="scheme-language-notice"><span>检测到英文提示词。中文校正只处理描述文字，保留当前分镜和素材。</span>{batchId && <Button type="button" className="secondary-button compact" disabled={busy || Boolean(estimate)} onClick={getEstimate}>转为中文</Button>}</div>}
         {estimate && <section className="scheme-language-confirm" aria-label="中文校正费用确认">
           <p>{estimate.model} · 预估 ¥{(estimate.estimated_cost_micros / 1000000).toFixed(4)}，最终按实际用量计费。不会生成图片或视频。</p>
-          <button type="button" className="primary-button compact" disabled={busy} onClick={translate}>{busy ? "提交中…" : "确认生成中文预览"}</button>
-          <button type="button" className="text-button" disabled={busy} onClick={() => { setEstimate(null); translationRequest.current = null; }}>取消</button>
+          <Button type="button" className="primary-button compact" disabled={busy} onClick={translate}>{busy ? "提交中…" : "确认生成中文预览"}</Button>
+          <Button type="button" className="text-button" disabled={busy} onClick={() => { setEstimate(null); translationRequest.current = null; }}>取消</Button>
         </section>}
         {isTranslation && document.source_document && <div className="scheme-language-confirm">
           <details><summary>对照原提示词</summary><pre>{productionPromptsToText(document.source_document)}</pre></details>
-          {canApply && <><p>确认后仅更新本方案的提示词，分镜、已采用素材及历史版本保留。</p><button type="button" className="primary-button compact" disabled={busy} onClick={applyTranslation}>{document.applied_revision_id ? "查看已应用方案" : "确认应用到原方案"}</button></>}
+          {canApply && <><p>确认后仅更新本方案的提示词，分镜、已采用素材及历史版本保留。</p><Button type="button" className="primary-button compact" disabled={busy} onClick={applyTranslation}>{document.applied_revision_id ? "查看已应用方案" : "确认应用到原方案"}</Button></>}
         </div>}
-        {document.read_only && !document.project_id && !hasEnglish && job?.status === "completed" && <div className="scheme-language-confirm"><button type="button" className="primary-button compact" disabled={busy} onClick={publish}>确认创建制作项目</button></div>}
+        {document.read_only && !document.project_id && !hasEnglish && job?.status === "completed" && <div className="scheme-language-confirm"><Button type="button" className="primary-button compact" disabled={busy} onClick={publish}>确认创建制作项目</Button></div>}
       </ProductionPromptDocument>}
     </>}
   </div>;

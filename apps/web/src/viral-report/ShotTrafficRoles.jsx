@@ -15,7 +15,7 @@ export function ShotTrafficRoles({ analysisId, request, resolveUrl, onSeek }) {
       <div className="shot-traffic-list">
         {insight.shot_roles.map((shot) => (
           <article key={shot.shot_id}>
-            <button type="button" onClick={() => onSeek?.(shot.start_seconds)} aria-label={`查看${shot.title}对应时间点`}>
+            <button data-ui="selection-card" type="button" onClick={() => onSeek?.(shot.start_seconds)} aria-label={`查看${shot.title}对应时间点`}>
               {shot.keyframe_url ? <img src={resolveUrl(shot.keyframe_url)} alt={shot.title} /> : <span className="shot-traffic-index">{String(shot.shot_index).padStart(2, "0")}</span>}
               <span className="shot-traffic-copy">
                 <span className="shot-traffic-heading">

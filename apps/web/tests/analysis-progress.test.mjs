@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import * as Icons from "@phosphor-icons/react";
 import { isCredentialAnalysisError, platformLabel } from "../src/platform-connection-ui.js";
 import { latestAnalysis, watchAnalysis } from "../src/analysis-progress.js";
+import { Button } from "./helpers/render-button.mjs";
 
 const state = (stage, seconds = 0) => ({ id: "job", stage, updated_at: new Date(seconds * 1000).toISOString() });
 function harness(t, request, overrides = {}) {
@@ -125,7 +126,7 @@ test("actual failure card renders the reason and actions without a running spinn
   const jsx = "function AnalysisProgress(" + source.split("function AnalysisProgress(")[1]
     .split("function RecordBreadcrumb")[0];
   const { code } = transformSync(jsx, { loader: "jsx", jsxFactory: "createElement" });
-  const scope = { createElement, ...Icons, isCredentialAnalysisError, platformLabel, stageLabels: {} };
+  const scope = { createElement, Button, ...Icons, isCredentialAnalysisError, platformLabel, stageLabels: {} };
   const Card = new Function(...Object.keys(scope), `${code}; return AnalysisProgress;`)(...Object.values(scope));
   const html = renderToStaticMarkup(createElement(Card, {
     analysis: { ...state("failed"), progress: 3, simulated: false,

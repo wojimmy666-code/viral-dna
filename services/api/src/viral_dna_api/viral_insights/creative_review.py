@@ -104,12 +104,13 @@ def assess(draft, brief, rules=(), *, expanded=False, manual_confirmed=()):
     for shared in draft.common_rules:
         rule = mapped_rules.get(shared.requirement_index)
         if rule and (
-            rule.kind != "shared" or not (shared.image_rule.strip() or shared.video_rule.strip())
+            rule.kind not in {"shared", "per_scene"}
+            or not (shared.image_rule.strip() or shared.video_rule.strip())
         ):
             issue(
                 shared.requirement_index,
                 "common_rule_invalid",
-                "公共设定必须属于贯穿全片的要求，并填写明确内容",
+                "公共设定须填写明确内容，只能补充共同调度或逐场景要求，不能代替全片结构",
                 "revision",
             )
     for requirement in requirements:
@@ -214,11 +215,12 @@ def assess(draft, brief, rules=(), *, expanded=False, manual_confirmed=()):
                     ref.scene_index is not None
                     or value is None
                     or not getattr(value, field).strip()
-                    or rule.kind != "shared"
+                    or rule.kind not in {"shared", "per_scene"}
                 ):
                     invalid = True
                 else:
-                    has_common = True
+                    # Per-scene summaries are supplementary, never scene evidence.
+                    has_common = rule.kind == "shared"
             elif ref.scene_index not in all_scenes or (not expanded and ref.field != "description"):
                 invalid = True
             else:
@@ -294,6 +296,27 @@ def present_reviews(batch):
         for index, idea in enumerate(result.ideas):
             if idea.review_state == "unreviewed":
                 result.ideas[index] = review_idea(idea, brief, result.requirement_rules)
+            elif (
+                idea.review_state == "needs_revision"
+                and idea.review_brief == brief["text"]
+                and idea.human_review is None
+                and idea.review_details
+                and len(idea.review_details) == len(idea.review_issues)
+                and all(
+                    item.code == "common_rule_invalid" and item.severity == "revision"
+                    for item in idea.review_details
+                )
+            ):
+                # Recheck only the old classification-only rejection. Preserve all
+                # authored content and human/other review decisions; never write or bill.
+                reviewed = review_idea(idea, brief, result.requirement_rules)
+                result.ideas[index] = idea.model_copy(update={
+                    key: getattr(reviewed, key)
+                    for key in (
+                        "brief_checks", "review_details", "review_state",
+                        "review_issues", "review_brief",
+                    )
+                })
         # Return the same exact-count interpretation to the editor, without persisting it.
         result.requirement_rules = rules_for_brief(brief, result.requirement_rules)
         result.review_source_fingerprint = fingerprint(
@@ -311,6 +334,29 @@ def present_reviews(batch):
 def idea_ready(idea, brief_text):
     return (
         idea.review_state == "ready" and not idea.review_issues and idea.review_brief == brief_text
+    )
+
+
+def idea_can_expand(idea, brief_text):
+    """Missing legacy attestations may be checked in the requested expansion.
+
+    This does not approve the old idea or relax validation of the resulting plan.
+    Known conflicts, modern review failures and incomplete plans remain blocked.
+    """
+    if idea_ready(idea, brief_text):
+        return True
+    return bool(
+        idea.review_state == "needs_review"
+        and idea.review_brief == brief_text
+        and idea.scene_plan
+        and [scene.index for scene in idea.scene_plan] == list(range(1, len(idea.scene_plan) + 1))
+        and all(scene.description.strip() for scene in idea.scene_plan)
+        and idea.review_details
+        and len(idea.review_details) == len(idea.review_issues)
+        and all(
+            issue.code == "legacy_evidence_missing" and issue.severity == "review"
+            for issue in idea.review_details
+        )
     )
 
 

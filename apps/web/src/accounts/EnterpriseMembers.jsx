@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { InlineMessage, PageHeader, PageShell, StatusBadge } from "../ui/system/index.js";
@@ -72,8 +73,8 @@ function MemberEditor({ action, busy, failure, onSubmit, onClose, onShowRemoved 
               type={visible ? "text" : "password"} autoComplete="new-password" required minLength={8}
               value={draft.password} onChange={event => edit("password", event.target.value)}
               {...fieldError("password")} />
-            <button className="text-button" type="button" aria-label={visible ? "隐藏密码" : "显示密码"}
-              aria-pressed={visible} onClick={() => setVisible(value => !value)}>{visible ? "隐藏" : "显示"}</button>
+            <Button className="text-button" type="button" aria-label={visible ? "隐藏密码" : "显示密码"}
+              aria-pressed={visible} onClick={() => setVisible(value => !value)}>{visible ? "隐藏" : "显示"}</Button>
           </div>
         </div>
         <p className="account-help">{isAdd
@@ -82,10 +83,10 @@ function MemberEditor({ action, busy, failure, onSubmit, onClose, onShowRemoved 
             : "确认后立即启用新密码，该成员需重新登录；旧邀请链接、同步授权和编辑权失效。"}</p>
       </>}
       {message && <p id={errorId} className="account-error" role="alert">{message}</p>}
-      {failure?.code === "member_removed" && <button className="text-button" type="button" onClick={() => onShowRemoved(draft.username || member?.username)}>查看已移除成员</button>}
+      {failure?.code === "member_removed" && <Button className="text-button" type="button" onClick={() => onShowRemoved(draft.username || member?.username)}>查看已移除成员</Button>}
       <div className="account-actions">
-        <button className={isRemove ? "secondary-button enterprise-member-danger" : "primary-button"} type="submit">{busy ? "处理中…" : isRemove ? "确认移除" : kind === "restore" ? "设置密码并恢复" : kind === "reset" ? "确认重置密码" : "创建成员"}</button>
-        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
+        <Button variant={isRemove ? "warning" : "primary"} className={isRemove ? "enterprise-member-danger" : ""} type="submit">{busy ? "处理中…" : isRemove ? "确认移除" : kind === "restore" ? "设置密码并恢复" : kind === "reset" ? "确认重置密码" : "创建成员"}</Button>
+        <Button className="secondary-button" type="button" onClick={onClose}>取消</Button>
       </div>
     </fieldset>
   </form>;
@@ -154,19 +155,19 @@ function OwnerMembers({ session }) {
   return <PageShell className="account-management enterprise-members">
     <Link to="/projects">返回项目</Link>
     <PageHeader id={headingId} tabIndex={-1} className="account-management-heading" title="企业成员" description="成员独立登录，共享本企业的项目和资产。"
-      actions={<button ref={addButton} className="primary-button" disabled={disabled} onClick={event => openEditor("add", null, event)}>添加成员</button>} />
+      actions={<Button ref={addButton} className="primary-button" disabled={disabled} onClick={event => openEditor("add", null, event)}>添加成员</Button>} />
     <form className="account-name-form" onSubmit={rename}>
       <label className="account-field"><span>企业名称</span><input name="enterprise_name" required maxLength={120} disabled={busy || Boolean(editor)} value={name} onChange={event => setName(event.target.value)} /></label>
-      <button className="secondary-button" disabled={disabled || !name.trim()}>更新名称</button>
+      <Button type="submit" className="secondary-button" disabled={disabled || !name.trim()}>更新名称</Button>
     </form>
     {notice && <p role="status" className="account-help">{notice}</p>}
-    {loadError && <InlineMessage tone="danger">{loadError}<button className="text-button" disabled={busy} onClick={refresh}>重新加载</button></InlineMessage>}
+    {loadError && <InlineMessage tone="danger">{loadError}<Button className="text-button" disabled={busy} onClick={refresh}>重新加载</Button></InlineMessage>}
     {editor && <MemberEditor key={`${editor.kind}:${editor.member?.id || "new"}`} action={editor} busy={busy} failure={failure}
       onSubmit={submit} onClose={closeEditor} onShowRemoved={phone => { closeEditor(); setView("removed"); setQuery(phone); }} />}
     <div className="enterprise-member-toolbar">
       <div className="account-actions" role="group" aria-label="成员状态">
-        <button className="secondary-button" aria-pressed={!removed} disabled={busy || Boolean(editor)} onClick={() => setView("current")}>当前成员（{items.filter(item => item.status !== "disabled").length}）</button>
-        <button className="secondary-button" aria-pressed={removed} disabled={busy || Boolean(editor)} onClick={() => setView("removed")}>已移除（{items.filter(item => item.status === "disabled").length}）</button>
+        <Button className="secondary-button" aria-pressed={!removed} disabled={busy || Boolean(editor)} onClick={() => setView("current")}>当前成员（{items.filter(item => item.status !== "disabled").length}）</Button>
+        <Button className="secondary-button" aria-pressed={removed} disabled={busy || Boolean(editor)} onClick={() => setView("removed")}>已移除（{items.filter(item => item.status === "disabled").length}）</Button>
       </div>
       <label className="account-field"><input type="search" aria-label="搜索成员" placeholder="搜索姓名或手机号" value={query} onChange={event => setQuery(event.target.value)} /></label>
     </div>
@@ -179,9 +180,9 @@ function OwnerMembers({ session }) {
           <td data-label="状态"><StatusBadge tone={item.status === "active" ? "success" : "neutral"}>{statusText[item.status] || item.status}</StatusBadge></td>
           <td data-label="创建时间">{item.created_at ? new Date(item.created_at * 1000).toLocaleDateString("zh-CN") : "—"}</td>
           <td data-label="操作"><div className="account-actions">{item.role === "member" && item.id !== session.user_id ? <>
-            <button className="text-button" disabled={disabled} aria-label={`${item.display_name}：${removed ? "恢复成员" : "重置密码"}`}
-              onClick={event => openEditor(removed ? "restore" : "reset", item, event)}>{removed ? "恢复成员" : "重置密码"}</button>
-            {!removed && <button className="text-button enterprise-member-danger" disabled={disabled} aria-label={`${item.display_name}：移除成员`} onClick={event => openEditor("remove", item, event)}>移除</button>}
+            <Button className="text-button" disabled={disabled} aria-label={`${item.display_name}：${removed ? "恢复成员" : "重置密码"}`}
+              onClick={event => openEditor(removed ? "restore" : "reset", item, event)}>{removed ? "恢复成员" : "重置密码"}</Button>
+            {!removed && <Button className="text-button enterprise-member-danger" disabled={disabled} aria-label={`${item.display_name}：移除成员`} onClick={event => openEditor("remove", item, event)}>移除</Button>}
           </> : <span className="account-help">负责人不可移除</span>}</div></td>
         </tr>)}</tbody>
       </table></div>}

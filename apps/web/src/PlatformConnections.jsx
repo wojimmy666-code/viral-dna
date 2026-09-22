@@ -1,3 +1,4 @@
+import { Button, IconButton } from "./ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
@@ -280,9 +281,9 @@ export function PlatformConnections({
         <div className="platform-header-actions">
           <span className="platform-local-badge"><ShieldCheck size={15} weight="fill" /> 仅此设备</span>
           {onBack && (
-            <button className="platform-secondary-button" onClick={onBack} type="button">
+            <Button variant="secondary" className="platform-secondary-button" onClick={onBack} type="button">
               返回新建项目
-            </button>
+            </Button>
           )}
         </div>
       </header>
@@ -349,7 +350,7 @@ export function PlatformConnections({
                     </span>
                   </label>
                   <div className="platform-card-actions">
-                    <button
+                    <Button variant="secondary" size="compact"
                       disabled={Boolean(busy)}
                       onClick={() => validateConnection(platform)}
                       type="button"
@@ -358,18 +359,18 @@ export function PlatformConnections({
                         ? <CircleNotch className="spin" size={16} />
                         : <CheckCircle size={16} />}
                       检查本机信息
-                    </button>
-                    <button disabled={Boolean(busy)} onClick={() => openEditor(platform)} type="button">
+                    </Button>
+                    <Button variant="secondary" size="compact" disabled={Boolean(busy)} onClick={() => openEditor(platform)} type="button">
                       <ArrowClockwise size={16} /> 更新
-                    </button>
-                    <button
+                    </Button>
+                    <Button variant="warning"
                       className="danger"
                       disabled={Boolean(busy)}
                       onClick={() => disconnect(platform)}
                       type="button"
                     >
                       断开
-                    </button>
+                    </Button>
                   </div>
                   <details className="platform-link-test">
                     <summary>测试视频链接</summary>
@@ -392,13 +393,13 @@ export function PlatformConnections({
                         />
                       </label>
                       <p>仅测试视频信息，不下载、不调用分析模型。新建项目时会自动下载并分析，无需提前测试。</p>
-                      <button
+                      <Button
                         className="secondary-button compact"
                         disabled={Boolean(busy) || !testUrls[platform]?.trim() || connection.usage_strategy === "disabled"}
                         type="submit"
                       >
                         {busy === `validate-${platform}` ? "正在检查" : "测试读取"}
-                      </button>
+                      </Button>
                       <p>最近链接测试：{formatDate(connection.last_tested_at, "尚未测试")}</p>
                     </form>
                   </details>
@@ -407,12 +408,12 @@ export function PlatformConnections({
                 <div className="platform-empty-state">
                   <p>连接后，可在平台要求登录时自动使用当前设备的登录状态。</p>
                   <div>
-                    <button className="platform-primary-button" onClick={() => openEditor(platform, "browser")} type="button">
+                    <Button variant="primary" className="platform-primary-button" onClick={() => openEditor(platform, "browser")} type="button">
                       自动检测浏览器
-                    </button>
-                    <button className="platform-secondary-button" onClick={() => openEditor(platform, "file")} type="button">
+                    </Button>
+                    <Button variant="secondary" className="platform-secondary-button" onClick={() => openEditor(platform, "file")} type="button">
                       导入 cookies.txt
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -437,9 +438,9 @@ export function PlatformConnections({
                 <h2 id="platform-editor-title">配置{platformLabel(editorPlatform)}</h2>
                 <p>选择本机登录状态的读取方式。</p>
               </div>
-              <button aria-label="关闭" disabled={Boolean(busy)} onClick={closeEditor} type="button">
+              <IconButton aria-label="关闭" disabled={Boolean(busy)} onClick={closeEditor} type="button">
                 <X size={19} />
-              </button>
+              </IconButton>
             </header>
 
             <div className="platform-editor-body">
@@ -471,10 +472,10 @@ export function PlatformConnections({
                       <h3>从已登录浏览器读取</h3>
                       <p>直接读取本机 Profile，不保存其他网站 Cookie。</p>
                     </div>
-                    <button disabled={browserLoading || Boolean(busy)} onClick={loadBrowsers} type="button">
+                    <Button variant="secondary" size="compact" disabled={browserLoading || Boolean(busy)} onClick={loadBrowsers} type="button">
                       {browserLoading ? <CircleNotch className="spin" size={15} /> : <ArrowClockwise size={15} />}
                       重新检测
-                    </button>
+                    </Button>
                   </div>
                   <label className="platform-field">
                     <span>浏览器</span>
@@ -567,16 +568,16 @@ export function PlatformConnections({
 
             <footer>
               {editorConnection?.configured && (
-                <button
+                <Button variant="secondary"
                   className="platform-secondary-button"
                   disabled={Boolean(busy)}
                   onClick={() => validateConnection(editorPlatform, testUrl)}
                   type="button"
                 >
                   {testUrl.trim() ? "测试视频链接" : "检查本机信息"}
-                </button>
+                </Button>
               )}
-              <button
+              <Button variant="primary"
                 className="platform-primary-button"
                 disabled={Boolean(busy)}
                 onClick={method === "browser" ? saveBrowser : importCookies}
@@ -584,7 +585,7 @@ export function PlatformConnections({
               >
                 {busy ? <CircleNotch className="spin" size={16} /> : <CheckCircle size={16} weight="fill" />}
                 {method === "browser" ? "读取并保存" : "校验并导入"}
-              </button>
+              </Button>
             </footer>
           </aside>
         </div>

@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { ArrowClockwise, CheckCircle, CloudArrowUp, WarningCircle } from "@phosphor-icons/react";
 import "./media-staging-settings.css";
 
@@ -194,7 +195,7 @@ export function MediaStagingSettingsPanel({
           {status?.valid ? <CheckCircle size={18} /> : <WarningCircle size={18} />}
           <span>{status?.message || "保存配置后测试私有桶、凭证和签名读取链路。"}</span>
         </div>
-        <button
+        <Button
           className="secondary-button"
           disabled={saving || validating || provider === "disabled"}
           onClick={onValidate}
@@ -202,7 +203,7 @@ export function MediaStagingSettingsPanel({
         >
           <ArrowClockwise className={validating ? "spin" : ""} size={18} />
           {validating ? "正在测试" : "测试连接"}
-        </button>
+        </Button>
       </footer>
     </section>
   );

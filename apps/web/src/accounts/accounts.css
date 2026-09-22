@@ -11,6 +11,7 @@
 .account-header-actions { flex: 0 0 auto; }
 .account-session-bar .topbar-actions { gap: var(--space-2); }
 .account-session-bar .icon-button, .account-menu > button { min-width: 44px; height: 44px; }
+.account-session-bar .ui-button.icon-button, .topbar .ui-button.icon-button { width: 44px; height: 44px; min-height: 44px; }
 .account-root .app-shell { min-height: calc(100vh - var(--account-header-height)); }
 .account-root .sidebar:not(.sidebar-mobile) { top: var(--account-header-height); height: calc(100vh - var(--account-header-height)); height: calc(100dvh - var(--account-header-height)); }
 .account-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

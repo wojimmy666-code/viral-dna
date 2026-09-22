@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useCallback } from "react";
 import {
   ArrowLeft,
@@ -437,9 +438,9 @@ export function PlatformAdminConsole({
 
         {error && <p className="admin-settings-error" role="alert">{error}</p>}
         <SettingsActions className="platform-admin-actions">
-          <button className="primary-button" disabled={loading || saving} onClick={onSave} type="button">
+          <Button className="primary-button" disabled={loading || saving} onClick={onSave} type="button">
             {saving ? "保存中…" : "保存平台配置"}
-          </button>
+          </Button>
         </SettingsActions>
       </main>
     </div>

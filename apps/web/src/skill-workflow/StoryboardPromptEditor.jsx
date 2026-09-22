@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { accountStorageKey, registerAccountFlusher } from "../accounts/account-client.js";
 import { ArrowCounterClockwise, ArrowRight, Plus, Trash } from "@phosphor-icons/react";
@@ -159,27 +160,27 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
     {recoveryConflict && <InlineMessage tone="warning"><div>
       <p>服务器已有更新，同时检测到本地未保存草稿。当前显示服务器版本，请选择要继续编辑的内容。</p>
       <div className="storyboard-shot-actions">
-        <button className="secondary-button compact" onClick={() => {
+        <Button className="secondary-button compact" onClick={() => {
           const recovered = recoveryConflict;
           setRecoveryConflict(null);
           edit(recovered);
-        }} type="button">恢复本地草稿</button>
-        <button className="secondary-button compact" onClick={() => {
+        }} type="button">恢复本地草稿</Button>
+        <Button className="secondary-button compact" onClick={() => {
           try { localStorage.removeItem(cacheKey); } catch { /* Optional browser storage. */ }
           setRecoveryConflict(null);
-        }} type="button">保留服务器版本</button>
+        }} type="button">保留服务器版本</Button>
       </div>
     </div></InlineMessage>}
     {issues.length > 0 && <InlineMessage tone="warning"><span>{issues.join("；")}</span></InlineMessage>}
     {!state.dirty && actualFrames > 0 && targetDurationFrames > 0 && actualFrames !== targetDurationFrames && <InlineMessage tone="warning"><span>当前分镜合计 {(actualFrames / state.manifest.fps).toFixed(1)} 秒，目标 {(targetDurationFrames / state.manifest.fps).toFixed(1)} 秒；可继续编辑或在剪辑阶段调整，不会自动增删镜头。</span></InlineMessage>}
-    {deleted && <div className="storyboard-delete-undo" role="status"><span>已移除分镜 {deleted.index + 1}，历史产物保留</span><button className="secondary-button compact" disabled={disabled} onClick={undoDelete} type="button"><ArrowCounterClockwise size={14} />撤销</button></div>}
+    {deleted && <div className="storyboard-delete-undo" role="status"><span>已移除分镜 {deleted.index + 1}，历史产物保留</span><Button className="secondary-button compact" disabled={disabled} onClick={undoDelete} type="button"><ArrowCounterClockwise size={14} />撤销</Button></div>}
     <section className="storyboard-prompt-list" aria-label="分镜提示词">
       {state.shots.map((shot, index) => <article className="storyboard-prompt-shot" key={shot.stable_shot_key} aria-labelledby={`title-${shot.stable_shot_key}`}>
         <header className="storyboard-prompt-heading">
           <h3 id={`title-${shot.stable_shot_key}`}>分镜 {String(index + 1).padStart(2, "0")}</h3>
           <div className="storyboard-shot-actions">
-            <button className="secondary-button compact" disabled={disabled} onClick={() => addShot(index)} type="button" aria-label={`在分镜 ${index + 1} 后插入`}><Plus size={14} /><span>插入</span></button>
-            <button className="secondary-button compact" disabled={disabled} onClick={() => removeShot(index)} type="button" aria-label={`删除分镜 ${index + 1}`}><Trash size={14} /><span>删除</span></button>
+            <Button className="secondary-button compact" disabled={disabled} onClick={() => addShot(index)} type="button" aria-label={`在分镜 ${index + 1} 后插入`}><Plus size={14} /><span>插入</span></Button>
+            <Button className="secondary-button compact" disabled={disabled} onClick={() => removeShot(index)} type="button" aria-label={`删除分镜 ${index + 1}`}><Trash size={14} /><span>删除</span></Button>
           </div>
         </header>
         <div className="storyboard-prompt-columns">
@@ -209,8 +210,8 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
         </div>
       </article>)}
       <footer className="storyboard-prompt-footer">
-        <button className="secondary-button compact" disabled={disabled} onClick={() => addShot()} type="button"><Plus size={16} />添加分镜</button>
-        <button className="primary-button" disabled={disabled} onClick={() => void complete()} type="button">{confirming ? "正在确认…" : approved && !state.dirty ? "进入分镜图片" : "确认并进入分镜图片"}<ArrowRight size={16} /></button>
+        <Button className="secondary-button compact" disabled={disabled} onClick={() => addShot()} type="button"><Plus size={16} />添加分镜</Button>
+        <Button className="primary-button" disabled={disabled} onClick={() => void complete()} type="button">{confirming ? "正在确认…" : approved && !state.dirty ? "进入分镜图片" : "确认并进入分镜图片"}<ArrowRight size={16} /></Button>
       </footer>
     </section>
   </div>;

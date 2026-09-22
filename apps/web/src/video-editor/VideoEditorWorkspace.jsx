@@ -1,3 +1,4 @@
+import { Button, IconButton } from "../ui/system/Button.jsx";
 import { useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import {
   ArrowsOut,
@@ -599,12 +600,12 @@ function ClipInspector({ clip, clips, hasSourceAudio, onChange, onMove }) {
       </div>
 
       <div className="timeline-order-actions" aria-label="调整片段顺序">
-        <button disabled={index <= 0} onClick={() => onMove(-1)} type="button">
+        <Button variant="secondary" size="compact" disabled={index <= 0} onClick={() => onMove(-1)} type="button">
           <ArrowUp size={15} />向前
-        </button>
-        <button disabled={index < 0 || index >= clips.length - 1} onClick={() => onMove(1)} type="button">
+        </Button>
+        <Button variant="secondary" size="compact" disabled={index < 0 || index >= clips.length - 1} onClick={() => onMove(1)} type="button">
           <ArrowDown size={15} />向后
-        </button>
+        </Button>
       </div>
 
       <div className="timeline-field-pair">
@@ -841,7 +842,7 @@ function SubtitleInspector({ cues, onAdd, onChange, onDelete, onSelect, selected
     <div className="timeline-subtitle-editor">
       <div className="timeline-inspector-heading">
         <div><small>文本轨道</small><h4>字幕与对白</h4></div>
-        <button className="secondary-button compact" onClick={onAdd} type="button"><Plus size={15} />添加字幕</button>
+        <Button className="secondary-button compact" onClick={onAdd} type="button"><Plus size={15} />添加字幕</Button>
       </div>
       <small className="timeline-subtitle-count">{cues.filter((cue) => cue.enabled).length}/{cues.length} 条启用</small>
       {cues.length === 0 && <div className="timeline-inspector-empty">播放头移动到目标位置后添加第一条字幕。</div>}
@@ -1411,7 +1412,7 @@ export function VideoEditorWorkspace({
 
   if (loading) return <TimelineSkeleton />;
   if (error && !timeline) {
-    return <div className="production-inline-error timeline-load-error" role="alert"><WarningCircle size={18} />{error}<button onClick={loadTimeline} type="button">重试</button></div>;
+    return <div className="production-inline-error timeline-load-error" role="alert"><WarningCircle size={18} />{error}<Button variant="secondary" size="compact" onClick={loadTimeline} type="button">重试</Button></div>;
   }
   if (!timeline) return null;
 
@@ -1428,23 +1429,23 @@ export function VideoEditorWorkspace({
             <div className="timeline-render-progress" aria-live="polite">
               <CircleNotch className="spin" size={16} />
               <span>预览渲染 {renderJob.progress_percent}%</span>
-              <button onClick={cancelPreview} type="button">取消</button>
+              <Button variant="warning" size="compact" onClick={cancelPreview} type="button">取消</Button>
             </div>
           )}
           <div className="timeline-local-history" role="group" aria-label="本地编辑历史">
-            <button aria-label="撤销" disabled={!undoStack.length || busy} onClick={undoTimelineEdit} title="撤销" type="button"><ArrowCounterClockwise size={16} /></button>
-            <button aria-label="重做" disabled={!redoStack.length || busy} onClick={redoTimelineEdit} title="重做" type="button"><ArrowClockwise size={16} /></button>
+            <IconButton aria-label="撤销" disabled={!undoStack.length || busy} onClick={undoTimelineEdit} title="撤销" type="button"><ArrowCounterClockwise size={16} /></IconButton>
+            <IconButton aria-label="重做" disabled={!redoStack.length || busy} onClick={redoTimelineEdit} title="重做" type="button"><ArrowClockwise size={16} /></IconButton>
           </div>
-          <button className="secondary-button compact" onClick={() => setHistoryOpen((value) => !value)} type="button">
+          <Button className="secondary-button compact" onClick={() => setHistoryOpen((value) => !value)} type="button">
             <ClockCounterClockwise size={16} />版本 {timeline.revision_number}
-          </button>
+          </Button>
           <AutosaveStatus
             onRetry={() => flushTimelineSave().catch(() => {})}
             state={autosaveState}
           />
-          <button className="primary-button compact" disabled={busy || ACTIVE_RENDER_STATUSES.has(renderJob?.status)} onClick={generatePreview} type="button">
+          <Button className="primary-button compact" disabled={busy || ACTIVE_RENDER_STATUSES.has(renderJob?.status)} onClick={generatePreview} type="button">
             <Play size={16} weight="fill" />{renderJob?.status === "succeeded" ? "重新生成合成预览" : "生成合成预览"}
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -1452,7 +1453,7 @@ export function VideoEditorWorkspace({
         <InlineMessage role="status">
           <span>上游内容已更新，当前剪辑和导出仍可继续使用。</span>
           {timeline.upstream_sync_available && (
-            <button className="text-button" disabled={busy} onClick={synchronizeHandoff} type="button">使用最新分镜</button>
+            <Button className="text-button" disabled={busy} onClick={synchronizeHandoff} type="button">使用最新分镜</Button>
           )}
         </InlineMessage>
       )}
@@ -1462,7 +1463,7 @@ export function VideoEditorWorkspace({
           <div><strong>时间线版本</strong><small>恢复历史会创建新版本，不覆盖旧快照。</small></div>
           <div className="timeline-history-list">
             {[...revisions].reverse().map((revision) => (
-              <button disabled={busy || revision.id === timeline.revision_id} key={revision.id} onClick={() => restoreRevision(revision)} type="button">
+              <button data-ui="timeline-control" disabled={busy || revision.id === timeline.revision_id} key={revision.id} onClick={() => restoreRevision(revision)} type="button">
                 <span><strong>v{revision.revision_number}</strong><small>{revisionChangeLabel(revision.change_kind)}</small></span>
                 <em>{revision.id === timeline.revision_id ? "当前" : "恢复"}</em>
               </button>

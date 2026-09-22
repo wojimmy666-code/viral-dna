@@ -1,3 +1,4 @@
+import { Button, IconButton } from "../ui/system/Button.jsx";
 import { useMemo } from "react";
 import {
   ArrowClockwise,
@@ -152,26 +153,26 @@ export function DepthControlPanel({
               />
             )}
             {activeDepth && (
-              <button className="secondary-button compact" disabled={busy} onClick={() => onToggle?.(activeDepth.id, false)} type="button">停用</button>
+              <Button className="secondary-button compact" disabled={busy} onClick={() => onToggle?.(activeDepth.id, false)} type="button">停用</Button>
             )}
             {engine?.available ? (
               !generationRunning && (
-                <button className="secondary-button compact" disabled={busy} onClick={() => onCreate?.()} type="button">
+                <Button className="secondary-button compact" disabled={busy} onClick={() => onCreate?.()} type="button">
                   <ArrowClockwise size={17} />{activeDepth ? "重新生成" : "生成深度视频"}
-                </button>
+                </Button>
               )
             ) : (
-              <button
+              <Button
                 className="secondary-button compact"
                 disabled={busy || installationRunning || !engine}
                 onClick={() => onInstall?.(engine?.engine)}
                 type="button"
               >
                 <ArrowClockwise size={17} />{installationRunning ? "正在安装" : "安装深度引擎"}
-              </button>
+              </Button>
             )}
             {activeDepth && (
-              <button aria-label="删除当前深度视频" className="icon-button danger" disabled={busy} onClick={() => onDelete?.(activeDepth.id)} title="删除深度视频" type="button"><Trash size={17} /></button>
+              <IconButton aria-label="删除当前深度视频" className="icon-button danger" disabled={busy} onClick={() => onDelete?.(activeDepth.id)} title="删除深度视频" type="button"><Trash size={17} /></IconButton>
             )}
           </div>
         </div>
@@ -206,7 +207,7 @@ export function DepthControlPanel({
             <strong>历史深度</strong>
             <div>
               {depthAssets.map((item) => (
-                <button disabled={busy || !usableDepth(item)} key={item.id} onClick={() => onToggle?.(item.id, true)} type="button">
+                <button data-ui="selection-card" disabled={busy || !usableDepth(item)} key={item.id} onClick={() => onToggle?.(item.id, true)} type="button">
                   <span>{item.enabled ? <CheckCircle size={16} weight="fill" /> : <VideoCamera size={16} />}</span>
                   <span>{createdAtLabel(item.created_at) || "历史版本"}</span>
                 </button>

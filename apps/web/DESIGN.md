@@ -63,8 +63,35 @@ ViralDNA 是面向长时间桌面创作与分析工作的产品界面。用户�
 - `SectionHeader`：区块标题与操作。
 - `StatusBadge`：neutral / active / info / success / warning / danger。
 - `InlineMessage`：行内信息、成功、警告和错误反馈。
+- `Button` / `IconButton`：普通操作与纯图标操作的唯一实现。
 
-设置页继续使用 `src/ui/settings`，其底层已复用 `PageShell` 和 `SurfacePanel`。按钮统一使用现有 `primary-button`、`secondary-button`、`text-button` 角色，不为单个页面重新发明按钮。
+设置页继续使用 `src/ui/settings`，其底层已复用 `PageShell` 和 `SurfacePanel`。按钮样式集中在 `ui/system/buttons.css`；已有角色类仍用于布局兼容及保留原生语义的链接，不为单个页面重新发明按钮。
+
+### Action buttons / 操作按钮
+
+| variant | 视觉 | 用途 |
+| --- | --- | --- |
+| `primary` | 紫底白字 | 生成、保存、确认；同组一个主操作 |
+| `secondary`（默认） | 白底、中性细边 | 取消、返回、刷新、重试 |
+| `text` / `quiet` | 透明底、紫字 / 次级中性字 | AI 修订、复制、辅助查看 |
+| `warning` | 白底、红字淡红边 | 停止任务、断开、移除确认 |
+| `danger` | 红底白字 | 最终永久删除确认 |
+
+- 默认高 40px，`size="compact"` 为 36px，`size="prominent"` 为 44px；圆角 8px，边框 1px，文字 14px／600，图标 18px，间距 8px。触屏和窄屏最小点击区域 44px；顶栏图标始终 44px。提示词预览辅助按钮仍遵守已批准的 12px 弱化规范。
+- `loading` 是受控状态，自动禁用按钮并提供 `aria-busy`；`loadingLabel` 在空闲与处理中均参与测量，防止宽度跳变。调用方继续负责请求锁、错误显示、幂等 ID、费用与二次确认，组件不自动执行任何请求。
+- `IconButton` 必须提供 `label`、`aria-label` 或 `title`，普通表单按钮必须显式声明 `type="submit"`。导航及下载保留链接，不伪装成点击处理器。
+- 统一悬停、按下、焦点、禁用、加载及减少动态效果状态；悬停不位移。布局允许换行；移动端主要操作按页面需要全宽。官网和媒体控件不套用工作台按钮皮肤。
+
+```jsx
+import { Button, IconButton } from "./ui/system";
+
+<Button variant="primary" type="submit">保存设置</Button>
+<Button variant="warning" size="compact" loading={stopping}
+  loadingLabel="正在停止…" icon={<Stop />} onClick={cancelTask}>停止任务</Button>
+<IconButton label="关闭" onClick={close}><X /></IconButton>
+```
+
+`npm run check:design` 会阻止普通按钮回退为原生裸按钮，并检查图标名称及提交类型。导航、菜单、媒体、选择卡等特殊控件使用既有类名或显式 `data-ui` 用途标记，不得用标记绕过普通操作按钮检查。
 
 ## Page patterns / 页面模式
 

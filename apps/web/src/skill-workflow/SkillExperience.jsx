@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SkillCover } from "./SkillCover.jsx";
 import { readOnce } from "../creation-workspace/read-request.js";
@@ -126,7 +127,7 @@ function ErrorState({ message, onRetry }) {
     <InlineMessage tone="danger">
       <WarningCircle size={18} />
       <span>{message}</span>
-      {onRetry && <button className="text-button" onClick={onRetry} type="button">重试</button>}
+      {onRetry && <Button className="text-button" onClick={onRetry} type="button">重试</Button>}
     </InlineMessage>
   );
 }
@@ -158,9 +159,9 @@ function SkillCard({ skill, onFavorite, onOpen, onStart }) {
         >
           <Heart size={18} weight={skill.favorited ? "fill" : "regular"} />
         </button>
-        <button className="primary-button compact" onClick={() => onStart(skill)} type="button">
+        <Button className="primary-button compact" onClick={() => onStart(skill)} type="button">
           用这个 Skill <ArrowRight size={15} />
-        </button>
+        </Button>
       </div>
     </article>
   );
@@ -277,7 +278,7 @@ export function SkillDetail({ navigate, request, skillSlug }) {
             <span>{skill.aspect_ratios.join(" / ")}</span>
             <span>{skill.supported_channels.join(" · ")}</span>
           </div>
-          <button className="primary-button" onClick={() => navigate(`/skills/${skill.slug}/start`)} type="button">开始创作 <ArrowRight size={16} /></button>
+          <Button className="primary-button" onClick={() => navigate(`/skills/${skill.slug}/start`)} type="button">开始创作 <ArrowRight size={16} /></Button>
         </div>
       </div>
 
@@ -733,7 +734,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
               const compatibleRoles = skill.asset_roles.filter((role) => role.media_types.includes(asset.media_kind));
               return (
                 <article className={selected ? "is-selected" : ""} key={asset.id}>
-                  <button onClick={() => toggleAsset(asset.id)} type="button">
+                  <button data-ui="selection-card" onClick={() => toggleAsset(asset.id)} type="button">
                     <img alt="" src={asset.thumbnail_url} />
                     <span><strong>{asset.name}</strong><small>{asset.rights_confirmed ? "权利已确认" : "权利未确认"}</small></span>
                     {selected && <CheckCircle size={19} weight="fill" />}
@@ -759,7 +760,7 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
             <WizardField label="默认图片分辨率" required><select onChange={(event) => update("imageResolution", event.target.value)} value={draft.imageResolution}><option value="">主动选择分辨率</option>{ratioResolutionOptions(draft.aspectRatio, selectedImageModel).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></WizardField>
             <WizardField label="默认视频模型" required><select onChange={(event) => update("videoModel", event.target.value)} value={draft.videoModel}><option value="">主动选择模型</option>{videoModels.map((item) => <option key={item.alias} value={item.alias}>{item.label} · {item.provider}</option>)}</select></WizardField>
             <WizardField label="默认视频分辨率" required><select onChange={(event) => update("videoResolution", event.target.value)} value={draft.videoResolution}><option value="">主动选择分辨率</option>{videoResolutionOptions(draft.aspectRatio, selectedVideoModel).map((item) => <option key={item} value={item}>{resolutionForDimensions(item)}</option>)}</select></WizardField>
-            {!settings.image?.local_executable_path && <button className="text-button" onClick={() => navigate("/settings/device")} type="button">配置本机 ImageGen</button>}
+            {!settings.image?.local_executable_path && <Button className="text-button" onClick={() => navigate("/settings/device")} type="button">配置本机 ImageGen</Button>}
             {selectedImageModel?.provider === "local_tool" && selectedImageModel.unit_cost_micros == null && (
               <div className="skill-field-wide">
                 {draft.automationMode === "full_auto" || Number(draft.budgetCny) > 0
@@ -788,8 +789,8 @@ export function SkillStartWizard({ navigate, onNotice, request, skillSlug }) {
           </div>
         )}
         <footer className="skill-wizard-actions">
-          <button className="secondary-button" disabled={step === 0 || submitting} onClick={() => { setError(""); setStep((value) => value - 1); }} type="button">上一步</button>
-          {step < WIZARD_STEPS.length - 1 ? <button className="primary-button" onClick={goNext} type="button">下一步 <ArrowRight size={16} /></button> : <button className="primary-button" disabled={submitting} onClick={createProject} type="button">{submitting ? <CircleNotch className="spin" size={17} /> : <MagicWand size={17} />}创建项目</button>}
+          <Button className="secondary-button" disabled={step === 0 || submitting} onClick={() => { setError(""); setStep((value) => value - 1); }} type="button">上一步</Button>
+          {step < WIZARD_STEPS.length - 1 ? <Button className="primary-button" onClick={goNext} type="button">下一步 <ArrowRight size={16} /></Button> : <Button className="primary-button" disabled={submitting} onClick={createProject} type="button">{submitting ? <CircleNotch className="spin" size={17} /> : <MagicWand size={17} />}创建项目</Button>}
         </footer>
       </SurfacePanel>
     </PageShell>
@@ -815,8 +816,8 @@ function GateAction({ busy, gate, label, onDecide, relatedRevisionIds = [] }) {
     <div className="skill-gate-action">
       <div><span>{label}</span></div>
       <div>
-        <button className="secondary-button compact" disabled={busy} onClick={() => onDecide(gate, "request_revision", relatedRevisionIds)} type="button">要求修改</button>
-        <button className="primary-button compact" disabled={busy} onClick={() => onDecide(gate, "approve", relatedRevisionIds)} type="button">{gate === "delivery_approved" ? "确认交付" : "确认并继续"}</button>
+        <Button className="secondary-button compact" disabled={busy} onClick={() => onDecide(gate, "request_revision", relatedRevisionIds)} type="button">要求修改</Button>
+        <Button className="primary-button compact" disabled={busy} onClick={() => onDecide(gate, "approve", relatedRevisionIds)} type="button">{gate === "delivery_approved" ? "确认交付" : "确认并继续"}</Button>
       </div>
     </div>
   );
@@ -952,10 +953,10 @@ function LookTestWorkspace({
       )}
 
       <div className="skill-look-actions">
-        {["pending", "succeeded"].includes(displayStatus) && <button className="primary-button" disabled={busy || !choiceState.ready} onClick={() => onGenerate({ ...imageChoicePayload(settings, ratio, choice), request_id: crypto.randomUUID() })} type="button">{displayStatus === "succeeded" ? "生成新一组风格图" : "生成 Look Test"}</button>}
-        {running && <button className="secondary-button" disabled={busy} onClick={onCancel} type="button">停止等待</button>}
-        {retryable && <button className="primary-button" disabled={busy} onClick={() => onGenerate()} type="button">继续生成未完成项</button>}
-        {displayStatus === "blocked" && <button className="secondary-button" disabled={busy} onClick={providerLabel === "local_tool" ? () => onGenerate() : onRefresh} type="button">{providerLabel === "local_tool" ? "恢复已生成图片" : "重新检查状态"}</button>}
+        {["pending", "succeeded"].includes(displayStatus) && <Button className="primary-button" disabled={busy || !choiceState.ready} onClick={() => onGenerate({ ...imageChoicePayload(settings, ratio, choice), request_id: crypto.randomUUID() })} type="button">{displayStatus === "succeeded" ? "生成新一组风格图" : "生成 Look Test"}</Button>}
+        {running && <Button variant="warning" disabled={busy} onClick={onCancel} type="button">停止等待</Button>}
+        {retryable && <Button className="primary-button" disabled={busy} onClick={() => onGenerate()} type="button">继续生成未完成项</Button>}
+        {displayStatus === "blocked" && <Button className="secondary-button" disabled={busy} onClick={providerLabel === "local_tool" ? () => onGenerate() : onRefresh} type="button">{providerLabel === "local_tool" ? "恢复已生成图片" : "重新检查状态"}</Button>}
       </div>
     </section>
   );
@@ -980,8 +981,8 @@ function StoryboardProgress({ busy, clockNow, manifest, onCancel, onRetry, step 
           <span>{running ? heartbeatLabel(step?.last_heartbeat_at, clockNow) : state.endedAt ? `结束于 ${state.endedAt}` : "任务已停止"}</span>
         </div>
         <div className="skill-storyboard-progress-actions">
-          {running && <button className="secondary-button compact" disabled={busy} onClick={onCancel} type="button">停止生成</button>}
-          {state.canRetry && <button className="primary-button compact" disabled={busy} onClick={onRetry} type="button">{state.retryLabel}</button>}
+          {running && <Button variant="warning" size="compact" disabled={busy} onClick={onCancel} type="button">停止生成</Button>}
+          {state.canRetry && <Button className="primary-button compact" disabled={busy} onClick={onRetry} type="button">{state.retryLabel}</Button>}
         </div>
       </div>
       <div className="skill-storyboard-progress-track" role="progressbar" aria-label="大纲与分镜生成进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span style={{ width: `${progress}%` }} /></div>
@@ -1363,7 +1364,7 @@ export function SkillProjectWorkspace({
 
             {stage.id === "style_confirmation" && (
               <div className="skill-stage-actions-stack">
-                {!workspace.style_bible && <button className="primary-button" disabled={busy} onClick={compileStyle} type="button">{busy ? <CircleNotch className="spin" size={17} /> : <Sparkle size={17} />}编译风格方案</button>}
+                {!workspace.style_bible && <Button className="primary-button" disabled={busy} onClick={compileStyle} type="button">{busy ? <CircleNotch className="spin" size={17} /> : <Sparkle size={17} />}编译风格方案</Button>}
                 {workspace.style_bible && workspace.look_test && (
                   <LookTestWorkspace
                     busy={busy}
@@ -1389,7 +1390,7 @@ export function SkillProjectWorkspace({
                   <StoryboardProgress busy={busy} clockNow={clockNow} manifest={workspace.shot_manifest} onCancel={cancelStoryboard} onRetry={compileStoryboard} step={storyboardStep} />
                 )}
                 {!workspace.shot_manifest && !["running", "failed", "cancelled"].includes(storyboardStep?.execution_status) && (
-                  <button className="primary-button" disabled={busy} onClick={compileStoryboard} type="button">生成大纲与分镜</button>
+                  <Button className="primary-button" disabled={busy} onClick={compileStoryboard} type="button">生成大纲与分镜</Button>
                 )}
                 {workspace.shot_manifest && <StoryboardPromptEditor
                   resolveUrl={resolveUrl}
@@ -1412,7 +1413,7 @@ export function SkillProjectWorkspace({
           </div>
   );
   const stageTools = <>
-            {stage.id === "editing" && <div className="skill-stage-actions-stack"><span>画面剪辑</span><button className="primary-button compact" disabled={busy} onClick={currentGateApproved && !productionTimelineChanged ? () => goToSection("audio_caption") : createPictureLock} type="button">{currentGateApproved && !productionTimelineChanged ? "继续配乐与字幕" : "确认画面，继续配乐与字幕"}</button></div>}
+            {stage.id === "editing" && <div className="skill-stage-actions-stack"><span>画面剪辑</span><Button className="primary-button compact" disabled={busy} onClick={currentGateApproved && !productionTimelineChanged ? () => goToSection("audio_caption") : createPictureLock} type="button">{currentGateApproved && !productionTimelineChanged ? "继续配乐与字幕" : "确认画面，继续配乐与字幕"}</Button></div>}
             {budgetPercent >= 80 && <InlineMessage tone="warning"><WarningCircle size={18} /><span>本次运行已使用预算的 {budgetPercent}%，下一次付费调用前仍会执行硬预算检查。</span></InlineMessage>}
             {stage.id === "audio_caption" && (
               <div className="skill-stage-actions-stack">
@@ -1425,14 +1426,14 @@ export function SkillProjectWorkspace({
                   {productionTimeline?.background_audio_track?.enabled && <label className="skill-confirm-row"><input checked={mixDraft.rightsConfirmed} onChange={(event) => setMixDraft((current) => ({ ...current, rightsConfirmed: event.target.checked }))} type="checkbox" /><span>我确认拥有该附加音频用于当前分发渠道的权利</span></label>}
                 </div>
                 </details>
-                <button className="primary-button compact" disabled={busy} onClick={confirmAudioCaption} type="button">{currentGateApproved && !productionTimelineChanged ? "继续到导出成片" : "确认声音与字幕，进入导出"}</button>
+                <Button className="primary-button compact" disabled={busy} onClick={confirmAudioCaption} type="button">{currentGateApproved && !productionTimelineChanged ? "继续到导出成片" : "确认声音与字幕，进入导出"}</Button>
                 {workspace.mix_revision?.validation_status === "warning" && <InlineMessage tone="warning"><WarningCircle size={18} /><span>{workspace.mix_revision.validation_messages.join("；")}</span></InlineMessage>}
               </div>
             )}
             {stage.id === "export" && (
               <div className="skill-stage-actions-stack">
                 {(workspace.timeline?.exact_overlays?.length || 0) > 0 && <label className="skill-confirm-row"><input checked={mixDraft.exactOverlayConfirmed} onChange={(event) => setMixDraft((current) => ({ ...current, exactOverlayConfirmed: event.target.checked }))} type="checkbox" /><span>我已在最终导出画面中逐项确认 {workspace.timeline.exact_overlays.length} 个品牌素材叠加</span></label>}
-                {!workspace.delivery_manifest && latestMatchingExport && <button className="primary-button" disabled={busy} onClick={() => confirmDelivery(latestMatchingExport)} type="button">确认成片交付</button>}
+                {!workspace.delivery_manifest && latestMatchingExport && <Button className="primary-button" disabled={busy} onClick={() => confirmDelivery(latestMatchingExport)} type="button">确认成片交付</Button>}
                 {workspace.delivery_manifest && !currentGateApproved && <GateAction busy={busy} gate={stage.gate} label="确认最终交付包" onDecide={decideGate} relatedRevisionIds={[workspace.delivery_manifest.id]} />}
               </div>
             )}
@@ -1498,7 +1499,7 @@ export function SkillProjectWorkspace({
           const itemStage = SKILL_WORKFLOW_STAGES.find((entry) => entry.id === item.id);
           const itemState = stageState(workspace, itemStage);
           const preceding = preparationStage && index > 0 ? stageState(workspace, SKILL_WORKFLOW_STAGES[index - 1]).approved : true;
-          return <button aria-current={selectedStage === item.id ? "page" : undefined} disabled={busy || !preceding || (item.id === "audio_caption" && !stageState(workspace, SKILL_WORKFLOW_STAGES[5]).approved)} key={item.id} onClick={() => void goToSection(item.id)} type="button">{item.label}{itemState.approved && <Check size={13} />}<small>{!itemState.approved && itemState.current ? "待确认" : ""}</small></button>;
+          return <button data-ui="navigation" aria-current={selectedStage === item.id ? "page" : undefined} disabled={busy || !preceding || (item.id === "audio_caption" && !stageState(workspace, SKILL_WORKFLOW_STAGES[5]).approved)} key={item.id} onClick={() => void goToSection(item.id)} type="button">{item.label}{itemState.approved && <Check size={13} />}<small>{!itemState.approved && itemState.current ? "待确认" : ""}</small></button>;
         })}
       </nav>,
       metrics: <><span>{localImageCostUnknown ? "已知成本" : "实际成本"} {formatMicros(actualCostMicros)}{localImageCostUnknown ? " · 本机图片费用未知" : ""}</span><details className="creation-metrics-detail"><summary>耗时与成本</summary><div><p>本阶段 {formatDurationMs(selectedStageMetrics.total)} · {localImageCostUnknown ? "已知部分 " : ""}{formatMicros(selectedStageMetrics.cost)}</p><p>排队 {formatDurationMs(selectedStageMetrics.queue)}</p><p>模型 {formatDurationMs(selectedStageMetrics.provider)}</p><p>后处理 {formatDurationMs(selectedStageMetrics.postprocess)}</p>{budgetPercent != null && <p>预算已使用 {budgetPercent}%</p>}</div></details></>,

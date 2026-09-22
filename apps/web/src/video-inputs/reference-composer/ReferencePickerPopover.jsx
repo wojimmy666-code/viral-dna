@@ -1,3 +1,4 @@
+import { Button } from "../../ui/system/Button.jsx";
 import { useMemo, useState } from "react";
 import {
   Check,
@@ -74,7 +75,7 @@ export function ReferencePickerPopover({
       </div>
       <div className="generation-reference-filters" role="tablist">
         {FILTERS.map(([value, label]) => (
-          <button aria-selected={filter === value} key={value} onClick={() => setFilter(value)} role="tab" type="button">{label}</button>
+          <button data-ui="selection-card" aria-selected={filter === value} key={value} onClick={() => setFilter(value)} role="tab" type="button">{label}</button>
         ))}
       </div>
       <div className="generation-reference-picker-list">
@@ -102,22 +103,22 @@ export function ReferencePickerPopover({
         {filtered.length === 0 && <p className="generation-reference-picker-empty">没有匹配的参考素材</p>}
       </div>
       <footer>
-        <button
+        <Button variant="text" size="compact"
           disabled={!supportsManagedAssets}
           onClick={onOpenManagedAssets}
           title={supportsManagedAssets ? "选择 Provider 托管人物" : "当前模型不支持托管人物"}
           type="button"
         >
           <IdentificationCard size={17} />选择托管人物
-        </button>
-        {onCreateDepth && <button
+        </Button>
+        {onCreateDepth && <Button variant="text" size="compact"
           disabled={!supportsDepthControl}
           onClick={onCreateDepth}
           title={supportsDepthControl ? "创建或管理深度视频" : "当前模型不支持深度控制"}
           type="button"
         >
           <Stack size={17} />创建或管理深度视频
-        </button>}
+        </Button>}
       </footer>
     </AnchoredPopover>
   );

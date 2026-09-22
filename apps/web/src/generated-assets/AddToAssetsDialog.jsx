@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ImageSquare, Plus, SpinnerGap, X } from "@phosphor-icons/react";
@@ -118,7 +119,7 @@ export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
       if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close();
     }}>
     <form onSubmit={submit}>
-      <header><h2 id={headingId}>加入资产库</h2><button className="text-button" aria-label="关闭入库窗口" disabled={busy} onClick={close} type="button"><X size={20} /></button></header>
+      <header><h2 id={headingId}>加入资产库</h2><Button className="text-button" aria-label="关闭入库窗口" disabled={busy} onClick={close} type="button"><X size={20} /></Button></header>
       <div className="generated-asset-dialog-preview">
         {target.previewUrl && !previewFailed
           ? <img alt="本次加入资产库的素材" src={target.previewUrl} onError={() => setPreviewFailed(true)} />
@@ -134,12 +135,12 @@ export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
         </select></label>
       </div>
       {!catalog && <p className="generated-asset-dialog-hint" role={loadError ? "alert" : "status"}>
-        {loadError || "正在加载目录…"}{loadError && <button className="text-button" type="button" onClick={() => setLoadAttempt(value => value + 1)}>重试</button>}
+        {loadError || "正在加载目录…"}{loadError && <Button className="text-button" type="button" onClick={() => setLoadAttempt(value => value + 1)}>重试</Button>}
       </p>}
-      {newFolder === null ? <button className="text-button generated-asset-new-folder" disabled={!catalog || busy} type="button" onClick={() => { setNewFolder(""); setFolderError(""); }}><Plus size={16} />新建目录</button>
+      {newFolder === null ? <Button className="text-button generated-asset-new-folder" disabled={!catalog || busy} type="button" onClick={() => { setNewFolder(""); setFolderError(""); }}><Plus size={16} />新建目录</Button>
         : <div className="generated-asset-create-folder">
           <label><span>新目录名称</span><input autoFocus maxLength={120} disabled={busy} value={newFolder} onChange={event => setNewFolder(event.target.value)} /></label>
-          <div><button className="secondary-button compact" type="button" disabled={busy} onClick={() => setNewFolder(null)}>取消新建</button><button className="secondary-button compact" type="button" disabled={busy || !newFolder.trim()} onClick={createFolder}>{folderSaving ? "正在创建…" : "创建目录"}</button></div>
+          <div><Button className="secondary-button compact" type="button" disabled={busy} onClick={() => setNewFolder(null)}>取消新建</Button><Button className="secondary-button compact" type="button" disabled={busy || !newFolder.trim()} onClick={createFolder}>{folderSaving ? "正在创建…" : "创建目录"}</Button></div>
           {folderError && <p className="generated-asset-dialog-error" role="alert">{folderError}</p>}
         </div>}
       <details className="generated-asset-extra"><summary>说明与标签（可选）</summary>
@@ -147,7 +148,7 @@ export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
         <label><span>标签</span><input disabled={busy} value={draft.tags} onChange={event => change("tags", event.target.value)} placeholder="用逗号分隔，最多 20 个" /></label>
       </details>
       {error && <p className="generated-asset-dialog-error" role="alert">{error}</p>}
-      <footer><button className="secondary-button compact" disabled={busy} type="button" onClick={close}>取消</button><button className="primary-button compact" disabled={busy || !catalog || !draft.name.trim() || newFolder !== null} type="submit">{saving ? <><SpinnerGap className="spin" size={16} />正在加入…</> : "确认加入"}</button></footer>
+      <footer><Button className="secondary-button compact" disabled={busy} type="button" onClick={close}>取消</Button><Button className="primary-button compact" disabled={busy || !catalog || !draft.name.trim() || newFolder !== null} type="submit">{saving ? <><SpinnerGap className="spin" size={16} />正在加入…</> : "确认加入"}</Button></footer>
     </form>
   </dialog>, document.body);
 }

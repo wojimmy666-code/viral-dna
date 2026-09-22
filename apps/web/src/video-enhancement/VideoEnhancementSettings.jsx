@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useCallback, useEffect, useState } from "react";
 import {
   ArrowClockwise,
@@ -102,7 +103,7 @@ export function VideoEnhancementSettings({ request }) {
           <h3 id="video-enhancement-settings-title"><MagicWand size={18} />视频 AI 清晰化</h3>
           <p>已采用的低清候选可在本地提升到 1080p 或 4K，不消耗视频生成额度。</p>
         </div>
-        <button
+        <Button
           className="secondary-button compact"
           disabled={Boolean(busy)}
           onClick={() => load(true)}
@@ -110,7 +111,7 @@ export function VideoEnhancementSettings({ request }) {
         >
           {busy === "probing" ? <CircleNotch className="spin" size={15} /> : <ArrowClockwise size={15} />}
           重新检测
-        </button>
+        </Button>
       </header>
 
       {busy === "loading" && !settings ? (
@@ -152,7 +153,7 @@ export function VideoEnhancementSettings({ request }) {
             >安装位置：<code>{settings.capability.installation_path}</code></small>
           </span>
           {!settings.capability.available && settings.capability.installable && (
-            <button
+            <Button
               className="secondary-button compact"
               disabled={Boolean(busy) || installing}
               onClick={install}
@@ -160,7 +161,7 @@ export function VideoEnhancementSettings({ request }) {
             >
               {installing ? <CircleNotch className="spin" size={15} /> : <DownloadSimple size={15} />}
               {installing ? "安装中" : "安装引擎"}
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -177,12 +178,12 @@ export function VideoEnhancementSettings({ request }) {
       {settings && (
         <footer>
           <span>4K 更耗时；480p 放大不会产生原生 4K 细节。</span>
-          <button
+          <Button
             className="primary-button compact"
             disabled={Boolean(busy) || target === settings.default_target}
             onClick={save}
             type="button"
-          >保存清晰化设置</button>
+          >保存清晰化设置</Button>
         </footer>
       )}
     </section>

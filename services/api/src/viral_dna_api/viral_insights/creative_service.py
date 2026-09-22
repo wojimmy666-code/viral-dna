@@ -52,7 +52,7 @@ from .creative_prompts import (
 )
 from .engine import report_fingerprint
 from .creative_review import (
-    assess, compile_common_rules, idea_ready, present_reviews, review_idea,
+    assess, compile_common_rules, idea_can_expand, present_reviews, review_idea,
 )
 from .service import ViralInsightServiceError
 
@@ -224,6 +224,10 @@ class CreativeConceptService:
             return await self._start(job, previous=latest.ideas if latest else [])
 
     async def act(self, set_id, idea_id, payload, *, expand):
+        if expand and payload.revision_notes is not None:
+            raise ViralInsightServiceError(
+                422, "revision_notes_not_supported", "修改意见只用于 AI 修订本条，请先修订后再展开"
+            )
         parent = await self.get(set_id)
         async with self.lock(parent.analysis_id):
             operation = "expand" if expand else "regenerate"
@@ -236,8 +240,16 @@ class CreativeConceptService:
             selected = next((item for item in parent.ideas if item.id == idea_id), None)
             if selected is None:
                 raise ViralInsightServiceError(404, "idea_not_found", "该创意不属于所选批次")
-            if expand and not idea_ready(selected, resolve_brief(None, parent)):
-                raise ViralInsightServiceError(409, "idea_review_required", "这条创意需要修订，请先修改与核对，或使用 AI 修订本条")
+            if expand and not idea_can_expand(selected, resolve_brief(None, parent)):
+                issue = next(
+                    (item for item in selected.review_details if item.severity == "revision"),
+                    next(iter(selected.review_details), None),
+                )
+                reason = issue.message if issue else "缺少完整、有效的场景规划或核对记录"
+                raise ViralInsightServiceError(
+                    409, "idea_review_required",
+                    "这条创意需要修订后再展开：" + reason[:320] + "。请使用 AI 修订本条。",
+                )
             job = parent.model_copy(
                 deep=True,
                 update={
@@ -245,13 +257,14 @@ class CreativeConceptService:
                     "parent_set_id": parent.id,
                     "source_idea_id": idea_id,
                     "request_id": payload.request_id,
-                    "request_signature": digest({**signature, **payload.model_dump(mode="json")}),
+                    "request_signature": digest({**signature, **self._request_data(payload)}),
                     "phase": "expanded" if expand else "ideas",
                     "operation": operation,
                     "ideas": [],
                     "concepts": [],
                     "status": "queued",
                     "feedback": resolve_brief(payload.feedback, parent),
+                    "revision_notes": payload.revision_notes,
                     "created_at": utc_now(),
                     "started_at": None,
                     "completed_at": None,
@@ -273,9 +286,17 @@ class CreativeConceptService:
                 job, selected=selected, existing=existing, original_order=parent.ideas
             )
 
+    @staticmethod
+    def _request_data(payload):
+        data = payload.model_dump(mode="json")
+        # Preserve signatures issued before per-idea notes were introduced.
+        if data.get("revision_notes") is None:
+            data.pop("revision_notes", None)
+        return data
+
     async def _deduplicate(self, analysis_id, payload, operation, **extra):
         items = await self.repository.list_viral_concept_sets(analysis_id)
-        signature = digest({"operation": operation, **extra, **payload.model_dump(mode="json")})
+        signature = digest({"operation": operation, **extra, **self._request_data(payload)})
         for item in items:
             if item.request_id == payload.request_id:
                 if item.request_signature != signature:
@@ -292,6 +313,10 @@ class CreativeConceptService:
     async def _start(self, job, *, selected=None, existing=(), previous=(), original_order=()):
         targets = await self.targets()
         job.input_snapshot["creative_brief"] = freeze_brief(job.feedback)
+        # A later action must not silently inherit the previous action's notes.
+        job.input_snapshot.pop("revision_notes", None)
+        if job.revision_notes is not None:
+            job.input_snapshot["revision_notes"] = job.revision_notes
         job.requested_model = targets[0].model
         job.input_snapshot["model_targets"] = [item.model_dump(mode="json") for item in targets]
         prompt_snapshot = {
@@ -403,7 +428,10 @@ class CreativeConceptService:
         for index, source_target in enumerate(targets):
             target = source_target.model_copy(
                 update={
-                    "prompt_version": prompt_version or f"creative-{job.phase}-v6",
+                    "prompt_version": prompt_version or (
+                        "creative-ideas-revision-v1" if job.revision_notes
+                        else f"creative-{job.phase}-v6"
+                    ),
                     "schema_version": "prompt-chinese-v1"
                     if job.operation == "localize"
                     else "creative-content-v6",

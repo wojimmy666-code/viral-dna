@@ -1,3 +1,4 @@
+import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useRef, useState } from "react";
 import { FolderPlus } from "@phosphor-icons/react";
 import { AddToAssetsDialog } from "./AddToAssetsDialog.jsx";
@@ -115,10 +116,10 @@ export function AddToAssetsButton({
 
   return <>
     {lookup?.identity === identity && lookup.request === request && lookup.absent && (
-      <button ref={buttonRef} className={`secondary-button compact generated-asset-button ${className}`.trim()}
+      <Button ref={buttonRef} className={`secondary-button compact generated-asset-button ${className}`.trim()}
         disabled={disabled || Boolean(dialog)} onClick={openDialog} type="button">
         <FolderPlus size={16} />{label}
-      </button>
+      </Button>
     )}
     {dialog && <AddToAssetsDialog target={dialog} onClose={closeDialog} onAdded={added} onUncertain={refreshTarget} />}
   </>;

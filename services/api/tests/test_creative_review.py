@@ -6,7 +6,6 @@ from test_creative_concepts import finish, ideas, plan, setup
 
 from viral_dna_api.sqlite_store import SQLiteStore
 from viral_dna_api.viral_insights.contracts import (
-    CreativeActionRequest,
     CreativeGenerateRequest,
     CreativeIdea,
     CreativeIdeaEdit,
@@ -17,6 +16,7 @@ from viral_dna_api.viral_insights.creative_prompts import IdeaResponse
 from viral_dna_api.viral_insights.creative_review import (
     compile_common_rules,
     explicit_scene_count,
+    idea_can_expand,
     review_idea,
 )
 from viral_dna_api.viral_insights.creative_review_models import CreativeRequirementRule
@@ -225,10 +225,9 @@ def test_failed_history_projection_and_explicit_manual_revision_are_unbilled(tmp
         payload.request_id, payload.source_fingerprint = uuid4(), "0" * 64
         with pytest.raises(ViralInsightServiceError, match="已变化"):
             await edit_idea(service, batch.id, view.ideas[0].id, payload)
-        with pytest.raises(ViralInsightServiceError, match="需要修订"):
-            await service.act(
-                batch.id, view.ideas[1].id, CreativeActionRequest(request_id=uuid4()), expand=True
-            )
+        # Selection/expansion is distinct from approval: missing legacy attestations
+        # are checked by the next explicit expansion, without rewriting history.
+        assert idea_can_expand(view.ideas[1], BRIEF)
         assert len(provider.requests) == call_count
 
     asyncio.run(scenario())
