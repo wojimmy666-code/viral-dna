@@ -17,7 +17,10 @@ export function ImageGenerationSettingsPopover({
   candidateCount,
   controlsDisabled,
   estimatedCostLabel,
-  identityLocked,
+  referenceCount = 0,
+  baseImageId,
+  baseImageOptions = [],
+  onBaseImageChange,
   inputMode,
   maxCandidates,
   onCandidateCountChange,
@@ -58,24 +61,40 @@ export function ImageGenerationSettingsPopover({
             <button
               aria-pressed={inputMode === "keyframe_edit"}
               className={inputMode === "keyframe_edit" ? "active" : ""}
-              disabled={controlsDisabled}
+              disabled={controlsDisabled || baseImageOptions.length === 0}
               onClick={() => onInputModeChange("keyframe_edit")}
               type="button"
             >
-              图生图
+              底图编辑
             </button>
             <button
-              aria-pressed={inputMode === "text_to_image"}
-              className={inputMode === "text_to_image" ? "active" : ""}
-              disabled={controlsDisabled || identityLocked}
-              onClick={() => onInputModeChange("text_to_image")}
-              title={identityLocked ? "已绑定人物身份资产，必须使用图生图" : ""}
+              aria-pressed={inputMode !== "keyframe_edit"}
+              className={inputMode !== "keyframe_edit" ? "active" : ""}
+              disabled={controlsDisabled}
+              onClick={() => onInputModeChange(referenceCount > 0 ? "reference_to_image" : "text_to_image")}
               type="button"
             >
-              纯文生图
+              {referenceCount > 0 ? "参考图创作" : "纯文生图"}
             </button>
           </div>
         </fieldset>
+        {inputMode === "keyframe_edit" && (
+          <label className="image-setting-section image-base-selector">
+            <span>编辑底图</span>
+            <select
+              aria-label="编辑底图"
+              value={baseImageId || "select"}
+              disabled={controlsDisabled}
+              onChange={event => onBaseImageChange(event.target.value)}
+            >
+              <option value="select">请选择底图</option>
+              {baseImageId && baseImageId !== "select" && !baseImageOptions.some(item => item.value === baseImageId) && (
+                <option value={baseImageId}>原底图已不可用，请重新选择</option>
+              )}
+              {baseImageOptions.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </label>
+        )}
         <section className="image-setting-section">
           <div className="image-setting-heading"><strong>比例</strong><span>跟随创作方案</span></div>
           <div className="image-aspect-value">

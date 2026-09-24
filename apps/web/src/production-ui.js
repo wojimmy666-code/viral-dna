@@ -115,6 +115,7 @@ export function imageGenerationInputManifest({
   referenceBindings = [],
   assets = [],
   allowTextReferences = false,
+  baseImageCandidateId = null,
 } = {}) {
   if (inputMode === "text_to_image" && !allowTextReferences) return [];
   const assetsById = new Map((assets || []).map((asset) => [asset.id, asset]));
@@ -124,15 +125,17 @@ export function imageGenerationInputManifest({
       - (IMAGE_REFERENCE_ROLE_ORDER[right.role] ?? 99)
       || Number(right.weight || 0) - Number(left.weight || 0)
     ));
-  const manifest = sourceUrl ? [{
+  const usesSource = inputMode === "keyframe_edit" && Boolean(sourceUrl);
+  const manifest = usesSource ? [{
     input_index: 1,
-    kind: "source_keyframe",
-    label: "原视频关键帧",
+    kind: baseImageCandidateId ? "generated_image" : "source_keyframe",
+    label: baseImageCandidateId ? "已选生成图片" : "原视频关键帧",
+    ...(baseImageCandidateId ? { candidate_id: baseImageCandidateId } : {}),
     responsibility: "composition_pose_action_camera",
     identity_source: false,
     thumbnail_url: sourceUrl,
   }] : [];
-  const startIndex = sourceUrl ? 2 : 1;
+  const startIndex = usesSource ? 2 : 1;
   references.forEach((binding, offset) => {
     const asset = assetsById.get(binding.reference_asset_id);
     manifest.push({

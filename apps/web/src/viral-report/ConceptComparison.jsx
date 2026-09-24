@@ -8,18 +8,19 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { PromptSectionView } from "../prompt-presentation/PromptSectionView.jsx";
-import { CreativeBriefChecks } from "./CreativeBriefChecks.jsx";
+import { CreativePlanReview } from "./CreativePlanReview.jsx";
 import { findConceptDuplicateFields, STRATEGY_META } from "./viral-report-ui.js";
 
 const LEVEL_LABELS = { low: "较低", medium: "中等", high: "较高" };
 
-export function ConceptComparison({ conceptSet, historical = false, publishingId, onPublish }) {
+export function ConceptComparison({ conceptSet, historical = false, publishingId, publishDisabled = false, onPublish, onPromptPreview }) {
   const [selectedId, setSelectedId] = useStateSafe(conceptSet?.concepts?.[0]?.id || "");
   const selected = conceptSet?.concepts?.find((item) => item.id === selectedId) || conceptSet?.concepts?.[0];
   if (!conceptSet || !selected) return null;
   const duplicateFields = findConceptDuplicateFields(conceptSet.concepts);
   const isStale = conceptSet.status === "stale";
   const creative = conceptSet.phase === "expanded";
+  if (creative) return <CreativePlanReview key={conceptSet.id || selected.id} conceptSet={conceptSet} selected={selected} publishingId={publishingId} publishDisabled={publishDisabled} onPublish={onPublish} onPromptPreview={onPromptPreview} />;
 
   return (
     <section className="concept-comparison">
@@ -78,17 +79,6 @@ export function ConceptComparison({ conceptSet, historical = false, publishingId
           </Button>
         </div>
         {creative && selected.required_assets.length > 0 && <details className="concept-risk-disclosure"><summary>所需资产 · {selected.required_assets.length} 项</summary><ul>{selected.required_assets.map((item, index) => <li key={index}>{item}</li>)}</ul></details>}
-        {creative && selected.brief_checks?.length > 0 && <details className="concept-risk-disclosure"><summary>补充想法落实说明</summary><CreativeBriefChecks checks={selected.brief_checks} /></details>}
-        {selected.risks.length > 0 && (
-          <details className="concept-risk-disclosure">
-            <summary>
-              <span className="concept-risk-title"><WarningCircle size={16} />制作提醒</span>
-              <span className="concept-disclosure-meta">{selected.risks.length} 项</span>
-              <CaretDown size={16} />
-            </summary>
-            <ul>{selected.risks.map((item) => <li key={item}><WarningCircle size={15} />{item}</li>)}</ul>
-          </details>
-        )}
         <details className="concept-shot-disclosure">
           <summary>
             <span className="concept-disclosure-title">查看逐镜头创作指令</span>

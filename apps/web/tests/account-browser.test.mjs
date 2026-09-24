@@ -150,6 +150,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
     if (path.endsWith("/auth/logout")) {
       response.setHeader("Set-Cookie", `${isAdmin ? "test_admin" : "test_user"}=; Path=/; Max-Age=0`); state.lease = null; return send({ logged_out: true });
     }
+    if (path.endsWith("/edit-lease")) return send({ editable: false, occupied: Boolean(state.lease), display_name: "另一位成员" });
     if (path.includes("/edit-lease/")) {
       const action = path.split("/").at(-1), owns = state.lease?.token === body.token;
       if (action === "release") { if (owns) state.lease = null; return send({ editable: false }); }
@@ -502,7 +503,7 @@ test("account UI: independent login, management, exclusive editing, lost draft, 
         assert.equal(state.requests.filter(item => item.path.endsWith('/fixture')).length, 1, "never replays a failed generation/save");
         await screenshot("session-retained-conflict", width);
         state.lease = null;
-        await evaluate("[...document.querySelectorAll('.account-edit-notice button')].find(button=>button.textContent==='重新取得编辑权').click()");
+        await evaluate("[...document.querySelectorAll('.account-edit-notice button')].find(button=>!button.disabled&&button.innerText.trim()==='重新取得编辑权').click()");
         await ready("!window.retainedEditor.closest('[inert]')");
         assert.equal(await evaluate("window.retainedEditor.value"), "登录过期时仍须保留的局部提示词");
       }

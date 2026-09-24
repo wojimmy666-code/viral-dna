@@ -176,6 +176,7 @@ from .project_prompts import (
     ProjectPromptService,
     ProjectPromptUpdate,
     PromptRevisionConflict,
+    effective_style,
     local_prompt,
     production_local_token,
     prompt_lock,
@@ -183,6 +184,7 @@ from .project_prompts import (
 )
 from .prompt_engine.compiler import sanitize_still_image_prompt
 from .prompt_engine.still_image import static_image_constraints
+from .visual_styles import style_prompt
 from .quality.continuity_service import ContinuityService
 from .storage_errors import IncompatibleShotPlanSchemaError
 from .upstream_changes import changed_beat, changed_plan, generated_before_input_change
@@ -2911,13 +2913,23 @@ class ProductionService:
         return await ProjectPromptService(self.repository).for_production(project)
 
     async def update_prompt_context(self, project_id: UUID, payload: ProjectPromptUpdate):
-        current = await self.get_prompt_context(project_id)
-        async with prompt_lock(self.repository, current.project_id):
+        async with await self._project_lock(project_id):
             current = await self.get_prompt_context(project_id)
-            try:
-                return await ProjectPromptService(self.repository).save(current, payload)
-            except PromptRevisionConflict as exc:
-                raise _fail(409, "prompt_revision_stale", str(exc)) from exc
+            async with prompt_lock(self.repository, current.project_id):
+                current = await self.get_prompt_context(project_id)
+                if payload.shot_styles is not None:
+                    plans = await self.repository.list_shot_plans(project_id)
+                    allowed = {str(p.id) for p in plans}
+                    # Shared skill context: foreign saved entries may be retained,
+                    # never changed or injected from another production.
+                    changed = {key for key in set(payload.shot_styles) | set(current.shot_styles)
+                               if payload.shot_styles.get(key) != current.shot_styles.get(key)}
+                    if changed - allowed:
+                        raise _fail(422, "style_shot_unknown", "单镜风格包含不属于当前方案的分镜")
+                try:
+                    return await ProjectPromptService(self.repository).save(current, payload)
+                except PromptRevisionConflict as exc:
+                    raise _fail(409, "prompt_revision_stale", str(exc)) from exc
 
     @staticmethod
     def _local_prompt_view(plan, context):
@@ -3755,6 +3767,8 @@ class ProductionService:
             current_global_prompts={
                 "common_image_prompt": context.common_image_prompt,
                 "common_video_prompt": context.common_video_prompt,
+                "image_style_prompt": style_prompt(effective_style(context, str(plan.id)), "image"),
+                "video_style_prompt": style_prompt(effective_style(context, str(plan.id)), "video"),
             },
             reference_bindings=await self.repository.list_reference_bindings(plan.id),
             current_revision_id=project.current_revision_id,
@@ -5951,7 +5965,7 @@ class ProductionService:
         if payload.duration_seconds is not None:
             if payload.duration_seconds < aggregate.duration_seconds:
                 raise _fail(422, "video_group_duration_short", "生成时长不能短于本组成片目标，请增加时长或拆分生成组")
-            aggregate, owners = execution_plan(group, members, payload.duration_seconds)
+            aggregate, owners = execution_plan(group, members, payload.duration_seconds, context=await self.get_prompt_context(project.id))
         return aggregate, owners
 
     async def _validate_video_input_plan(
@@ -6215,7 +6229,8 @@ class ProductionService:
             / str(run_id)
         )
         request_payload["prompt_snapshot"] = frozen_prompt or prompt_snapshot(
-            plan.video_prompt, await self.get_prompt_context(project.id), "video"
+            plan.video_prompt, await self.get_prompt_context(project.id), "video",
+            shot_key=str(plan.id), include_style=not payload.generation_group_id,
         )
         queue_path = queue_root / "queue.json"
         fingerprint = hashlib.sha256(
@@ -6393,6 +6408,21 @@ class ProductionService:
         bindings = self._image_bindings_for_beat(plan, beat, bindings)
         assets = await self._list_reference_assets(project.id)
         gateway_plan = _shot_for_visual_beat(plan, beat)
+        base_path = None
+        if payload.base_image_candidate_id is not None:
+            base_path = await self._resolve_image_base(project, plan, gateway_plan, payload)
+        if payload.input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not bindings:
+            raise _fail(409, "reference_images_required", "请添加参考资产，或切换为纯文生图")
+        if (
+            payload.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE
+            and bindings
+            and plan.source_kind != "skill_generated"
+        ):
+            raise _fail(
+                422,
+                "references_require_reference_mode",
+                "已绑定参考资产，请使用参考图创作，不能在纯文生图中忽略资产",
+            )
         try:
             identity_policy = validate_identity_bindings(bindings, assets)
             validate_identity_generation(
@@ -6400,7 +6430,9 @@ class ProductionService:
                 input_mode=payload.input_mode,
                 reference_creation=plan.source_kind == "skill_generated",
                 source_present=bool(
-                    gateway_plan.source_keyframe_url or gateway_plan.source_keyframe_relative_path
+                    base_path
+                    or gateway_plan.source_keyframe_url
+                    or gateway_plan.source_keyframe_relative_path
                 ),
             )
         except IdentityPolicyViolation as exc:
@@ -6441,7 +6473,8 @@ class ProductionService:
             / str(run_id)
         )
         request_payload["prompt_snapshot"] = frozen_prompt or prompt_snapshot(
-            beat.image_prompt, await self.get_prompt_context(project.id), "image"
+            beat.image_prompt, await self.get_prompt_context(project.id), "image",
+            shot_key=str(plan.id),
         )
         queue_path = queue_root / "queue.json"
         fingerprint = hashlib.sha256(
@@ -6982,7 +7015,8 @@ class ProductionService:
                 if not asset.rights_confirmed:
                     raise _fail(409, "reference_rights_required", "分镜参考资产尚未完成权利确认")
             source_path = (
-                self._resolve_source_keyframe(project, gateway_plan) if uses_images else None
+                await self._resolve_image_base(project, plan, gateway_plan, payload)
+                if uses_images else None
             )
             generation_project = project
             payload = await self._validate_skill_image_contract(project, payload)
@@ -7018,6 +7052,7 @@ class ProductionService:
                 )
 
         if isinstance(self.image_gateway, ImageGenerationGateway):
+            gateway_options["base_image_candidate_id"] = payload.base_image_candidate_id
             gateway_options["reserve_cost"] = lambda cost: self._reserve_image_cost(
                 project.id, run_id, cost
             )
@@ -10214,7 +10249,8 @@ class ProductionService:
                 return False
             frozen = run.request_payload.get("prompt_snapshot")
             if frozen is not None:
-                return frozen.get("global_prompt", "") != getattr(context, f"common_{part}_prompt")
+                style_changed = style_prompt(frozen.get("visual_style_snapshot"), part) != style_prompt(effective_style(context, str(plan.id)), part)
+                return style_changed or frozen.get("global_prompt", "") != getattr(context, f"common_{part}_prompt")
             return context.created_at > run.created_at
 
         beats = []
@@ -11958,6 +11994,37 @@ class ProductionService:
             completed_at=completed_at,
         )
         return run, candidate
+
+    async def _resolve_image_base(
+        self,
+        project: ProductionProject,
+        plan: ShotPlan,
+        gateway_plan: ShotPlan,
+        payload: ImageGenerationCreate,
+    ) -> Path | None:
+        """Resolve an explicit base; never substitute a preview or another account's image."""
+        if payload.base_image_candidate_id is None:
+            return self._resolve_source_keyframe(project, gateway_plan)
+        candidate = await self._require_candidate(payload.base_image_candidate_id)
+        run = await self._require_run(candidate.generation_run_id)
+        beat = _visual_beat(plan, payload.visual_beat_id)
+        if (
+            run.project_id != project.id
+            or run.shot_plan_id != plan.id
+            or not _run_matches_visual_beat(run, plan, beat.id)
+            or run.kind != GenerationKind.IMAGE
+            or candidate.kind != GenerationKind.IMAGE
+        ):
+            raise _fail(404, "image_base_not_found", "编辑底图不属于当前分镜画面")
+        if (
+            candidate.archived_at is not None
+            or candidate.status == GenerationCandidateStatus.ARCHIVED
+        ):
+            raise _fail(409, "image_base_unavailable", "编辑底图已归档，请重新选择")
+        path, _ = await self.resolve_candidate_content(candidate.id)
+        if await asyncio.to_thread(_file_sha256, path) != candidate.sha256:
+            raise _fail(409, "image_base_changed", "编辑底图文件已变化，请重新选择有效图片")
+        return path
 
     def _resolve_source_keyframe(
         self,

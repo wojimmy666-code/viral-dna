@@ -1,6 +1,8 @@
 import { Button } from "./ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
+import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
+import { stylePrompt } from "./visual-styles/visual-style.js";
 import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
 import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import {
@@ -1181,6 +1183,7 @@ export function ShotVideoWorkspace({
               <PromptSectionHeader as="summary" title="局部视频提示词" hint={`${videoDraft.videoPrompt.length} 字`} state={draftSaveState} onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)} />
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
+                  styleControl={<ShotStyleControl context={globalPrompts} shotKey={plan.id} editorRef={globalPromptRef} request={request} disabled={busy} part="video" />}
                   assets={assets}
                   disabled={busy}
                   onAddAssets={onAddAssets}
@@ -1205,10 +1208,10 @@ export function ShotVideoWorkspace({
                   prompt={videoDraft.videoPrompt}
                   references={videoDraft.selectedReferences || []}
                 />
-                <PromptPreview common={globalPrompts.common_video_prompt} local={videoDraft.videoPrompt} label="视频提示词" />
+                <PromptPreview common={globalPrompts.common_video_prompt} local={videoDraft.videoPrompt} style={stylePrompt(globalPrompts, plan.id, "video")} label="视频提示词" />
               </div>
             </details>
-            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" request={request} onChange={setGlobalPrompts} disabled={busy} />
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} />
             {generationGroup ? <p role="status">此分镜已加入上方的视频生成组。下方编辑分镜动作和资产引用，保存后请回到生成组预览费用、生成并核对切点。</p> : <ShotVideoGenerationControls
               activeRun={activeRun}
               allReferencesApproved={!generationBlockedReason}

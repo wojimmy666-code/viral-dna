@@ -21,7 +21,7 @@ from ..models import (
 
 IMAGE_REQUEST_SCHEMA_VERSION = "viral-dna-image-generation/v2"
 LOCAL_TOOL_PROTOCOL_VERSION = "viral-dna-image-tool/v1"
-IMAGE_PROMPT_VERSION = "shot-image-v3"
+IMAGE_PROMPT_VERSION = "shot-image-v4"
 MAX_GENERATED_IMAGE_BYTES = 25 * 1024 * 1024
 
 
@@ -66,6 +66,7 @@ class ImageGenerationRequest:
     execution_mode: ImageExecutionMode
     allow_unknown_cost: bool = False
     seed: int | None = None
+    base_image_candidate_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

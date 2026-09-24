@@ -35,6 +35,7 @@ function Field({ children, hint, label, required = false }) {
 }
 
 export function CategoryProfileLibrary({ onNotice, request }) {
+  const [stylePending, setStylePending] = useState(false);
   const [profiles, setProfiles] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState({ ...EMPTY_CATEGORY_PROFILE });
@@ -92,6 +93,7 @@ export function CategoryProfileLibrary({ onNotice, request }) {
   }
 
   async function saveProfile(event) {
+    if (stylePending) { event.preventDefault(); return; }
     event.preventDefault();
     const payload = draftToPayload(draft);
     const validationMessage = categoryProfileValidationMessage(payload);
@@ -253,9 +255,10 @@ export function CategoryProfileLibrary({ onNotice, request }) {
             <Field hint="用顿号或逗号分隔" label="常用场景">
               <input onChange={(event) => updateDraft("scenes", event.target.value)} placeholder="上班通勤、客户会议、周末约会" value={draft.scenes} />
             </Field>
-            <Field label="视觉风格">
+            <Field label="品牌视觉补充">
               <textarea maxLength={500} onChange={(event) => updateDraft("visual_style", event.target.value)} placeholder="克制的都市感，自然光，中性低饱和色，真实面料质感" rows={3} value={draft.visual_style} />
             </Field>
+            <VisualStyleControl key={selectedId || "new"} label="默认画面风格" value={draft.default_visual_style || { preset: "original" }} request={request} disabled={saving} onChange={value => updateDraft("default_visual_style", value)} onPending={setStylePending} />
             <Field hint="每行一项，写入生成约束" label="禁用表述">
               <textarea onChange={(event) => updateDraft("forbidden_claims", event.target.value)} placeholder={"绝对显瘦\n全网最低价\n夸大功效"} rows={3} value={draft.forbidden_claims} />
             </Field>
@@ -277,7 +280,7 @@ export function CategoryProfileLibrary({ onNotice, request }) {
                 <Trash size={17} />删除档案
               </Button>
             ) : <span />}
-            <Button className="primary-button" disabled={saving} type="submit">
+            <Button className="primary-button" disabled={saving || stylePending} type="submit">
               {saving && <CircleNotch className="spin" size={18} />}
               {selectedId ? "保存修改" : "创建档案"}
             </Button>
@@ -287,3 +290,4 @@ export function CategoryProfileLibrary({ onNotice, request }) {
     </PageShell>
   );
 }
+import { VisualStyleControl } from "../visual-styles/VisualStyleControl.jsx";

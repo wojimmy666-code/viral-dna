@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, DownloadSimple } from "@phosphor-icons/react";
 import { registerAccountFlusher } from "../accounts/account-client.js";
 import { AssetReferenceEditor } from "../prompt-references/AssetReferenceEditor.jsx";
+import { PromptPreview } from "../prompt-context/GlobalPromptEditor.jsx";
 import { promptDocumentBody, productionPromptsToText, downloadProductionPrompts } from "./prompt-sources.js";
 
 function BodyEditor({ label, value, mentions = [], readOnly, onChange }) {
@@ -97,9 +98,11 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
         <div className="scheme-prompt-columns">
           <div>{shot.images.map((image, index) => <div key={image.id}>
             <BodyEditor label={`局部图片提示词${shot.images.length > 1 ? ` ${index + 1}` : ""}`} value={image.prompt} mentions={image.mentions} readOnly={readOnly} onChange={value => changeImage(shot.id, image.id, row => ({ ...row, prompt: value }))} />
+            <PromptPreview label="图片提示词" common={working.common_image_prompt} local={image.prompt} style={(shot.visual_style_snapshot ?? working.visual_style_snapshot)?.image_prompt || ""} />
             {constraints("图片负面约束", image.negative_constraints, values => changeImage(shot.id, image.id, row => ({ ...row, negative_constraints: values })))}
           </div>)}{!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_images"); }}>到分镜图片编辑资产引用</Button>}</div>
           <div><BodyEditor label={shot.video_group_id ? "分镜动作说明（由生成组合并）" : "局部视频提示词"} value={shot.video_prompt} mentions={shot.video_mentions} readOnly={readOnly} onChange={value => changeShot(shot.id, row => ({ ...row, video_prompt: value }))} />
+            {!shot.video_group_id && <PromptPreview label="视频提示词" common={working.common_video_prompt} local={shot.video_prompt} style={(shot.visual_style_snapshot ?? working.visual_style_snapshot)?.video_prompt || ""} />}
             {constraints("视频负面约束", shot.video_negative_constraints, values => changeShot(shot.id, row => ({ ...row, video_negative_constraints: values })))}
             {!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_videos"); }}>到分镜视频编辑资产引用</Button>}
           </div>

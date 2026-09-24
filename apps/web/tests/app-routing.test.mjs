@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { appHandler } from "./helpers/app-handlers.mjs";
 
 import {
   pathForNav,
@@ -106,4 +107,102 @@ test("redirects removed workbench and legacy record URLs", () => {
     "/projects/record-1",
   );
   assert.equal(resolveAppRoute("/missing").name, "not-found");
+});
+
+function entryScope() {
+  const location = { key: "list", pathname: "/projects", state: null };
+  const scope = {
+    records: [{ id: "record-1", kind: "analysis" }, { id: "skill-1", kind: "skill" }],
+    location, routeLocationRef: { current: location }, projectEntryRequestIdRef: { current: 0 },
+    recordWorkspacePath, skillProjectWorkspacePath,
+    events: [], historyError: "", mode: "analysis", target: null,
+    flushAccountDrafts: async () => { scope.events.push("flush"); },
+    loadRecordWorkspace: async () => { scope.events.push("protected-read"); throw new Error("当前项目为只读，请先取得编辑权"); },
+    navigate: (path, options) => { scope.navigation = { path, options }; scope.events.push("navigate"); },
+    window: { scrollTo() {} },
+    setHistoryError: message => { scope.historyError = message; },
+    showNotice: notice => { scope.notice = notice; },
+    setRecordWorkspaceMode: mode => { scope.mode = mode; },
+    setNotificationTarget: target => { scope.target = target; },
+    setNotificationOpen() {}, markNotificationRead: async () => {},
+  };
+  scope.openHistoryRecord = appHandler("openHistoryRecord", scope);
+  return scope;
+}
+
+test("opening a project after restart navigates before any protected detail request", async () => {
+  const scope = entryScope();
+  assert.ok(await scope.openHistoryRecord("record-1"));
+  assert.equal(scope.navigation.path, "/projects/record-1");
+  assert.deepEqual(scope.events, ["flush", "navigate"]);
+  assert.equal(scope.historyError, "");
+});
+
+test("Skill and notification-only projects use their route without a detail prefetch", async () => {
+  for (const [id, path] of [["skill-1", "/projects/skill-1/skill"], ["not-in-current-page", "/projects/not-in-current-page"]]) {
+    const scope = entryScope();
+    assert.ok(await scope.openHistoryRecord(id));
+    assert.equal(scope.navigation.path, path);
+    assert.deepEqual(scope.events, ["flush", "navigate"]);
+  }
+});
+
+test("project entry preserves drafts and does not navigate after a failed save", async () => {
+  const scope = entryScope();
+  scope.flushAccountDrafts = async () => { throw new Error("草稿保存失败"); };
+  assert.equal(await scope.openHistoryRecord("record-1"), null);
+  assert.equal(scope.navigation, undefined);
+  assert.match(scope.historyError, /草稿保存失败/);
+});
+
+test("a delayed project entry cannot overtake newer navigation", async () => {
+  let finish;
+  const scope = entryScope();
+  scope.flushAccountDrafts = () => new Promise(resolve => { finish = resolve; });
+  const pending = scope.openHistoryRecord("record-1");
+  scope.routeLocationRef.current = { key: "assets", pathname: "/assets" };
+  finish();
+  assert.equal(await pending, null);
+  assert.equal(scope.navigation, undefined);
+});
+
+test("the production-list entry survives the lease boundary through router state", async () => {
+  const scope = entryScope();
+  await appHandler("openHistoryProductions", scope)("record-1");
+  assert.deepEqual(scope.navigation.options.state.projectEntry, { recordId: "record-1", mode: "production", target: null });
+  scope.location = { state: scope.navigation.options.state };
+  appHandler("restoreRecordEntry", scope)("record-1");
+  assert.equal(scope.mode, "production");
+  assert.equal(scope.target, null);
+});
+
+test("notification targets survive project entry and never leak to a different record", async () => {
+  const scope = entryScope();
+  await appHandler("openNotificationAction", scope)({ id: "notice-1", action_kind: "production_shot", action_payload: { record_id: "record-1", project_id: "production-1", shot_plan_id: "shot-1", candidate_id: "candidate-1", step: "shot_videos" } });
+  const entry = scope.navigation.options.state.projectEntry;
+  assert.equal(entry.mode, "production");
+  assert.equal(entry.target.shotPlanId, "shot-1");
+  assert.equal(entry.target.candidateId, "candidate-1");
+  scope.location = { state: { projectEntry: entry } };
+  const restore = appHandler("restoreRecordEntry", scope);
+  restore("another-record");
+  assert.equal(scope.target, null);
+  restore("record-1");
+  assert.equal(scope.target, entry.target);
+  assert.equal(scope.mode, "production");
+});
+
+test("loading details after the lease does not erase the requested production destination", () => {
+  const scope = entryScope();
+  const target = { recordId: "record-1", projectId: "production-1", shotPlanId: "shot-1", token: "notification-1" };
+  scope.location = { state: { projectEntry: { recordId: "record-1", mode: "production", target } } };
+  scope.window.location = { search: "" };
+  scope.resetProductionWorkspace = () => { scope.mode = "analysis"; scope.target = null; };
+  scope.savedWorkspaceLocation = () => ({});
+  scope.restoreRecordEntry = appHandler("restoreRecordEntry", scope);
+  scope.loadProductions = async () => [];
+  for (const setter of ["setVideo", "setAnalysisVersions", "setAnalysis", "setReport", "setReplacementVersion", "setActiveShotId", "setActiveReportTab"]) scope[setter] = () => {};
+  appHandler("applyRecordWorkspaceDetail", scope)({ record: { id: "record-1" }, analyses: [] });
+  assert.equal(scope.mode, "production");
+  assert.equal(scope.target, target);
 });

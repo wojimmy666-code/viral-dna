@@ -35,10 +35,11 @@ class ProductionConceptPublisher:
         analysis_id: UUID,
         concept: ViralConcept,
         payload: ViralConceptPublishRequest,
+        visual_style_snapshot: dict | None = None,
     ) -> ViralConceptPublishResult:
         try:
             if concept.strategy == "creative":
-                return await self._publish_creative(analysis_id, concept, payload)
+                return await self._publish_creative(analysis_id, concept, payload, visual_style_snapshot)
             detail = await self.production_service.create_project(
                 payload.record_id,
                 ProductionProjectCreate(
@@ -98,7 +99,7 @@ class ProductionConceptPublisher:
         except ProductionServiceError as exc:
             raise ViralInsightServiceError(exc.status_code, exc.code, str(exc)) from exc
 
-    async def _publish_creative(self, analysis_id, concept, payload):
+    async def _publish_creative(self, analysis_id, concept, payload, visual_style_snapshot=None):
         shots = []
         cursor = 0
         for index, shot in enumerate(concept.shots, start=1):
@@ -127,7 +128,7 @@ class ProductionConceptPublisher:
                 budget_limit_micros=payload.budget_limit_micros,
             ),
             authored_shots=shots,
-            creative_brief=concept.model_dump(mode="json"),
+            creative_brief={**concept.model_dump(mode="json"), "visual_style_snapshot": visual_style_snapshot or {}},
         )
         return ViralConceptPublishResult(
             project_id=detail.project.id,

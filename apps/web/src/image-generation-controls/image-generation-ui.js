@@ -48,18 +48,25 @@ export function imageModelCompatibility(model, { inputCount = 0, inputMode = "ke
   if (inputMode === "text_to_image" && !capability.text_to_image) {
     return { compatible: false, reason: "不支持纯文生图" };
   }
-  if ((inputMode === "keyframe_edit" || inputCount > 0) && !capability.image_to_image) {
+  if ((inputMode === "keyframe_edit" || inputMode === "reference_to_image" || inputCount > 0) && !capability.image_to_image) {
     return { compatible: false, reason: "不支持图生图" };
   }
   const maximumInputs = Number(capability.max_input_images || 1);
   if (inputCount > maximumInputs) {
     return { compatible: false, reason: `最多接收 ${maximumInputs} 张图片` };
   }
+  if (inputCount > 1 && !capability.multi_reference) {
+    return { compatible: false, reason: "不支持多图参考" };
+  }
+  const referenceCount = Math.max(0, inputCount - (inputMode === "keyframe_edit" ? 1 : 0));
+  if (Number.isFinite(capability.max_reference_images) && referenceCount > capability.max_reference_images) {
+    return { compatible: false, reason: `最多接收 ${capability.max_reference_images} 张参考图` };
+  }
   return { compatible: true, reason: "" };
 }
 
 export function imageGenerationSummary({ aspectRatio, candidateCount, inputMode, inputCount = 0 }) {
-  const mode = inputMode === "text_to_image" ? (inputCount > 0 ? "参考图创作" : "纯文生图") : "图生图";
+  const mode = inputMode === "keyframe_edit" ? "底图编辑" : (inputCount > 0 || inputMode === "reference_to_image" ? "参考图创作" : "纯文生图");
   return `${mode} · ${aspectRatio || "跟随方案"} · 自适应 · ${candidateCount}张`;
 }
 

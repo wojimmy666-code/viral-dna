@@ -162,6 +162,7 @@ existing_ideas 只供参考，严禁改写，输出且仅输出一条修订结�
 
 
 def build_prompt(snapshot, *, phase, feedback, selected=None, existing=(), previous=()):
+    from ..visual_styles import CREATIVE_STYLE_INSTRUCTION
     schema = PlanResponse if phase == "expanded" else IdeaResponse
     brief = snapshot.get("creative_brief") or freeze_brief(feedback or "")
     data = {
@@ -183,6 +184,7 @@ def build_prompt(snapshot, *, phase, feedback, selected=None, existing=(), previ
         instruction += "\n" + REVISION_INSTRUCTIONS
     return (
         instruction
+        + ("\n" + CREATIVE_STYLE_INSTRUCTION if snapshot.get("visual_style_snapshot") else "")
         + "\n" + LANGUAGE_INSTRUCTIONS
         + "\n"
         + BRIEF_INSTRUCTIONS

@@ -4,6 +4,7 @@ import { registerAccountFlusher } from "./accounts/account-client.js";
 import { readOnce } from "./creation-workspace/read-request.js";
 import { videoStageShots, workspaceShotId } from "./creation-workspace/video-stage-selection.js";
 import { useGenerationPreferences } from "./image-generation-controls/generation-preferences.js";
+import { imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId } from "./image-generation-controls/image-input.js";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CreationNavigation, CreationWorkspace } from "./creation-workspace/CreationWorkspace.jsx";
 import { mainCreationStep, productionNavigation, readWorkspaceLocation, rememberWorkspaceLocation, savedWorkspaceLocation, sourceCapabilities, workspaceSearch } from "./creation-workspace/workspace-ui.js";
@@ -1661,13 +1662,15 @@ export function ProductionHub({
     `viraldna:image-options:${recordId}:${selectedShotId || "default"}:${selectedVisualBeatId || "first"}`,
     {
       engine: "default", inputMode: workflow ? "text_to_image" : "keyframe_edit",
-      count: 1,
+      count: 1, baseImageId: "",
       model: imageGenerationSettings?.remote_model_alias || "qwen_image_2_pro",
       resolution: imageGenerationSettings?.image_width ? `${imageGenerationSettings.image_width}x${imageGenerationSettings.image_height}` : "",
     },
     { defaultVersions: { count: 1 } },
   );
   const { engine: generationEngine, inputMode: generationInputMode, count: generationCandidateCount, model: generationModelAlias, resolution: generationResolution } = imageChoices;
+  const generationBaseImageId = imageChoices.baseImageId || "";
+  const setGenerationBaseImageId = (value) => setImageChoices({ baseImageId: value });
   const setGenerationEngine = (value) => setImageChoices((current) => ({ engine: typeof value === "function" ? value(current.engine) : value }));
   const setGenerationInputMode = (value) => setImageChoices((current) => ({ inputMode: typeof value === "function" ? value(current.inputMode) : value }));
   const setGenerationCandidateCount = (value) => setImageChoices((current) => ({ count: typeof value === "function" ? value(current.count) : value }));
@@ -2396,11 +2399,22 @@ export function ProductionHub({
         persistedShotDetail?.current_revision_id
         || detail.project.current_revision_id
       );
-      const effectiveInputMode = shotDraft.referenceBindings.some(
-        (binding) => binding.role === "identity",
-      )
-        ? "keyframe_edit"
-        : generationInputMode;
+      const persistedPlan = persistedShotDetail?.plan || shotDetail.plan;
+      const persistedBeat = visualBeatFromDetail(persistedShotDetail || shotDetail, activeBeat.id);
+      const bindings = imageBindingsForDraft(persistedPlan, persistedBeat, shotDraft);
+      const effectiveInputMode = resolveImageInputMode({
+        inputMode: generationInputMode,
+        sourceUrl: workflow ? "" : persistedBeat?.source_frame_url || "",
+        baseImageId: generationBaseImageId,
+        referenceCount: bindings.length,
+      });
+      if (effectiveInputMode === "keyframe_edit" && generationBaseImageId === "select") {
+        throw new Error("请先选择编辑底图");
+      }
+      const baseCandidateId = imageBaseCandidateId(effectiveInputMode, generationBaseImageId);
+      if (baseCandidateId && !generationSettings.supports_candidate_base_image) {
+        throw new Error("当前图片服务尚不支持生成图片作为底图，请重启后端并刷新页面");
+      }
       const run = await request(
         `/production-shots/${shotDetail.plan.id}/image-runs`,
         {
@@ -2411,6 +2425,7 @@ export function ProductionHub({
             visual_beat_id: activeBeat.id,
             candidate_count: candidateCount,
             input_mode: effectiveInputMode,
+            base_image_candidate_id: baseCandidateId,
             execution_mode: executionMode,
             model_alias: executionMode === "remote_api" ? generationModelAlias : "local_tool",
             allow_unknown_cost: acceptsUnknownCost,
@@ -3952,6 +3967,8 @@ export function ProductionHub({
                 generationCandidateCount={generationCandidateCount}
                 generationEngine={generationEngine}
                 generationInputMode={generationInputMode}
+                generationBaseImageId={generationBaseImageId}
+                setGenerationBaseImageId={setGenerationBaseImageId}
                 generationModelAlias={generationModelAlias}
                 generationSettings={generationSettings}
                 generationResolution={generationResolution}

@@ -641,6 +641,8 @@ class SkillWorkflowService:
         await self._require_skill_project(project_id)
         async with prompt_lock(self.repository, project_id):
             current = await self.get_prompt_context(project_id)
+            if payload.shot_styles is not None and payload.shot_styles != current.shot_styles:
+                raise _fail(422, "style_shot_scope", "请在分镜制作阶段调整单镜风格")
             try:
                 return await ProjectPromptService(self.repository).save(current, payload)
             except PromptRevisionConflict as exc:
@@ -694,6 +696,7 @@ class SkillWorkflowService:
                     update={
                         "image_prompt_body": local_prompt(image, context, "image"),
                         "video_prompt_body": local_prompt(video, context, "video"),
+                        "production_shot_id": plan.id if plan else None,
                         "image_prompt_mentions": image_mentions,
                         "video_prompt_mentions": video_mentions,
                         "image_asset_usage_ids": [

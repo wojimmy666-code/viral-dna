@@ -14,6 +14,8 @@
 
 ## 分镜图片与视频
 
+- [方案级画面风格（第一阶段）](generation/visual-style-workflow.md)
+- [无原视频关键帧的参考图创作](generation/reference-image-creation.md)
 - [独立创意编排与多分镜视频生成组](generation/creative-video-groups.md)
 - [Phase2_Batch4.2_分镜生图输入模式与关键帧工作流](generation/Phase2_Batch4.2_分镜生图输入模式与关键帧工作流.md)
 - [Phase2_Batch4.2_图片生成双模式执行验收](generation/Phase2_Batch4.2_图片生成双模式执行验收.md)

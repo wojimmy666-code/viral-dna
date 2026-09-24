@@ -250,10 +250,14 @@ class ViralInsightService:
                 "concept_publisher_unavailable",
                 "创作方案发布服务尚未就绪",
             )
+        production_style = concept_set.production_visual_style_snapshot
+        if production_style is None:
+            production_style = concept_set.visual_style_snapshot
         result = await self.publisher.publish(
             analysis_id=concept_set.analysis_id,
             concept=concept,
             payload=payload,
+            **({"visual_style_snapshot": production_style} if production_style else {}),
         )
         concept_set.published_result = result
         await self.repository.save_viral_concept_set(concept_set)

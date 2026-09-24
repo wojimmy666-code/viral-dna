@@ -140,7 +140,7 @@ export function resolveAppRoute(pathname) {
       settingsSection: "profile",
     };
   }
-  const adminMatch = normalized.match(/^\/admin\/(providers|models|media|runtime|skills)$/);
+  const adminMatch = normalized.match(/^\/admin\/(providers|models|media|runtime|skills|styles)$/);
   if (adminMatch || normalized === "/admin") {
     return {
       name: "platform-admin",

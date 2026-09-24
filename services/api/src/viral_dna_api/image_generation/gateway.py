@@ -185,10 +185,14 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
         item.reference_asset_id: item.label for item in request.shot.image_prompt_mentions
     }
     primary_identity = identity_reference(request.references)
-    if request.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
+    base_label = "已选生成图片" if request.base_image_candidate_id else "原视频关键帧"
+    if request.input_mode in {
+        ImageGenerationInputMode.TEXT_TO_IMAGE,
+        ImageGenerationInputMode.REFERENCE_TO_IMAGE,
+    }:
         lines = [
             (
-                "本次基于文字与指定参考素材创作新画面，不存在原视频关键帧。"
+                "本次基于文字与指定参考素材创作新画面，不存在原视频关键帧或编辑底图。"
                 if request.references
                 else "本次任务是纯文字生成，不使用原视频关键帧或参考图片。"
             ),
@@ -199,7 +203,7 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
     elif primary_identity is not None:
         lines = [
             "这是受控人物身份替换任务，必须严格区分每张输入图的职责。",
-            "图像1仅用于保留原视频关键帧的姿态、构图、空间关系、机位和光影逻辑。",
+            f"图像1仅用于保留{base_label}中未明确要求修改的构图、空间关系、机位和光影逻辑。",
             "严禁从图像1继承人物的年龄、五官、脸型、肤色、发型、身份或其他生物特征。",
             (
                 "图像2（@"
@@ -207,13 +211,13 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
                 "）是生成结果中人物身份的唯一来源。"
             ),
             "人物年龄、五官、脸型、肤色和可识别身份必须以图像2为准；不得与图像1的人脸融合，不得生成第三个人物身份。",
-            "当图像1与图像2发生冲突时，身份一律服从图像2，姿态、构图和动作一律服从图像1。",
+            "当图像1与图像2发生冲突时，身份一律服从图像2；其他内容按编辑要求处理，未指定修改的内容保留图像1。",
             f"编辑要求：{image_prompt}",
         ]
         reference_offset = 2
     else:
         lines = [
-            "图像1是原视频分镜关键帧，作为基础图进行编辑。",
+            f"图像1是{base_label}，作为基础图进行编辑。",
             "除下方明确要求替换的内容外，保留原图的镜头视角、构图、主体姿态、动作关系和光影逻辑。",
             f"编辑要求：{image_prompt}",
         ]
@@ -237,6 +241,8 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
             notes = sanitize_still_image_prompt(reference.notes)
             if notes:
                 detail += f"，说明：{notes}"
+        if reference.role == "style":
+            detail += "，仅参考色彩、光照、材质与表现语言，不继承参考图的人物身份、服装或场景；内容以本次提示词和相应用途的资产为准"
         if reference.crop_hint:
             detail += f"，裁切提示：{reference.crop_hint.strip()}"
         lines.append(detail + "。")
@@ -261,7 +267,7 @@ def _negative_prompt(request: ImageGenerationRequest) -> str:
     )
     base = [
         "低清晰度",
-        "模糊",
+        "主体意外失焦（不限制合理景深、运动虚化或绘画边缘）",
         "水印",
         "额外文字",
         "拼接画面",
@@ -501,6 +507,7 @@ class ImageGenerationGateway:
         *,
         candidate_count: int,
         source_path: Path | None,
+        base_image_candidate_id: UUID | None = None,
         input_mode: ImageGenerationInputMode | str = ImageGenerationInputMode.KEYFRAME_EDIT,
         execution_mode: str | None = None,
         model_alias: str | None = None,
@@ -546,6 +553,8 @@ class ImageGenerationGateway:
                 "simulated_override_forbidden",
                 "启用真实图片生成后不能通过业务接口切回模拟模式",
             )
+        if selected_input_mode != ImageGenerationInputMode.KEYFRAME_EDIT:
+            source_path = None
         try:
             identity_policy = validate_identity_bindings(bindings, assets)
             validate_identity_generation(
@@ -566,11 +575,17 @@ class ImageGenerationGateway:
             raise ImageGenerationGatewayError(
                 409,
                 "source_keyframe_required",
-                "真实图片生成需要可读取的原分镜关键帧",
+                "底图编辑需要可读取的底图；没有底图时请使用参考图创作",
             )
         if selected_input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE and (
             not bindings or shot.source_kind != "skill_generated"
         ):
+            if bindings:
+                raise ImageGenerationGatewayError(
+                    422,
+                    "references_require_reference_mode",
+                    "已绑定参考资产，请使用参考图创作，不能在纯文生图中忽略资产",
+                )
             references = ()
             source_path = None
         else:
@@ -586,6 +601,16 @@ class ImageGenerationGateway:
                     "reference_path_invalid",
                     "参考资产文件路径无效",
                 ) from exc
+        if len(references) != len(bindings):
+            raise ImageGenerationGatewayError(
+                409,
+                "reference_asset_missing",
+                "部分参考资产已不可用，请重新选择，不能忽略资产继续生成",
+            )
+        if selected_input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not references:
+            raise ImageGenerationGatewayError(
+                409, "reference_images_required", "请添加参考资产，或切换为纯文生图"
+            )
         for reference in references:
             if not await asyncio.to_thread(reference.path.is_file):
                 raise ImageGenerationGatewayError(
@@ -661,6 +686,20 @@ class ImageGenerationGateway:
                     f"当前已绑定 {len(references)} 张"
                 ),
             )
+        input_count = int(source_path is not None) + len(references)
+        if input_count > identity.capability.max_input_images:
+            raise ImageGenerationGatewayError(
+                422,
+                "image_input_count_unsupported",
+                f"当前模型最多接收 {identity.capability.max_input_images} 张图片，"
+                f"本次需要 {input_count} 张",
+            )
+        if input_count > 1 and not identity.capability.multi_reference:
+            raise ImageGenerationGatewayError(
+                422,
+                "multi_reference_unsupported",
+                "当前模型不支持多图参考，请减少参考图或选择支持的模型",
+            )
         request = ImageGenerationRequest(
             project=project,
             shot=shot,
@@ -673,6 +712,7 @@ class ImageGenerationGateway:
             execution_mode=selected_mode,
             allow_unknown_cost=allow_unknown_cost,
             seed=seed,
+            base_image_candidate_id=base_image_candidate_id,
         )
         if project.origin_type == "skill_run":
             width, height = project.output_width, project.output_height
@@ -1583,6 +1623,7 @@ class ImageGenerationGateway:
         input_manifest = build_input_manifest(
             source_present=request.source_path is not None,
             references=request.references,
+            base_image_candidate_id=request.base_image_candidate_id,
         )
         identity_snapshot = policy_snapshot(
             state=identity_policy,
@@ -1627,7 +1668,14 @@ class ImageGenerationGateway:
             "seed": request.seed,
             "source": (
                 {
-                    "relative_url": request.shot.source_keyframe_url,
+                    "relative_url": (
+                        f"/api/v1/generation-candidates/{request.base_image_candidate_id}/content"
+                        if request.base_image_candidate_id else request.shot.source_keyframe_url
+                    ),
+                    "candidate_id": (
+                        str(request.base_image_candidate_id)
+                        if request.base_image_candidate_id else None
+                    ),
                     "sha256": request.source_sha256,
                 }
                 if request.source_path is not None and request.source_sha256 is not None

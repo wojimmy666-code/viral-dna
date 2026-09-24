@@ -43,6 +43,7 @@ export function draftToPayload(draft) {
     scenes: splitProfileItems(draft.scenes),
     forbidden_claims: splitProfileItems(draft.forbidden_claims),
     visual_style: String(draft.visual_style || "").trim() || null,
+    ...(Object.hasOwn(draft, "default_visual_style") ? { default_visual_style: draft.default_visual_style } : {}),
   };
 }
 

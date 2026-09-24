@@ -29,8 +29,8 @@ export function mergeCreativeBatch(items, batch) {
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 }
 
-export function creativeTiming(batch, now = Date.now()) {
-  if (!batch) return "";
+export function creativeTimingParts(batch, now = Date.now()) {
+  if (!batch) return { total: 0, queue: 0, model: 0 };
   const end = batch.completed_at ? new Date(batch.completed_at).getTime() : now;
   const total = Math.max(0, (end - new Date(batch.created_at).getTime()) / 1000);
   const queue = batch.started_at
@@ -38,7 +38,13 @@ export function creativeTiming(batch, now = Date.now()) {
   const model = isCreativeRunning(batch) && batch.started_at
     ? Math.max((batch.model_elapsed_ms || 0) / 1000, (end - new Date(batch.started_at)) / 1000)
     : (batch.model_elapsed_ms || 0) / 1000;
-  return `总计 ${Math.round(total)} 秒 · 排队 ${Math.round(queue)} 秒 · 模型 ${Math.round(model)} 秒`;
+  return { total: Math.round(total), queue: Math.round(queue), model: Math.round(model) };
+}
+
+export function creativeTiming(batch, now = Date.now()) {
+  if (!batch) return "";
+  const { total, queue, model } = creativeTimingParts(batch, now);
+  return `总计 ${total} 秒 · 排队 ${queue} 秒 · 模型 ${model} 秒`;
 }
 
 export function creativeCost(batch) {

@@ -19,6 +19,7 @@ from .contracts import (
 from .creative_errors import present_batch_error
 from .creative_idea_edit import edit_idea
 from .service import ViralInsightService, ViralInsightServiceError
+from .production_style import ProductionStyleUpdate, production_style
 
 
 def create_viral_insight_router(service: ViralInsightService, creative=None) -> APIRouter:
@@ -75,6 +76,28 @@ def create_viral_insight_router(service: ViralInsightService, creative=None) -> 
             raise http_error(exc) from exc
 
     if creative is not None:
+
+        @router.get("/viral-concept-sets/{concept_set_id}/production-style")
+        async def read_production_style(concept_set_id: UUID):
+            from ..production import ProductionServiceError
+            try:
+                return await production_style(creative, concept_set_id)
+            except ViralInsightServiceError as exc:
+                raise http_error(exc) from exc
+            except ProductionServiceError as exc:
+                raise HTTPException(exc.status_code, str(exc)) from exc
+
+        @router.put("/viral-concept-sets/{concept_set_id}/production-style")
+        async def update_production_style(concept_set_id: UUID, payload: ProductionStyleUpdate):
+            from ..production import ProductionServiceError
+            try:
+                return await production_style(creative, concept_set_id, payload)
+            except ViralInsightServiceError as exc:
+                raise http_error(exc) from exc
+            except ProductionServiceError as exc:
+                raise HTTPException(exc.status_code, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(422, "制作风格版本无效，请重新读取") from exc
 
         @router.get(
             "/analyses/{analysis_id}/viral-concepts/history", response_model=list[ViralConceptSet]

@@ -1,7 +1,7 @@
 """Exclusive identity-source policy for reference-guided image generation.
 
-The source keyframe controls staging.  When a person identity asset is bound,
-that asset is the only allowed source for the generated person's identity.
+An explicitly selected base guides unchanged staging; creation needs no base.
+When a person identity asset is bound, it is the exclusive identity source.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from ..models import (
 )
 from .contracts import ImageReferenceInput
 
-IDENTITY_POLICY_VERSION = "exclusive-identity-source/v1"
+IDENTITY_POLICY_VERSION = "exclusive-identity-source/v2"
 
 
 class IdentityPolicyViolation(ValueError):
@@ -81,17 +81,20 @@ def validate_identity_generation(
 ) -> None:
     if not state.enabled:
         return
+    reference_creation = (
+        reference_creation or input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE
+    )
     if not reference_creation and input_mode != ImageGenerationInputMode.KEYFRAME_EDIT:
         raise IdentityPolicyViolation(
             422,
             "identity_requires_reference_mode",
-            "绑定人物身份资产后必须使用“关键帧编辑（文字 + 图片）”，不能使用纯文字生图",
+            "已绑定人物资产，请使用参考图创作或底图编辑，不能忽略人物参考图",
         )
     if not reference_creation and not source_present:
         raise IdentityPolicyViolation(
             409,
             "identity_source_keyframe_required",
-            "人物身份替换需要图像1作为构图与动作控制图，请先选择原视频关键帧",
+            "底图编辑需要先选择可读取的底图；没有底图时请使用参考图创作",
         )
     if capability is None:
         return
@@ -103,12 +106,12 @@ def validate_identity_generation(
             "唯一人物身份资产未进入模型输入，请重新保存参考绑定后再生成",
         )
     if not capability.image_to_image or (
-        (not reference_creation or len(references) > 1) and not capability.multi_reference
+        (int(source_present) + len(references) > 1) and not capability.multi_reference
     ):
         raise IdentityPolicyViolation(
             422,
             "identity_model_unsupported",
-            "当前生图模型不能同时接收构图控制图和唯一人物身份图，请切换支持多图参考的模型",
+            "当前生图模型不支持本次参考图片输入，请切换支持所需图片数量的模型",
         )
     if capability.max_reference_images < len(references):
         raise IdentityPolicyViolation(
@@ -119,7 +122,7 @@ def validate_identity_generation(
                 f"当前已绑定 {len(references)} 张"
             ),
         )
-    required_inputs = int(not reference_creation) + len(references)
+    required_inputs = int(source_present) + len(references)
     if capability.max_input_images < required_inputs:
         raise IdentityPolicyViolation(
             422,
@@ -148,15 +151,20 @@ def build_input_manifest(
     *,
     source_present: bool,
     references: Sequence[ImageReferenceInput],
+    base_image_candidate_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     manifest: list[dict[str, Any]] = []
     if source_present:
         manifest.append(
             {
                 "input_index": 1,
-                "kind": "source_keyframe",
+                "kind": "generated_image" if base_image_candidate_id else "source_keyframe",
                 "responsibility": "composition_pose_action_camera",
-                "label": "原视频关键帧",
+                "label": "已选生成图片" if base_image_candidate_id else "原视频关键帧",
+                **(
+                    {"candidate_id": str(base_image_candidate_id)}
+                    if base_image_candidate_id else {}
+                ),
                 "identity_source": False,
                 "restrictions": [
                     "不继承人物年龄",

@@ -3,13 +3,16 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import { PromptSectionHeader } from "./PromptSectionHeader.jsx";
 import { combinePrompt, createGlobalPromptSession } from "./global-prompt-session.js";
 import "./prompt-context.css";
+import { VisualStyleControl } from "../visual-styles/VisualStyleControl.jsx";
+import { styleRecoverySummary } from "../visual-styles/visual-style.js";
 
-export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path, part = "both", request, disabled = false, onChange }, ref) {
+export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path, part = "both", request, disabled = false, onChange, shotKey, hideShotStyle = false }, ref) {
   const callbacks = useRef({ request, onChange });
   callbacks.current = { request, onChange };
   const session = useRef(null);
   const timer = useRef(null);
   const recoveryRef = useRef(null);
+  const stylePending = useRef({});
   const [state, setState] = useState(null);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
@@ -42,6 +45,7 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
           // Never silently apply a recovered draft against a different revision.
           if (cached.expected_revision_id === initial.id) {
             next.edit("image", cached.common_image_prompt); next.edit("video", cached.common_video_prompt);
+            next.restoreStyles(cached);
             timer.current = window.setTimeout(() => void next.flush(), 900);
           } else {
             recoveryRef.current = cached; setRecovery(cached);
@@ -55,14 +59,21 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
   async function flush() {
     window.clearTimeout(timer.current);
     if (recoveryRef.current) return false;
+    if (Object.values(stylePending.current).some(Boolean)) return false;
     // Initial page hydration has no editable draft to save. Generation reads
     // the persisted context on the server even if this GET is still pending.
     return session.current ? session.current.flush() : !error;
   }
-  useImperativeHandle(ref, () => ({ flush }), [error]);
+  async function applyStyle(value, compiled, key) {
+    if (disabled || recoveryRef.current || !session.current) throw new Error("当前不可编辑，请先恢复编辑状态");
+    window.clearTimeout(timer.current);
+    session.current.editStyle(value, compiled, key);
+    if (!await session.current.flush()) throw new Error(session.current.snapshot().error || "风格保存失败，请重试");
+  }
+  useImperativeHandle(ref, () => ({ flush, applyStyle }), [error, disabled]);
   useEffect(() => {
-    const beforeUnload = event => { if (session.current?.snapshot().dirty) { event.preventDefault(); event.returnValue = ""; } };
-    const refresh = () => { if (!session.current?.snapshot().dirty && !recoveryRef.current) setReload(value => value + 1); };
+    const beforeUnload = event => { if (session.current?.snapshot().dirty || Object.values(stylePending.current).some(Boolean)) { event.preventDefault(); event.returnValue = ""; } };
+    const refresh = () => { if (!session.current?.snapshot().dirty && !recoveryRef.current && !Object.values(stylePending.current).some(Boolean)) setReload(value => value + 1); };
     window.addEventListener("beforeunload", beforeUnload);
     window.addEventListener("focus", refresh);
     return () => { window.removeEventListener("beforeunload", beforeUnload); window.removeEventListener("focus", refresh); };
@@ -73,6 +84,7 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
     if (useLocal && cached) {
       session.current.edit("image", cached.common_image_prompt);
       session.current.edit("video", cached.common_video_prompt);
+      session.current.restoreStyles(cached);
       timer.current = window.setTimeout(() => void flush(), 900);
     } else {
       try { localStorage.removeItem(cacheKey); } catch { /* Optional cache. */ }
@@ -83,20 +95,29 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => void flush(), 900);
   }
+  function editStyle(value, compiled, key) {
+    session.current?.editStyle(value, compiled, key);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => void flush(), 900);
+  }
   const parts = part === "both" ? ["image", "video"] : [part];
   return <div className="global-prompt-editor">
     <details onToggle={event => { if (!event.currentTarget.open) void flush(); }}>
       <PromptSectionHeader as="summary" quiet title={`全局${part === "both" ? "" : part === "image" ? "图片" : "视频"}提示词`} hint="适用于全部分镜" state={state?.status || "loading"} onRetry={() => void flush()} />
+      {state && Object.hasOwn(state.values, "visual_style") && <div className="prompt-style-tools">
+        <VisualStyleControl label="整片风格" part={part} value={state.values.visual_style} snapshot={state.values.visual_style_snapshot} request={request} disabled={disabled || Boolean(recovery)} onChange={applyStyle} onPending={value => { stylePending.current.global = value; }} />
+        {shotKey && !hideShotStyle && <VisualStyleControl key={shotKey} label="本镜风格" part={part} allowInherit value={state.values.shot_styles[shotKey] ?? null} snapshot={state.values.shot_style_snapshots[shotKey]} inheritedSnapshot={state.values.visual_style_snapshot} request={request} disabled={disabled || Boolean(recovery)} onChange={(value, compiled) => applyStyle(value, compiled, shotKey)} onPending={value => { stylePending.current.shot = value; }} />}
+      </div>}
       <div className={`global-prompt-fields ${parts.length === 2 ? "is-paired" : ""}`}>
         {parts.map(type => <label key={type}>{parts.length === 2 && <span>{type === "image" ? "图片" : "视频"}提示词</span>}<textarea aria-label={`全局${type === "image" ? "图片" : "视频"}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ""} placeholder="可留空；只填写整片共同要求" onBlur={() => void flush()} onChange={event => edit(type, event.target.value)} /></label>)}
       </div>
     </details>
     {(error || state?.error) && <div className="prompt-context-error" role="alert"><span>{error || state.error}</span>{!recovery && <><Button className="text-button" type="button" onClick={() => state ? void flush() : setReload(value => value + 1)}>重试保存</Button><Button className="text-button" type="button" onClick={() => setReload(value => value + 1)}>重新加载并核对</Button></>}</div>}
-    {recovery && <details className="prompt-recovery"><summary>核对未保存的全局草稿</summary>{["image", "video"].map(type => <label key={type}>本地全局{type === "image" ? "图片" : "视频"}草稿<textarea readOnly rows={5} value={recovery[`common_${type}_prompt`]} /></label>)}<Button className="secondary-button" type="button" onClick={() => resolveRecovery(true)}>使用本地草稿</Button><Button className="text-button" type="button" onClick={() => resolveRecovery(false)}>保留服务器版本</Button></details>}
+    {recovery && <details className="prompt-recovery"><summary>核对未保存的全局草稿</summary>{["image", "video"].map(type => <label key={type}>本地全局{type === "image" ? "图片" : "视频"}草稿<textarea readOnly rows={5} value={recovery[`common_${type}_prompt`]} /></label>)}{[["本地画面风格", recovery], ["服务器画面风格", state?.values]].map(([title, values]) => <label key={title}>{title}<textarea aria-label={title} readOnly rows={5} value={styleRecoverySummary(values)} /></label>)}<Button className="secondary-button" type="button" onClick={() => resolveRecovery(true)}>使用本地草稿</Button><Button className="text-button" type="button" onClick={() => resolveRecovery(false)}>保留服务器版本</Button></details>}
   </div>;
 });
 
-export function PromptPreview({ common = "", local = "", label = "提示词" }) {
+export function PromptPreview({ common = "", local = "", style = "", label = "提示词" }) {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   async function copy(value, kind) {
@@ -105,7 +126,7 @@ export function PromptPreview({ common = "", local = "", label = "提示词" }) 
   }
   return <div className="prompt-preview">
     <Button className="text-button" type="button" onClick={() => void copy(local, "local")}>{copied === "local" ? "已复制局部" : "复制局部"}</Button>
-    <details><summary>查看完整提示词</summary><textarea aria-label={`完整${label}`} readOnly rows={8} value={combinePrompt(common, local)} /><p>生成时还会附加本次参考素材与模型参数。</p><Button className="text-button" type="button" onClick={() => void copy(combinePrompt(common, local), "full")}>{copied === "full" ? "已复制完整提示词" : "复制完整提示词"}</Button></details>
+    <details><summary>查看完整提示词</summary><textarea aria-label={`完整${label}`} readOnly rows={8} value={combinePrompt(combinePrompt(common, local), style)} /><p>生成时还会附加本次参考素材与模型参数。</p><Button className="text-button" type="button" onClick={() => void copy(combinePrompt(combinePrompt(common, local), style), "full")}>{copied === "full" ? "已复制完整提示词" : "复制完整提示词"}</Button></details>
     {error && <span role="alert">{error}</span>}
   </div>;
 }

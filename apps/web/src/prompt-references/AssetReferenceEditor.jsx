@@ -46,7 +46,7 @@ function Thumbnail({ reference, resolveUrl }) {
 export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   value = "", references = [], options = [], onChange, onBlur, onAddAssets, resolveUrl,
   disabled = false, label = "提示词", placeholder = "描述画面；输入 @ 引用项目已选资产", rows = 8,
-  maxLength = 8000, indexOffset = 0, labelledBy,
+  maxLength = 8000, indexOffset = 0, labelledBy, styleControl,
 }, forwardedRef) {
   const editorRef = useRef(null);
   const wrapperRef = useRef(null);
@@ -324,6 +324,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         setPopup(null); editorRef.current?.focus({ preventScroll: true });
       }
     }}>
+    {styleControl && <div className="prompt-style-tools">{onAddAssets && <Button variant="quiet" size="compact" disabled={disabled} onClick={addAsset} icon={<Plus size={16} />}>添加参考</Button>}{styleControl}</div>}
     {visible.length > 0 && <div className="asset-reference-rail" aria-label={`${label}已引用图片`}>
       {visible.map((reference) => <button type="button" key={referenceKey(reference)}
         className={selected === referenceKey(reference) ? 'active' : ''}
@@ -351,7 +352,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       onMouseOver={(event) => { const token = inputReference(event.target); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token, true); }}
       onMouseOut={(event) => { if (inputReference(event.target) && !event.relatedTarget?.closest?.('[data-reference-key]')) dismissPreview(); }}
     />
-    {onAddAssets && <button className="asset-reference-add" type="button" disabled={disabled} onClick={addAsset}><Plus size={14} />添加资产</button>}
+    {onAddAssets && !styleControl && <button className="asset-reference-add" type="button" disabled={disabled} onClick={addAsset}><Plus size={14} />添加资产</button>}
     {popup && createPortal(<div className="asset-reference-popover" ref={popupRef} style={{ left: popup.left, top: popup.top }}
       onMouseEnter={() => clearTimeout(dismissTimer.current)} onMouseLeave={dismissPreview}
       onFocus={() => clearTimeout(dismissTimer.current)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) dismissPreview(); }}

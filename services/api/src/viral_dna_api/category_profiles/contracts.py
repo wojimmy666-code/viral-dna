@@ -7,6 +7,7 @@ from typing import Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from ..visual_styles import VisualStyle
 
 
 def utc_now() -> datetime:
@@ -34,6 +35,7 @@ class CategoryProfileFields(BaseModel):
     scenes: list[str] = Field(default_factory=list, max_length=16)
     forbidden_claims: list[str] = Field(default_factory=list, max_length=20)
     visual_style: str | None = Field(default=None, max_length=500)
+    default_visual_style: VisualStyle | None = None
 
     @field_validator("display_name", "category_name", "brief")
     @classmethod

@@ -13,6 +13,7 @@ import { AccountHeader } from "./AccountHeader.jsx";
 import { StorageManagement } from "./StorageManagement.jsx";
 import { startSessionActivity } from "./session-activity.js";
 import { SessionReauthentication } from "./SessionReauthentication.jsx";
+import { startProjectLeaseRecovery } from "./project-lease-recovery.js";
 import {
   PASSWORD_MIN_LENGTH, PHONE_INPUT_PROPS,
   passwordError, pastePhone, phoneError, setupRequestBody,
@@ -226,8 +227,15 @@ export function AccountRoot({ children }) {
     }).catch(() => undefined);
   }
   async function acquire(preserveDraft = false) {
+    // Reauthentication calls this before React commits sessionHealth="active".
+    // The account client enforces the current session; the recovery observer and
+    // manual button separately stop acquisitions while the session is blocked.
+    if (!projectId) return;
     const version = ++generation.current;
-    setError(""); setLease({ projectId, loading: true, lost: preserveDraft });
+    setError("");
+    setLease(current => current?.projectId === projectId && !current.editable
+      ? { ...current, acquiring: true, checkError: false, lost: preserveDraft || current.lost }
+      : { projectId, loading: true, lost: preserveDraft });
     // Reuse an in-flight acquisition across React StrictMode effects, but never
     // reuse an abandoned project's token when navigating back to it.
     if (requestedLease.current?.projectId !== projectId) requestedLease.current = newLease(projectId);
@@ -239,6 +247,7 @@ export function AccountRoot({ children }) {
       const result = await next.pending;
       if (version !== generation.current) { if (result.editable && requestedLease.current !== next) await release(next); return; }
       if (result.editable) { activeLease.current = next; setProjectEditing(next); }
+      else { activeLease.current = null; setProjectEditing(null); }
       setLease({ projectId, ...result, lost: preserveDraft && !result.editable });
     } catch (failure) { if (version === generation.current) { setError(failure.message); setLease({ projectId, editable: false, lost: preserveDraft }); } }
   }
@@ -250,6 +259,22 @@ export function AccountRoot({ children }) {
     if (previous?.projectId !== projectId) { activeLease.current = null; setProjectEditing(null); void release(previous); }
     if (projectId) void acquire(); else { ++generation.current; setLease(null); }
   }, [projectId, session?.user_id, auth.auth_mode, admin]);
+  useEffect(() => {
+    if (admin || auth.auth_mode !== "password" || !session || sessionBlocked || !projectId
+      || lease?.projectId !== projectId || lease.loading || lease.acquiring || lease.editable || lease.lost) return;
+    const version = generation.current;
+    const observer = startProjectLeaseRecovery({
+      projectId,
+      isCurrent: () => generation.current === version,
+      onState: state => setLease(current => current?.projectId === projectId && !current.editable && !current.lost
+        ? { ...current, ...state, editable: false, checkError: false } : current),
+      onAvailable: () => acquire(),
+      onError: () => setLease(current => current?.projectId === projectId
+        ? { ...current, checkError: true } : current),
+    });
+    return () => observer.stop();
+  }, [projectId, session?.user_id, auth.auth_mode, admin, sessionBlocked,
+    lease?.projectId, lease?.loading, lease?.acquiring, lease?.editable, lease?.lost]);
   useEffect(() => {
     if (!projectId || !lease?.editable) return;
     let alive = true;
@@ -344,7 +369,7 @@ export function AccountRoot({ children }) {
       <h2>修改密码</h2>{["current_password", "new_password"].map(name => <label className="account-field" key={name}><span>{name === "current_password" ? "当前密码" : "新密码（至少 8 位）"}</span><input type="password" value={password[name]} autoComplete={name === "current_password" ? "current-password" : "new-password"} minLength={PASSWORD_MIN_LENGTH} required onChange={e => setPassword({ ...password, [name]: e.target.value })} /></label>)}
       <div className="account-actions"><Button type="submit" className="primary-button">修改并重新登录</Button><Button type="button" className="secondary-button" onClick={() => setPasswordOpen(false)}>取消</Button></div>
     </form>}
-    {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? (sessionBlocked ? "当前修改已暂停提交。" : lease.occupied ? `${lease.display_name || "其他成员"} 正在编辑。当前修改仍保留，暂不能提交。` : "编辑权已失效，当前修改仍保留。") : lease.occupied ? `${lease.display_name} 正在编辑，当前为只读查看。` : "当前为只读查看。"}</span>{lease.lost ? <>{!sessionBlocked && <Button className="text-button" onClick={() => void acquire(true)}>重新取得编辑权</Button>}<Button className="text-button" onClick={copyDraft}>复制未提交内容</Button><Button className="text-button" onClick={downloadDraft}>下载备份</Button></> : <Button className="text-button" onClick={() => void acquire()}>进入编辑</Button>}</div>}
+    {projectId && held && !lease.loading && !lease.editable && <div className="account-edit-notice" role="status"><Lock size={16} /><span>{lease.lost ? (sessionBlocked ? "当前修改已暂停提交。" : lease.occupied ? `${lease.display_name || "其他成员"} 正在编辑。当前修改仍保留，暂不能提交。` : "编辑权已失效，当前修改仍保留。") : lease.checkError ? "暂时无法确认编辑状态，连接恢复后会自动重试。" : lease.occupied ? `${lease.display_name || "其他成员"} 正在编辑，当前为只读查看。编辑权释放后将自动恢复。` : "正在恢复项目编辑状态…"}</span>{lease.lost ? <>{!sessionBlocked && <Button className="text-button" loading={lease.acquiring} loadingLabel="正在检查…" onClick={() => void acquire(true)}>重新取得编辑权</Button>}<Button className="text-button" onClick={copyDraft}>复制未提交内容</Button><Button className="text-button" onClick={downloadDraft}>下载备份</Button></> : <Button className="text-button" loading={lease.acquiring} loadingLabel="正在检查…" disabled={sessionBlocked} onClick={() => void acquire()}>进入编辑</Button>}</div>}
     <div ref={content} inert={sessionBlocked || !!lease?.lost}>
     {location.pathname === "/account/storage" && !admin ? <StorageManagement session={session} /> : management ? <AccountManagement admin={admin} session={session} /> : <>
       {projectId && (!held || (lease?.loading && !lease?.lost)) && <main className="account-loading" role="status">正在检查项目编辑状态…</main>}

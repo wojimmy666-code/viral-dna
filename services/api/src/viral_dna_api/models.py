@@ -275,6 +275,7 @@ class ImageExecutionMode(StrEnum):
 
 class ImageGenerationInputMode(StrEnum):
     KEYFRAME_EDIT = "keyframe_edit"
+    REFERENCE_TO_IMAGE = "reference_to_image"
     TEXT_TO_IMAGE = "text_to_image"
 
 
@@ -941,6 +942,7 @@ class ImageGenerationSettingsUpdate(BaseModel):
 
 class ImageGenerationSettingsResponse(BaseModel):
     enabled: bool = False
+    supports_candidate_base_image: bool = True
     execution_mode: ImageExecutionMode = ImageExecutionMode.REMOTE_API
     default_candidate_count: int = Field(default=1, ge=1, le=4)
     remote_provider: str = "dashscope"
@@ -3309,6 +3311,7 @@ class ImageGenerationCreate(ImageGenerationOverrides):
     visual_beat_id: UUID | None = None
     candidate_count: int = Field(default=1, ge=1, le=4)
     input_mode: ImageGenerationInputMode = ImageGenerationInputMode.KEYFRAME_EDIT
+    base_image_candidate_id: UUID | None = None
     execution_mode: Literal["remote_api", "local_tool"] | None = None
     model_alias: str | None = Field(
         default=None,
@@ -3320,6 +3323,15 @@ class ImageGenerationCreate(ImageGenerationOverrides):
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
     image_batch_id: UUID | None = None
     preserve_approval: bool = False
+
+    @model_validator(mode="after")
+    def require_edit_mode_for_base_image(self):
+        if (
+            self.base_image_candidate_id is not None
+            and self.input_mode != ImageGenerationInputMode.KEYFRAME_EDIT
+        ):
+            raise ValueError("选择编辑底图时必须使用底图编辑模式")
+        return self
 
 
 class VideoGenerationCreate(BaseModel):

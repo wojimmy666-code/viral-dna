@@ -539,6 +539,7 @@ class ShotManifestShot(BaseModel):
     description: str = Field(min_length=1, max_length=4000)
     image_prompt: str = Field(default="", max_length=8000)
     image_prompt_body: str | None = Field(default=None, max_length=8000)
+    production_shot_id: UUID | None = None  # Read-only live projection for effective style previews.
     image_negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     video_prompt: str = Field(default="", max_length=8000)
     video_prompt_body: str | None = Field(default=None, max_length=8000)

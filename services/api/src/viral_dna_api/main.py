@@ -236,6 +236,7 @@ from .production import (
 )
 from .project_assets import ProjectAssetService
 from .project_prompts import ProjectPromptRevision, ProjectPromptUpdate
+from .style_library import create_style_library_admin_router, create_style_library_user_router
 from .projects import ProjectService, create_project_router
 from .prompt_engine.routes import create_prompt_draft_router
 from .prompt_engine.service import PromptDraftService
@@ -656,6 +657,8 @@ app.include_router(
     create_storage_router(durable_storage_service, server_sync_service), prefix=API_PREFIX
 )
 app.include_router(create_user_preferences_router(user_preferences_service), prefix=API_PREFIX)
+app.include_router(create_style_library_admin_router(require_platform_admin), prefix=API_PREFIX)
+app.include_router(create_style_library_user_router(account_context_service), prefix=API_PREFIX)
 app.include_router(create_category_profile_router(category_profile_service), prefix=API_PREFIX)
 app.include_router(create_continuity_router(continuity_service), prefix=API_PREFIX)
 app.include_router(

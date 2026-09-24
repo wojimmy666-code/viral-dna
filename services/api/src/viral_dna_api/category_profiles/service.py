@@ -115,10 +115,13 @@ class CategoryProfileService:
             exclude_id=current.id,
         )
         now = utc_now()
+        fields = payload.model_dump(exclude={"revision"})
+        if "default_visual_style" not in payload.model_fields_set:
+            fields.pop("default_visual_style", None)
         return await self._save(
             current.model_copy(
                 update={
-                    **payload.model_dump(exclude={"revision"}),
+                    **fields,
                     "revision": current.revision + 1,
                     "updated_at": now,
                 }

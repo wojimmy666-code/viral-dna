@@ -1,5 +1,5 @@
 import { Button } from "../ui/system/Button.jsx";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import {
   ArrowLeft,
   CloudArrowUp,
@@ -15,6 +15,7 @@ import { DepthGenerationSettings } from "../depth-settings/DepthGenerationSettin
 import { MediaStagingSettingsPanel } from "../media-staging/MediaStagingSettingsPanel.jsx";
 import { SettingsActions } from "../ui/settings/SettingsPrimitives.jsx";
 import { PlatformSkillAdmin } from "./PlatformSkillAdmin.jsx";
+import { StyleLibraryAdmin } from "./StyleLibraryAdmin.jsx";
 import "./platform-admin.css";
 
 const ADMIN_SECTIONS = [
@@ -22,6 +23,7 @@ const ADMIN_SECTIONS = [
   { id: "providers", label: "服务商与凭据", Icon: Key },
   { id: "models", label: "模型与默认值", Icon: SlidersHorizontal },
   { id: "skills", label: "平台 Skill", Icon: Sparkle },
+  { id: "styles", label: "风格库", Icon: Sparkle },
   { id: "media", label: "媒体与对象存储", Icon: CloudArrowUp },
   { id: "runtime", label: "运行环境", Icon: Cpu },
 ];
@@ -55,6 +57,15 @@ export function PlatformAdminConsole({
   videoServerSettings,
 }) {
   const videoProviders = videoServerSettings?.providers || [];
+  const [styleUnsaved, setStyleUnsaved] = useState(false);
+  const [styleNavigationError, setStyleNavigationError] = useState("");
+  function navigate(action) {
+    if (section === "styles" && styleUnsaved) {
+      setStyleNavigationError("请先保存风格草稿或取消修改，再离开风格库。");
+      return;
+    }
+    setStyleNavigationError(""); action();
+  }
   const runtimeRequest = useCallback((path, options) => adminRequest(request, path, options), [request]);
   return (
     <div className="platform-admin-shell settings-surface">
@@ -71,14 +82,14 @@ export function PlatformAdminConsole({
             <button
               className={section === id ? "active" : ""}
               key={id}
-              onClick={() => onNavigate(id)}
+              onClick={() => navigate(() => onNavigate(id))}
               type="button"
             >
               <Icon size={19} /> {label}
             </button>
           ))}
         </nav>
-        <button className="platform-admin-back" onClick={onBack} type="button">
+        <button className="platform-admin-back" onClick={() => navigate(onBack)} type="button">
           <ArrowLeft size={18} /> 返回用户设置
         </button>
       </aside>
@@ -379,6 +390,7 @@ export function PlatformAdminConsole({
         )}
 
         {section === "skills" && <PlatformSkillAdmin request={request} />}
+        {section === "styles" && <StyleLibraryAdmin request={request} onUnsavedChange={setStyleUnsaved} />}
 
         {section === "runtime" && (
           <section className="admin-settings-section admin-component-section">
@@ -436,12 +448,13 @@ export function PlatformAdminConsole({
           </section>
         )}
 
+        {styleNavigationError && styleUnsaved && <p className="admin-settings-error" role="alert">{styleNavigationError}</p>}
         {error && <p className="admin-settings-error" role="alert">{error}</p>}
-        <SettingsActions className="platform-admin-actions">
+        {section !== "styles" && <SettingsActions className="platform-admin-actions">
           <Button className="primary-button" disabled={loading || saving} onClick={onSave} type="button">
             {saving ? "保存中…" : "保存平台配置"}
           </Button>
-        </SettingsActions>
+        </SettingsActions>}
       </main>
     </div>
   );

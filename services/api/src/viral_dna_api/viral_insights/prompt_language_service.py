@@ -55,6 +55,9 @@ JSON 中分镜与图片的 id、顺序和约束条目数量必须原样返回。
 
 def concept_document(batch):
     concept = batch.concepts[0]
+    style_snapshot = batch.production_visual_style_snapshot
+    if style_snapshot is None:
+        style_snapshot = batch.visual_style_snapshot
     rows = []
     for shot in concept.shots:
         identifier = str(uuid5(NAMESPACE_URL, f"{concept.id}:shot:{shot.index}"))
@@ -63,6 +66,7 @@ def concept_document(batch):
                 "id": identifier,
                 "index": shot.index,
                 "title": shot.title,
+                "visual_style_snapshot": style_snapshot,
                 "duration_seconds": shot.duration_seconds,
                 "images": [
                     {
@@ -83,6 +87,7 @@ def concept_document(batch):
         "batch_id": str(batch.id),
         "common_image_prompt": "",
         "common_video_prompt": "",
+        "visual_style_snapshot": style_snapshot,
         "shots": rows,
     }
     document["token"] = fingerprint({"document": document, "revision": batch.revision})

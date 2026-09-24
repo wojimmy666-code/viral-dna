@@ -8,7 +8,7 @@ import {
 export function VideoPromptReferenceEditor({
   assets, depthAssets, managedAssetBinding, onBlur, onChange, referenceFrames, resolveUrl,
   selectedReferences = [], value, videoPromptMentions = [], videoReferenceBindings,
-  onAddAssets, disabled = false,
+  onAddAssets, disabled = false, styleControl,
 }) {
   const options = useMemo(() => buildVideoReferenceOptions({
     assets, depthAssets, managedAssetBinding, referenceFrames, videoReferenceBindings,
@@ -26,6 +26,7 @@ export function VideoPromptReferenceEditor({
     number: numbers.get(videoReferenceKey(item)), available: byKey.has(videoReferenceKey(item)),
   }));
   return <AssetReferenceEditor label="视频提示词" rows={7} value={value}
+    styleControl={styleControl}
     references={references} options={choices} resolveUrl={resolveUrl} onBlur={onBlur}
     onAddAssets={onAddAssets && ((insert) => onAddAssets((asset) => insert(
       buildVideoReferenceOptions({ assets:[asset] })[0],

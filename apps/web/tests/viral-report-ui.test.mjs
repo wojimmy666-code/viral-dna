@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import * as PhosphorIcons from "@phosphor-icons/react";
 
 const APP_URL = new URL("../src/App.jsx", import.meta.url);
 const EXECUTIVE_URL = new URL("../src/viral-report/ViralExecutiveSummary.jsx", import.meta.url);
@@ -8,6 +14,7 @@ const REPLICATION_URL = new URL("../src/viral-report/ReplicationWorkspace.jsx", 
 const MECHANISM_URL = new URL("../src/viral-report/ViralMechanismWorkspace.jsx", import.meta.url);
 const SHOT_TRAFFIC_URL = new URL("../src/viral-report/ShotTrafficRoles.jsx", import.meta.url);
 const CONCEPT_URL = new URL("../src/viral-report/ConceptComparison.jsx", import.meta.url);
+const PLAN_URL = new URL("../src/viral-report/CreativePlanReview.jsx", import.meta.url);
 const PROMPT_EDITOR_URL = new URL("../src/prompt-editor/PromptEditor.jsx", import.meta.url);
 const PROMPT_SHOT_URL = new URL("../src/prompt-editor/PromptShotEditor.jsx", import.meta.url);
 const UI_HELPERS_URL = new URL("../src/viral-report/viral-report-ui.js", import.meta.url);
@@ -77,18 +84,67 @@ test("idea cards remove review clutter and keep a deliberate note-based AI actio
   assert.match(workspace, /Object\.hasOwn\(ideaBatch, "revision_notes"\)/);
 });
 
-test("expanded plan fulfillment remains in closed details for legacy compatibility", async () => {
+test("expanded plans omit fulfillment and production reminders without removing production actions", async () => {
   const concept = await readFile(CONCEPT_URL, "utf8");
-  const checks = await readFile(new URL("../src/viral-report/CreativeBriefChecks.jsx", import.meta.url), "utf8");
-  assert.match(concept, /brief_checks\?\.length > 0 && <details className="concept-risk-disclosure">/);
-  assert.match(checks, /if \(!checks\?\.length\) return null/);
-  assert.match(checks, /\{item\.requirement\}/);
-  assert.match(checks, /\{item\.explanation\}/);
-  assert.doesNotMatch(checks, /dangerouslySetInnerHTML/);
+  const plan = await readFile(PLAN_URL, "utf8");
+  assert.doesNotMatch(plan, /补充想法落实说明|制作提醒|CreativeBriefChecks|selected\.brief_checks|selected\.risks/);
+  assert.doesNotMatch(concept, /补充想法落实说明|制作提醒|CreativeBriefChecks|selected\.brief_checks|selected\.risks/);
+  assert.match(concept, /所需资产/);
+  assert.match(concept, /查看逐镜头创作指令/);
+  assert.match(concept, /onClick=\{\(\) => onPublish\(selected\)\}/);
+  const css = await readFile(CSS_URL, "utf8");
+  const workflowCss = await readFile(new URL("../src/viral-report/creative-workflow.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /\.concept-risk-title/);
+  assert.doesNotMatch(workflowCss, /\.creative-brief-checks/);
+});
+
+test("expanded plan renders a sequential review with unchanged publish guards and legacy rendering", async () => {
+  const bundle = await build({ entryPoints: [fileURLToPath(CONCEPT_URL)], write: false, bundle: true, format: "cjs", platform: "node", packages: "external", jsx: "automatic", loader: { ".css": "empty" } });
+  const module = { exports: {} };
+  const require = createRequire(import.meta.url);
+  new Function("require", "module", "exports", bundle.outputFiles[0].text)((specifier) => specifier === "@phosphor-icons/react" ? PhosphorIcons : require(specifier), module, module.exports);
+  const plan = { id: "plan1", name: "地标行走", thesis: "人物居中，背景硬切。", narrative_structure: "非线性蒙太奇", payoff: "结束画面", category_fit_summary: "服装", changed_elements: ["调整场景"], retained_dna: ["硬切"], required_assets: ["服装参考图"], brief_checks: [{ explanation: "不可见核对依据" }], risks: ["不可见风险内容"], shots: [{ index: 1, title: "巴黎", description: "女孩居中向左走。", traffic_role: "视觉吸引", duration_seconds: 0.8, image_prompt: "静态场景", video_prompt: "向左行走" }] };
+  const render = (batch = {}, props = {}, concept = plan) => renderToStaticMarkup(createElement(module.exports.ConceptComparison, { conceptSet: { id: "expanded", phase: "expanded", status: "completed", concepts: [concept], ...batch }, onPublish() { throw new Error("render must not publish"); }, onPromptPreview() { throw new Error("render must not preview"); }, ...props }));
+  const html = render();
+  assert.match(html, /creative-plan-header[\s\S]*查看方案提示词/);
+  assert.match(html, /creative-plan-overview[\s\S]*<p>人物居中，背景硬切。<\/p>/);
+  assert.doesNotMatch(html, /方案详情/);
+  assert.match(html, /aria-expanded="false" aria-controls="[^"]+"/);
+  assert.match(html, /aria-label="展开创意说明"/);
+  assert.match(html, /class="creative-plan-details" hidden=""/);
+  assert.match(html, /creative-plan-shot-heading[\s\S]*creative-plan-shot-title[\s\S]*creative-plan-shot-duration/);
+  const shotToggle = html.match(/<span class="creative-plan-shot-toggle"[^>]*>[\s\S]*?<\/span>/)?.[0];
+  assert.ok(shotToggle, "shot summary keeps its disclosure arrow");
+  assert.match(shotToggle, /aria-hidden="true"[\s\S]*<svg/);
+  assert.doesNotMatch(shotToggle, /展开|收起|when-closed|when-open/);
+  assert.equal(html.split(plan.shots[0].description).length - 1, 1, "shot description appears once, including after expansion");
+  assert.doesNotMatch(html, /creative-plan-shot-description/);
+  assert.match(html, /creative-plan-shot-list[\s\S]*creative-plan-assets[\s\S]*creative-plan-footer/);
+  assert.equal((html.match(/class="ui-button primary-button"/g) || []).length, 1);
+  assert.doesNotMatch(html, /不可见核对依据|不可见风险内容|制作提醒|补充想法落实说明|<details[^>]+open/);
+  const primary = value => value.match(/<button[^>]*class="ui-button primary-button"[^>]*>/)?.[0] || "";
+  assert.doesNotMatch(primary(html), /disabled/);
+  for (const [batch, props] of [[{ status: "stale" }, {}], [{ language_issues: ["English"] }, {}], [{ input_snapshot: { prompt_language_project_id: "existing" } }, {}], [{}, { publishingId: "plan1" }]]) {
+    assert.match(primary(render(batch, props)), /disabled=""/);
+  }
+  assert.match(render({}, { publishingId: "plan1" }), /aria-busy="true"/);
+  const published = render({ language_issues: ["English"], published_result: { project_id: "existing" } });
+  assert.match(published, /进入已创建方案/);
+  assert.doesNotMatch(primary(published), /disabled/);
+  assert.doesNotMatch(render({}, {}, { ...plan, required_assets: [] }), /creative-plan-assets/);
+  assert.doesNotMatch(render({}, {}, { ...plan, narrative_structure: "", payoff: "", category_fit_summary: "", changed_elements: [], retained_dna: [] }), /creative-plan-details|展开创意说明/);
+  for (const count of [1, 5, 12]) {
+    const markup = render({}, {}, { ...plan, shots: Array.from({ length: count }, (_, index) => ({ ...plan.shots[0], index: index + 1 })) });
+    assert.equal((markup.match(/class="creative-plan-shot"/g) || []).length, count);
+  }
+  const legacy = render({ phase: "legacy" }, { historical: true });
+  assert.match(legacy, /历史完整方案/);
+  assert.match(legacy, /concept-summary-grid/);
+  assert.doesNotMatch(legacy, /creative-plan-review/);
 });
 
 test("creative batches merge without dropping history and keep unreported costs honest", async () => {
-  const { mergeCreativeBatch, creativeCost, creativeTiming, isCreativeRunning } = await import("../src/viral-report/creative-workflow.js");
+  const { mergeCreativeBatch, creativeCost, creativeTiming, creativeTimingParts, isCreativeRunning } = await import("../src/viral-report/creative-workflow.js");
   const first = { id: "one", created_at: "2026-09-19T00:00:00Z", status: "completed" };
   const next = { id: "two", created_at: "2026-09-19T00:01:00Z", status: "running" };
   const merged = mergeCreativeBatch([first, next], { ...next, status: "completed" });
@@ -99,6 +155,8 @@ test("creative batches merge without dropping history and keep unreported costs 
   assert.match(creativeCost({ cost_status: "unreported", model_cost_micros: 0 }), /不代表免费/);
   assert.match(creativeCost({ cost_status: "measured", model_cost_micros: 1200 }), /0\.0012/);
   assert.equal(creativeTiming({ ...first, started_at: "2026-09-19T00:00:02Z", completed_at: "2026-09-19T00:00:20Z", model_elapsed_ms: 15000 }), "总计 20 秒 · 排队 2 秒 · 模型 15 秒");
+  assert.deepEqual(creativeTimingParts({ ...first, started_at: "2026-09-19T00:00:02Z", completed_at: "2026-09-19T00:00:20Z", model_elapsed_ms: 15000 }), { total: 20, queue: 2, model: 15 });
+  assert.deepEqual(creativeTimingParts({ ...next, started_at: "2026-09-19T00:01:02Z", model_elapsed_ms: 5000 }, Date.parse("2026-09-19T00:01:20Z")), { total: 20, queue: 2, model: 18 });
 });
 
 test("two-stage UI requires explicit selection, reuses request IDs and only polls on reload", async () => {
@@ -288,7 +346,9 @@ test("replication concepts expose distinct change levels and stale-batch recover
   assert.match(concept, /创意主张/);
   assert.match(concept, /叙事结构/);
   assert.match(concept, /品类适配/);
-  assert.match(concept, /制作提醒/);
+  assert.doesNotMatch(concept, /制作提醒|补充想法落实说明|CreativeBriefChecks|selected\.brief_checks|selected\.risks/);
+  assert.match(concept, /所需资产/);
+  assert.match(concept, /查看逐镜头创作指令/);
   assert.match(concept, /concept-risk-disclosure/);
   assert.match(concept, /保留 \{selected\.retained_dna\.length\} 项 DNA/);
   assert.doesNotMatch(concept, /本方案重点改进|本策略锁定|concept-strategy-goal|meta\.goal/);

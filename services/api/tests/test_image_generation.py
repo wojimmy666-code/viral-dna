@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -159,6 +160,8 @@ def main() -> None:
         "candidates": candidates,
         "usage": {
             "image_count": len(candidates),
+            "input_roles": [item["role"] for item in request["inputs"]],
+            "input_paths": [item["path"] for item in request["inputs"]],
             "https_proxy": os.getenv("HTTPS_PROXY"),
         },
     }), "utf-8")
@@ -687,6 +690,108 @@ def test_local_tool_supports_pure_text_generation_without_image_inputs(
     assert snapshot["references"] == []
 
 
+@pytest.mark.parametrize(
+    "roles",
+    [
+        [("person", "identity")],
+        [("product", "product"), ("scene", "scene"), ("wardrobe", "wardrobe"), ("style", "style")],
+    ],
+)
+def test_reference_creation_passes_every_asset_without_an_original_frame(
+    tmp_path, monkeypatch, roles
+):
+    isolate_image_settings(tmp_path, monkeypatch)
+    monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    settings = ImageGenerationSettingsService()
+    asyncio.run(
+        settings.update(
+            ImageGenerationSettingsUpdate(
+                execution_mode="local_tool",
+                local_executable_path=sys.executable,
+                local_fixed_args=[str(write_fake_tool(tmp_path))],
+                local_cost_source="unmetered",
+            )
+        )
+    )
+    workspace = WorkspaceManager()
+    project = _project()
+    workspace.initialize_production(project.record_id, project.id)
+    shot = _shot(project.id).model_copy(update={"source_kind": "blank"})
+    assets, bindings = [], []
+    for asset_type, role in roles:
+        path = write_image(workspace.root / "references" / f"{role}.jpg")
+        asset = ReferenceAsset(
+            project_id=project.id,
+            type=asset_type,
+            name=f"指定{role}",
+            relative_path=workspace.relative(path),
+            mime_type="image/jpeg",
+            width=720,
+            height=1280,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            rights_confirmed=True,
+        )
+        assets.append(asset)
+        bindings.append(
+            ReferenceBinding(shot_plan_id=shot.id, reference_asset_id=asset.id, role=role)
+        )
+    gateway = ImageGenerationGateway(workspace, settings)
+    run, candidates = asyncio.run(
+        gateway.generate(
+            project,
+            shot,
+            shot.revision_id,
+            bindings,
+            assets,
+            candidate_count=1,
+            source_path=None,
+            input_mode=ImageGenerationInputMode.REFERENCE_TO_IMAGE,
+        )
+    )
+    assert run.status == "completed"
+    assert len(candidates) == 1
+    assert set(run.usage["input_roles"]) == {role for _, role in roles}
+    assert len(run.usage["input_paths"]) == len(roles)
+    snapshot = json.loads(
+        filesystem_path(workspace.resolve(run.input_snapshot_relative_path)).read_text("utf-8")
+    )
+    assert snapshot["input_mode"] == "reference_to_image"
+    assert snapshot["source"] is None
+    assert len(snapshot["references"]) == len(roles)
+    assert [item["input_index"] for item in snapshot["input_manifest"]] == list(
+        range(1, len(roles) + 1)
+    )
+    assert "不存在原视频关键帧或编辑底图" in snapshot["prompt"]["positive"]
+    assert "图像1仅用于保留" not in snapshot["prompt"]["positive"]
+    assert settings.get().supports_candidate_base_image is True
+    with pytest.raises(ImageGenerationGatewayError):
+        asyncio.run(
+            gateway.generate(
+                project,
+                shot,
+                shot.revision_id,
+                bindings,
+                assets[:-1],
+                candidate_count=1,
+                source_path=None,
+                input_mode=ImageGenerationInputMode.REFERENCE_TO_IMAGE,
+            )
+        )
+    with pytest.raises(ImageGenerationGatewayError):
+        asyncio.run(
+            gateway.generate(
+                project,
+                shot,
+                shot.revision_id,
+                bindings,
+                assets,
+                candidate_count=1,
+                source_path=None,
+                input_mode=ImageGenerationInputMode.TEXT_TO_IMAGE,
+            )
+        )
+
+
 def test_identity_reference_is_second_input_and_exclusive_identity_source() -> None:
     project = _project()
     shot = _shot(project.id)
@@ -782,6 +887,23 @@ def test_identity_reference_is_second_input_and_exclusive_identity_source() -> N
     assert "图像1是人物资产" in creative_positive
     assert "图像1是原视频" not in creative_positive
     assert "混合图像1与图像2的人脸或身份" not in _negative_prompt(creative_request)
+    reference_request = replace(
+        creative_request, input_mode=ImageGenerationInputMode.REFERENCE_TO_IMAGE
+    )
+    validate_identity_generation(
+        state=validate_identity_bindings(bindings, [identity_asset, scene_asset]),
+        input_mode=reference_request.input_mode, source_present=False,
+        references=references,
+        capability=load_image_model_catalog().option("qwen_image_2_pro").capabilities,
+    )
+    assert "图像1是人物资产" in _compiled_prompt(reference_request)
+    generated_base = replace(request, base_image_candidate_id=uuid4())
+    assert "已选生成图片" in _compiled_prompt(generated_base)
+    assert "原视频关键帧" not in _compiled_prompt(generated_base)
+    base_manifest = build_input_manifest(source_present=True, references=references,
+        base_image_candidate_id=generated_base.base_image_candidate_id)
+    assert base_manifest[0]["kind"] == "generated_image"
+    assert base_manifest[0]["candidate_id"] == str(generated_base.base_image_candidate_id)
 
 
 def test_identity_reference_forbids_text_to_image_and_multiple_identities() -> None:

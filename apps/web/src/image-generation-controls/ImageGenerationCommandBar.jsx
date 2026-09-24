@@ -29,7 +29,10 @@ export function ImageGenerationCommandBar({
   estimatedCostLabel,
   generationAvailable,
   identityBlocker,
-  identityLocked,
+  referenceCount = 0,
+  baseImageId,
+  baseImageOptions = [],
+  onBaseImageChange,
   inputCount,
   inputMode,
   latestRun,
@@ -176,7 +179,10 @@ export function ImageGenerationCommandBar({
         candidateCount={candidateCount}
         controlsDisabled={controlsDisabled}
         estimatedCostLabel={estimatedCostLabel}
-        identityLocked={identityLocked}
+        referenceCount={referenceCount}
+        baseImageId={baseImageId}
+        baseImageOptions={baseImageOptions}
+        onBaseImageChange={onBaseImageChange}
         inputMode={inputMode}
         maxCandidates={maximumCandidates}
         onCandidateCountChange={onCandidateCountChange}

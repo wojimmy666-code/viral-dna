@@ -163,7 +163,7 @@ class ImageBatchService:
                     shot_index=plan.index,
                     beat_index=beat.index,
                     input_fingerprint=fingerprint,
-                    prompt_snapshot=prompt_snapshot(beat.image_prompt, prompt_context, "image"),
+                    prompt_snapshot=prompt_snapshot(beat.image_prompt, prompt_context, "image", shot_key=str(plan.id)),
                 )
                 picture_runs = [
                     run

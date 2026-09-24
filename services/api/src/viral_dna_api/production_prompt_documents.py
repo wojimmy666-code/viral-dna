@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .models import ProductionChangeKind, ShotLifecycleStatus, utc_now
 from .production import ProductionServiceError
-from .project_prompts import local_prompt
+from .project_prompts import local_prompt, effective_style, prompt_snapshot
 from .upstream_changes import changed_beat, changed_plan
 from .viral_insights.creative_language import is_foreign_prose
 
@@ -106,8 +106,8 @@ class ProductionPromptDocuments:
                     "video_prompt_mentions": drafts[p.id].video_prompt_mentions,
                     "video_negative_constraints": drafts[p.id].video_negative_constraints})
                     if drafts.get(p.id) else self.production._local_prompt_view(p, context) for p in members]
-                compiled, _ = execution_plan(group, members)
-                row.update(compiled_prompt=compiled.video_prompt, negative_constraints=compiled.video_negative_constraints,
+                compiled, _ = execution_plan(group, members, context=context)
+                row.update(compiled_prompt=prompt_snapshot(compiled.video_prompt, context, "video", include_style=False)["compiled_prompt"], negative_constraints=compiled.video_negative_constraints,
                     target_duration_seconds=compiled.duration_seconds, error=None)
             except ProductionServiceError as exc:
                 row.update(compiled_prompt=group.video_prompt, negative_constraints=[], error=str(exc))
@@ -143,6 +143,7 @@ class ProductionPromptDocuments:
                     "id": str(plan.id),
                     "index": plan.index,
                     "title": f"分镜 {plan.index}",
+                    "visual_style_snapshot": effective_style(context, str(plan.id)),
                     "video_group_id": next((str(g.id) for g in project.video_generation_groups if plan.id in g.shot_plan_ids), None),
                     "duration_seconds": plan.end_seconds - plan.start_seconds,
                     "images": images,
@@ -166,6 +167,7 @@ class ProductionPromptDocuments:
             "name": project.name,
             "revision_id": str(project.current_revision_id),
             "context_id": str(context.id),
+            "visual_style_snapshot": context.visual_style_snapshot,
             "common_image_prompt": context.common_image_prompt,
             "common_video_prompt": context.common_video_prompt,
             "shots": rows,

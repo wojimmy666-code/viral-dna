@@ -24,6 +24,7 @@ from ..ai.router import ModelRouter
 from ..ai.text_model_routing import preferred_text_model_aliases
 from ..category_profiles.service import CategoryProfileServiceError
 from ..models import ModelResponseDiagnostics, ModelRun, ModelRunStatus, ModelTask, ModelUsage
+from ..visual_styles import freeze_style
 from .contracts import ViralConcept, ViralConceptSet, utc_now
 from .creative_brief import (
     CreativeBriefError,
@@ -166,7 +167,9 @@ class CreativeConceptService:
             history = await self.history(analysis_id, profile.id)
             previous_brief = next((item for item in history if item.phase != "legacy"), None)
             feedback = resolve_brief(payload.feedback, previous_brief)
+            visual_style = freeze_style(payload.visual_style or profile.default_visual_style)
             snapshot = {
+                "visual_style_snapshot": visual_style,
                 "category": profile.model_dump(mode="json"),
                 "original_creative_brief": feedback,
                 "source_grammar": {
@@ -213,10 +216,11 @@ class CreativeConceptService:
                 generator_id=GENERATOR,
                 strategy_contract_version="creative-two-stage-v2",
                 category_profile=profile,
+                visual_style_snapshot=visual_style,
                 request_id=payload.request_id,
                 feedback=feedback,
                 request_signature=digest(
-                    {"operation": "generate", **payload.model_dump(mode="json")}
+                    {"operation": "generate", **self._request_data(payload)}
                 ),
                 input_snapshot=snapshot,
             )
@@ -281,9 +285,15 @@ class CreativeConceptService:
                     "review_source_fingerprint": None,
                 },
             )
-            existing = [] if expand else [item for item in parent.ideas if item.id != idea_id]
+            original_order = [item if item.visual_style_snapshot is not None else item.model_copy(update={"visual_style_snapshot": parent.visual_style_snapshot}) for item in parent.ideas]
+            existing = [] if expand else [item for item in original_order if item.id != idea_id]
+            if payload.visual_style is not None:
+                job.visual_style_snapshot = freeze_style(payload.visual_style)
+            elif selected.visual_style_snapshot is not None:
+                job.visual_style_snapshot = selected.visual_style_snapshot
+            job.input_snapshot["visual_style_snapshot"] = job.visual_style_snapshot
             return await self._start(
-                job, selected=selected, existing=existing, original_order=parent.ideas
+                job, selected=selected, existing=existing, original_order=original_order
             )
 
     @staticmethod
@@ -292,6 +302,8 @@ class CreativeConceptService:
         # Preserve signatures issued before per-idea notes were introduced.
         if data.get("revision_notes") is None:
             data.pop("revision_notes", None)
+        if data.get("visual_style") is None:
+            data.pop("visual_style", None)
         return data
 
     async def _deduplicate(self, analysis_id, payload, operation, **extra):
@@ -354,6 +366,7 @@ class CreativeConceptService:
                         raise ValueError(f"模型应返回 {expected} 个新创意")
                     fresh = [review_idea(item, job.input_snapshot["creative_brief"], result.requirement_rules)
                              for item in result.ideas]
+                    fresh = [item.model_copy(update={"visual_style_snapshot": job.visual_style_snapshot}) for item in fresh]
                     if existing:
                         fresh = [
                             fresh[0] if item.id == job.source_idea_id else item

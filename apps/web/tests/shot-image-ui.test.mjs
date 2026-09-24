@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { parse } from "@babel/parser";
+import { imageGenerationInputManifest } from "../src/production-ui.js";
 import { globalPromptWasEdited } from "../src/prompt-context/input-freshness.js";
 import { restoreGenerationPreferences } from "../src/image-generation-controls/generation-preferences.js";
+import { imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId } from "../src/image-generation-controls/image-input.js";
 
 test("shot images default to one, migrate only old counts and retain later explicit choices", () => {
   const defaults = {count:1, model:"default", inputMode:"text_to_image"};
@@ -324,6 +327,7 @@ test("image model choices support per-run routing and compatibility checks", () 
       capabilities: {
         text_to_image: true,
         image_to_image: true,
+        multi_reference: true,
         max_input_images: 2,
       },
     }],
@@ -337,6 +341,110 @@ test("image model choices support per-run routing and compatibility checks", () 
   );
   assert.match(
     imageGenerationSummary({ aspectRatio: "16:9", candidateCount: 1, inputMode: "keyframe_edit" }),
-    /^图生图/,
+    /^底图编辑/,
   );
+});
+
+test("reference creation needs no original frame and never silently drops assets", () => {
+  assert.equal(resolveImageInputMode({ inputMode: "keyframe_edit", referenceCount: 1 }), "reference_to_image");
+  assert.equal(resolveImageInputMode({ inputMode: "text_to_image", referenceCount: 3 }), "reference_to_image");
+  assert.equal(resolveImageInputMode({ inputMode: "reference_to_image", referenceCount: 0 }), "text_to_image");
+  assert.equal(resolveImageInputMode({ inputMode: "text_to_image", sourceUrl: "/original", referenceCount: 1 }), "reference_to_image");
+  assert.equal(resolveImageInputMode({ inputMode: "keyframe_edit", sourceUrl: "/original", referenceCount: 1 }), "keyframe_edit");
+  assert.equal(resolveImageInputMode({ inputMode: "keyframe_edit", baseImageId: "missing-image", referenceCount: 1 }), "keyframe_edit");
+  assert.equal(imageBaseCandidateId("reference_to_image", "previous-image"), null);
+  assert.equal(imageBaseCandidateId("keyframe_edit", "previous-image"), "previous-image");
+  assert.equal(imageBaseCandidateId("keyframe_edit", "source"), null);
+  assert.doesNotMatch(shotImageSource, /人物身份替换需要先选择原视频关键帧|identityLocked|setGenerationInputMode\("keyframe_edit"\)/);
+  assert.match(productionWorkflowSource, /base_image_candidate_id: baseCandidateId/);
+  assert.match(imageGenerationSummary({ inputMode: "reference_to_image", candidateCount: 1 }), /^参考图创作/);
+});
+
+test("reference scope matches the active visual beat for both creation workflows", () => {
+  const draft = { referenceBindings: [{ reference_asset_id: "person" }, { reference_asset_id: "scene" }], imagePromptMentions: [{ reference_asset_id: "scene" }] };
+  assert.deepEqual(imageBindingsForDraft({ source_kind: "blank", visual_beats: [{}] }, {}, draft), draft.referenceBindings);
+  assert.deepEqual(imageBindingsForDraft({ source_kind: "blank", visual_beats: [{}, {}] }, {}, draft), [draft.referenceBindings[1]]);
+  assert.deepEqual(imageBindingsForDraft({ source_kind: "skill_generated", visual_beats: [{}] }, {}, draft), [draft.referenceBindings[1]]);
+});
+
+test("reference and base image capabilities are checked independently without model fallback", () => {
+  const model = { configured: true, capabilities: { text_to_image: false, image_to_image: true, multi_reference: false, max_input_images: 3, max_reference_images: 2 } };
+  assert.equal(imageModelCompatibility(model, { inputMode: "reference_to_image", inputCount: 1 }).compatible, true);
+  assert.equal(imageModelCompatibility(model, { inputMode: "text_to_image", inputCount: 0 }).compatible, false);
+  assert.match(imageModelCompatibility(model, { inputMode: "reference_to_image", inputCount: 2 }).reason, /多图/);
+  model.capabilities.multi_reference = true;
+  assert.equal(imageModelCompatibility(model, { inputMode: "keyframe_edit", inputCount: 3 }).compatible, true);
+  assert.match(imageModelCompatibility(model, { inputMode: "reference_to_image", inputCount: 3 }).reason, /2 张参考/);
+});
+
+test("reference manifests number every input and distinguish an explicitly chosen base", () => {
+  const bindings = [{ reference_asset_id: "person", role: "identity" }, { reference_asset_id: "scene", role: "scene" }];
+  const reference = imageGenerationInputManifest({ inputMode: "reference_to_image", sourceUrl: "/unused-original", referenceBindings: bindings });
+  assert.deepEqual(reference.map(item => item.input_index), [1, 2]);
+  assert.ok(reference.every(item => item.kind === "reference_asset"));
+  const edit = imageGenerationInputManifest({ inputMode: "keyframe_edit", sourceUrl: "/selected-base", baseImageCandidateId: "chosen", referenceBindings: bindings });
+  assert.deepEqual(edit.map(item => item.input_index), [1, 2, 3]);
+  assert.equal(edit[0].kind, "generated_image");
+  assert.equal(edit[0].candidate_id, "chosen");
+  assert.equal(edit[0].thumbnail_url, "/selected-base");
+});
+
+test("the real submit handler sends the visible mode and base, and protects against an outdated backend", async () => {
+  const ast = parse(productionWorkflowSource, { sourceType: "module", plugins: ["jsx"] });
+  const component = ast.program.body.find(node => node.declaration?.id?.name === "ProductionHub").declaration;
+  const handler = component.body.body.find(node => node.id?.name === "generateShotCandidates");
+  assert.ok(handler);
+  const createHandler = new Function("scope", `with (scope) { return (${productionWorkflowSource.slice(handler.start, handler.end)}); }`);
+  async function submit({ bindings = [], source = "", inputMode = "keyframe_edit", base = "", supportsBase = true, saveError = false } = {}) {
+    const requests = [];
+    const beat = { id: "beat", index: 1, source_frame_url: source };
+    const shot = { plan: { id: "shot", index: 1, source_kind: "blank", visual_beats: [beat] }, current_revision_id: "saved-revision" };
+    const scope = {
+      shotDetail: shot, selectedVisualBeatId: beat.id,
+      shotDraft: { referenceBindings: bindings }, workflow: null,
+      generationResolution: "", generationCandidateCount: 1,
+      generationEngine: "remote_api", generationModelAlias: "chosen-model",
+      generationSettings: { enabled: true, supports_candidate_base_image: supportsBase },
+      generationInputMode: inputMode, generationBaseImageId: base,
+      detail: { project: { current_revision_id: "old-revision" } },
+      shotDraftPatch: () => ({ activeBeat: beat, beatChanges: {}, shotChanges: {} }),
+      resolveImageExecutionMode: () => "remote_api", executeAction: callback => callback(),
+      flushGlobalPrompts: async () => {},
+      flushShotDraft: async () => { if (saveError) throw new Error("保存失败"); return shot; },
+      visualBeatFromDetail: item => item.plan.visual_beats[0],
+      imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId,
+      imageGenerationIntentForShot: () => "standard",
+      request: async (url, options) => { requests.push({ url, ...JSON.parse(options.body) }); return { id: "run" }; },
+      setShotDetail: () => {}, onProjectsChanged: async () => {}, onNotice: () => {},
+      setActionError: message => { throw new Error(message); },
+    };
+    try { await createHandler(scope)(); } catch (error) { return { requests, error }; }
+    return { requests };
+  }
+  const cases = [
+    [{ bindings: [{ reference_asset_id: "person", role: "identity" }] }, "reference_to_image", null],
+    [{ bindings: [{ reference_asset_id: "product", role: "product" }], inputMode: "text_to_image" }, "reference_to_image", null],
+    [{}, "text_to_image", null],
+    [{ base: "chosen-candidate" }, "keyframe_edit", "chosen-candidate"],
+    [{ source: "/source", base: "source" }, "keyframe_edit", null],
+    [{ source: "/source", inputMode: "text_to_image" }, "text_to_image", null],
+  ];
+  for (const [input, mode, base] of cases) {
+    const result = await submit(input);
+    assert.equal(result.error, undefined);
+    assert.equal(result.requests.length, 1);
+    assert.equal(result.requests[0].input_mode, mode);
+    assert.equal(result.requests[0].base_image_candidate_id, base);
+    assert.equal(result.requests[0].model_alias, "chosen-model");
+    assert.equal(result.requests[0].expected_revision_id, "saved-revision");
+  }
+  for (const [input, message] of [
+    [{ base: "chosen-candidate", supportsBase: false }, /重启后端/],
+    [{ base: "select" }, /选择编辑底图/],
+    [{ saveError: true }, /保存失败/],
+  ]) {
+    const result = await submit(input);
+    assert.match(result.error.message, message);
+    assert.equal(result.requests.length, 0);
+  }
 });

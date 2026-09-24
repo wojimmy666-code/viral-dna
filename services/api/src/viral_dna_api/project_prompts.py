@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .prompt_engine.punctuation import normalize_prompt_punctuation
 from .prompt_engine.still_image import static_image_text
+from .visual_styles import VisualStyle, freeze_style, style_prompt
 
 
 class PromptRevisionConflict(ValueError):
@@ -26,6 +27,10 @@ class ProjectPromptRevision(BaseModel):
     revision_number: int = 0
     common_image_prompt: str = Field(default="", max_length=8000)
     common_video_prompt: str = Field(default="", max_length=8000)
+    visual_style: VisualStyle = Field(default_factory=VisualStyle)
+    visual_style_snapshot: dict = Field(default_factory=dict)
+    shot_styles: dict[str, VisualStyle] = Field(default_factory=dict)
+    shot_style_snapshots: dict[str, dict] = Field(default_factory=dict)
     original_image_prompt: str = ""
     original_video_prompt: str = ""
     known_image_prompts: list[str] = Field(default_factory=list, exclude=True)
@@ -37,6 +42,8 @@ class ProjectPromptUpdate(BaseModel):
     expected_revision_id: UUID
     common_image_prompt: str = Field(max_length=8000)
     common_video_prompt: str = Field(max_length=8000)
+    visual_style: VisualStyle | None = None
+    shot_styles: dict[str, VisualStyle] | None = Field(default=None, max_length=200)
 
 
 def sections(value: str) -> list[str]:
@@ -99,10 +106,18 @@ def production_local_token(plans, drafts) -> str:
     return hashlib.sha256(json.dumps(sorted(versions)).encode()).hexdigest()
 
 
-def prompt_snapshot(value: str, context: ProjectPromptRevision, part: str) -> dict:
+def effective_style(context: ProjectPromptRevision, shot_key=None) -> dict:
+    return context.shot_style_snapshots.get(str(shot_key), context.visual_style_snapshot)
+
+
+def prompt_snapshot(value: str, context: ProjectPromptRevision, part: str, *, shot_key=None, include_style=True) -> dict:
     body = local_prompt(value, context, part)
     common = getattr(context, f"common_{part}_prompt")
+    frozen_style = effective_style(context, shot_key)
     compiled = compose_prompt(body, common, part)
+    if include_style and frozen_style:
+        # Keep authored text intact; add a distinct, inspectable style layer.
+        compiled = compose_prompt(style_prompt(frozen_style, part), compiled, part)
     material = {
         "global_revision_id": str(context.id),
         "part": part,
@@ -110,6 +125,10 @@ def prompt_snapshot(value: str, context: ProjectPromptRevision, part: str) -> di
         "local_prompt": body,
         "compiled_prompt": compiled,
     }
+    if frozen_style or context.shot_style_snapshots:
+        material["visual_style_snapshot"] = frozen_style
+        if not include_style:
+            material["shot_style_snapshots"] = context.shot_style_snapshots
     material["content_hash"] = hashlib.sha256(
         json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -166,9 +185,13 @@ class ProjectPromptService:
             plans = await self.repository.list_shot_plans(project.id)
             image = extract_shared([plan.image_prompt for plan in plans], "image")
             video = extract_shared([plan.video_prompt for plan in plans], "video")
-        return await self.current(scope, image=image, video=video)
+        seed = (await self.repository.get_production_seed(project.production_seed_id)
+                if getattr(project, "production_seed_id", None) else None)
+        style = ((seed.style_bible_snapshot.get("creative_concept") or {}).get("visual_style_snapshot", {})
+                 if seed else {})
+        return await self.current(scope, image=image, video=video, style=style)
 
-    async def current(self, scope_id: UUID, *, image="", video="") -> ProjectPromptRevision:
+    async def current(self, scope_id: UUID, *, image="", video="", style=None) -> ProjectPromptRevision:
         revisions = await self.repository.list_project_prompt_revisions(scope_id)
         if revisions:
             current = max(revisions, key=lambda item: item.revision_number)
@@ -187,12 +210,14 @@ class ProjectPromptService:
                 }
             )
         image = static_image_text(image)
-        digest = hashlib.sha256((image + "\0" + video).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256((image + "\0" + video + (json.dumps(style, sort_keys=True) if style else "")).encode("utf-8")).hexdigest()
         return ProjectPromptRevision(
             id=uuid5(NAMESPACE_URL, f"viraldna:prompts:{scope_id}:{digest}"),
             project_id=scope_id,
             common_image_prompt=image,
             common_video_prompt=normalize_prompt_punctuation(video),
+            visual_style=VisualStyle.model_validate((style or {}).get("selection", {})),
+            visual_style_snapshot=style or {},
             original_image_prompt=image,
             original_video_prompt=video,
             created_at=datetime(2000, 1, 1, tzinfo=UTC),
@@ -205,7 +230,12 @@ class ProjectPromptService:
             static_image_text(payload.common_image_prompt),
             normalize_prompt_punctuation(payload.common_video_prompt.strip()),
         )
-        if (image, video) == (current.common_image_prompt, current.common_video_prompt):
+        visual = payload.visual_style if "visual_style" in payload.model_fields_set else current.visual_style
+        visual = visual or VisualStyle()
+        overrides = payload.shot_styles if "shot_styles" in payload.model_fields_set else current.shot_styles
+        overrides = overrides or {}
+        if ((image, video) == (current.common_image_prompt, current.common_video_prompt)
+                and visual == current.visual_style and overrides == current.shot_styles):
             return current
         saved = current.model_copy(
             update={
@@ -213,6 +243,10 @@ class ProjectPromptService:
                 "revision_number": current.revision_number + 1,
                 "common_image_prompt": image,
                 "common_video_prompt": video,
+                "visual_style": visual,
+                "visual_style_snapshot": current.visual_style_snapshot if visual == current.visual_style else freeze_style(visual),
+                "shot_styles": overrides,
+                "shot_style_snapshots": {key: current.shot_style_snapshots.get(key, {}) if value == current.shot_styles.get(key) else freeze_style(value) for key, value in overrides.items()},
                 "created_at": datetime.now(UTC),
             }
         )

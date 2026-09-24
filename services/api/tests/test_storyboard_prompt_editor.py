@@ -436,7 +436,7 @@ async def test_existing_editable_manifest_is_projected_without_rewriting_video_o
     assert legacy.model_dump(mode="json") == snapshot
 
 
-def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_path, monkeypatch):
+def test_reapproval_syncs_production_preserves_adoption_and_marks_changed_inputs(tmp_path, monkeypatch):
     monkeypatch.setenv("VIRAL_DNA_WORKSPACE_ROOT", str(tmp_path / "workspace"))
 
     async def scenario():
@@ -479,7 +479,10 @@ def test_reapproval_syncs_existing_production_and_only_stales_changed_shots(tmp_
         after = await env.store.list_shot_plans(production_id)
         assert [plan.id for plan in after] == [plan.id for plan in before]
         assert after[0].image_status == WorkflowItemStatus.APPROVED
-        assert after[0].video_status == WorkflowItemStatus.STALE
+        # Input freshness is advisory; it does not revoke human adoption.
+        assert after[0].video_status == WorkflowItemStatus.APPROVED
+        assert after[0].video_inputs_changed
+        assert after[0].approved_video_candidate_id == before[0].approved_video_candidate_id
         assert after[1].video_prompt == before[1].video_prompt
         assert after[1].video_status == WorkflowItemStatus.APPROVED
         assert after[1].approved_video_candidate_id == before[1].approved_video_candidate_id

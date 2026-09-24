@@ -26,10 +26,14 @@ export function productionPromptsToText(document) {
     lines.push("", `分镜 ${shot.index} · ${Number(shot.duration_seconds.toFixed(2))} 秒`);
     shot.images.forEach((image, index) => {
       lines.push(`图片提示词${shot.images.length > 1 ? ` ${index + 1}` : ""}`, image.prompt);
+      const imageStyle = (shot.visual_style_snapshot ?? document.visual_style_snapshot)?.image_prompt;
+      if (imageStyle) lines.push(imageStyle);
       if (image.negative_constraints.length) lines.push("图片负面约束：" + image.negative_constraints.join("；"));
     });
     if (!shot.video_group_id) {
       lines.push("视频提示词", shot.video_prompt);
+      const videoStyle = (shot.visual_style_snapshot ?? document.visual_style_snapshot)?.video_prompt;
+      if (videoStyle) lines.push(videoStyle);
       if (shot.video_negative_constraints.length) lines.push("视频负面约束：" + shot.video_negative_constraints.join("；"));
     } else lines.push("视频按生成组执行，见下方合并提示词");
   }

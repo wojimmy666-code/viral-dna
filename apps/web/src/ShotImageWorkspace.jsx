@@ -1,6 +1,9 @@
 import { IconButton, Button } from "./ui/system/Button.jsx";
+import { imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId } from "./image-generation-controls/image-input.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
+import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
+import { stylePrompt } from "./visual-styles/visual-style.js";
 import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
 import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import { ImageAssetPromptEditor } from "./prompt-references/ImageAssetPromptEditor.jsx";
@@ -327,6 +330,8 @@ export function ShotImageWorkspace({
   generationCandidateCount,
   generationEngine,
   generationInputMode,
+  generationBaseImageId = "",
+  setGenerationBaseImageId,
   generationModelAlias,
   generationSettings,
   generationResolution,
@@ -461,30 +466,11 @@ export function ShotImageWorkspace({
     [assets],
   );
   const pictureBindings = useMemo(() => {
-    if (!isSkillMode && visualBeats.length <= 1) return draft.referenceBindings;
-    const ids = new Set(draft.imagePromptMentions.map((item) => item.reference_asset_id));
-    return draft.referenceBindings.filter((item) => ids.has(item.reference_asset_id));
-  }, [isSkillMode, visualBeats.length, draft.referenceBindings, draft.imagePromptMentions]);
+    return imageBindingsForDraft(shotPlan, activeVisualBeat, draft);
+  }, [shotPlan, activeVisualBeat, draft.referenceBindings, draft.imagePromptMentions]);
   const identityPolicy = useMemo(
     () => imageIdentityPolicy(pictureBindings, assets),
     [assets, pictureBindings],
-  );
-  const generationInputManifest = useMemo(
-    () => imageGenerationInputManifest({
-      inputMode: identityPolicy.enabled && !isSkillMode ? "keyframe_edit" : generationInputMode,
-      sourceUrl: isSkillMode ? "" : plan?.source_keyframe_url || "",
-      referenceBindings: pictureBindings,
-      assets,
-      allowTextReferences: isSkillMode,
-    }),
-    [
-      assets,
-      pictureBindings,
-      generationInputMode,
-      identityPolicy.enabled,
-      isSkillMode,
-      plan?.source_keyframe_url,
-    ],
   );
   const visualBeatPreviews = useMemo(() => {
     const previews = new Map();
@@ -561,6 +547,27 @@ export function ShotImageWorkspace({
   const approvedCandidateEntry = allImageCandidateEntries.find(
     (entry) => entry.candidate.id === plan?.approved_image_candidate_id,
   ) || null;
+  const sourceUrl = isSkillMode ? "" : plan?.source_keyframe_url || "";
+  const effectiveInputMode = resolveImageInputMode({
+    inputMode: generationInputMode, sourceUrl, baseImageId: generationBaseImageId,
+    referenceCount: pictureBindings.length,
+  });
+  const baseCandidateId = imageBaseCandidateId(effectiveInputMode, generationBaseImageId);
+  const baseImageOptions = [
+    ...(sourceUrl ? [{ value: "source", label: "原视频关键帧", url: sourceUrl }] : []),
+    ...allImageCandidateEntries.filter(({ candidate }) => (
+      isVisibleImageCandidate(candidate) && candidate.status !== "archived" && !candidate.archived_at
+    )).map(({ candidate }, index) => ({
+      value: candidate.id, label: `生成图片 ${index + 1}${candidate.id === plan?.approved_image_candidate_id ? "（已采用）" : ""}`,
+      url: candidate.content_url,
+    })),
+  ];
+  const selectedBaseId = generationBaseImageId || (sourceUrl ? "source" : "select");
+  const selectedBase = baseImageOptions.find(item => item.value === selectedBaseId);
+  const generationInputManifest = imageGenerationInputManifest({
+    inputMode: effectiveInputMode, sourceUrl: selectedBase?.url || "",
+    baseImageCandidateId: baseCandidateId, referenceBindings: pictureBindings, assets,
+  });
   const hasSourceVideo = Boolean(sourceVideoUrl);
   const hasSourcePreview = hasSourceVideo && Boolean(plan?.source_keyframe_url);
   const approvedImage = approvedCandidateEntry?.candidate || null;
@@ -656,9 +663,11 @@ export function ShotImageWorkspace({
   );
   const identityGenerationBlocker = !identityPolicy.valid
     ? identityPolicy.blocker
-    : identityPolicy.enabled && !isSkillMode && !plan?.source_keyframe_url
-      ? "人物身份替换需要先选择原视频关键帧"
-      : "";
+    : baseCandidateId && !generationSettings?.supports_candidate_base_image
+      ? "当前图片服务尚不支持生成图片作为底图，请重启后端并刷新页面"
+      : effectiveInputMode === "keyframe_edit" && !selectedBase?.url
+        ? "请选择有效的编辑底图，或切换为参考图创作／纯文生图"
+        : "";
   useEffect(() => {
     const preferred = (
       candidates.find((item) => item.id === initialCandidateId)
@@ -718,21 +727,6 @@ export function ShotImageWorkspace({
     setDraft,
   ]);
 
-  useEffect(() => {
-    if (isSkillMode) {
-      setGenerationInputMode("text_to_image");
-    } else if (identityPolicy.enabled) {
-      setGenerationInputMode("keyframe_edit");
-    } else if (plan?.source_kind === "blank") {
-      setGenerationInputMode("text_to_image");
-    }
-  }, [
-    identityPolicy.enabled,
-    isSkillMode,
-    plan?.id,
-    plan?.source_kind,
-    setGenerationInputMode,
-  ]);
 
   function toggleBinding(asset) {
     setDraft((state) => {
@@ -1440,9 +1434,12 @@ export function ShotImageWorkspace({
                 estimatedCostLabel={commandCostLabel}
                 generationAvailable={generationAvailable}
                 identityBlocker={identityGenerationBlocker}
-                identityLocked={identityPolicy.enabled && !isSkillMode}
+                referenceCount={pictureBindings.length}
+                baseImageId={selectedBaseId}
+                baseImageOptions={baseImageOptions}
+                onBaseImageChange={setGenerationBaseImageId}
                 inputCount={generationInputManifest.length}
-                inputMode={generationInputMode}
+                inputMode={effectiveInputMode}
                 latestRun={latestRun}
                 latestRunBusy={latestRunBusy}
                 modelAlias={
@@ -1453,7 +1450,10 @@ export function ShotImageWorkspace({
                 onCancelRun={onCancelRun}
                 onCandidateCountChange={setGenerationCandidateCount}
                 onGenerate={onGenerate}
-                onInputModeChange={setGenerationInputMode}
+                onInputModeChange={(mode) => {
+                  if (mode === "keyframe_edit" && !generationBaseImageId) setGenerationBaseImageId(selectedBaseId);
+                  setGenerationInputMode(mode);
+                }}
                 onModelChange={(alias, nextExecutionMode) => {
                   if (onGenerationModelChange) onGenerationModelChange(alias, nextExecutionMode);
                   else { setGenerationEngine(nextExecutionMode); setGenerationModelAlias(alias); }
@@ -1517,11 +1517,12 @@ export function ShotImageWorkspace({
                 ref={promptRef} assets={assets} draft={draft} setDraft={setDraft}
                 disabled={busy} resolveUrl={resolveUrl} onBlur={onFlushDraft}
                 onAddAssets={onAddAssets}
-                sourceFrame={generationInputMode === "keyframe_edit"}
+                sourceFrame={effectiveInputMode === "keyframe_edit"}
+                styleControl={<ShotStyleControl context={globalPrompts} shotKey={plan.id} editorRef={globalPromptRef} request={request} disabled={busy} part="image" />}
               />
             </div>
-            <PromptPreview common={globalPrompts.common_image_prompt} local={draft.imagePrompt} label="图片提示词" />
-            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" request={request} onChange={setGlobalPrompts} disabled={busy} />
+            <PromptPreview common={globalPrompts.common_image_prompt} local={draft.imagePrompt} style={stylePrompt(globalPrompts, plan.id, "image")} label="图片提示词" />
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} />
             <fieldset className="shot-reference-field">
               <legend>参考资产绑定</legend>
               {assets.length === 0 ? (

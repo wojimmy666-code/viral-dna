@@ -6,6 +6,7 @@ import { AutosaveStatus, InlineMessage } from "../ui/system/index.js";
 import { createStoryboardDraftSession, newStoryboardShot, storyboardDraftIssues } from "./storyboard-draft.js";
 import "./storyboard-prompt-editor.css";
 import { GlobalPromptEditor, PromptPreview } from "../prompt-context/GlobalPromptEditor.jsx";
+import { stylePrompt } from "../visual-styles/visual-style.js";
 import { PromptSectionHeader } from "../prompt-context/PromptSectionHeader.jsx";
 import { AssetReferenceEditor } from "../prompt-references/AssetReferenceEditor.jsx";
 import { PromptAssetPicker } from "../prompt-references/PromptAssetPicker.jsx";
@@ -206,7 +207,7 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
                   : { reference_kind: reference.reference_kind, reference_id: reference.reference_id, label: reference.label, role: reference.role, order: order + 1 }),
               } : item))}
               value={shot[`${part}_prompt_body`]} />
-          </div><PromptPreview common={globalPrompts[`common_${part}_prompt`]} local={shot[`${part}_prompt_body`]} label={label.replace("局部", "")} /></div>)}
+          </div><PromptPreview common={globalPrompts[`common_${part}_prompt`]} local={shot[`${part}_prompt_body`]} style={stylePrompt(globalPrompts, state.manifest.shots.find(item => item.stable_shot_key === shot.stable_shot_key)?.production_shot_id, part)} label={label.replace("局部", "")} /></div>)}
         </div>
       </article>)}
       <footer className="storyboard-prompt-footer">

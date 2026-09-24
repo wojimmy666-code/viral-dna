@@ -15,10 +15,20 @@ from .ai.catalog import load_model_catalog
 from .ai.text_model_routing import DEFAULT_TEXT_MODEL_ALIAS
 from .models import ModelOption, TextGenerationPurpose
 from .workspace_catalog import AccountContextService, default_account_catalog_path
+from .visual_styles import SavedVisualStyle, VisualStyle, freeze_style
 
 
 class UserPreferences(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    visual_style_presets: list[SavedVisualStyle] = Field(default_factory=list, max_length=20)
+
+    @field_validator("visual_style_presets")
+    @classmethod
+    def unique_style_presets(cls, values):
+        names = [value.name.strip().casefold() for value in values]
+        if any(not name for name in names) or len(set(names)) != len(names) or len({v.id for v in values}) != len(values):
+            raise ValueError("风格预设名称不能为空或重复，标识不能重复")
+        return values
 
     target_model: Literal["seedance", "generic"] = "seedance"
     analysis_profile: Literal["quality", "balanced", "economy"] = "balanced"
@@ -147,6 +157,8 @@ class UserPreferencesRepository:
             if payload.revision is not None and payload.revision != current_revision:
                 raise UserPreferencesConflict("设置已在其他页面更新，请刷新后重试")
             next_revision = current_revision + 1
+            if "visual_style_presets" not in payload.settings.model_fields_set:
+                payload.settings.visual_style_presets = state.accounts.get(key, UserPreferences()).visual_style_presets
             state.accounts[key] = payload.settings
             state.revisions[key] = next_revision
             await asyncio.to_thread(self._write, state)
@@ -236,6 +248,23 @@ class UserPreferencesService:
 
 def create_user_preferences_router(service: UserPreferencesService) -> APIRouter:
     router = APIRouter(prefix="/me/settings", tags=["user-settings"])
+
+    @router.get("/visual-styles")
+    async def get_visual_styles():
+        from .access_context import account_access
+        from .style_library import get_style_library
+        account = await service.account_context.current_account()
+        access = account_access.get()
+        return get_style_library().catalog(principal=f"{account.id}:{access.user_id if access else account.id}")
+
+    @router.post("/visual-styles/preview")
+    async def preview_visual_style(payload: VisualStyle):
+        await service.account_context.current_account()
+        # Deterministic compilation only. No writes, providers or paid generation.
+        if payload.catalog_id:
+            from .style_library import get_style_library
+            get_style_library().frozen(str(payload.catalog_id), payload.catalog_version, selectable=True)
+        return freeze_style(payload)
 
     @router.get("/preferences", response_model=UserPreferencesResponse)
     async def get_preferences() -> UserPreferencesResponse:

@@ -1,6 +1,16 @@
+function promptValues(revision) {
+  return {
+    common_image_prompt: revision.common_image_prompt, common_video_prompt: revision.common_video_prompt,
+    ...(Object.hasOwn(revision, "visual_style") ? {
+      visual_style: revision.visual_style, visual_style_snapshot: revision.visual_style_snapshot || {},
+      shot_styles: revision.shot_styles || {}, shot_style_snapshots: revision.shot_style_snapshots || {},
+    } : {}),
+  };
+}
+
 export function createGlobalPromptSession(initial, { save, onChange }) {
   let revision = initial;
-  let values = { common_image_prompt: initial.common_image_prompt, common_video_prompt: initial.common_video_prompt };
+  let values = promptValues(initial);
   let edited = 0;
   let saved = 0;
   let pending;
@@ -11,6 +21,22 @@ export function createGlobalPromptSession(initial, { save, onChange }) {
   return {
     snapshot,
     edit(part, value) { values = { ...values, [`common_${part}_prompt`]: value }; edited++; status = "dirty"; error = ""; notify(); },
+    restoreStyles(cached) {
+      if (!Object.hasOwn(cached, "visual_style") || !Object.hasOwn(initial, "visual_style")) return;
+      const restored = promptValues(cached);
+      values = { ...values, visual_style: restored.visual_style, visual_style_snapshot: restored.visual_style_snapshot,
+        shot_styles: restored.shot_styles, shot_style_snapshots: restored.shot_style_snapshots };
+      edited++; status = "dirty"; error = ""; notify();
+    },
+    editStyle(value, compiled, shotKey) {
+      if (shotKey) {
+        const styles = { ...values.shot_styles }, snapshots = { ...values.shot_style_snapshots };
+        if (value === null) { delete styles[shotKey]; delete snapshots[shotKey]; }
+        else { styles[shotKey] = value; snapshots[shotKey] = compiled; }
+        values = { ...values, shot_styles: styles, shot_style_snapshots: snapshots };
+      } else values = { ...values, visual_style: value, visual_style_snapshot: compiled };
+      edited++; status = "dirty"; error = ""; notify();
+    },
     flush() {
       if (pending) return pending;
       if (edited === saved) return Promise.resolve(true);
@@ -18,11 +44,12 @@ export function createGlobalPromptSession(initial, { save, onChange }) {
         try {
           while (edited !== saved) {
             const version = edited;
-            const payload = { expected_revision_id: revision.id, ...values };
+            const { visual_style_snapshot, shot_style_snapshots, ...fields } = values;
+            const payload = { expected_revision_id: revision.id, ...fields };
             status = "saving"; error = ""; notify();
             revision = await save(payload);
             saved = version;
-            if (edited === version) values = { common_image_prompt: revision.common_image_prompt, common_video_prompt: revision.common_video_prompt };
+            if (edited === version) values = promptValues(revision);
           }
           status = "saved"; notify(); return true;
         } catch (failure) {

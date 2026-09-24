@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from viral_dna_api.category_profiles.contracts import CategoryProfileSnapshot
+from ..visual_styles import VisualStyle
 from .creative_review_models import (
     CreativeCommonRule, CreativeHumanReview, CreativeRequirementCheck,
     CreativeRequirementRule, CreativeReviewIssue,
@@ -295,6 +296,8 @@ class CreativeIdeaContent(BaseModel):
 
 class CreativeIdea(CreativeIdeaContent):
     id: UUID = Field(default_factory=uuid4)
+    # Application-owned provenance; absent on legacy records, never model-authored.
+    visual_style_snapshot: dict[str, Any] | None = None
     brief_checks: list[CreativeBriefFulfillment] = Field(default_factory=list, max_length=24)
     review_issues: list[str] = Field(default_factory=list, max_length=24)
     review_state: Literal["unreviewed", "ready", "needs_review", "needs_revision"] = "unreviewed"
@@ -318,12 +321,14 @@ class CreativeGenerateRequest(BaseModel):
     category_profile_id: UUID
     feedback: str | None = Field(default=None, max_length=2000)
     replacements: list[ViralReplacementSelection] = Field(default_factory=list, max_length=30)
+    visual_style: VisualStyle | None = None
 
 
 class CreativeActionRequest(BaseModel):
     request_id: UUID
     feedback: str | None = Field(default=None, max_length=2000)
     revision_notes: str | None = Field(default=None, max_length=2000)
+    visual_style: VisualStyle | None = None
 
     @field_validator("revision_notes")
     @classmethod
@@ -379,6 +384,10 @@ class ViralConceptSet(BaseModel):
     feedback: str = Field(default="", max_length=2000)
     revision_notes: str | None = Field(default=None, max_length=2000)
     input_snapshot: dict[str, Any] = Field(default_factory=dict)
+    visual_style_snapshot: dict[str, Any] = Field(default_factory=dict)
+    # Editable production configuration, never part of the historical AI input.
+    production_style_revision: int = 0
+    production_visual_style_snapshot: dict[str, Any] | None = None
     model_runs: list[UUID] = Field(default_factory=list)
     requested_model: str | None = None
     resolved_model: str | None = None

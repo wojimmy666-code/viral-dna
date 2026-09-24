@@ -16,6 +16,8 @@ from .models import (
     ApprovalEvent, ApprovalDecision, VideoClipPreparationStatus,
 )
 from .video_group_models import VideoGroupUpdate, VideoGroupAdopt, VideoGroupClip
+from .project_prompts import effective_style, prompt_snapshot
+from .visual_styles import style_prompt
 
 
 def fail(message, status=409):
@@ -43,7 +45,7 @@ def members_for(project, group, plans):
     return [lookup[identifier] for identifier in group.shot_plan_ids]
 
 
-def input_fingerprint(project, group, members, common_prompt):
+def input_fingerprint(project, group, members, common_prompt, context=None):
     data = {
         "group": group.model_dump(mode="json"), "common_prompt": common_prompt,
         "size": [project.output_width, project.output_height],
@@ -57,14 +59,21 @@ def input_fingerprint(project, group, members, common_prompt):
                               for b in p.visual_beats if b.approved_image_candidate_id]}
                   for p in members],
     }
+    styles = {str(p.id): effective_style(context, str(p.id)) for p in members} if context else {}
+    if any(styles.values()):
+        data["visual_styles"] = styles
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def execution_plan(group, members, generation_duration=None):
+def execution_plan(group, members, generation_duration=None, *, context=None):
     """Transient aggregate. Never persist this object over its anchor shot."""
     total = sum(p.duration_seconds for p in members)
     scale = float(generation_duration or total) / total
     cursor, beats, lines, owners, mentions = 0.0, [], [], {}, {}
+    # Declare each distinct style once, then bind it to its temporal segment.
+    # Repeating a whole preset per short shot can exceed provider prompt limits.
+    style_rules = {p.id: style_prompt(effective_style(context, str(p.id)), "video") for p in members} if context else {}
+    definitions = list(dict.fromkeys(text for text in style_rules.values() if text))
     for p in members:
         adopted = [b for b in sorted(p.visual_beats, key=lambda b: b.index) if b.approved_image_candidate_id]
         if not adopted:
@@ -84,6 +93,10 @@ def execution_plan(group, members, generation_duration=None):
             cursor += beat_duration
         tokens = "、".join(f"图{b.index}" for b in beats[-len(adopted):])
         prompt = p.video_prompt
+        if definitions:
+            rules = style_rules[p.id]
+            prompt += (f"\n本分段应用风格配置 {definitions.index(rules) + 1}。" if rules
+                       else "\n本分段沿用自身正文风格，不应用其他分段的风格配置。")
         for mention in p.video_prompt_mentions:
             if mention.reference_kind.value in {"depth_control", "reference_video"}:
                 fail("含深度或参考视频控制的分镜请独立生成，不能作为多场景组隐式合并")
@@ -105,6 +118,8 @@ def execution_plan(group, members, generation_duration=None):
                   "dissolve": "按分段规划使用短叠化转场。"}[group.transition]
     prompt = "\n".join([group.video_prompt, transition,
                         "人物位置、动作与景别以各分镜要求为准，不强制继承原片。", *lines]).strip()
+    if definitions:
+        prompt += "\n" + "\n".join(f"风格配置 {i}（仅用于上方指定分段）：\n{text}" for i, text in enumerate(definitions, 1))
     if len(prompt) > 8000:
         fail("合并后的分段提示词超过 8000 字，请精简提示词或拆组")
     bindings = {b.asset_id: b for p in members for b in p.managed_asset_bindings}
@@ -133,8 +148,8 @@ class VideoGroups:
                 "video_negative_constraints": draft.video_negative_constraints}) if draft else member)
         members = current
         context = await self.production.get_prompt_context(project.id)
-        fingerprint = input_fingerprint(project, group, members, context.common_video_prompt)
-        plan, owners = execution_plan(group, members)
+        fingerprint = input_fingerprint(project, group, members, context.common_video_prompt, context)
+        plan, owners = execution_plan(group, members, context=context)
         return group, members, plan, owners, fingerprint
 
     async def require_idle(self, project, identifiers):
@@ -189,7 +204,7 @@ class VideoGroups:
                     sources.append("provider_managed_assets")
                 row.update(input_fingerprint=fingerprint, target_duration_seconds=plan.duration_seconds,
                            input_plan={"sources": sources, "references": references},
-                           compiled_prompt=plan.video_prompt, anchor_shot_id=str(plan.id),
+                           compiled_prompt=prompt_snapshot(plan.video_prompt, await self.production.get_prompt_context(project.id), "video", include_style=False)["compiled_prompt"], anchor_shot_id=str(plan.id),
                            shots=[{"id": str(p.id), "index": p.index, "duration_seconds": p.duration_seconds} for p in members],
                            images=[{"id": str(b.approved_image_candidate_id), "index": b.index,
                                     "url": f"/api/v1/generation-candidates/{b.approved_image_candidate_id}/content"} for b in plan.visual_beats])

@@ -628,6 +628,8 @@ export function App() {
   const initialHistoryState = useMemo(loadHistoryState, []);
   const location = useLocation();
   const navigate = useNavigate();
+  const routeLocationRef = useRef(location);
+  routeLocationRef.current = location;
   const appRoute = useMemo(
     () => resolveAppRoute(location.pathname),
     [location.pathname],
@@ -752,6 +754,7 @@ export function App() {
   const notificationFeedInitializedRef = useRef(false);
   const historyRequestIdRef = useRef(0);
   const recordRouteRequestIdRef = useRef(0);
+  const projectEntryRequestIdRef = useRef(0);
   const productionRequestIdRef = useRef(0);
   const videoSettingsRequestIdRef = useRef(0);
   const videoSettingsLoadedRef = useRef(false);
@@ -760,6 +763,14 @@ export function App() {
   const reportSectionRef = useRef(null);
   const videoRef = useRef(null);
   const filePreview = useFilePreview(file);
+
+  useEffect(() => () => { ++projectEntryRequestIdRef.current; }, []);
+
+  useEffect(() => {
+    if (appRoute.name === "record-workspace" || appRoute.name === "skill-workspace") {
+      restoreRecordEntry(appRoute.recordId);
+    }
+  }, [appRoute.recordId, location.key]);
 
   const dismissToast = useCallback((toastId) => {
     setToasts((current) => current.filter((item) => item.id !== toastId));
@@ -1260,11 +1271,19 @@ export function App() {
     setHistorySort(value);
   }
 
+  function restoreRecordEntry(recordId) {
+    const entry = location.state?.projectEntry;
+    if (entry?.recordId !== recordId) return;
+    if (entry.mode === "production" || entry.mode === "analysis") setRecordWorkspaceMode(entry.mode);
+    setNotificationTarget(entry.target?.recordId === recordId ? entry.target : null);
+  }
+
   function applyRecordWorkspaceDetail(detail) {
     resetProductionWorkspace();
     const saved = savedWorkspaceLocation(detail.record.id, window.location.search);
     if (new URLSearchParams(window.location.search).has("reportTab")) setRecordWorkspaceMode("analysis");
     else if (saved.productionId || saved.section) setRecordWorkspaceMode("production");
+    restoreRecordEntry(detail.record.id);
     setVideo(detail.video);
     setAnalysisVersions(detail.analyses || []);
     setAnalysis((current) => latestAnalysis(current, detail.analyses?.[0] || null));
@@ -1488,21 +1507,23 @@ export function App() {
     await updateHistoryRecord(record.id, { name: name.trim() }, "项目名称已更新");
   }
 
-  async function openHistoryRecord(recordId) {
+  async function openHistoryRecord(recordId, { mode = "", target = null } = {}) {
+    if (!recordId) return null;
+    const requestId = ++projectEntryRequestIdRef.current;
+    const fromLocation = location.key;
     setHistoryError("");
     const project = records.find((item) => item.id === recordId);
-    if (project?.kind === "skill") {
-      navigate(skillProjectWorkspacePath(project.id));
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      return project;
-    }
     try {
-      const detail = await loadRecordWorkspace(recordId);
-      if (!detail) return null;
-      navigate(recordWorkspacePath(detail.record.id));
+      await flushAccountDrafts();
+      if (requestId !== projectEntryRequestIdRef.current || routeLocationRef.current.key !== fromLocation) return null;
+      // AccountRoot acquires the project's lease after navigation, before mounting
+      // the workspace. Fetching protected details here deadlocks first-time entry.
+      const path = project?.kind === "skill" ? skillProjectWorkspacePath(recordId) : recordWorkspacePath(recordId);
+      navigate(path, { state: { projectEntry: { recordId, mode, target } } });
       window.scrollTo({ top: 0, behavior: "smooth" });
-      return detail;
+      return project || { id: recordId };
     } catch (requestError) {
+      if (requestId !== projectEntryRequestIdRef.current || routeLocationRef.current.key !== fromLocation) return null;
       setHistoryError(requestError.message);
       showNotice({ type: "error", title: "无法打开项目", message: requestError.message });
       return null;
@@ -1510,15 +1531,7 @@ export function App() {
   }
 
   async function openHistoryProductions(recordId) {
-    const project = records.find((item) => item.id === recordId);
-    if (project?.kind === "skill") {
-      navigate(skillProjectWorkspacePath(project.id));
-      return project;
-    }
-    const detail = await openHistoryRecord(recordId);
-    if (!detail) return null;
-    setRecordWorkspaceMode("production");
-    return detail;
+    return openHistoryRecord(recordId, { mode: "production" });
   }
 
   async function mutateHistoryRecords(recordIds, action) {
@@ -1629,17 +1642,14 @@ export function App() {
       return;
     }
     if (notification.action_kind !== "production_shot" || !payload.record_id) return;
-    const opened = await openHistoryRecord(payload.record_id);
-    if (!opened) return;
-    setRecordWorkspaceMode("production");
-    setNotificationTarget({
+    await openHistoryRecord(payload.record_id, { mode: "production", target: {
       candidateId: payload.candidate_id || "",
       projectId: payload.project_id || "",
       recordId: payload.record_id,
       shotPlanId: payload.shot_plan_id || "",
       step: payload.step || "shot_videos",
       token: `${notification.id}:${Date.now()}`,
-    });
+    } });
   }
 
   async function savePlatformSettings() {
