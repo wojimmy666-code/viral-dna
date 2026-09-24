@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from ..chinese import to_simplified
+from ..composition import CompositionGuide, build_guide_reference, guide_matches_aspect
 from ..generation import generate_simulated_images
 from ..models import (
     GenerationCandidate,
@@ -533,6 +534,11 @@ class ImageGenerationGateway:
                 "图片生成输入模式无效",
             ) from exc
         settings = self.settings_service.get()
+        guide = CompositionGuide.model_validate(shot.image_composition) if shot.image_composition else None
+        if guide and not guide_matches_aspect(guide, project.output_width, project.output_height):
+            raise ImageGenerationGatewayError(422, "composition_aspect_changed", "画幅已改变，请重新确认构图引导")
+        if guide and selected_input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
+            selected_input_mode = ImageGenerationInputMode.REFERENCE_TO_IMAGE
         if not settings.enabled:
             raise ImageGenerationGatewayError(
                 409,
@@ -607,7 +613,7 @@ class ImageGenerationGateway:
                 "reference_asset_missing",
                 "部分参考资产已不可用，请重新选择，不能忽略资产继续生成",
             )
-        if selected_input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not references:
+        if selected_input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not references and guide is None:
             raise ImageGenerationGatewayError(
                 409, "reference_images_required", "请添加参考资产，或切换为纯文生图"
             )
@@ -624,6 +630,11 @@ class ImageGenerationGateway:
                     "reference_hash_changed",
                     "参考资产文件已发生变化，请重新上传",
                 )
+        if guide:
+            if guide.subject_reference_id and guide.subject_reference_id not in {item.asset_id for item in references}:
+                raise ImageGenerationGatewayError(422, "composition_subject_unbound", "请先引用构图指定的人物资产")
+            reference = await asyncio.to_thread(build_guide_reference, self.workspace, project, shot, guide, project.output_width, project.output_height)
+            references = (*references, reference)
         source_sha256 = _sha256_file(source_path) if source_path is not None else None
         detection_started = time.perf_counter()
         timing["input_preparation_ms"] = round((detection_started - gateway_started) * 1000)
@@ -744,6 +755,8 @@ class ImageGenerationGateway:
             prompt=prompt,
             negative_prompt=negative_prompt,
         )
+        if guide:
+            input_payload["composition_guide"] = guide.model_dump(mode="json")
         fingerprint = self._fingerprint(input_payload)
         run_id = run_id or uuid4()
         run_root = (
@@ -968,7 +981,7 @@ class ImageGenerationGateway:
             )
             reviewed_candidates: list[GenerationCandidate] = []
             reference_paths = tuple(item.path for item in references)
-            reference_labels = tuple(f"{item.role}：{item.label}" for item in references)
+            reference_labels = tuple(f"{item.role}：{item.name}" for item in references)
             for candidate in candidates:
                 if cancel_event is not None and cancel_event.is_set():
                     raise ImageGenerationGatewayError(

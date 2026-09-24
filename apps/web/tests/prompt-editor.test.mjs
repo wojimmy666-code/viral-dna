@@ -74,7 +74,7 @@ test("scheme selection is explicit and exports only its own live prompt bodies",
   const payload = promptDocumentBody(document);
   assert.equal(payload.expected_token, "token");
   assert.equal(payload.shots[0].video_prompt, "裙摆随风轻动");
-  assert.equal(payload.shots[0].images[0].mentions, undefined);
+  assert.deepEqual(payload.shots[0].images[0].mentions, []);
   const text = productionPromptsToText(document);
   assert.match(text, /世界地标里的格纹呼吸[\s\S]*1 个分镜[\s\S]*冰岛黑沙滩[\s\S]*裙摆随风轻动/);
   assert.doesNotMatch(text, /11111111|expected_token/);
@@ -94,7 +94,8 @@ test("direction A uses independent collapsed rows and one continuous editor", as
   assert.match(shot, /onClick=\{\(\) => setIsOpen\(\(current\) => !current\)\}/);
   assert.match(shot, /className="prompt-document-shot-summary"/);
   assert.match(shot, /promptShotCharacterCount\(shot\)/);
-  assert.match(shot, /<PromptRichTextEditor/);
+  assert.match(shot, /<AssetReferenceEditor/);
+  assert.match(shot, /asset_mentions: promptMentionData/);
   assert.match(shot, /promptDocumentTextToDraft\(nextText, draft\)/);
   assert.doesNotMatch(shot, /<textarea|<input|<select|<details/);
   assert.doesNotMatch(shot, /PromptDocumentField|PromptTimelineEditor|PromptSectionView|模型输入/);

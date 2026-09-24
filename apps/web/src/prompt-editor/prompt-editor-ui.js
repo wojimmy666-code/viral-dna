@@ -37,7 +37,8 @@ export function promptDraftContainsUnlabeledEnglish(draft) {
     ...(draft.negative_constraints || []),
     draft.custom_notes,
   ];
-  return values.some(containsUnlabeledEnglish);
+  const tokens = (draft.asset_mentions || []).map(item => `@${item.label}`).sort((a, b) => b.length - a.length);
+  return values.some(value => containsUnlabeledEnglish(tokens.reduce((text, token) => text.split(token).join(''), String(value || ''))));
 }
 
 export function replaceShotDraft(promptPackage, shotId, draft) {

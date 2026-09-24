@@ -68,6 +68,11 @@ class PromptTransitionDraft(BaseModel):
         return self
 
 
+class SourcePromptAssetMention(BaseModel):
+    reference_asset_id: UUID
+    label: str = Field(min_length=1, max_length=260)
+
+
 class PromptShotDraft(BaseModel):
     schema_version: Literal["prompt-shot-draft-v2"] = "prompt-shot-draft-v2"
     visual: PromptVisualDraft = Field(default_factory=PromptVisualDraft)
@@ -76,6 +81,7 @@ class PromptShotDraft(BaseModel):
     continuity_refs: list[str] = Field(default_factory=list, max_length=40)
     negative_constraints: list[str] = Field(default_factory=list, max_length=40)
     custom_notes: str = Field(default="", max_length=2400)
+    asset_mentions: list[SourcePromptAssetMention] = Field(default_factory=list, max_length=50)
 
 
 class PromptShotDraftUpdate(BaseModel):

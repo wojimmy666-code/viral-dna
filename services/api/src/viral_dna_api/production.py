@@ -1674,7 +1674,7 @@ class ProductionService:
         revision_id = uuid4()
         linked_references: list[ReferenceAsset] = []
         reference_by_usage_id: dict[UUID, ReferenceAsset] = {}
-        if seed.origin_type == ProductionSeedOrigin.SKILL_RUN and seed.reference_assets:
+        if seed.reference_assets:
             image_references = [
                 item for item in seed.reference_assets if item.media_kind == "image"
             ]
@@ -1691,7 +1691,7 @@ class ProductionService:
                 linked = await self.project_assets.link_asset(
                     project,
                     reference.asset_id,
-                    _reference_type_for_seed(reference),
+                    _reference_type_for_seed(reference) if seed.origin_type == ProductionSeedOrigin.SKILL_RUN else None,
                 )
                 if reference.sha256 is not None and linked.sha256 != reference.sha256:
                     raise _fail(
@@ -1740,6 +1740,20 @@ class ProductionService:
             plans,
             reference_by_usage_id,
         )
+        if analysis_report is not None and reference_by_usage_id:
+            seed_shots = {item.stable_shot_key: item for item in seed.shots}
+            next_plans = []
+            for plan in plans:
+                source = seed_shots.get(plan.stable_shot_key)
+                selected = [reference_by_usage_id[key] for key in (source.image_asset_usage_ids if source else []) if key in reference_by_usage_id]
+                mentions = [PromptAssetMention(reference_asset_id=item.id, label=_reference_asset_mention_label(item)) for item in selected]
+                def with_tokens(text):
+                    missing = [f"@{item.label}" for item in mentions if f"@{item.label}" not in text]
+                    return "\n".join([*missing, text]) if missing else text
+                next_plans.append(plan.model_copy(update={"image_prompt": with_tokens(plan.image_prompt), "image_prompt_mentions": mentions,
+                    "visual_beats": [beat.model_copy(update={"image_prompt": with_tokens(beat.image_prompt), "image_prompt_mentions": mentions}) for beat in plan.visual_beats],
+                    "video_prompt": with_tokens(plan.video_prompt), "video_prompt_mentions": [VideoPromptMention(reference_kind="project_asset", reference_id=item.reference_asset_id, label=item.label, role="composition", order=index + 1) for index, item in enumerate(mentions)]}))
+            plans = next_plans
         project, revision = await self._prepare_revision(
             project,
             ProductionChangeKind.PROJECT_CREATED,
@@ -2912,11 +2926,73 @@ class ProductionService:
         project = await self._require_project(project_id)
         return await ProjectPromptService(self.repository).for_production(project)
 
+    async def get_composition(self, project_id: UUID):
+        project = await self._require_project(project_id)
+        context = await self.get_prompt_context(project_id)
+        plans = await self.repository.list_shot_plans(project_id)
+        targets = [{"id": str(beat.id), "shot_id": str(plan.id),
+                    "label": f"分镜 {plan.index} · 画面 {beat.index}"}
+                   for plan in plans if str(plan.lifecycle_status) != "discarded"
+                   for beat in plan.visual_beats]
+        allowed = {item["id"] for item in targets} | {f"default:{project_id}"}
+        return {"context_id": str(context.id), "revision_id": str(project.current_revision_id),
+                "width": project.output_width, "height": project.output_height, "targets": targets,
+                "entries": {key: value.model_dump(mode="json") if value else None
+                            for key, value in context.image_compositions.items() if key in allowed}}
+
+    async def update_composition(self, project_id, payload):
+        from .composition import guide_matches_aspect
+        async with await self._project_lock(project_id):
+            project = await self._require_project(project_id)
+            self._require_expected_revision(project, payload.expected_revision_id)
+            context = await self.get_prompt_context(project_id)
+            async with prompt_lock(self.repository, context.project_id):
+                context = await self.get_prompt_context(project_id)
+                if context.id != payload.expected_context_id:
+                    raise _fail(409, "composition_revision_stale", "构图或全局提示词已更新，请重新读取后核对；当前输入仍保留")
+                plans = await self.repository.list_shot_plans(project_id)
+                allowed = {beat.id for plan in plans if str(plan.lifecycle_status) != "discarded" for beat in plan.visual_beats}
+                targets = set(payload.visual_beat_ids)
+                if targets - allowed:
+                    raise _fail(422, "composition_target_unknown", "所选画面不存在或不属于当前方案")
+                if payload.operation in {"apply", "inherit", "disable"} and not targets:
+                    raise _fail(422, "composition_targets_required", "请至少选择一个画面")
+                guide = payload.guide
+                if payload.operation in {"apply", "default"}:
+                    if guide is None or not guide_matches_aspect(guide, project.output_width, project.output_height):
+                        raise _fail(422, "composition_aspect_changed", "请按当前方案画幅重新确认构图")
+                    if guide.subject_reference_id:
+                        assets = await self._list_reference_assets(project_id)
+                        asset = next((item for item in assets if item.id == guide.subject_reference_id), None)
+                        if not asset or asset.archived_at or not asset.rights_confirmed or str(asset.type) != "person":
+                            raise _fail(422, "composition_subject_invalid", "构图人物资产不可用，请重新选择")
+                entries = dict(context.image_compositions)
+                if payload.operation == "default":
+                    entries[f"default:{project_id}"] = guide
+                elif payload.operation == "clear_default":
+                    entries.pop(f"default:{project_id}", None)
+                else:
+                    for target in targets:
+                        if payload.operation == "inherit":
+                            entries.pop(str(target), None)
+                        else:
+                            entries[str(target)] = guide if payload.operation == "apply" else None
+                if entries != context.image_compositions:
+                    saved = context.model_copy(update={"id": uuid4(), "revision_number": context.revision_number + 1,
+                                                       "created_at": utc_now(), "image_compositions": entries})
+                    try:
+                        await self.repository.save_project_prompt_revision(saved, context.id)
+                    except PromptRevisionConflict as exc:
+                        raise _fail(409, "composition_revision_stale", str(exc)) from exc
+        return await self.get_composition(project_id)
+
     async def update_prompt_context(self, project_id: UUID, payload: ProjectPromptUpdate):
         async with await self._project_lock(project_id):
             current = await self.get_prompt_context(project_id)
             async with prompt_lock(self.repository, current.project_id):
                 current = await self.get_prompt_context(project_id)
+                project = await self._require_project(project_id)
+                await self._validate_global_mentions(project, payload)
                 if payload.shot_styles is not None:
                     plans = await self.repository.list_shot_plans(project_id)
                     allowed = {str(p.id) for p in plans}
@@ -2930,6 +3006,14 @@ class ProductionService:
                     return await ProjectPromptService(self.repository).save(current, payload)
                 except PromptRevisionConflict as exc:
                     raise _fail(409, "prompt_revision_stale", str(exc)) from exc
+
+    async def _validate_global_mentions(self, project, payload):
+        if payload.common_image_mentions is not None:
+            await self._validate_prompt_mentions(project, payload.common_image_mentions)
+        if payload.common_video_mentions is not None:
+            if any(item.reference_kind != VideoPromptReferenceKind.PROJECT_ASSET for item in payload.common_video_mentions):
+                raise _fail(422, "global_reference_scope", "全局提示词仅支持项目资产，单镜素材请在对应分镜引用")
+            await self._validate_prompt_mentions(project, [PromptAssetMention(reference_asset_id=item.reference_id, label=item.label) for item in payload.common_video_mentions])
 
     @staticmethod
     def _local_prompt_view(plan, context):
@@ -3486,6 +3570,15 @@ class ProductionService:
                     updated_at=now,
                 )
 
+            if payload.mode != "duplicate" and payload.image_prompt_mentions:
+                mentions = await self._validate_prompt_mentions(project, payload.image_prompt_mentions)
+                mentions = [item for item in mentions if f"@{item.label}" in new_plan.image_prompt]
+                new_plan = new_plan.model_copy(update={
+                    "image_prompt_mentions": mentions,
+                    "visual_beats": [beat.model_copy(update={"image_prompt_mentions": mentions}) for beat in new_plan.visual_beats],
+                })
+                inputs = await self._append_mention_bindings(project, [], mentions)
+                new_bindings = await self._build_bindings(project, new_plan, inputs)
             active.insert(insert_index, new_plan)
             next_plans, changed_plans = self._resequence_plans(
                 active,
@@ -6153,6 +6246,23 @@ class ProductionService:
         payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
         self._require_video_stage_member(project, plan)
         plan, _ = await self._group_video_plan(project, plan, payload)
+        frozen_prompt = frozen_prompt or prompt_snapshot(
+            plan.video_prompt, await self.get_prompt_context(project.id), "video",
+            shot_key=str(plan.id), include_style=not payload.generation_group_id,
+        )
+        global_mentions = [VideoPromptMention.model_validate(item) for item in frozen_prompt.get("global_mentions", [])]
+        if global_mentions:
+            await self._validate_video_prompt_mentions(project, plan, global_mentions)
+            selected = list(payload.input_plan.references)
+            keys = {(item.reference_kind, item.reference_id) for item in selected}
+            for mention in global_mentions:
+                if (mention.reference_kind, mention.reference_id) not in keys:
+                    selected.append(VideoGenerationReference(**(mention.model_dump() | {"order": len(selected) + 1})))
+                    keys.add((mention.reference_kind, mention.reference_id))
+            payload = payload.model_copy(update={"input_plan": payload.input_plan.model_copy(update={
+                "references": selected,
+                "sources": list(dict.fromkeys([*payload.input_plan.sources, VideoGenerationInputSource.PROJECT_ASSETS])),
+            })})
         if payload.generation_group_id is not None:
             from .video_groups import VideoGroups, group_for
             await VideoGroups(self).require_idle(project, set(group_for(project, payload.generation_group_id).shot_plan_ids))
@@ -6406,12 +6516,22 @@ class ProductionService:
             payload = payload.model_copy(update={"preserve_approval": True})
         bindings = await self.repository.list_reference_bindings(plan.id)
         bindings = self._image_bindings_for_beat(plan, beat, bindings)
+        if frozen_prompt is None:
+            from .project_prompts import image_prompt_snapshot
+            context = await self.get_prompt_context(project.id)
+            frozen_prompt = image_prompt_snapshot(beat.image_prompt, context, project_id=project.id, shot_key=str(plan.id), beat_id=beat.id)
+        bindings = await self._with_global_image_bindings(project, plan, bindings, frozen_prompt)
+        composition = frozen_prompt.get("composition_guide")
+        if composition and composition.get("subject_reference_id") not in {None, *(str(item.reference_asset_id) for item in bindings)}:
+            raise _fail(422, "composition_subject_unbound", "请先在当前画面提示词中引用构图指定的人物资产")
+        if (frozen_prompt.get("global_mentions") or composition) and payload.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
+            payload = payload.model_copy(update={"input_mode": ImageGenerationInputMode.REFERENCE_TO_IMAGE})
         assets = await self._list_reference_assets(project.id)
         gateway_plan = _shot_for_visual_beat(plan, beat)
         base_path = None
         if payload.base_image_candidate_id is not None:
             base_path = await self._resolve_image_base(project, plan, gateway_plan, payload)
-        if payload.input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not bindings:
+        if payload.input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not bindings and not composition:
             raise _fail(409, "reference_images_required", "请添加参考资产，或切换为纯文生图")
         if (
             payload.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE
@@ -6992,6 +7112,7 @@ class ProductionService:
                 gateway_plan = gateway_plan.model_copy(
                     update={
                         "image_prompt": frozen["compiled_prompt"],
+                        "image_composition": frozen.get("composition_guide"),
                     }
                 )
             if not beat.image_prompt.strip():
@@ -7002,6 +7123,10 @@ class ProductionService:
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
             bindings = await self.repository.list_reference_bindings(plan.id)
             bindings = self._image_bindings_for_beat(plan, beat, bindings)
+            bindings = await self._with_global_image_bindings(project, plan, bindings, frozen or {})
+            if frozen and frozen.get("global_mentions"):
+                mentions = [PromptAssetMention.model_validate(item) for item in frozen["global_mentions"]]
+                gateway_plan = gateway_plan.model_copy(update={"image_prompt_mentions": [*gateway_plan.image_prompt_mentions, *mentions]})
             assets = await self._list_reference_assets(project.id)
             assets_by_id = {item.id: item for item in assets}
             for binding in bindings:
@@ -7083,10 +7208,23 @@ class ProductionService:
             plan = await self._require_shot(shot_plan_id)
             current_beat = next((item for item in plan.visual_beats if item.id == beat.id), None)
             current_bindings = await self.repository.list_reference_bindings(plan.id)
-            unchanged = current_beat is not None and snapshot_fingerprint == input_fingerprint(
+            current_references_valid = True
+            if current_beat is not None:
+                current_bindings = self._image_bindings_for_beat(plan, current_beat, current_bindings)
+                current_context = await self.get_prompt_context(project.id)
+                try:
+                    current_bindings = await self._with_global_image_bindings(project, plan, current_bindings, prompt_snapshot(current_beat.image_prompt, current_context, "image", shot_key=str(plan.id)))
+                except ProductionServiceError:
+                    # A removed/archived current reference must not discard the
+                    # completed output generated from a valid frozen request.
+                    current_references_valid = False
+            from .composition import effective_composition
+            current_guide = effective_composition(current_context, project.id, beat.id) if current_beat is not None else None
+            composition_unchanged = (current_guide.model_dump(mode="json") if current_guide else None) == (frozen or {}).get("composition_guide")
+            unchanged = composition_unchanged and current_references_valid and current_beat is not None and snapshot_fingerprint == input_fingerprint(
                 plan,
                 current_beat,
-                self._image_bindings_for_beat(plan, current_beat, current_bindings),
+                current_bindings,
             )
             preserve_selection = (
                 not unchanged or current_beat.image_status == WorkflowItemStatus.APPROVED
@@ -7402,6 +7540,11 @@ class ProductionService:
                 if frozen
                 else plan
             )
+            if frozen and frozen.get("global_mentions"):
+                generation_plan = generation_plan.model_copy(update={"video_prompt_mentions": [
+                    *generation_plan.video_prompt_mentions,
+                    *(VideoPromptMention.model_validate(item) for item in frozen["global_mentions"]),
+                ]})
             try:
                 run, candidates = await self.video_gateway.generate(
                     project,
@@ -11217,6 +11360,15 @@ class ProductionService:
                 )
             )
         return normalized
+
+    async def _with_global_image_bindings(self, project, plan, bindings, frozen):
+        mentions = [PromptAssetMention.model_validate(item) for item in frozen.get("global_mentions", [])]
+        if not mentions:
+            return bindings
+        await self._validate_prompt_mentions(project, mentions)
+        existing = {item.reference_asset_id for item in bindings}
+        inputs = await self._append_mention_bindings(project, [], [item for item in mentions if item.reference_asset_id not in existing])
+        return [*bindings, *await self._build_bindings(project, plan, inputs)]
 
     async def _append_mention_bindings(
         self,

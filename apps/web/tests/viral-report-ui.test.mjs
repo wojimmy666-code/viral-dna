@@ -260,7 +260,7 @@ test("long report content uses progressive disclosure", async () => {
   assert.doesNotMatch(app, /<p>\{activeShot\.prompt\}<\/p>/);
   assert.match(promptEditor, /workingPackage\.continuity_locks\?\.length > 0/);
   assert.match(promptShot, /prompt-document-shot-row/);
-  assert.match(promptShot, /<PromptRichTextEditor/);
+  assert.match(promptShot, /<AssetReferenceEditor/);
   assert.doesNotMatch(promptShot, /prompt-document-compiled|PromptSectionView/);
 });
 

@@ -23,6 +23,7 @@ import {
   replaceShotDraft,
 } from "./prompt-editor-ui.js";
 import "./prompt-editor.css";
+import { usePromptAssetLibrary } from '../prompt-references/usePromptAssetLibrary.jsx';
 
 function SaveState({ promptPackage, status }) {
   const Icon = status === "saving" || status === "loading"
@@ -56,6 +57,7 @@ export function PromptEditor({
   const saveTimerRef = useRef(null);
   const saveChainRef = useRef(Promise.resolve());
   const mountedRef = useRef(true);
+  const referenceLibrary = usePromptAssetLibrary({ request, scopeKey: analysisId });
 
   const applyPackage = useCallback((nextPackage) => {
     packageRef.current = nextPackage;
@@ -301,6 +303,7 @@ export function PromptEditor({
         <div className="prompt-document-shot-list">
           {(workingPackage.shots || []).map((shot, index) => (
             <PromptShotEditor
+              onAddAssets={readOnly ? undefined : referenceLibrary.open}
               disabled={readOnly || saveStatus === "loading"}
               index={index}
               key={`${analysisId}:${shot.shot_id}`}
@@ -312,6 +315,7 @@ export function PromptEditor({
           ))}
         </div>
       </main>
+      {referenceLibrary.dialog}
     </div>
   );
 }

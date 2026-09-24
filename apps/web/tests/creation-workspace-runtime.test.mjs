@@ -61,7 +61,7 @@ function productionScope() {
       return {};
     },
   };
-  for (const key of ["SelectedShotId", "FocusedCandidateId", "ActionError", "ImpactReview", "ShotDetail", "SelectedVisualBeatId", "Detail", "Assets", "Revisions", "Shots", "Gate", "GenerationSettings", "SettingsDraft"]) {
+  for (const key of ["SelectedShotId", "FocusedCandidateId", "ActionError", "ImageGateFeedback", "ImpactReview", "ShotDetail", "SelectedVisualBeatId", "Detail", "Assets", "Revisions", "Shots", "Gate", "GenerationSettings", "SettingsDraft"]) {
     scope[`set${key}`] = (value) => { scope[key[0].toLowerCase() + key.slice(1)] = value; };
   }
   return scope;
@@ -289,7 +289,8 @@ for (const skill of [false, true]) {
       assert.equal(options, undefined);
       return { allowed: false, approved_image_count: 0, blocker_messages: ["请至少采用一张分镜图"] };
     };
-    await assert.rejects(productionHandler("advanceWorkflow", scope)(), /请至少采用一张分镜图/);
+    await productionHandler("advanceWorkflow", scope)();
+    assert.deepEqual(scope.imageGateFeedback, { projectId: "p", message: "请至少采用一张分镜图" });
     assert.equal(scope.activeSection, "shot_images");
   });
 }

@@ -9,7 +9,7 @@ import { GlobalPromptEditor, PromptPreview } from "../prompt-context/GlobalPromp
 import { stylePrompt } from "../visual-styles/visual-style.js";
 import { PromptSectionHeader } from "../prompt-context/PromptSectionHeader.jsx";
 import { AssetReferenceEditor } from "../prompt-references/AssetReferenceEditor.jsx";
-import { PromptAssetPicker } from "../prompt-references/PromptAssetPicker.jsx";
+import { usePromptAssetLibrary } from "../prompt-references/usePromptAssetLibrary.jsx";
 
 export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor({
   approved, busy, manifest, onComplete, onSaved, outline, projectId, request, targetDurationFrames, resolveUrl,
@@ -26,7 +26,14 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
   const [globalPrompts, setGlobalPrompts] = useState({});
   const [assetFacts, setAssetFacts] = useState(manifest.asset_selection_snapshot || []);
   const [assetError, setAssetError] = useState('');
-  const [assetPicker, setAssetPicker] = useState(false);
+  const assetLibrary = usePromptAssetLibrary({ request, resolveUrl, skillProjectId: projectId, beforeLink: flush,
+    onLinked: (_assets, facts) => { setAssetFacts(facts); setAssetError(''); },
+  });
+  const assetReference = (asset, part) => ({
+    ...(part === 'image' ? { reference_asset_id: asset.id || asset.asset_id } : { reference_kind: 'project_asset', reference_id: asset.id || asset.asset_id, role: { person: 'actor_identity', product: 'product', scene: 'scene', clothing: 'wardrobe' }[asset.type] || 'composition' }),
+    label: `${part === 'video' ? '资产/' : ''}${asset.folder_name || '未分类'}/${asset.name}`,
+    thumbnail_url: asset.thumbnail_url, available: true,
+  });
   useEffect(() => {
     let active = true;
     request(`/projects/${projectId}/prompt-assets`).then((items) => {
@@ -143,21 +150,10 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
       <div className="storyboard-prompt-heading"><h3 id="storyboard-approach-title">创作思路</h3><AutosaveStatus state={state.status} onRetry={() => void flush()} /></div>
       <p>{approach || "围绕创作目标呈现产品，通过镜头的前后衔接完成叙事。"}</p>
     </section>
-    <GlobalPromptEditor ref={globalPromptRef} key={projectId} path={`/projects/${projectId}/prompt-context`} request={request} disabled={disabled} onChange={setGlobalPrompts} />
+    <GlobalPromptEditor ref={globalPromptRef} key={projectId} path={`/projects/${projectId}/prompt-context`} request={request} disabled={disabled} onChange={setGlobalPrompts} assets={assetFacts} onAddAssets={assetLibrary.open} resolveUrl={resolveUrl} />
     {state.error && <InlineMessage tone="error"><span>{state.error}</span></InlineMessage>}
     {assetError && <InlineMessage tone="warning"><span>参考图片读取失败：{assetError}</span></InlineMessage>}
-    {assetPicker && <PromptAssetPicker request={request} resolveUrl={resolveUrl}
-      selectedIds={assetFacts.map((item) => item.asset_id)} onClose={() => setAssetPicker(false)}
-      onSelect={async (asset) => {
-        const items = await request(`/projects/${projectId}/prompt-assets/${asset.id}`, { method: 'POST' });
-        const chosen = items.find((item) => item.asset_id === asset.id);
-        if (chosen?.image_eligible) assetPicker.insert({
-          ...(assetPicker.part === 'image' ? {reference_asset_id:chosen.asset_id} : {reference_kind:'project_asset',reference_id:chosen.asset_id,role:{person:'actor_identity',product:'product',scene:'scene',clothing:'wardrobe'}[chosen.type] || 'composition'}),
-          label:`${assetPicker.part === 'video' ? '资产/' : ''}${chosen.folder_name || '未分类'}/${chosen.name}`,
-          thumbnail_url:chosen.thumbnail_url,available:true,
-        });
-        setAssetFacts(items); setAssetError(''); setAssetPicker(false);
-      }} />}
+    {assetLibrary.dialog}
     {recoveryConflict && <InlineMessage tone="warning"><div>
       <p>服务器已有更新，同时检测到本地未保存草稿。当前显示服务器版本，请选择要继续编辑的内容。</p>
       <div className="storyboard-shot-actions">
@@ -191,7 +187,7 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
               labelledBy={`title-${shot.stable_shot_key} prompt-label-${shot.stable_shot_key}-${part}`}
               ref={part === "image" ? (node) => { if (node) fields.current.set(shot.stable_shot_key, node); else fields.current.delete(shot.stable_shot_key); } : undefined}
               onBlur={() => void flush()}
-              resolveUrl={resolveUrl} onAddAssets={(insert) => setAssetPicker({insert,part})}
+              resolveUrl={resolveUrl} onAddAssets={(insert, options) => assetLibrary.open((assets) => insert(assets.map((asset) => assetReference(asset, part))), options)}
               references={(shot[`${part}_prompt_mentions`] || []).map((mention) => {
                 const fact = assetFacts.find((item) => item.asset_id === (mention.reference_asset_id || mention.reference_id));
                 return { ...mention, thumbnail_url: fact?.thumbnail_url, available: part === 'video' && mention.reference_kind !== 'project_asset' ? true : Boolean(fact?.image_eligible) };

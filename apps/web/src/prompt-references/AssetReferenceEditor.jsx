@@ -1,7 +1,7 @@
 import { Button } from "../ui/system/Button.jsx";
-import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ImageSquare, Plus, X } from "@phosphor-icons/react";
+import { ArrowLeft, CaretRight, FolderSimple, ImageSquare, Plus, UserCircle, VideoCamera, X } from "@phosphor-icons/react";
 import { activeReferences, atomicDeletion, readReferenceDOM, referenceKey, referenceSegments, referenceToken, replaceReference, replacementRange } from "./reference-document.js";
 import "./asset-reference-editor.css";
 
@@ -44,11 +44,14 @@ function Thumbnail({ reference, resolveUrl }) {
 }
 
 export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
-  value = "", references = [], options = [], onChange, onBlur, onAddAssets, resolveUrl,
+  value = "", references = [], options = [], onChange, onBlur, onAddAssets, onAddManagedAssets, resolveUrl,
   disabled = false, label = "提示词", placeholder = "描述画面；输入 @ 引用项目已选资产", rows = 8,
   maxLength = 8000, indexOffset = 0, labelledBy, styleControl,
+  referenceLimit, reservedReferenceCount = 0, reservedReferenceIds = [],
 }, forwardedRef) {
   const editorRef = useRef(null);
+  const readOnlyRef = useRef(disabled);
+  readOnlyRef.current = disabled;
   const wrapperRef = useRef(null);
   const popupRef = useRef(null);
   const composing = useRef(false);
@@ -62,6 +65,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   const [popup, setPopup] = useState(null);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [menuSection, setMenuSection] = useState(null);
   const [selected, setSelected] = useState(null);
   const [renderTick, setRenderTick] = useState(0);
   const popupId = useId();
@@ -71,8 +75,18 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     number: item.number ?? indexOffset + index + 1,
   }));
   const visibleKey = JSON.stringify(visible);
-  const matching = options.filter((item) => item.available !== false && (!query ||
+  const matching = [...optionMap.values()].filter((item) => item.available !== false && (!query ||
     `${item.label} ${item.description || ""}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+  const isVideo = (item) => ['reference_video', 'video'].includes(item.reference_kind || item.media_kind);
+  const menuReferences = menuSection ? matching.filter((item) => menuSection === 'video' ? isVideo(item) : !isVideo(item))
+    : matching.filter((item) => visible.some((reference) => referenceKey(reference) === referenceKey(item)));
+  const categories = menuSection ? [] : [
+    { key: 'image', label: '图片', icon: ImageSquare },
+    ...(options.some(isVideo) ? [{ key: 'video', label: '视频', icon: VideoCamera }] : []),
+    ...(onAddAssets ? [{ key: 'library', label: '资产', icon: FolderSimple }] : []),
+    ...(onAddManagedAssets ? [{ key: 'managed', label: '从托管资产目录选择', icon: UserCircle }] : []),
+  ];
+  const menuCount = menuReferences.length + categories.length;
 
   useImperativeHandle(forwardedRef, () => ({
     focus: () => editorRef.current?.focus(),
@@ -159,12 +173,22 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     // immediately trigger the document-level popup dismissal listener.
     if (item.top < viewport.top) list.scrollTop += item.top - viewport.top;
     else if (item.bottom > viewport.bottom) list.scrollTop += item.bottom - viewport.bottom;
-  }, [activeIndex, popup?.kind, popupId, matching.length]);
+  }, [activeIndex, popup?.kind, popupId, menuCount]);
+  function caretRect() {
+    const selection = window.getSelection();
+    if (selection?.rangeCount && editorRef.current?.contains(selection.focusNode)) {
+      const range = selection.getRangeAt(0).cloneRange();
+      range.collapse(false);
+      const rect = range.getBoundingClientRect();
+      if (rect.height) return rect;
+    }
+    return null;
+  }
   function positionPopup() {
     if (!popup || !popupRef.current) return;
     const panel = popupRef.current;
     const box = panel.getBoundingClientRect();
-    const anchor = popup.kind === 'menu' ? editorRef.current?.getBoundingClientRect() : null;
+    const anchor = popup.kind === 'menu' ? (caretRect() || popup.anchor || editorRef.current?.getBoundingClientRect()) : null;
     const desiredLeft = anchor?.left ?? popup.left;
     let desiredTop = anchor ? anchor.bottom + 4 : popup.top;
     if (anchor && desiredTop + box.height > window.innerHeight - 8) desiredTop = anchor.top - box.height - 4;
@@ -175,7 +199,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   useLayoutEffect(() => {
     positionPopup();
     if (popup?.kind === 'menu' && popup.replacing) popupRef.current?.querySelector('input')?.focus({ preventScroll: true });
-  }, [popup, matching.length]);
+  }, [popup, menuCount, menuSection]);
 
   function commit(nextValue, nextReferences = local.current.references, position, typing = false) {
     if (disabled || nextValue.length > maxLength) { setRenderTick((tick) => tick + 1); return; }
@@ -218,12 +242,13 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   }
 
   function menu(range, replacing = null) {
-    const rect = editorRef.current.getBoundingClientRect();
-    setQuery(""); setActiveIndex(0);
-    setPopup({ kind: "menu", range, replacing, left: rect.left, top: rect.bottom + 4 });
+    const rect = caretRect() || editorRef.current.getBoundingClientRect();
+    setQuery(""); setActiveIndex(0); setMenuSection(replacing ? 'image' : popup?.kind === 'menu' ? menuSection : null);
+    setPopup({ kind: "menu", range, replacing, anchor: rect, left: rect.left, top: rect.bottom + 4 });
   }
 
   function insert(reference) {
+    if (atReferenceLimit(reference)) return;
     const current = local.current;
     if (popup.replacing) {
       const next = replaceReference(current.value, current.references, popup.replacing, reference);
@@ -237,18 +262,46 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     setPopup(null); editorRef.current.focus({ preventScroll: true });
   }
 
-  function addAsset() {
+  function atReferenceLimit(reference) {
+    if (!Number.isFinite(referenceLimit) || reference.reference_kind === 'reference_video') return false;
+    const keys = new Set([...reservedReferenceIds, ...visible.filter(item => item.reference_kind !== 'reference_video' && referenceKey(item) !== referenceKey(popup?.replacing || {})).map(item => item.reference_asset_id || item.reference_id)]);
+    keys.add(reference.reference_asset_id || reference.reference_id);
+    return keys.size + reservedReferenceCount > referenceLimit;
+  }
+
+  function addAsset(handler = onAddAssets) {
     const position = popup?.kind === 'menu' ? popup.range : offsets(editorRef.current);
     const range = position || { start: local.current.value.length, end: local.current.value.length };
+    const capturedValue = local.current.value;
+    const replacing = popup?.replacing;
+    const restore = () => {
+      if (!editorRef.current) return;
+      editorRef.current.focus({ preventScroll: true });
+      setSelection(editorRef.current, range.end);
+    };
     setPopup(null);
-    onAddAssets?.((reference) => {
-      if (!editorRef.current || !reference) return;
+    handler?.((selection) => {
+      if (!editorRef.current) throw new Error('编辑位置已关闭，请重新选择提示词。');
+      if (readOnlyRef.current) throw new Error('当前已变为只读，请取得编辑权限后重新引用。');
+      const additions = (Array.isArray(selection) ? selection : [selection]).filter(Boolean);
+      if (!additions.length) return;
       const current = local.current;
-      const token = referenceToken(reference);
+      if (current.value !== capturedValue) throw new Error('提示词已变化，请关闭资产库后重新选择插入位置。');
       const start = Math.min(range.start, range.end), end = Math.max(range.start, range.end);
-      editorRef.current.focus();
-      commit(current.value.slice(0, start) + token + ' ' + current.value.slice(end),
-        [...current.references, reference], {start:start + token.length + 1,end:start + token.length + 1});
+      const token = additions.map(referenceToken).join(' ') + ' ';
+      const next = replacing ? replaceReference(current.value, current.references, replacing, additions[0])
+        : { value: current.value.slice(0, start) + token + current.value.slice(end), references: [...current.references, ...additions] };
+      if (next.value.length > maxLength) throw new Error(`加入引用后超过 ${maxLength} 字，请减少选择或缩短提示词。`);
+      editorRef.current.focus({ preventScroll: true });
+      commit(next.value, next.references, replacing ? undefined : { start: start + token.length, end: start + token.length });
+      setTimeout(() => {
+        if (!editorRef.current) return;
+        editorRef.current.focus({ preventScroll: true });
+        if (!replacing) setSelection(editorRef.current, start + token.length);
+      }, 0);
+    }, {
+      query: popup?.kind === 'menu' ? query : '', selectedIds: [...new Set([...reservedReferenceIds, ...visible.filter(item => item.reference_kind !== 'reference_video' && referenceKey(item) !== referenceKey(replacing || {})).map((item) => item.reference_asset_id || item.reference_id)])],
+      referenceLimit, reservedReferenceCount, maxSelection: replacing ? 1 : undefined, onCancel: restore,
     });
   }
 
@@ -304,9 +357,17 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   function menuKeyDown(event) {
     if (event.isComposing || composing.current || popup?.kind !== 'menu' || !['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return false;
     event.preventDefault();
-    if (event.key === 'Enter') { if (matching[activeIndex]) insert(matching[activeIndex]); }
-    else setActiveIndex((index) => Math.max(0, Math.min(matching.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1))));
+    if (event.key === 'Enter') {
+      if (menuReferences[activeIndex]) insert(menuReferences[activeIndex]);
+      else if (categories[activeIndex - menuReferences.length]) chooseCategory(categories[activeIndex - menuReferences.length].key);
+    }
+    else setActiveIndex((index) => Math.max(0, Math.min(menuCount - 1, index + (event.key === 'ArrowDown' ? 1 : -1))));
     return true;
+  }
+  function chooseCategory(key) {
+    if (key === 'library') addAsset();
+    else if (key === 'managed') addAsset(onAddManagedAssets);
+    else { setMenuSection(key); setActiveIndex(0); }
   }
 
   function copy(event, cut = false) {
@@ -317,6 +378,25 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     if (cut && !disabled) commit(value.slice(0, range.start) + value.slice(range.end), references, { start: range.start, end: range.start });
   }
 
+  const referenceThumbnails = visible.map((reference) => <button type="button" key={referenceKey(reference)}
+    className={`asset-reference-thumbnail${selected === referenceKey(reference) ? ' active' : ''}`}
+    aria-label={`图片 ${reference.number}，${reference.label}`} onClick={(event) => open(reference, event.currentTarget)}
+    onFocus={(event) => open(reference, event.currentTarget, true)} onBlur={dismissPreview}
+    onMouseLeave={dismissPreview} onMouseEnter={(event) => open(reference, event.currentTarget, true)}>
+    <Thumbnail reference={reference} resolveUrl={resolveUrl} /><span>{reference.number}</span>
+  </button>);
+  // Keep one mounted style control; only compose its display slots around the asset rail.
+  // Style covers remain prompt metadata, never numbered generation references.
+  const renderReferenceLayout = ({ trigger, thumbnail, status }) => <>
+    <div className="prompt-style-tools">
+      {onAddAssets && <Button variant="quiet" size="compact" disabled={disabled} onClick={() => addAsset()} icon={<Plus size={16} />}>添加参考</Button>}
+      {trigger}{status}
+    </div>
+    {(thumbnail || visible.length > 0) && <div className="asset-reference-rail" aria-label={`${label}风格与引用图片`}>
+      {thumbnail}{referenceThumbnails}
+    </div>}
+  </>;
+
   return <div className={`asset-reference-editor${disabled ? ' disabled' : ''}`} ref={wrapperRef}
     onKeyDownCapture={(event) => {
       if (event.key === 'Escape' && popup) {
@@ -324,20 +404,11 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         setPopup(null); editorRef.current?.focus({ preventScroll: true });
       }
     }}>
-    {styleControl && <div className="prompt-style-tools">{onAddAssets && <Button variant="quiet" size="compact" disabled={disabled} onClick={addAsset} icon={<Plus size={16} />}>添加参考</Button>}{styleControl}</div>}
-    {visible.length > 0 && <div className="asset-reference-rail" aria-label={`${label}已引用图片`}>
-      {visible.map((reference) => <button type="button" key={referenceKey(reference)}
-        className={selected === referenceKey(reference) ? 'active' : ''}
-        aria-label={`图片 ${reference.number}，${reference.label}`} onClick={(event) => open(reference, event.currentTarget)}
-        onFocus={(event) => open(reference, event.currentTarget, true)} onBlur={dismissPreview}
-        onMouseLeave={dismissPreview} onMouseEnter={(event) => open(reference, event.currentTarget, true)}>
-        <Thumbnail reference={reference} resolveUrl={resolveUrl} /><span>{reference.number}</span>
-      </button>)}
-    </div>}
+    {styleControl ? cloneElement(styleControl, { renderLayout: renderReferenceLayout }) : renderReferenceLayout({})}
     <div ref={editorRef} className="asset-reference-input" role="textbox" aria-label={label} aria-labelledby={labelledBy} aria-multiline="true"
       aria-disabled={disabled} contentEditable={!disabled} suppressContentEditableWarning tabIndex={0}
       aria-controls={popup?.kind === 'menu' ? popupId : undefined} aria-autocomplete="list"
-      aria-activedescendant={popup?.kind === 'menu' && matching[activeIndex] ? `${popupId}-${activeIndex}` : undefined}
+      aria-activedescendant={popup?.kind === 'menu' && menuCount > activeIndex ? `${popupId}-${activeIndex}` : undefined}
       data-placeholder={placeholder} data-empty={!value} style={{ '--editor-rows': rows }}
       onInput={input} onKeyDown={keyDown}
       onCompositionStart={() => { composing.current = true; }}
@@ -352,7 +423,6 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       onMouseOver={(event) => { const token = inputReference(event.target); if (token) open(visible.find((item) => referenceKey(item) === token.dataset.referenceKey), token, true); }}
       onMouseOut={(event) => { if (inputReference(event.target) && !event.relatedTarget?.closest?.('[data-reference-key]')) dismissPreview(); }}
     />
-    {onAddAssets && !styleControl && <button className="asset-reference-add" type="button" disabled={disabled} onClick={addAsset}><Plus size={14} />添加资产</button>}
     {popup && createPortal(<div className="asset-reference-popover" ref={popupRef} style={{ left: popup.left, top: popup.top }}
       onMouseEnter={() => clearTimeout(dismissTimer.current)} onMouseLeave={dismissPreview}
       onFocus={() => clearTimeout(dismissTimer.current)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) dismissPreview(); }}
@@ -374,17 +444,25 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
           }}>移除</Button>
         </div>
       </> : <>
-        <input aria-label="搜索项目已选资产" placeholder="搜索项目已选资产" value={query} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} />
+        <input aria-label="搜索项目已选资产" placeholder="搜索引用，或打开资产库" value={query} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} />
+        {menuSection && <Button variant="quiet" size="compact" icon={<ArrowLeft size={16} />} onClick={() => { setMenuSection(null); setActiveIndex(0); }}>返回素材引用</Button>}
         <div role="listbox" id={popupId} aria-label="项目已选资产">
-          {!matching.length && <p>没有合适的已选资产，可继续编辑文字或添加资产。</p>}
-          {matching.map((reference, index) => <button data-ui="selection-card" id={`${popupId}-${index}`} type="button" role="option" aria-selected={activeIndex === index}
-            key={referenceKey(reference)} onMouseDown={(event) => event.preventDefault()} onClick={() => insert(reference)} onMouseEnter={() => setActiveIndex(index)}>
+          {!menuSection && menuReferences.length > 0 && <p className="reference-menu-heading">已引用</p>}
+          {menuSection && !menuReferences.length && <p>没有匹配的项目素材，可到资产库中选择。</p>}
+          {menuReferences.map((reference, index) => <button data-ui="selection-card" id={`${popupId}-${index}`} type="button" role="option" aria-selected={activeIndex === index}
+            key={referenceKey(reference)} disabled={atReferenceLimit(reference)} title={atReferenceLimit(reference) ? '已达到当前模型的参考图数量上限' : undefined} onMouseDown={(event) => event.preventDefault()} onClick={() => insert(reference)} onMouseEnter={() => setActiveIndex(index)}>
             <span className="asset-reference-option-image"><Thumbnail reference={reference} resolveUrl={resolveUrl} /></span>
             <span><strong>{reference.label}</strong>{reference.description && <small>{reference.description}</small>}</span>
           </button>)}
+          {!menuSection && <p className="reference-menu-heading">素材引用</p>}
+          {categories.map(({ key, label: name, icon: Icon }, index) => <button data-ui="selection-card" type="button" role="option"
+            id={`${popupId}-${menuReferences.length + index}`} key={key} aria-selected={activeIndex === menuReferences.length + index}
+            onMouseDown={(event) => event.preventDefault()} onClick={() => chooseCategory(key)} onMouseEnter={() => setActiveIndex(menuReferences.length + index)}>
+            <Icon size={20} /><span>{name}</span><CaretRight size={16} className="reference-menu-chevron" />
+          </button>)}
         </div>
-        {onAddAssets && <Button className="text-button" type="button" onClick={addAsset}>添加资产</Button>}
+        {onAddAssets && menuSection && <Button variant="quiet" type="button" onClick={() => addAsset()}>打开资产库</Button>}
       </>}
-    </div>, document.body)}
+    </div>, editorRef.current?.closest('dialog') || document.body)}
   </div>;
 });

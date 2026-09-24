@@ -2202,6 +2202,8 @@ class ProviderManagedAssetBinding(BaseModel):
 
 
 class ShotPlan(BaseModel):
+    # Populated only on the frozen gateway view; authored plans stay untouched.
+    image_composition: dict | None = Field(default=None, exclude=True)
     video_group_clip: VideoGroupClip | None = None
     editing_guidance: str | None = Field(default=None, max_length=4000)
 
@@ -3199,6 +3201,7 @@ class ShotPlanCreate(BaseModel):
     end_seconds: float | None = Field(default=None, gt=0)
     source_keyframe_timestamp_seconds: float | None = Field(default=None, ge=0)
     image_prompt: str = Field(default="", max_length=8000)
+    image_prompt_mentions: list[PromptAssetMention] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def validate_create_mode(self) -> ShotPlanCreate:

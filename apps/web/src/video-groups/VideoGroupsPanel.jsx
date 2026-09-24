@@ -3,6 +3,8 @@ import { useCallback, useEffect, useImperativeHandle, useRef, useState } from "r
 import { videoDurationOptions, preferredVideoResolution } from "../production-ui.js";
 import { groupDefinition, groupModelOptions, suggestedGroups, plannedCuts, cutsValid } from "./group-planning.js";
 import "./video-groups.css";
+import { AssetReferenceEditor } from '../prompt-references/AssetReferenceEditor.jsx';
+import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 
 const ACTIVE = new Set(["queued", "running", "cancellation_requested"]);
 const json = body => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -34,8 +36,9 @@ function CandidateReview({ candidate, group, request, projectId, revision, onRel
   </section>;
 }
 
-function GroupEditor({ group, ordinal, models, revision, projectId, request, resolveUrl, onSave, onReload, onDirty, registerSave, beforeGenerate, disabled }) {
+function GroupEditor({ group, ordinal, models, revision, projectId, request, resolveUrl, onSave, onReload, onDirty, registerSave, beforeGenerate, disabled, assets, onAddAssets }) {
   const [prompt, setPrompt] = useState(group.video_prompt || "");
+  const [mentions, setMentions] = useState(group.video_prompt_mentions || []);
   const [transition, setTransition] = useState(group.transition || "cut");
   const [alias, setAlias] = useState(models[0]?.alias || "");
   const model = models.find(item => item.alias === alias) || models[0];
@@ -46,7 +49,7 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
   const [acceptUnknown, setAcceptUnknown] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const dirty = prompt !== (group.video_prompt || "") || transition !== group.transition;
+  const dirty = prompt !== (group.video_prompt || "") || transition !== group.transition || JSON.stringify(mentions) !== JSON.stringify(group.video_prompt_mentions || []);
   const definitionKey = JSON.stringify(groupDefinition(group));
   const [baseKey, setBaseKey] = useState(definitionKey);
   const conflict = baseKey !== definitionKey && dirty;
@@ -62,10 +65,10 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
     if (conflict) { setError("其他页面已修改组要求，当前文字已保留。请复制备份后重新读取再核对。"); return false; }
     if (busyRef.current || disabled) return false;
     busyRef.current = true; setPending(true); setError("");
-    try { const saved = { ...groupDefinition(group), video_prompt: prompt, transition }; await onSave(saved); setBaseKey(JSON.stringify(saved)); return true; }
+    try { const saved = { ...groupDefinition(group), video_prompt: prompt, video_prompt_mentions: mentions, transition }; await onSave(saved); setBaseKey(JSON.stringify(saved)); return true; }
     catch (failure) { setError(failure.message); return false; }
     finally { busyRef.current = false; setPending(false); }
-  }, [dirty, conflict, disabled, group, prompt, transition, onSave]);
+  }, [dirty, conflict, disabled, group, prompt, mentions, transition, onSave]);
   useEffect(() => registerSave(group.id, save), [group.id, registerSave, save]);
   useEffect(() => {
     const warn = event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } };
@@ -103,8 +106,12 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
     {group.error ? <p role="alert" className="video-group-error">{group.error}</p> : <>
       <div className="video-group-images">{group.images.map(image => <figure key={image.id}><img src={resolveUrl(image.url)} alt={`本组参考图 ${image.index}`} /><figcaption>图 {image.index}</figcaption></figure>)}</div>
       {group.input_plan.references.some(item => item.reference_kind !== "approved_image") && <p>同时引用：{group.input_plan.references.filter(item => item.reference_kind !== "approved_image").map(item => item.label).join("、")}</p>}
-      {conflict && <p role="alert" className="video-group-error">组要求已在其他页面更新。<Button className="text-button" type="button" onClick={() => { setPrompt(group.video_prompt); setTransition(group.transition); setBaseKey(definitionKey); setEstimate(null); setError(""); }}>放弃本地组要求，读取新内容</Button></p>}
-      <label>组视频补充要求<textarea rows={3} maxLength={8000} value={prompt} disabled={pending || disabled || Boolean(running)} onChange={event => setPrompt(event.target.value)} placeholder="逐段动作沿用下方分镜提示词；此处填写本组共同要求。" /></label>
+      {conflict && <p role="alert" className="video-group-error">组要求已在其他页面更新。<Button className="text-button" type="button" onClick={() => { setPrompt(group.video_prompt); setMentions(group.video_prompt_mentions || []); setTransition(group.transition); setBaseKey(definitionKey); setEstimate(null); setError(""); }}>放弃本地组要求，读取新内容</Button></p>}
+      <div className="production-field"><span>组视频补充要求</span><AssetReferenceEditor label="组视频补充要求" rows={3} maxLength={8000} value={prompt} references={mentions} options={(assets || []).map(asset => promptAssetReference(asset, 'video'))} resolveUrl={resolveUrl} disabled={pending || disabled || Boolean(running)}
+        referenceLimit={model?.capabilities?.maximum_reference_images}
+        reservedReferenceCount={(group.input_plan?.references || []).filter(item => !mentions.some(mention => mention.reference_kind === item.reference_kind && mention.reference_id === item.reference_id)).length}
+        onAddAssets={onAddAssets && ((insert, options) => onAddAssets(selected => insert(selected.map(asset => promptAssetReference(asset, 'video'))), options))}
+        onChange={(value, refs) => { setPrompt(value); setMentions(promptMentionData(refs, 'video')); }} placeholder="逐段动作沿用下方分镜提示词；输入 @ 引用本组共同资产。" /></div>
       <div className="video-group-actions"><label>场景切换<select value={transition} disabled={pending || disabled || Boolean(running)} onChange={event => setTransition(event.target.value)}><option value="cut">硬切</option><option value="continuous">连续运动</option><option value="dissolve">叠化</option></select></label><Button type="button" className="secondary-button" disabled={!dirty || pending || disabled || Boolean(running)} onClick={save}>保存组要求</Button></div>
       <details><summary>查看完整分段提示词 · 目标 {Number(group.target_duration_seconds.toFixed(2))} 秒</summary><p className="video-group-script">{group.compiled_prompt}</p></details>
       <div className="video-group-actions">
@@ -131,7 +138,7 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
   </details>;
 }
 
-export function VideoGroupsPanel({ project, shots, settings, request, resolveUrl, onChanged, onAdvance, flushRef, beforeGenerate, disabled = false }) {
+export function VideoGroupsPanel({ project, shots, settings, request, resolveUrl, onChanged, onAdvance, flushRef, beforeGenerate, disabled = false, assets = [], onAddAssets }) {
   const [state, setState] = useState(null), [error, setError] = useState("");
   const [selected, setSelected] = useState([]), [pending, setPending] = useState(false), [suggestions, setSuggestions] = useState([]);
   const [suggested, setSuggested] = useState(false), [dirtyGroups, setDirtyGroups] = useState({});
@@ -181,7 +188,7 @@ export function VideoGroupsPanel({ project, shots, settings, request, resolveUrl
         {suggestions.length > 0 && <div className="video-group-confirm"><p>建议 {suggestions.length} 个生成组：{suggestions.map(ids => ids.map(id => (shots.find(row => (row.plan || row).id === id)?.plan || shots.find(row => row.id === id))?.index).join("、")).join("；")}。确认仅保存分组，不会生成或扣费。</p><Button type="button" className="secondary-button" disabled={pending || disabled || running} onClick={() => mutate(() => addGroups(suggestions))}>确认建议分组</Button></div>}
         {state.groups.map((group, index) => <div className="video-group-actions" key={group.id}><span>生成组 {index + 1} · {group.shot_plan_ids.length} 个分镜</span><Button type="button" className="text-button" disabled={pending || disabled || running} onClick={() => mutate(() => update(state.groups.filter(item => item.id !== group.id).map(groupDefinition)))}>拆为独立生成</Button></div>)}
       </details>
-      {state.groups.map((group, index) => <GroupEditor key={group.id} group={group} ordinal={index + 1} models={models} revision={state.expected_revision_id} projectId={project.id} request={request} resolveUrl={resolveUrl} disabled={disabled || pending} onReload={reload} onDirty={onDirty} registerSave={registerSave} beforeGenerate={beforeGenerate} onSave={saved => update(latestState.current.groups.map(item => item.id === saved.id ? saved : groupDefinition(item)))} />)}
+      {state.groups.map((group, index) => <GroupEditor key={group.id} group={group} ordinal={index + 1} models={models} revision={state.expected_revision_id} projectId={project.id} request={request} resolveUrl={resolveUrl} disabled={disabled || pending} assets={assets} onAddAssets={onAddAssets} onReload={reload} onDirty={onDirty} registerSave={registerSave} beforeGenerate={beforeGenerate} onSave={saved => update(latestState.current.groups.map(item => item.id === saved.id ? saved : groupDefinition(item)))} />)}
     </>}
   </section>;
 }

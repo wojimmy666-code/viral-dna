@@ -39,8 +39,8 @@ export function ProductionStyleControl({ batchId, request, disabled, onPending, 
   </div>;
 }
 
-export function ShotStyleControl({ context, shotKey, editorRef, request, disabled, part }) {
-  return <VisualStyleControl key={shotKey} label="风格" part={part} allowInherit
+export function ShotStyleControl({ context, shotKey, editorRef, request, disabled, part, renderLayout }) {
+  return <VisualStyleControl key={shotKey} label="风格" part={part} allowInherit renderLayout={renderLayout}
     value={context?.shot_styles?.[shotKey] ?? null} snapshot={context?.shot_style_snapshots?.[shotKey]} inheritedSnapshot={context?.visual_style_snapshot}
     request={request} disabled={disabled || !Object.hasOwn(context || {}, "visual_style")}
     onChange={(value, compiled) => editorRef.current.applyStyle(value, compiled, shotKey)} />;

@@ -79,6 +79,20 @@ function pickerHandler(name, scope) {
   return new Function("scope", `with(scope) { return (${source.slice(handler.start, handler.end)}); }`)(scope);
 }
 
+test("style control has one entry, a named thumbnail, and a separate corner remove action", () => {
+  const source = readFileSync(new URL("../src/visual-styles/VisualStyleControl.jsx", import.meta.url), "utf8");
+  assert.match(source, /const trigger = !selected && <Button[^>]*icon=\{<Palette/);
+  const thumbnail = source.match(/<button data-ui="style-thumbnail"[\s\S]*?<\/button>/)?.[0];
+  assert.ok(thumbnail);
+  assert.match(thumbnail, /aria-haspopup="dialog"/);
+  assert.match(thumbnail, /<span className="style-selected-name">\{name\}<\/span>/);
+  assert.match(thumbnail, /className="style-selected-replace" aria-hidden="true">替换/);
+  assert.doesNotMatch(thumbnail, /IconButton|style-selected-kind/);
+  assert.match(source, /<IconButton className="style-selected-remove"/);
+  assert.equal((source.match(/className="style-selected-name"/g) || []).length, 1);
+  assert.match(source, /renderLayout\(\{ trigger, thumbnail, status \}\)/);
+});
+
 test("style library filters previews without mutating catalog and preserves version identity", () => {
   const sparse = { preset: "natural" };
   const filled = { motion: "", camera: "", texture: "", color: "", lighting: "", description: "", preset: "natural" };

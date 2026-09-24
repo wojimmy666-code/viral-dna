@@ -3,7 +3,15 @@
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+
+
+class GroupAssetMention(BaseModel):
+    reference_kind: Literal["project_asset"] = "project_asset"
+    reference_id: UUID
+    label: str = Field(min_length=1, max_length=260)
+    role: Literal["actor_identity", "composition", "scene", "product", "wardrobe", "style"] = "composition"
+    order: int = Field(default=1, ge=1, le=100)
 
 
 class VideoGenerationGroup(BaseModel):
@@ -11,7 +19,15 @@ class VideoGenerationGroup(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     shot_plan_ids: list[UUID] = Field(min_length=2, max_length=20)
     video_prompt: str = Field(default="", max_length=8000)
+    video_prompt_mentions: list[GroupAssetMention] = Field(default_factory=list, max_length=50)
     transition: Literal["cut", "continuous", "dissolve"] = "cut"
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_fingerprint(self, handler):
+        value = handler(self)
+        if not self.video_prompt_mentions:
+            value.pop("video_prompt_mentions", None)
+        return value
 
     @model_validator(mode="after")
     def unique_members(self):

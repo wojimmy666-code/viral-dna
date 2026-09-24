@@ -393,7 +393,7 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
         assert.equal(await evaluate("document.body.innerText.includes('请至少选择一个有效的已采用视频参与剪辑')"),false);
         assert.ok(await evaluate("document.querySelector('.shot-video-advance').title.includes('请至少选择一个')"));
         assert.ok(await evaluate("document.querySelector('.shot-video-gate').textContent.includes('已选 0 个视频')"));
-        assert.equal(await evaluate("document.querySelectorAll('.asset-reference-add').length"),1);
+        assert.equal(await evaluate("[...document.querySelectorAll('.shot-video-config-disclosure-body .prompt-style-tools button')].filter(button=>button.textContent==='添加参考').length"),1);
       }
     });
 
@@ -402,6 +402,7 @@ test('reference preview browser regression', { timeout: 90000 }, async t => {
       await evaluate("(()=>{const root=document.querySelector('.asset-reference-input');root.focus({preventScroll:true});const range=document.createRange();range.selectNodeContents(root);range.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(range);root.scrollTop=root.scrollHeight;})()");
       await send('Input.insertText',{text:'@'});
       await ready("document.querySelector('.asset-reference-popover [role=option]')");
+      await evaluate("[...document.querySelectorAll('.asset-reference-popover [role=option]')].find(item=>item.textContent==='图片').click()");
       await pause(150);
       assert.equal(await evaluate(visible),true);
       const pageScroll=await evaluate('window.scrollY');

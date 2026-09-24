@@ -2,6 +2,7 @@ import { IconButton, Button } from "./ui/system/Button.jsx";
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { registerAccountFlusher } from "./accounts/account-client.js";
 import { readOnce } from "./creation-workspace/read-request.js";
+import { usePromptAssetLibrary } from "./prompt-references/usePromptAssetLibrary.jsx";
 import { videoStageShots, workspaceShotId } from "./creation-workspace/video-stage-selection.js";
 import { useGenerationPreferences } from "./image-generation-controls/generation-preferences.js";
 import { imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId } from "./image-generation-controls/image-input.js";
@@ -1605,6 +1606,7 @@ export function ProductionHub({
   const [revisions, setRevisions] = useState([]);
   const [shots, setShots] = useState([]);
   const [gate, setGate] = useState(null);
+  const [imageGateFeedback, setImageGateFeedback] = useState(null);
   const [selectedShotId, setSelectedShotId] = useState(null);
   const [selectedVisualBeatId, setSelectedVisualBeatId] = useState(null);
   const [shotDetail, setShotDetail] = useState(null);
@@ -1679,6 +1681,11 @@ export function ProductionHub({
   const selectImageModel = (model, engine) => setImageChoices({ model, engine, resolution: "" });
   const [focusedCandidateId, setFocusedCandidateId] = useState("");
   const capabilities = sourceCapabilities(detail?.project, sourceMedia);
+
+  useEffect(() => { setImageGateFeedback(null); }, [selectedProjectId, activeSection]);
+  useEffect(() => {
+    if (gate?.current_step === "shot_images" && gate.allowed) setImageGateFeedback(null);
+  }, [gate]);
 
   function updateLocation(update, { replace = true } = {}) {
     const search = workspaceSearch(locationRef.current.search, update);
@@ -2932,11 +2939,15 @@ export function ProductionHub({
   }
 
   async function advanceWorkflow() {
+    setImageGateFeedback(null);
     await executeAction(async () => {
       await flushWorkspace();
       const imageGate = await request(productionGateStatusPath(detail.project.id, "shot_images"));
       setGate(imageGate);
-      if (!imageGate.allowed) throw new Error(imageGate.blocker_messages?.join("；") || "请至少采用一张分镜图");
+      if (!imageGate.allowed) {
+        setImageGateFeedback({ projectId: detail.project.id, message: imageGate.blocker_messages?.join("；") || "请至少采用一张分镜图" });
+        return;
+      }
       if (workflow && !workflow.imagesApproved && await workflow.onAdvance("shot_images") === false) return;
       const latest = await request(`/productions/${detail.project.id}`);
       await request(`/productions/${detail.project.id}/video-stage/enter`, {
@@ -3626,7 +3637,19 @@ export function ProductionHub({
     }
   }
 
-  async function openAssetPicker(onSelected) {
+  const promptAssetLibrary = usePromptAssetLibrary({ request, resolveUrl,
+    productionId: detail?.project?.id,
+    skillProjectId: detail?.project?.origin_type === 'skill_run' ? detail.project.owner_project_id : undefined,
+    beforeLink: flushWorkspace,
+    onLinked: async (_assets, _facts, check) => {
+      const [next, references] = await Promise.all([request(`/productions/${detail.project.id}`), request(`/productions/${detail.project.id}/references`)]);
+      check();
+      setDetail(next); setAssets(references);
+    },
+  });
+
+  async function openAssetPicker(onSelected, options) {
+    if (typeof onSelected === 'function') { promptAssetLibrary.open(onSelected, options); return; }
     assetPickerResult.current = typeof onSelected === 'function' ? onSelected : null;
     setAssetPickerOpen(true);
     setAssetPickerLoading(true);
@@ -3956,7 +3979,6 @@ export function ProductionHub({
             {activeSection === "reference_assets" && <ReferenceAssets assets={assets} busy={busy} error={actionError} onArchive={(asset) => { setActionError(""); setArchiveAsset(asset); }} onContinue={() => void changeSection("shot_images")} onEdit={openReferenceEdit} onOpenLibrary={openAssetPicker} onUpload={openReferenceUpload} resolveUrl={resolveUrl} />}
             {activeSection === "shot_images" && (
               <ShotImageWorkspace
-                upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 onAddAssets={openAssetPicker}
                 globalPromptRef={globalPromptRef}
                 assets={assets}
@@ -3964,6 +3986,7 @@ export function ProductionHub({
                 draft={shotDraft}
                 error={actionError}
                 gate={gate?.current_step === "shot_images" ? gate : null}
+                advanceFeedback={imageGateFeedback?.projectId === detail.project.id && !gate?.allowed ? imageGateFeedback.message : ""}
                 generationCandidateCount={generationCandidateCount}
                 generationEngine={generationEngine}
                 generationInputMode={generationInputMode}
@@ -4022,7 +4045,7 @@ export function ProductionHub({
             )}
             {activeSection === "shot_videos" && (
               <>
-              <VideoGroupsPanel key={detail.project.id} flushRef={videoGroupsRef} beforeGenerate={async () => { await flushGlobalPrompts(); await flushVideoDraft(); }} project={detail.project} shots={videoStageShots(shots, detail.project)} settings={videoGenerationSettings} request={request} resolveUrl={resolveUrl} disabled={busy} onChanged={() => refreshProject(detail.project.id, selectedShotId)} onAdvance={advanceToEditing} />
+              <VideoGroupsPanel key={detail.project.id} assets={assets} onAddAssets={openAssetPicker} flushRef={videoGroupsRef} beforeGenerate={async () => { await flushGlobalPrompts(); await flushVideoDraft(); }} project={detail.project} shots={videoStageShots(shots, detail.project)} settings={videoGenerationSettings} request={request} resolveUrl={resolveUrl} disabled={busy} onChanged={() => refreshProject(detail.project.id, selectedShotId)} onAdvance={advanceToEditing} />
               <ShotVideoWorkspace
                 upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 onAddAssets={openAssetPicker}
@@ -4148,6 +4171,7 @@ export function ProductionHub({
           project={projectLifecycleAction.project}
         />
       )}
+      {promptAssetLibrary.dialog}
       <ChangeImpactPanel
         busy={busy}
         onCancel={() => setImpactReview(null)}

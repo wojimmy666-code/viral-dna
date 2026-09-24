@@ -56,6 +56,7 @@ export function CreativeIntentPanel({
   errorCode = "",
   managedAssetBinding,
   onChange,
+  onAddAssets,
   onCompile,
   onOpenPrompt,
   onOpenReferences,
@@ -108,6 +109,7 @@ export function CreativeIntentPanel({
           managedAssetBinding={managedAssetBinding}
           mentions={draft?.intentMentions || []}
           onChange={onChange}
+          onAddAssets={onAddAssets}
           onRequestManagedAssetMention={onRequestManagedAssetMention}
           onValidityChange={setMentionsValid}
           referenceFrames={referenceFrames}

@@ -140,6 +140,10 @@ def find_prompt_draft_language_issues(
             ("补充说明", draft.custom_notes),
         ]
     )
+    # Asset labels are identifiers, not generated foreign-language prose. Only
+    # metadata-backed tokens are exempt; normal English outside them still fails.
+    for mention in sorted(draft.asset_mentions, key=lambda item: len(item.label), reverse=True):
+        values = [(field, (value or "").replace(f"@{mention.label}", "")) for field, value in values]
     return _issues(values)
 
 

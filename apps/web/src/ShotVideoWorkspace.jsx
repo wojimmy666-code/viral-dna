@@ -324,6 +324,7 @@ export function ShotVideoWorkspace({
   const [managedAssetPickerOpen, setManagedAssetPickerOpen] = useState(false);
   const [managedAssetPickerQuery, setManagedAssetPickerQuery] = useState("");
   const pendingManagedAssetMentionRef = useRef(null);
+  const pendingManagedAssetCancelRef = useRef(null);
   const [depthEngineCapabilities, setDepthEngineCapabilities] = useState([]);
   const [depthEngineLoadBusy, setDepthEngineLoadBusy] = useState(false);
   const [depthEngineLoadError, setDepthEngineLoadError] = useState("");
@@ -828,20 +829,25 @@ export function ShotVideoWorkspace({
     setDurationAdjustmentMessage("");
   }
 
-  function openManagedAssetPicker({ insert = null, query = "" } = {}) {
+  function openManagedAssetPicker({ insert = null, query = "", onCancel = null } = {}) {
     pendingManagedAssetMentionRef.current = insert;
+    pendingManagedAssetCancelRef.current = onCancel;
     setManagedAssetPickerQuery(query);
     setManagedAssetPickerOpen(true);
   }
 
-  function closeManagedAssetPicker() {
+  function closeManagedAssetPicker(restoreCaret = true) {
+    const cancel = pendingManagedAssetCancelRef.current;
+    pendingManagedAssetCancelRef.current = null;
     pendingManagedAssetMentionRef.current = null;
     setManagedAssetPickerQuery("");
     setManagedAssetPickerOpen(false);
+    if (restoreCaret) setTimeout(() => cancel?.(), 0);
   }
 
   function changeCreativeIntent({
     addedReference = null,
+    addedReferences = addedReference ? [addedReference] : [],
     intentMentions = [],
     intentText = "",
   }) {
@@ -852,9 +858,9 @@ export function ShotVideoWorkspace({
       ...current,
       intentText,
       intentMentions,
-      removedIntentReferenceKeys: addedReference
+      removedIntentReferenceKeys: addedReferences.length
         ? (current.removedIntentReferenceKeys || []).filter(
-          (key) => key !== videoReferenceStableKey(addedReference),
+          (key) => !addedReferences.some(reference => key === videoReferenceStableKey(reference)),
         )
         : current.removedIntentReferenceKeys,
     }));
@@ -1113,6 +1119,7 @@ export function ShotVideoWorkspace({
               errorCode={intentErrorCode}
               managedAssetBinding={managedAssetBinding}
               onChange={changeCreativeIntent}
+              onAddAssets={onAddAssets}
               onCompile={compileCreativeIntent}
               onOpenPrompt={() => setPromptSettingsOpen(true)}
               onOpenReferences={() => {
@@ -1183,6 +1190,8 @@ export function ShotVideoWorkspace({
               <PromptSectionHeader as="summary" title="局部视频提示词" hint={`${videoDraft.videoPrompt.length} 字`} state={draftSaveState} onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)} />
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
+                  referenceLimit={selectedModel?.capabilities?.maximum_reference_images}
+                  inheritedMentions={globalPrompts.common_video_mentions || []}
                   styleControl={<ShotStyleControl context={globalPrompts} shotKey={plan.id} editorRef={globalPromptRef} request={request} disabled={busy} part="video" />}
                   assets={assets}
                   disabled={busy}
@@ -1211,7 +1220,7 @@ export function ShotVideoWorkspace({
                 <PromptPreview common={globalPrompts.common_video_prompt} local={videoDraft.videoPrompt} style={stylePrompt(globalPrompts, plan.id, "video")} label="视频提示词" />
               </div>
             </details>
-            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} />
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
             {generationGroup ? <p role="status">此分镜已加入上方的视频生成组。下方编辑分镜动作和资产引用，保存后请回到生成组预览费用、生成并核对切点。</p> : <ShotVideoGenerationControls
               activeRun={activeRun}
               allReferencesApproved={!generationBlockedReason}
@@ -1323,7 +1332,7 @@ export function ShotVideoWorkspace({
               const insertMention = pendingManagedAssetMentionRef.current;
               const option = buildManagedAssetReferenceOption(savedBinding);
               if (insertMention && option) insertMention(option);
-              closeManagedAssetPicker();
+              closeManagedAssetPicker(false);
             }
           }}
           request={request}

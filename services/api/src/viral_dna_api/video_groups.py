@@ -14,6 +14,7 @@ from .models import (
     GenerationKind, GenerationCandidateStatus, ProductionChangeKind,
     ProductionRunStatus, ShotLifecycleStatus, WorkflowItemStatus, utc_now,
     ApprovalEvent, ApprovalDecision, VideoClipPreparationStatus,
+    VideoPromptMention,
 )
 from .video_group_models import VideoGroupUpdate, VideoGroupAdopt, VideoGroupClip
 from .project_prompts import effective_style, prompt_snapshot
@@ -62,6 +63,8 @@ def input_fingerprint(project, group, members, common_prompt, context=None):
     styles = {str(p.id): effective_style(context, str(p.id)) for p in members} if context else {}
     if any(styles.values()):
         data["visual_styles"] = styles
+    if context and context.common_video_mentions:
+        data["global_mentions"] = [item.model_dump(mode="json") for item in context.common_video_mentions]
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -116,7 +119,14 @@ def execution_plan(group, members, generation_duration=None, *, context=None):
     transition = {"cut": "场景之间直接硬切，不融合、不渐变；允许不同地理空间。",
                   "continuous": "按用户动作与运镜要求连续衔接。",
                   "dissolve": "按分段规划使用短叠化转场。"}[group.transition]
-    prompt = "\n".join([group.video_prompt, transition,
+    group_prompt = group.video_prompt
+    for item in group.video_prompt_mentions:
+        mention = VideoPromptMention.model_validate(item.model_dump())
+        key = (mention.reference_kind, mention.reference_id)
+        if key not in mentions:
+            mentions[key] = mention
+        group_prompt = group_prompt.replace(f"@{mention.label}", f"@{mentions[key].label}")
+    prompt = "\n".join([group_prompt, transition,
                         "人物位置、动作与景别以各分镜要求为准，不强制继承原片。", *lines]).strip()
     if definitions:
         prompt += "\n" + "\n".join(f"风格配置 {i}（仅用于上方指定分段）：\n{text}" for i, text in enumerate(definitions, 1))
@@ -166,7 +176,11 @@ class VideoGroups:
             plans = await self.repository.list_shot_plans(project.id)
             used, group_ids = set(), set()
             for group in payload.groups:
-                members_for(project, group, plans)
+                members = members_for(project, group, plans)
+                mentions = [VideoPromptMention.model_validate(item.model_dump()) for item in group.video_prompt_mentions]
+                await self.production._validate_video_prompt_mentions(project, members[0], mentions)
+                if any(f"@{item.label}" not in group.video_prompt for item in mentions):
+                    fail("组要求的资产标签已不在正文中，请重新引用或移除", 422)
                 if used.intersection(group.shot_plan_ids) or group.id in group_ids:
                     fail("同一分镜不能同时属于两个生成组，生成组 ID 不能重复", 422)
                 used.update(group.shot_plan_ids)
@@ -197,6 +211,10 @@ class VideoGroups:
                 for mention in plan.video_prompt_mentions:
                     references.append({"reference_kind": mention.reference_kind, "reference_id": str(mention.reference_id),
                                        "label": mention.label, "role": mention.role, "order": len(references) + 1})
+                context = await self.production.get_prompt_context(project.id)
+                for mention in context.common_video_mentions:
+                    if not any(item["reference_kind"] == mention.reference_kind and item["reference_id"] == str(mention.reference_id) for item in references):
+                        references.append({"reference_kind": mention.reference_kind, "reference_id": str(mention.reference_id), "label": mention.label, "role": mention.role, "order": len(references) + 1})
                 sources = ["approved_images"]
                 if any(r["reference_kind"] == "project_asset" for r in references):
                     sources.append("project_assets")

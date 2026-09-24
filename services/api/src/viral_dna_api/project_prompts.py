@@ -11,6 +11,8 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, Field
+from .models import PromptAssetMention, VideoPromptMention
+from .composition import CompositionGuide, effective_composition
 
 from .prompt_engine.punctuation import normalize_prompt_punctuation
 from .prompt_engine.still_image import static_image_text
@@ -27,10 +29,13 @@ class ProjectPromptRevision(BaseModel):
     revision_number: int = 0
     common_image_prompt: str = Field(default="", max_length=8000)
     common_video_prompt: str = Field(default="", max_length=8000)
+    common_image_mentions: list[PromptAssetMention] = Field(default_factory=list, max_length=50)
+    common_video_mentions: list[VideoPromptMention] = Field(default_factory=list, max_length=50)
     visual_style: VisualStyle = Field(default_factory=VisualStyle)
     visual_style_snapshot: dict = Field(default_factory=dict)
     shot_styles: dict[str, VisualStyle] = Field(default_factory=dict)
     shot_style_snapshots: dict[str, dict] = Field(default_factory=dict)
+    image_compositions: dict[str, CompositionGuide | None] = Field(default_factory=dict)
     original_image_prompt: str = ""
     original_video_prompt: str = ""
     known_image_prompts: list[str] = Field(default_factory=list, exclude=True)
@@ -42,6 +47,8 @@ class ProjectPromptUpdate(BaseModel):
     expected_revision_id: UUID
     common_image_prompt: str = Field(max_length=8000)
     common_video_prompt: str = Field(max_length=8000)
+    common_image_mentions: list[PromptAssetMention] | None = Field(default=None, max_length=50)
+    common_video_mentions: list[VideoPromptMention] | None = Field(default=None, max_length=50)
     visual_style: VisualStyle | None = None
     shot_styles: dict[str, VisualStyle] | None = Field(default=None, max_length=200)
 
@@ -129,9 +136,23 @@ def prompt_snapshot(value: str, context: ProjectPromptRevision, part: str, *, sh
         material["visual_style_snapshot"] = frozen_style
         if not include_style:
             material["shot_style_snapshots"] = context.shot_style_snapshots
+    mentions = getattr(context, f"common_{part}_mentions")
+    if mentions:
+        material["global_mentions"] = [item.model_dump(mode="json") for item in mentions]
     material["content_hash"] = hashlib.sha256(
         json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
+    return material
+
+
+def image_prompt_snapshot(value, context, *, project_id, shot_key, beat_id):
+    material = prompt_snapshot(value, context, "image", shot_key=shot_key)
+    guide = effective_composition(context, project_id, beat_id)
+    if guide:
+        material["composition_guide"] = guide.model_dump(mode="json")
+        material["content_hash"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in material.items() if key != "content_hash"},
+            ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     return material
 
 
@@ -234,8 +255,16 @@ class ProjectPromptService:
         visual = visual or VisualStyle()
         overrides = payload.shot_styles if "shot_styles" in payload.model_fields_set else current.shot_styles
         overrides = overrides or {}
+        mentions = {}
+        for part, text in (("image", image), ("video", video)):
+            key = f"common_{part}_mentions"
+            items = getattr(payload, key)
+            if items is None:
+                items = getattr(current, key)
+            mentions[key] = [item for item in items if f"@{item.label}" in text]
         if ((image, video) == (current.common_image_prompt, current.common_video_prompt)
-                and visual == current.visual_style and overrides == current.shot_styles):
+                and visual == current.visual_style and overrides == current.shot_styles
+                and all(value == getattr(current, key) for key, value in mentions.items())):
             return current
         saved = current.model_copy(
             update={
@@ -243,6 +272,7 @@ class ProjectPromptService:
                 "revision_number": current.revision_number + 1,
                 "common_image_prompt": image,
                 "common_video_prompt": video,
+                **mentions,
                 "visual_style": visual,
                 "visual_style_snapshot": current.visual_style_snapshot if visual == current.visual_style else freeze_style(visual),
                 "shot_styles": overrides,

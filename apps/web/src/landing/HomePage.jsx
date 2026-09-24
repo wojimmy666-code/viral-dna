@@ -221,7 +221,17 @@ export default function HomePage({ loginOpen = false }) {
       <TeamSection />
       <section className="vd-closing vd-section"><h2>灵感，不必停留在脑海。</h2><p>从一条参考视频，或一个想法开始。</p><CreationLink className="vd-button vd-primary" to={loginHref()}>进入创作台<ArrowRight size={24} /></CreationLink></section>
     </main>
-    <footer className="vd-footer"><Link className="vd-brand" to="/" aria-label="返回 ViralDNA 首页"><img src="/favicon.svg" alt="" width="32" height="32" /><span>ViralDNA</span></Link><p>看懂好视频，把创意做成片。</p><a href="#workflow">创作流程</a><CreationLink to={loginHref()}>账户登录</CreationLink><Link to="/admin/login">后台登录</Link><small>本页影像为 AI 视觉示意，非真实客户案例。</small></footer>
+    <footer className="vd-footer">
+      <Link className="vd-brand" to="/" aria-label="返回 ViralDNA 首页"><img src="/favicon.svg" alt="" width="32" height="32" /><span>ViralDNA</span></Link>
+      <p>看懂好视频，把创意做成片。</p>
+      <a href="#workflow">创作流程</a>
+      <CreationLink to={loginHref()}>账户登录</CreationLink>
+      <Link to="/admin/login">后台登录</Link>
+      <small>本页影像为 AI 视觉示意，非真实客户案例。</small>
+      <div className="vd-footer-legal">
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer" title="在新窗口打开工信部备案查询网站">沪ICP备15044279号-7</a>
+      </div>
+    </footer>
     {demo && !loginOpen && <DemoDialog initialScene={sample} onClose={() => setDemo(false)} />}
     {loginOpen && <LoginDialog onClose={closeLogin} />}
   </div>;

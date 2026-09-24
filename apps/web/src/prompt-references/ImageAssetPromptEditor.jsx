@@ -2,18 +2,20 @@ import { forwardRef } from "react";
 import { AssetReferenceEditor } from "./AssetReferenceEditor.jsx";
 import { assetMentionLabel } from "../shot-image-ui.js";
 
-const roles = { person: 'identity', product: 'product', wardrobe: 'wardrobe', scene: 'scene', style: 'style', prop: 'layout' };
+const roles = { person: 'identity', product: 'product', wardrobe: 'wardrobe', clothing: 'wardrobe', scene: 'scene', style: 'style', prop: 'layout' };
 const order = { identity: 0, product: 1, wardrobe: 2, scene: 3, style: 4, layout: 5 };
 
-export const ImageAssetPromptEditor = forwardRef(function ImageAssetPromptEditor({ assets, draft, setDraft, disabled, resolveUrl, onBlur, onAddAssets, sourceFrame, labelledBy, styleControl }, ref) {
+export const ImageAssetPromptEditor = forwardRef(function ImageAssetPromptEditor({ assets, draft, setDraft, disabled, resolveUrl, onBlur, onAddAssets, sourceFrame, labelledBy, styleControl, referenceLimit, inheritedMentions = [] }, ref) {
   const bindings = draft.referenceBindings || [];
   const mentions = draft.imagePromptMentions || [];
   const eligibleIds = new Set(mentions.map((item) => item.reference_asset_id));
-  const ordered = bindings.filter((item) => eligibleIds.has(item.reference_asset_id)).slice().sort((a, b) =>
+  const localIds = new Set(bindings.map(item => item.reference_asset_id));
+  const inheritedBindings = inheritedMentions.filter(item => !localIds.has(item.reference_asset_id)).map(item => ({ reference_asset_id: item.reference_asset_id, role: roles[assets.find(asset => asset.id === item.reference_asset_id)?.type] || 'layout', weight: 1 }));
+  const ordered = [...bindings, ...inheritedBindings].sort((a, b) =>
     (order[a.role] ?? 99) - (order[b.role] ?? 99) || (b.weight ?? 1) - (a.weight ?? 1)
     || String(a.created_at || '').localeCompare(String(b.created_at || '')));
   const numbers = new Map(ordered.map((item, index) => [item.reference_asset_id, index + (sourceFrame ? 2 : 1)]));
-  const options = assets.map((asset) => ({
+  const options = assets.filter((asset) => asset.media_kind !== 'video' && asset.type !== 'logo').map((asset) => ({
     key: asset.id, reference_asset_id: asset.id, label: assetMentionLabel(asset),
     thumbnail_url: asset.thumbnail_url || `/api/v1/references/${asset.id}/thumbnail`,
     description: roles[asset.type] === 'identity' ? '人物身份参考' : asset.description || '画面参考',
@@ -27,11 +29,12 @@ export const ImageAssetPromptEditor = forwardRef(function ImageAssetPromptEditor
   }));
   return <AssetReferenceEditor ref={ref} value={draft.imagePrompt} references={references} options={options}
     styleControl={styleControl}
+    referenceLimit={referenceLimit} reservedReferenceIds={[...bindings.filter((item) => !eligibleIds.has(item.reference_asset_id)).map(item => item.reference_asset_id), ...inheritedMentions.map(item => item.reference_asset_id)]}
     label="局部图片提示词" labelledBy={labelledBy} disabled={disabled} resolveUrl={resolveUrl}
-    onAddAssets={onAddAssets && ((insert) => onAddAssets((asset) => insert({
+    onAddAssets={onAddAssets && ((insert, pickerOptions) => onAddAssets((assets) => insert((Array.isArray(assets) ? assets : [assets]).map((asset) => ({
       key:asset.id, reference_asset_id:asset.id, label:assetMentionLabel(asset),
       thumbnail_url:asset.thumbnail_url, available:true, role:roles[asset.type] || 'layout',
-    }))) }
+    }))), pickerOptions)) }
     indexOffset={sourceFrame ? 1 : 0} onBlur={() => Promise.resolve(onBlur?.()).catch(() => undefined)}
     onChange={(value, nextReferences) => setDraft((current) => {
       const nextIds = new Set(nextReferences.map((item) => item.reference_asset_id));

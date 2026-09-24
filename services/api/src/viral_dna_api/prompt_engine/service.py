@@ -38,8 +38,9 @@ def _initial_revision_id(package_id: UUID) -> UUID:
 
 
 class PromptDraftService:
-    def __init__(self, repository: PromptDraftRepository) -> None:
+    def __init__(self, repository: PromptDraftRepository, asset_library=None) -> None:
         self.repository = repository
+        self.asset_library = asset_library
 
     async def _report(self, analysis_id: UUID) -> AnalysisReport:
         report = await self.repository.get_report_by_analysis(analysis_id)
@@ -138,6 +139,19 @@ class PromptDraftService:
             raise PromptDraftServiceError(404, "prompt_shot_not_found", "分镜不存在")
         for shot_id, draft in updates.items():
             self._validate_draft(shot_id, draft, report)
+            if draft.asset_mentions:
+                if self.asset_library is None:
+                    raise PromptDraftServiceError(422, "prompt_assets_unavailable", "资产库尚未启用")
+                from ..asset_library import AssetLibraryError
+                for mention in draft.asset_mentions:
+                    try:
+                        asset = await self.asset_library.get_asset(mention.reference_asset_id)
+                    except AssetLibraryError as exc:
+                        raise PromptDraftServiceError(422, "prompt_asset_unavailable", "引用资产不属于当前账户或已不可用") from exc
+                    if asset.archived_at or not asset.rights_confirmed or asset.media_kind != "image" or asset.type == "logo":
+                        raise PromptDraftServiceError(422, "prompt_asset_unavailable", "请引用已授权且未归档的图片资产，Logo 使用专用入口")
+                compiled = compile_prompt_draft(draft, package.target_model)
+                draft.asset_mentions = [item for item in draft.asset_mentions if f"@{item.label}" in compiled]
             language_issues = find_prompt_draft_language_issues(draft)
             if language_issues:
                 raise PromptDraftServiceError(

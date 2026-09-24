@@ -9,11 +9,13 @@ export function promptDocumentBody(document) {
     expected_token: document.token,
     common_image_prompt: document.common_image_prompt,
     common_video_prompt: document.common_video_prompt,
+    ...(Object.hasOwn(document, 'common_image_mentions') ? { common_image_mentions: document.common_image_mentions, common_video_mentions: document.common_video_mentions } : {}),
     shots: document.shots.map(shot => ({
       id: shot.id,
-      images: shot.images.map(({ id, prompt, negative_constraints }) => ({ id, prompt, negative_constraints })),
+      images: shot.images.map(({ id, prompt, negative_constraints, mentions }) => ({ id, prompt, negative_constraints, ...(mentions ? { mentions } : {}) })),
       video_prompt: shot.video_prompt,
       video_negative_constraints: shot.video_negative_constraints,
+      ...(shot.video_mentions ? { video_mentions: shot.video_mentions } : {}),
     })),
   };
 }

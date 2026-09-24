@@ -102,11 +102,13 @@ function StylePicker({ catalog, loading, error: loadError, onReload, initial, al
   </dialog>, document.body);
 }
 
-export function VisualStyleControl({ value = ORIGINAL_STYLE, snapshot, inheritedSnapshot, request, onChange, onPending, onAvailable, disabled = false, label = "风格", allowInherit = false, part }) {
+export function VisualStyleControl({ value = ORIGINAL_STYLE, snapshot, inheritedSnapshot, request, onChange, onPending, onAvailable, disabled = false, label = "风格", allowInherit = false, part, renderLayout }) {
+  const controlRef = useRef(null);
   const callbacks = useRef({ onChange, onPending, onAvailable });
   callbacks.current = { onChange, onPending, onAvailable };
   const [catalog, setCatalog] = useState(null), [error, setError] = useState("");
   const [loading, setLoading] = useState(true), [reload, setReload] = useState(0), [open, setOpen] = useState(false), [pending, setPending] = useState(false);
+  const [restoreFocus, setRestoreFocus] = useState(false);
   const alive = useRef(false);
   useEffect(() => { alive.current = true; return () => { alive.current = false; callbacks.current.onPending?.(false); }; }, []);
   useEffect(() => {
@@ -121,7 +123,7 @@ export function VisualStyleControl({ value = ORIGINAL_STYLE, snapshot, inherited
     return () => { active = false; };
   }, [request, reload]);
   async function apply(next, compiled) {
-    setPending(true); callbacks.current.onPending?.(true);
+    setError(""); setPending(true); callbacks.current.onPending?.(true);
     try { await callbacks.current.onChange?.(next, compiled); }
     finally { if (alive.current) { setPending(false); callbacks.current.onPending?.(false); } }
   }
@@ -130,21 +132,33 @@ export function VisualStyleControl({ value = ORIGINAL_STYLE, snapshot, inherited
   const selected = hasVisualStyle(value) || (value === null && effective?.label);
   const name = effective?.label || known?.name || (value?.catalog_id ? "已选风格" : "原有风格");
   const showPicker = () => { setOpen(true); setReload(count => count + 1); };
-  return <div className="visual-style-control" aria-label={label}>
-    <div className="visual-style-row">
-      <Button variant="quiet" size="compact" icon={<Palette size={18} />} disabled={disabled || pending} onClick={showPicker} aria-haspopup="dialog">{label}</Button>
-      {selected && <div className="style-selected">
-        <button data-ui="style-thumbnail" className="style-selected-choice" type="button" disabled={disabled || pending} onClick={showPicker} aria-label={`更换${label}：${name}`} title={name}>
-          <StyleCover src={effective?.cover_url || known?.cover_url} name="" /><span className="style-selected-kind">风格</span>
+  const focusTrigger = () => { if (alive.current) setRestoreFocus(true); };
+  useEffect(() => {
+    if (!restoreFocus || open || pending) return;
+    // Wait for the saved selection and enabled controls to commit, and for the
+    // dialog cleanup to finish, before focusing the replacement entry.
+    controlRef.current?.querySelector('[aria-haspopup="dialog"]:not(:disabled)')?.focus({ preventScroll: true });
+    setRestoreFocus(false);
+  }, [restoreFocus, open, pending]);
+  const closePicker = () => { setOpen(false); focusTrigger(); };
+  const trigger = !selected && <Button variant="quiet" size="compact" icon={<Palette size={18} />} disabled={disabled || pending} onClick={showPicker} aria-haspopup="dialog" aria-expanded={open}>{label}</Button>;
+  const thumbnail = selected && <div className="style-selected">
+        <button data-ui="style-thumbnail" className="style-selected-choice" type="button" disabled={disabled || pending} onClick={showPicker} aria-haspopup="dialog" aria-expanded={open} aria-label={`更换${label}：${name}`} title={name}>
+          <StyleCover src={effective?.cover_url || known?.cover_url} name="" />
+          <span className="style-selected-name">{name}</span>
+          <span className="style-selected-replace" aria-hidden="true">替换</span>
         </button>
-        <span className="style-selected-name">{name}{value === null && <small>继承整片</small>}</span>
-        <IconButton label={`移除${label}`} size="compact" disabled={disabled || pending} onClick={() => { void apply(ORIGINAL_STYLE, {}).catch(failure => setError(failure.message)); }}><X size={16} /></IconButton>
-      </div>}
+        <IconButton className="style-selected-remove" variant="quiet" label={`移除${label}：${name}`} size="compact" disabled={disabled || pending} onClick={() => { void apply(ORIGINAL_STYLE, {}).then(focusTrigger).catch(failure => setError(failure.message || "风格移除失败，请重试")); }}><span className="style-selected-remove-mark"><X size={16} /></span></IconButton>
+        {value === null && <small className="visual-style-status">继承整片</small>}
+      </div>;
+  const status = <>
       {!selected && allowInherit && value === null && <span className="visual-style-status">继承整片</span>}
       {pending && <span className="visual-style-status" role="status">正在保存风格…</span>}
-    </div>
+    </>;
+  return <div ref={controlRef} className="visual-style-control" aria-label={label}>
+    {renderLayout ? renderLayout({ trigger, thumbnail, status }) : <div className="visual-style-row">{trigger}{thumbnail}{status}</div>}
     {error && !open && <p role="alert" className="visual-style-error">{error}<Button variant="text" size="compact" onClick={showPicker}>重新读取</Button></p>}
     {open && <StylePicker catalog={catalog} loading={loading} error={error} onReload={() => setReload(count => count + 1)} initial={value}
-      allowInherit={allowInherit} inheritedSnapshot={inheritedSnapshot} part={part} onApply={apply} onClose={() => setOpen(false)} request={request} onCatalogChange={setCatalog} />}
+      allowInherit={allowInherit} inheritedSnapshot={inheritedSnapshot} part={part} onApply={apply} onClose={closePicker} request={request} onCatalogChange={setCatalog} />}
   </div>;
 }

@@ -8,7 +8,7 @@ import {
 export function VideoPromptReferenceEditor({
   assets, depthAssets, managedAssetBinding, onBlur, onChange, referenceFrames, resolveUrl,
   selectedReferences = [], value, videoPromptMentions = [], videoReferenceBindings,
-  onAddAssets, disabled = false, styleControl,
+  onAddAssets, disabled = false, styleControl, referenceLimit, inheritedMentions = [],
 }) {
   const options = useMemo(() => buildVideoReferenceOptions({
     assets, depthAssets, managedAssetBinding, referenceFrames, videoReferenceBindings,
@@ -27,16 +27,18 @@ export function VideoPromptReferenceEditor({
   }));
   return <AssetReferenceEditor label="视频提示词" rows={7} value={value}
     styleControl={styleControl}
+    referenceLimit={referenceLimit}
+    reservedReferenceIds={[...selectedReferences.filter((item) => item.reference_kind !== 'reference_video' && !videoPromptMentions.some((mention) => videoReferenceKey(mention) === videoReferenceKey(item))).map(item => item.reference_id), ...inheritedMentions.map(item => item.reference_id)]}
     references={references} options={choices} resolveUrl={resolveUrl} onBlur={onBlur}
-    onAddAssets={onAddAssets && ((insert) => onAddAssets((asset) => insert(
-      buildVideoReferenceOptions({ assets:[asset] })[0],
-    ))) } disabled={disabled}
+    onAddAssets={onAddAssets && ((insert, pickerOptions) => onAddAssets((assets) => insert(
+      buildVideoReferenceOptions({ assets: Array.isArray(assets) ? assets : [assets] }),
+    ), pickerOptions)) } disabled={disabled}
     placeholder="描述视频；输入 @ 引用已采用分镜图或项目已选素材"
     onChange={(nextValue, nextReferences) => {
       const nextMentions = normalizeVideoPromptMentions(nextValue, nextReferences.map((item, index) => ({
         reference_kind: item.reference_kind, reference_id: item.reference_id, label: item.label,
         role: item.role, order: index + 1,
-      })), options);
+      })), [...options, ...nextReferences]);
       const retained = new Set(nextMentions.map(videoReferenceKey));
       const removedKeys = new Set(videoPromptMentions.filter((item) => !retained.has(videoReferenceKey(item))).map(videoReferenceKey));
       const removedReferences = selectedReferences.filter((item) => removedKeys.has(videoReferenceKey(item)));

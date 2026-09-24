@@ -32,6 +32,15 @@ test("public presentation is explicit, illustrative, accessible and not a privat
   assert.match(home, /画面暂时不可用/);
 });
 
+test("public footer displays the supplied ICP number as a safe official registry link", () => {
+  const footer = home.match(/<footer className="vd-footer">([\s\S]*?)<\/footer>/)?.[1];
+  assert.ok(footer, "public footer is present without an account request");
+  assert.equal((footer.match(/沪ICP备15044279号-7/g) || []).length, 1);
+  assert.match(footer, /<a href="https:\/\/beian\.miit\.gov\.cn\/" target="_blank" rel="noopener noreferrer"[^>]*>沪ICP备15044279号-7<\/a>/);
+  assert.match(footer, /<div className="vd-footer-legal">[\s\S]*<\/div>\s*$/);
+  assert.match(styles, /\.vd-footer-legal\s*\{[^}]*text-align: center/);
+});
+
 test("real film keeps three complete shots and uses frame-accurate chapter boundaries", () => {
   assert.equal(FILM_SCENES.length, 3);
   assert.deepEqual(FILM_SCENES.map(scene => scene.label), ["光线唤醒", "材质特写", "英雄定格"]);

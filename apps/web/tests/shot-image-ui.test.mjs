@@ -76,9 +76,100 @@ const imageControlStyles = readFileSync(
 test("image entry is a one-adopted-picture action without a required-shot checkbox", () => {
   assert.doesNotMatch(shotImageSource, /必需分镜|未确认时阻止|shot-required-check|draft\.required/);
   assert.match(shotImageSource, /已采用 \{gate\?\.approved_image_count \|\| 0\} 张/);
-  assert.match(shotImageSource, /disabled=\{busy \|\| !gate\?\.allowed\}/);
+  assert.match(shotImageSource, /disabled=\{busy \|\| !gate\}/);
+  assert.doesNotMatch(shotImageSource, /gate\?\.blocker_messages|shot-gate-message|上游内容已更新，已有图片仍可继续使用/);
+  assert.match(shotImageSource, /advanceFeedback && <p className="shot-gate-feedback"[^>]+role="alert"/);
   assert.doesNotMatch(shotImageSource, /确认图片，进入|advanced/);
   assert.match(productionWorkflowSource, /gate=\{gate\?\.current_step === "shot_images" \? gate : null\}/);
+});
+
+function advanceFixture({ allowed = false, blockers, saveError = false, readError = false, approve = true } = {}) {
+  const ast = parse(productionWorkflowSource, { sourceType: "module", plugins: ["jsx"] });
+  const component = ast.program.body.find(node => node.declaration?.id?.name === "ProductionHub").declaration;
+  const events = [], notices = [], feedback = [], errors = [], gates = [];
+  const imageGate = { current_step: "shot_images", allowed, approved_image_count: allowed ? 1 : 0, blocker_messages: blockers };
+  const scope = {
+    detail: { project: { id: "project" } }, selectedShotId: "shot", selectedVisualBeatId: "beat",
+    shotCache: { current: new Map() }, setBusy: value => events.push(["busy", value]), setActionError: value => errors.push(value),
+    setImageGateFeedback: value => feedback.push(value), setGate: value => gates.push(value),
+    flushWorkspace: async () => { events.push(["save"]); if (saveError) throw new Error("保存失败"); },
+    productionGateStatusPath: (id, step) => `/productions/${id}/gate-status?step=${step}`,
+    request: async (path, options) => {
+      events.push(["request", path, options?.body && JSON.parse(options.body)]);
+      if (readError) throw new Error("网络读取失败");
+      if (path.includes("gate-status")) return imageGate;
+      return { project: { current_revision_id: "saved-revision" } };
+    },
+    workflow: { imagesApproved: false, onAdvance: async step => { events.push(["approval", step]); return approve; } },
+    refreshProject: async (...args) => events.push(["refresh", ...args]), onProjectsChanged: async () => {},
+    setActiveSection: step => events.push(["section", step]), updateLocation: value => events.push(["location", value]),
+    onNotice: value => notices.push(value),
+  };
+  for (const name of ["executeAction", "advanceWorkflow"]) {
+    const handler = component.body.body.find(node => node.id?.name === name);
+    scope[name] = new Function("scope", `with(scope) { return (${productionWorkflowSource.slice(handler.start, handler.end)}); }`)(scope);
+  }
+  return { run: scope.advanceWorkflow, events, notices, feedback, errors, gates };
+}
+
+test("image advance checks the server only on intent and reports blockers inline without entering video", async () => {
+  for (const blockers of [undefined, ["请至少采用一张分镜图"], ["有任务仍在进行", "请稍后重试"]]) {
+    const fixture = advanceFixture({ blockers });
+    assert.deepEqual(fixture.feedback, []);
+    await fixture.run();
+    assert.deepEqual(fixture.feedback, [null, { projectId: "project", message: blockers?.join("；") || "请至少采用一张分镜图" }]);
+    assert.deepEqual(fixture.notices, []);
+    assert.deepEqual(fixture.errors, [""]);
+    assert.deepEqual(fixture.events.filter(([name]) => name === "request").map(([, path]) => path), ["/productions/project/gate-status?step=shot_images"]);
+    assert.ok(!fixture.events.some(([name]) => ["approval", "section", "location"].includes(name)));
+  }
+});
+
+test("allowed image advance still saves, obtains approval and enters using the latest revision", async () => {
+  const fixture = advanceFixture({ allowed: true });
+  await fixture.run();
+  assert.deepEqual(fixture.feedback, [null]);
+  assert.deepEqual(fixture.events.slice(1, 6), [
+    ["save"], ["request", "/productions/project/gate-status?step=shot_images", undefined],
+    ["approval", "shot_images"], ["request", "/productions/project", undefined],
+    ["request", "/productions/project/video-stage/enter", { expected_revision_id: "saved-revision" }],
+  ]);
+  assert.deepEqual(fixture.notices, ["已进入分镜视频"]);
+  const declined = advanceFixture({ allowed: true, approve: false });
+  await declined.run();
+  assert.ok(!declined.events.some(([, path]) => path?.includes?.("video-stage/enter")));
+});
+
+test("image advance keeps real save and network failures visible instead of treating them as adoption hints", async () => {
+  for (const failure of [{ saveError: true }, { readError: true }]) {
+    const fixture = advanceFixture(failure);
+    await fixture.run();
+    assert.deepEqual(fixture.feedback, [null]);
+    assert.equal(fixture.errors.length, 2);
+    assert.equal(fixture.notices[0].type, "error");
+    assert.ok(!fixture.events.some(([name]) => name === "section"));
+    assert.deepEqual(fixture.events.at(-1), ["busy", false]);
+  }
+});
+
+test("image gate feedback clears on adoption and resets with its project or stage", () => {
+  const ast = parse(productionWorkflowSource, { sourceType: "module", plugins: ["jsx"] });
+  const component = ast.program.body.find(node => node.declaration?.id?.name === "ProductionHub").declaration;
+  const effects = component.body.body.filter(node => node.expression?.callee?.name === "useEffect")
+    .map(node => node.expression.arguments).filter(([callback]) => productionWorkflowSource.slice(callback.start, callback.end).includes("setImageGateFeedback"));
+  assert.equal(effects.length, 2);
+  const resets = [];
+  const scope = { gate: { current_step: "shot_images", allowed: false }, setImageGateFeedback: value => resets.push(value) };
+  for (const [callback, dependencies] of effects) {
+    const execute = new Function("scope", `with(scope) { return (${productionWorkflowSource.slice(callback.start, callback.end)}); }`)(scope);
+    if (dependencies.elements.length === 1) {
+      execute(); assert.equal(resets.length, 0);
+      scope.gate.allowed = true; execute(); assert.deepEqual(resets, [null]);
+    } else {
+      assert.deepEqual(dependencies.elements.map(item => item.name), ["selectedProjectId", "activeSection"]);
+      execute(); resets.length = 0;
+    }
+  }
 });
 
 test("shows directory and asset name while keeping the reference id stable", () => {

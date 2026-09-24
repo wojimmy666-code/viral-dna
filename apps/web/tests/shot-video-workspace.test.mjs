@@ -1054,15 +1054,14 @@ test("binds readable prompt mentions to stable multimodal reference ids", () => 
   assert.match(workspaceSource, /intentRequirementsNeedAssets/);
   assert.match(workspaceSource, /仍有创作意图需要人工确认/);
   assert.match(creativeIntentMentionEditorSource, /buildVideoReferenceOptions/);
-  assert.match(creativeIntentMentionEditorSource, /从托管资产目录选择/);
+  assert.match(creativeIntentMentionEditorSource, /onAddManagedAssets/);
   assert.match(creativeIntentMentionEditorSource, /onRequestManagedAssetMention/);
   assert.match(workspaceSource, /buildManagedAssetReferenceOption\(savedBinding\)/);
   assert.match(workspaceSource, /pendingManagedAssetMentionRef/);
   assert.doesNotMatch(creativeIntentPanelSource, /interpretation\.summary/);
   assert.doesNotMatch(creativeIntentPanelSource, /creative-intent-result-copy/);
-  assert.match(creativeIntentMentionEditorSource, /deleteVideoMentionAtSelection/);
-  assert.match(creativeIntentMentionEditorSource, /event\.nativeEvent\?\.isComposing/);
-  assert.match(creativeIntentMentionEditorSource, /createPortal\(menu, document\.body\)/);
+  assert.match(creativeIntentMentionEditorSource, /<AssetReferenceEditor/);
+  assert.match(creativeIntentMentionEditorSource, /onAddAssets/);
   assert.match(creativeIntentMentionEditorSource, /explicit|失效|invalidMentions/);
   assert.match(generationDraftSource, /intent_mentions/);
   assert.match(videoPromptReferencePolicySource, /复制可编辑提示词/);

@@ -5,8 +5,10 @@ import { combinePrompt, createGlobalPromptSession } from "./global-prompt-sessio
 import "./prompt-context.css";
 import { VisualStyleControl } from "../visual-styles/VisualStyleControl.jsx";
 import { styleRecoverySummary } from "../visual-styles/visual-style.js";
+import { AssetReferenceEditor } from '../prompt-references/AssetReferenceEditor.jsx';
+import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 
-export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path, part = "both", request, disabled = false, onChange, shotKey, hideShotStyle = false }, ref) {
+export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path, part = "both", request, disabled = false, onChange, shotKey, hideShotStyle = false, assets = [], onAddAssets, resolveUrl }, ref) {
   const callbacks = useRef({ request, onChange });
   callbacks.current = { request, onChange };
   const session = useRef(null);
@@ -44,7 +46,7 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
         if (cached && typeof cached.common_image_prompt === "string" && typeof cached.common_video_prompt === "string") {
           // Never silently apply a recovered draft against a different revision.
           if (cached.expected_revision_id === initial.id) {
-            next.edit("image", cached.common_image_prompt); next.edit("video", cached.common_video_prompt);
+            next.edit("image", cached.common_image_prompt, cached.common_image_mentions); next.edit("video", cached.common_video_prompt, cached.common_video_mentions);
             next.restoreStyles(cached);
             timer.current = window.setTimeout(() => void next.flush(), 900);
           } else {
@@ -70,7 +72,13 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
     session.current.editStyle(value, compiled, key);
     if (!await session.current.flush()) throw new Error(session.current.snapshot().error || "风格保存失败，请重试");
   }
-  useImperativeHandle(ref, () => ({ flush, applyStyle }), [error, disabled]);
+  useImperativeHandle(ref, () => ({ flush, applyStyle, async refresh() {
+    const currentSession = session.current;
+    if (!currentSession || !await flush()) return false;
+    const next = await callbacks.current.request(path);
+    if (currentSession !== session.current || !currentSession.acceptRevision(next)) return false;
+    return true;
+  } }), [error, disabled, path]);
   useEffect(() => {
     const beforeUnload = event => { if (session.current?.snapshot().dirty || Object.values(stylePending.current).some(Boolean)) { event.preventDefault(); event.returnValue = ""; } };
     const refresh = () => { if (!session.current?.snapshot().dirty && !recoveryRef.current && !Object.values(stylePending.current).some(Boolean)) setReload(value => value + 1); };
@@ -82,16 +90,16 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
     const cached = recoveryRef.current;
     recoveryRef.current = null; setRecovery(null); setError("");
     if (useLocal && cached) {
-      session.current.edit("image", cached.common_image_prompt);
-      session.current.edit("video", cached.common_video_prompt);
+      session.current.edit("image", cached.common_image_prompt, cached.common_image_mentions);
+      session.current.edit("video", cached.common_video_prompt, cached.common_video_mentions);
       session.current.restoreStyles(cached);
       timer.current = window.setTimeout(() => void flush(), 900);
     } else {
       try { localStorage.removeItem(cacheKey); } catch { /* Optional cache. */ }
     }
   }
-  function edit(type, value) {
-    session.current?.edit(type, value);
+  function edit(type, value, references) {
+    session.current?.edit(type, value, promptMentionData(references, type));
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => void flush(), 900);
   }
@@ -109,7 +117,13 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
         {shotKey && !hideShotStyle && <VisualStyleControl key={shotKey} label="本镜风格" part={part} allowInherit value={state.values.shot_styles[shotKey] ?? null} snapshot={state.values.shot_style_snapshots[shotKey]} inheritedSnapshot={state.values.visual_style_snapshot} request={request} disabled={disabled || Boolean(recovery)} onChange={(value, compiled) => applyStyle(value, compiled, shotKey)} onPending={value => { stylePending.current.shot = value; }} />}
       </div>}
       <div className={`global-prompt-fields ${parts.length === 2 ? "is-paired" : ""}`}>
-        {parts.map(type => <label key={type}>{parts.length === 2 && <span>{type === "image" ? "图片" : "视频"}提示词</span>}<textarea aria-label={`全局${type === "image" ? "图片" : "视频"}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ""} placeholder="可留空；只填写整片共同要求" onBlur={() => void flush()} onChange={event => edit(type, event.target.value)} /></label>)}
+        {parts.map(type => {
+          const options = assets.map(asset => promptAssetReference(asset, type));
+          const references = (state?.values[`common_${type}_mentions`] || []).map(mention => ({ ...options.find(option => (option.reference_asset_id || option.reference_id) === (mention.reference_asset_id || mention.reference_id)), ...mention }));
+          return <div key={type}>{parts.length === 2 && <span>{type === 'image' ? '图片' : '视频'}提示词</span>}<AssetReferenceEditor label={`全局${type === 'image' ? '图片' : '视频'}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ''} references={references} options={options} resolveUrl={resolveUrl}
+            onAddAssets={onAddAssets && ((insert, pickerOptions) => onAddAssets(selected => insert(selected.map(asset => promptAssetReference(asset, type))), pickerOptions))}
+            placeholder="可留空；输入 @ 引用整片共同资产" onBlur={() => void flush()} onChange={(value, refs) => edit(type, value, refs)} /></div>;
+        })}
       </div>
     </details>
     {(error || state?.error) && <div className="prompt-context-error" role="alert"><span>{error || state.error}</span>{!recovery && <><Button className="text-button" type="button" onClick={() => state ? void flush() : setReload(value => value + 1)}>重试保存</Button><Button className="text-button" type="button" onClick={() => setReload(value => value + 1)}>重新加载并核对</Button></>}</div>}

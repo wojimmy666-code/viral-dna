@@ -135,6 +135,43 @@ test("public homepage: privacy boundary, responsive UI, keyboard controls and lo
       await browser.viewport(1536, 1024);
       await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
     });
+    await t.test("ICP filing link is centered at the footer bottom and keyboard accessible on desktop and mobile", async () => {
+      for (const width of [1440, 390, 320]) {
+        await load("/", width, width === 1440 ? 960 : 844);
+        await evaluate("document.querySelector('.vd-footer').scrollIntoView({block:'end',behavior:'instant'})");
+        const filing = await evaluate(`(() => {
+          const footer = document.querySelector('.vd-footer'), row = footer.querySelector('.vd-footer-legal'), link = row.querySelector('a');
+          const bounds = link.getBoundingClientRect(), footerBounds = footer.getBoundingClientRect();
+          const style = getComputedStyle(link);
+          const luminance = color => color.match(/[\\d.]+/g).slice(0,3).map(Number).map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4).reduce((sum, value, index) => sum + value * [.2126,.7152,.0722][index], 0);
+          const foreground = luminance(style.color), background = luminance(getComputedStyle(document.querySelector('.vd-home')).backgroundColor);
+          return {
+            text: link.textContent, href: link.href, target: link.target, rel: link.rel,
+            centerOffset: Math.abs(bounds.left + bounds.width / 2 - footerBounds.left - footerBounds.width / 2),
+            height: bounds.height, visible: bounds.top >= 0 && bounds.bottom <= innerHeight,
+            last: [...footer.children].filter(child => child !== row).every(child => child.getBoundingClientRect().bottom <= bounds.top),
+            overflow: document.documentElement.scrollWidth > innerWidth,
+            contrast: (Math.max(foreground, background) + .05) / (Math.min(foreground, background) + .05),
+          };
+        })()`);
+        assert.equal(filing.text, "沪ICP备15044279号-7");
+        assert.equal(filing.href, "https://beian.miit.gov.cn/");
+        assert.equal(filing.target, "_blank");
+        assert.equal(filing.rel, "noopener noreferrer");
+        assert.ok(filing.centerOffset <= 1, `centered at ${width}px`);
+        assert.ok(filing.height >= 44, `touch target at ${width}px`);
+        assert.ok(filing.visible && filing.last && !filing.overflow, `bottom row fits at ${width}px`);
+        assert.ok(filing.contrast >= 4.5, `readable contrast at ${width}px`);
+        await shot(`icp-footer-${width}`);
+        await evaluate("document.querySelector('.vd-footer > a[href=\"/admin/login\"]').focus()");
+        await key("Tab");
+        assert.equal(await evaluate("document.activeElement === document.querySelector('.vd-footer-legal a')"), true);
+        assert.equal(await evaluate("getComputedStyle(document.activeElement).outlineStyle"), "solid");
+        assert.ok(await evaluate("parseFloat(getComputedStyle(document.activeElement).outlineWidth) >= 2"));
+      }
+      assert.deepEqual(requests.filter(path => path.startsWith("/api/")), []);
+      await load();
+    });
     await t.test("samples, pause, dialog, focus restoration and workflow keyboard navigation", async () => {
       await click('[aria-label="查看材质特写"]');
       await ready("document.querySelector('.vd-hero video').currentTime >= 121 / 24 && !document.querySelector('.vd-hero video').paused");

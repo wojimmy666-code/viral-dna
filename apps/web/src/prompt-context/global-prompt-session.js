@@ -1,6 +1,7 @@
 function promptValues(revision) {
   return {
     common_image_prompt: revision.common_image_prompt, common_video_prompt: revision.common_video_prompt,
+    ...(Object.hasOwn(revision, 'common_image_mentions') ? { common_image_mentions: revision.common_image_mentions || [], common_video_mentions: revision.common_video_mentions || [] } : {}),
     ...(Object.hasOwn(revision, "visual_style") ? {
       visual_style: revision.visual_style, visual_style_snapshot: revision.visual_style_snapshot || {},
       shot_styles: revision.shot_styles || {}, shot_style_snapshots: revision.shot_style_snapshots || {},
@@ -20,7 +21,11 @@ export function createGlobalPromptSession(initial, { save, onChange }) {
   const notify = () => onChange?.(snapshot());
   return {
     snapshot,
-    edit(part, value) { values = { ...values, [`common_${part}_prompt`]: value }; edited++; status = "dirty"; error = ""; notify(); },
+    acceptRevision(next) {
+      if (pending || edited !== saved) return false;
+      revision = next; values = promptValues(next); error = ''; status = 'saved'; notify(); return true;
+    },
+    edit(part, value, mentions) { values = { ...values, [`common_${part}_prompt`]: value, ...(mentions ? { [`common_${part}_mentions`]: mentions } : {}) }; edited++; status = "dirty"; error = ""; notify(); },
     restoreStyles(cached) {
       if (!Object.hasOwn(cached, "visual_style") || !Object.hasOwn(initial, "visual_style")) return;
       const restored = promptValues(cached);

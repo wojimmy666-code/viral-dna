@@ -18,7 +18,8 @@ from .image_generation.selection import (
     resolve_skill_image_request,
 )
 from .models import ImageGenerationCreate, ProductionOriginType, utc_now
-from .project_prompts import prompt_snapshot
+from .project_prompts import image_prompt_snapshot
+from .composition import guide_matches_aspect, effective_composition
 
 ACTIVE = {"queued", "running", "cancellation_requested"}
 SUCCESS = {"completed", "cached"}
@@ -163,7 +164,7 @@ class ImageBatchService:
                     shot_index=plan.index,
                     beat_index=beat.index,
                     input_fingerprint=fingerprint,
-                    prompt_snapshot=prompt_snapshot(beat.image_prompt, prompt_context, "image", shot_key=str(plan.id)),
+                    prompt_snapshot=image_prompt_snapshot(beat.image_prompt, prompt_context, project_id=project.id, shot_key=str(plan.id), beat_id=beat.id),
                 )
                 picture_runs = [
                     run
@@ -196,15 +197,19 @@ class ImageBatchService:
                     item.status = "skipped"
                 else:
                     message = ""
+                    composition = effective_composition(prompt_context, project.id, beat.id)
+                    reference_count = len(picture_bindings) + bool(composition)
                     if not beat.image_prompt.strip():
                         message = "请先填写图片提示词"
+                    elif composition and not guide_matches_aspect(composition, project.output_width, project.output_height):
+                        message = "画幅已改变，请重新确认构图引导"
                     elif count > option.capabilities.max_candidates:
                         message = "单画面候选数超过当前模型上限"
-                    elif picture_bindings and not option.capabilities.image_to_image:
+                    elif reference_count and not option.capabilities.image_to_image:
                         message = "当前模型不支持参考图片，请调整本画面的模型或参考素材"
-                    elif len(picture_bindings) > option.capabilities.max_reference_images:
+                    elif reference_count > min(option.capabilities.max_reference_images, option.capabilities.max_input_images):
                         message = (
-                            f"本画面绑定 {len(picture_bindings)} 项参考，"
+                            f"本画面需要 {reference_count} 项参考（含构图引导），"
                             f"模型最多支持 {option.capabilities.max_reference_images} 项"
                         )
                     elif any(

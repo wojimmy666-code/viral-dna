@@ -54,6 +54,7 @@ class AnalysisProductionSeedBuilder:
         fps: int = 30,
     ) -> ProductionSeed:
         prompt_shots = {item.shot_id: item for item in report.prompt_package.shots}
+        references = {item.reference_asset_id: item for shot in prompt_shots.values() if shot.draft for item in shot.draft.asset_mentions}
         shots: list[ProductionSeedShot] = []
         for order, shot in enumerate(sorted(report.shots, key=lambda item: item.index), start=1):
             prompt_shot = prompt_shots.get(shot.id)
@@ -85,6 +86,8 @@ class AnalysisProductionSeedBuilder:
                 "output_mode": "image_to_video",
                 "source_keyframe_url": shot.keyframe_url,
             }
+            if prompt_shot and prompt_shot.draft and prompt_shot.draft.asset_mentions:
+                shot_payload["image_asset_usage_ids"] = [item.reference_asset_id for item in prompt_shot.draft.asset_mentions]
             shot_payload["input_hash"] = canonical_digest(shot_payload)
             shots.append(ProductionSeedShot.model_validate(shot_payload))
         payload: dict[str, Any] = {
@@ -104,7 +107,7 @@ class AnalysisProductionSeedBuilder:
             "source_analysis_id": report.analysis_id,
             "source_prompt_package_id": report.prompt_package.id,
             "style_bible_snapshot": {},
-            "reference_assets": [],
+            "reference_assets": [ProductionSeedReference(id=item.reference_asset_id, asset_id=item.reference_asset_id, name=item.label[:120], role="reference", media_kind="image", rights_status="confirmed") for item in references.values()],
             "shots": shots,
             "audio_intent": ProductionSeedAudioIntent(
                 clip_audio_strategy="source",

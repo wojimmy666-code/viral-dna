@@ -9,7 +9,7 @@ import { localBrowser } from "./helpers/local-browser.mjs";
 test("reference creation and explicit generated-image editing work without source footage", { timeout: 90000 }, async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const bundle = await build({ absWorkingDir: root, bundle: true, write: false, outfile: "fixture.js", format: "esm", platform: "browser", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' }, stdin: { resolveDir: root, loader: "jsx", contents: `
-    import React,{useState} from 'react'; import {createRoot} from 'react-dom/client';
+    import React,{useEffect,useState} from 'react'; import {createRoot} from 'react-dom/client';
     import {ShotImageWorkspace} from './src/ShotImageWorkspace.jsx';
     import './src/styles.css'; import './src/production-workflow.css';
     const preview='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#dad4f5"/></svg>');
@@ -20,12 +20,16 @@ test("reference creation and explicit generated-image editing work without sourc
     const settings={enabled:true,supports_candidate_base_image:true,api_key_configured:true,allow_local_tool:false,execution_mode:'remote_api',remote_model_alias:'fixture',models:[{alias:'fixture',label:'验收模型',capabilities:{text_to_image:true,image_to_image:true,multi_reference:true,max_input_images:5,max_reference_images:4,max_candidates:4,maximum_width:2048,maximum_height:2048,maximum_pixels:4194304}}]};
     function Fixture(){
       const [draft,setDraft]=useState(initialDraft),[inputMode,setMode]=useState('keyframe_edit'),[base,setBase]=useState(''),[source,setSource]=useState(false),[available,setAvailable]=useState(true);
+      const [adopted,setAdopted]=useState(false),[advanceFeedback,setAdvanceFeedback]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('');
+      window.adoptImage=setAdopted; window.changeBusy=setBusy; window.changeError=setError;
+      useEffect(()=>{if(adopted)setAdvanceFeedback('');},[adopted]);
+      const gate={current_step:'shot_images',allowed:adopted,approved_image_count:adopted?1:0,blocker_messages:adopted?[]:['请至少采用一张分镜图']};
       window.changeRefs=count=>setDraft({...initialDraft,imagePrompt:count?initialDraft.imagePrompt:'巴黎街头的完整画面',referenceBindings:initialDraft.referenceBindings.slice(0,count),imagePromptMentions:initialDraft.imagePromptMentions.slice(0,count)});
       window.changeSource=setSource;window.changeAvailable=setAvailable;
-      const beat={id:'beat',index:1,duration_seconds:1.5,image_prompt:draft.imagePrompt,image_prompt_mentions:draft.imagePromptMentions,image_status:'ready',source_frame_url:source?preview:null};
+      const beat={id:'beat',index:1,duration_seconds:1.5,image_prompt:draft.imagePrompt,image_prompt_mentions:draft.imagePromptMentions,image_status:'ready',image_inputs_changed:true,source_frame_url:source?preview:null};
       const plan={id:'shot',index:1,source_kind:'blank',image_status:'ready',output_mode:'image_to_video',start_seconds:0,end_seconds:1.5,duration_seconds:1.5,visual_beats:[beat],lifecycle_status:'active',image_prompt:draft.imagePrompt};
       const runs=[{id:'run',kind:'image',visual_beat_id:'beat',execution_mode:'remote_api',status:'completed',model:'fixture',candidates:available?[{id:'candidate',ordinal:1,status:'ready',content_url:preview,thumbnail_url:preview}]:[]}];
-      return <ShotImageWorkspace shots={[{plan}]} shotDetail={{plan,generation_runs:runs}} selectedShotId="shot" selectedVisualBeatId="beat" draft={draft} setDraft={setDraft} assets={[person,wardrobe]} generationCandidateCount={1} generationEngine="remote_api" generationInputMode={inputMode} generationBaseImageId={base} setGenerationBaseImageId={setBase} generationModelAlias="fixture" generationSettings={settings} project={{id:'project',origin_type:'analysis',output_aspect_ratio:'16:9',output_width:1280,output_height:720}} busy={false} error="" resolveUrl={v=>v} setGenerationCandidateCount={noop} setGenerationEngine={noop} setGenerationInputMode={setMode} setGenerationModelAlias={noop} onSelectShot={noop} onGenerate={()=>window.calls.push({mode:inputMode,base,refs:draft.referenceBindings.length})} onCancelRun={noop} onSelectCandidate={noop} onApprove={noop} onCreateVisualBeat={noop} onFlushDraft={async()=>{}} onAddAssets={noop} onNotice={noop} request={async()=>({current_global_prompts:{},items:[]})}/>;
+      return <ShotImageWorkspace shots={[{plan}]} shotDetail={{plan,generation_runs:runs}} selectedShotId="shot" selectedVisualBeatId="beat" draft={draft} setDraft={setDraft} assets={[person,wardrobe]} generationCandidateCount={1} generationEngine="remote_api" generationInputMode={inputMode} generationBaseImageId={base} setGenerationBaseImageId={setBase} generationModelAlias="fixture" generationSettings={settings} project={{id:'project',origin_type:'analysis',output_aspect_ratio:'16:9',output_width:1280,output_height:720}} busy={busy} error={error} gate={gate} advanceFeedback={advanceFeedback} onAdvance={()=>{window.advanceChecks=(window.advanceChecks||0)+1;if(!gate.allowed)setAdvanceFeedback(gate.blocker_messages.join('；'));}} resolveUrl={v=>v} setGenerationCandidateCount={noop} setGenerationEngine={noop} setGenerationInputMode={setMode} setGenerationModelAlias={noop} onSelectShot={noop} onGenerate={()=>window.calls.push({mode:inputMode,base,refs:draft.referenceBindings.length})} onCancelRun={noop} onSelectCandidate={noop} onApprove={noop} onCreateVisualBeat={noop} onFlushDraft={async()=>{}} onAddAssets={noop} onNotice={noop} request={async()=>({current_global_prompts:{},items:[]})}/>;
     }
     createRoot(document.getElementById('root')).render(<Fixture/>);
   ` } });
@@ -43,6 +47,26 @@ test("reference creation and explicit generated-image editing work without sourc
     browser.on("Runtime.exceptionThrown", event => errors.push(event.exceptionDetails.text));
     await browser.navigate(`http://127.0.0.1:${server.address().port}`);
     await browser.ready("document.querySelector('.shot-image-settings-trigger')");
+    assert.equal(await browser.evaluate("document.querySelector('.shot-gate-feedback')"),null);
+    assert.equal(await browser.evaluate("document.querySelector('.shot-gate-message')"),null);
+    assert.equal(await browser.evaluate("document.body.textContent.includes('上游内容已更新，已有图片仍可继续使用')"),false);
+    assert.equal(await browser.evaluate("document.querySelector('.shot-gate-summary button').disabled"),false);
+    assert.equal(await browser.evaluate("window.advanceChecks||0"),0);
+    await browser.evaluate("document.querySelector('.shot-gate-summary button').click()");
+    await browser.ready("document.querySelector('.shot-gate-feedback')");
+    assert.equal(await browser.evaluate("document.querySelector('.shot-gate-feedback').textContent"),"请至少采用一张分镜图");
+    assert.equal(await browser.evaluate("document.querySelector('.shot-gate-summary button').getAttribute('aria-describedby')===document.querySelector('.shot-gate-feedback').id"),true);
+    for(const width of [1440,390]){
+      await browser.viewport(width,640);
+      assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),true);
+      await browser.screenshot(fileURLToPath(new URL(`../../../.impeccable/review/style-reference-rail/gate-${width}.png`,import.meta.url)));
+    }
+    await browser.evaluate("window.adoptImage(true)");
+    await browser.ready("!document.querySelector('.shot-gate-feedback') && document.querySelector('.shot-gate-summary').textContent.includes('已采用 1 张')");
+    await browser.evaluate("window.changeBusy(true);window.changeError('提示词保存失败，请重试')");
+    await browser.ready("document.querySelector('.shot-gate-summary button').disabled");
+    assert.match(await browser.evaluate("document.querySelector('.production-inline-error').textContent"),/保存失败/);
+    await browser.evaluate("window.changeBusy(false);window.changeError('')");
     for (const width of [1440, 390]) {
       await browser.viewport(width, 960);
       await browser.evaluate("document.querySelector('.shot-image-generation-command').scrollIntoView({block:'center',behavior:'instant'})");
@@ -63,8 +87,10 @@ test("reference creation and explicit generated-image editing work without sourc
     assert.equal(await browser.evaluate("window.calls.length"), 0, "mode and base selection never generate");
     for (const width of [1440, 390]) {
       await browser.viewport(width, 960);
+      await browser.evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
       assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"), true);
-      assert.ok(await browser.evaluate("document.querySelector('select[aria-label=编辑底图]').getBoundingClientRect().height >= 44"));
+      const baseLayout = await browser.evaluate("(()=>{const el=document.querySelector('select[aria-label=编辑底图]');return {height:el.getBoundingClientRect().height,minHeight:getComputedStyle(el).minHeight,viewport:innerWidth}})()");
+      assert.ok(baseLayout.height >= 44, JSON.stringify(baseLayout));
       await browser.screenshot(fileURLToPath(new URL(`../../../.impeccable/review/image-input/base-edit-${width}.png`, import.meta.url)));
     }
     await browser.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });

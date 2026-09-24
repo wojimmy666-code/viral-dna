@@ -641,6 +641,14 @@ class SkillWorkflowService:
         await self._require_skill_project(project_id)
         async with prompt_lock(self.repository, project_id):
             current = await self.get_prompt_context(project_id)
+            facts = {item["asset_id"]: item for item in await self.prompt_assets(project_id)}
+            for part in ("image", "video"):
+                for mention in getattr(payload, f"common_{part}_mentions") or []:
+                    if part == "video" and mention.reference_kind != "project_asset":
+                        raise _fail(422, "global_reference_scope", "全局提示词仅支持项目资产")
+                    asset_id = str(mention.reference_asset_id if part == "image" else mention.reference_id)
+                    if not facts.get(asset_id, {}).get("image_eligible"):
+                        raise _fail(422, "prompt_reference_not_found", "请先选择当前项目中可用的图片资产")
             if payload.shot_styles is not None and payload.shot_styles != current.shot_styles:
                 raise _fail(422, "style_shot_scope", "请在分镜制作阶段调整单镜风格")
             try:

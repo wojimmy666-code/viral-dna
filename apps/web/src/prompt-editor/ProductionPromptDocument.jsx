@@ -3,13 +3,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, DownloadSimple } from "@phosphor-icons/react";
 import { registerAccountFlusher } from "../accounts/account-client.js";
 import { AssetReferenceEditor } from "../prompt-references/AssetReferenceEditor.jsx";
+import { usePromptAssetLibrary } from '../prompt-references/usePromptAssetLibrary.jsx';
+import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 import { PromptPreview } from "../prompt-context/GlobalPromptEditor.jsx";
 import { promptDocumentBody, productionPromptsToText, downloadProductionPrompts } from "./prompt-sources.js";
 
-function BodyEditor({ label, value, mentions = [], readOnly, onChange }) {
-  return <div className="scheme-prompt-field"><span>{label}</span>{mentions.length
-    ? <AssetReferenceEditor label={label} value={value} references={mentions} options={mentions} disabled={readOnly} onChange={onChange} placeholder="描述画面" />
-    : <textarea aria-label={label} value={value} readOnly={readOnly} rows={6} maxLength={8000} onChange={event => onChange(event.target.value)} />}</div>;
+function BodyEditor({ label, value, mentions = [], readOnly, onChange, assets = [], onAddAssets, part = 'image' }) {
+  const options = assets.map(asset => promptAssetReference(asset, part));
+  const references = mentions.map(mention => ({ ...options.find(item => (item.reference_id || item.reference_asset_id) === (mention.reference_id || mention.reference_asset_id)), ...mention }));
+  return <div className="scheme-prompt-field"><span>{label}</span><AssetReferenceEditor label={label} value={value} references={references} options={[...options, ...references]} disabled={readOnly}
+    onAddAssets={!readOnly && onAddAssets ? (insert, pickerOptions) => onAddAssets(selected => insert(selected.map(asset => promptAssetReference(asset, part))), pickerOptions) : undefined}
+    onChange={(text, refs) => onChange?.(text, promptMentionData(refs, part))} placeholder="描述画面；输入 @ 引用资产" /></div>;
 }
 
 export function ProductionPromptDocument({ document, request, onCopy, onEditProduction, children }) {
@@ -19,6 +23,13 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
   const state = useRef({ document, version: 0, saved: 0, chain: Promise.resolve(), timer: null });
   const alive = useRef(true);
   const readOnly = Boolean(document.read_only);
+  const [assets, setAssets] = useState([]);
+  useEffect(() => {
+    if (readOnly) return undefined;
+    let active = true;
+    request(`/productions/${document.project_id}/references`).then(items => { if (active) setAssets(items || []); }).catch(failure => { if (active) setError(failure.message); });
+    return () => { active = false; };
+  }, [document.project_id, request, readOnly]);
   const flush = useCallback(async () => {
     const current = state.current;
     clearTimeout(current.timer);
@@ -48,6 +59,18 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
     current.chain = current.chain.then(drain, drain);
     return current.chain;
   }, [document.project_id, readOnly, request]);
+  const library = usePromptAssetLibrary({ request, productionId: document.project_id, beforeLink: flush,
+    onLinked: async (_assets, _facts, check) => {
+      const [latest, references] = await Promise.all([request(`/productions/${document.project_id}/prompt-document`), request(`/productions/${document.project_id}/references`)]);
+      check();
+      if (!alive.current) throw new Error('提示词文档已关闭，请重新打开。');
+      const body = value => { const { expected_token, ...content } = promptDocumentBody(value); return JSON.stringify(content); };
+      if (body(latest) !== body(state.current.document)) throw new Error('提示词已在其他页面更新，当前草稿已保留。请先核对最新内容，再引用资产。');
+      // Linking advances the production revision but does not edit any body.
+      state.current.document = { ...state.current.document, token: latest.token, revision_id: latest.revision_id };
+      setWorking(state.current.document); setAssets(references);
+    },
+  });
 
   useEffect(() => {
     alive.current = true;
@@ -88,20 +111,21 @@ export function ProductionPromptDocument({ document, request, onCopy, onEditProd
     </header>
     {error && <p className="scheme-prompt-error" role="alert">{error}</p>}
     {children}
+    {library.dialog}
     <div className="scheme-prompt-content">
       <details className="scheme-global"><summary>全局提示词</summary><div className="scheme-prompt-columns">
-        <BodyEditor label="全局图片提示词" value={working.common_image_prompt} readOnly={readOnly} onChange={value => change(doc => ({ ...doc, common_image_prompt: value }))} />
-        <BodyEditor label="全局视频提示词" value={working.common_video_prompt} readOnly={readOnly} onChange={value => change(doc => ({ ...doc, common_video_prompt: value }))} />
+        <BodyEditor label="全局图片提示词" value={working.common_image_prompt} mentions={working.common_image_mentions} assets={assets} onAddAssets={library.open} readOnly={readOnly} onChange={(value, mentions) => change(doc => ({ ...doc, common_image_prompt: value, common_image_mentions: mentions }))} />
+        <BodyEditor label="全局视频提示词" part="video" value={working.common_video_prompt} mentions={working.common_video_mentions} assets={assets} onAddAssets={library.open} readOnly={readOnly} onChange={(value, mentions) => change(doc => ({ ...doc, common_video_prompt: value, common_video_mentions: mentions }))} />
       </div></details>
       {working.shots.map((shot, index) => <details className="scheme-shot" key={shot.id} open={index === 0 ? true : undefined}>
         <summary><strong>分镜 {shot.index}</strong><span>{Number(shot.duration_seconds.toFixed(2))} 秒</span><span className="scheme-shot-excerpt">{shot.images[0]?.prompt}</span></summary>
         <div className="scheme-prompt-columns">
           <div>{shot.images.map((image, index) => <div key={image.id}>
-            <BodyEditor label={`局部图片提示词${shot.images.length > 1 ? ` ${index + 1}` : ""}`} value={image.prompt} mentions={image.mentions} readOnly={readOnly} onChange={value => changeImage(shot.id, image.id, row => ({ ...row, prompt: value }))} />
+            <BodyEditor label={`局部图片提示词${shot.images.length > 1 ? ` ${index + 1}` : ""}`} value={image.prompt} mentions={image.mentions} assets={assets} onAddAssets={library.open} readOnly={readOnly} onChange={(value, mentions) => changeImage(shot.id, image.id, row => ({ ...row, prompt: value, mentions }))} />
             <PromptPreview label="图片提示词" common={working.common_image_prompt} local={image.prompt} style={(shot.visual_style_snapshot ?? working.visual_style_snapshot)?.image_prompt || ""} />
             {constraints("图片负面约束", image.negative_constraints, values => changeImage(shot.id, image.id, row => ({ ...row, negative_constraints: values })))}
           </div>)}{!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_images"); }}>到分镜图片编辑资产引用</Button>}</div>
-          <div><BodyEditor label={shot.video_group_id ? "分镜动作说明（由生成组合并）" : "局部视频提示词"} value={shot.video_prompt} mentions={shot.video_mentions} readOnly={readOnly} onChange={value => changeShot(shot.id, row => ({ ...row, video_prompt: value }))} />
+          <div><BodyEditor label={shot.video_group_id ? "分镜动作说明（由生成组合并）" : "局部视频提示词"} part="video" value={shot.video_prompt} mentions={shot.video_mentions} assets={assets} onAddAssets={library.open} readOnly={readOnly} onChange={(value, mentions) => changeShot(shot.id, row => ({ ...row, video_prompt: value, video_mentions: mentions }))} />
             {!shot.video_group_id && <PromptPreview label="视频提示词" common={working.common_video_prompt} local={shot.video_prompt} style={(shot.visual_style_snapshot ?? working.visual_style_snapshot)?.video_prompt || ""} />}
             {constraints("视频负面约束", shot.video_negative_constraints, values => changeShot(shot.id, row => ({ ...row, video_negative_constraints: values })))}
             {!readOnly && onEditProduction && <Button type="button" className="text-button" onClick={async () => { if (await flush()) onEditProduction(document.project_id, shot.id, "shot_videos"); }}>到分镜视频编辑资产引用</Button>}

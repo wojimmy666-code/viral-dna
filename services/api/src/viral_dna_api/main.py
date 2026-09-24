@@ -236,6 +236,7 @@ from .production import (
 )
 from .project_assets import ProjectAssetService
 from .project_prompts import ProjectPromptRevision, ProjectPromptUpdate
+from .composition import CompositionUpdate
 from .style_library import create_style_library_admin_router, create_style_library_user_router
 from .projects import ProjectService, create_project_router
 from .prompt_engine.routes import create_prompt_draft_router
@@ -556,7 +557,7 @@ viral_insight_service = ViralInsightService(
 creative_concept_service = CreativeConceptService(
     store, viral_insight_service, preferences=user_preferences_service,
 )
-prompt_draft_service = PromptDraftService(store)
+prompt_draft_service = PromptDraftService(store, asset_library=asset_library_service)
 timeline_service = TimelineService(
     store,
     workspace_manager,
@@ -1083,6 +1084,22 @@ async def get_production(project_id: UUID) -> ProductionProjectDetail:
 async def get_production_prompt_context(project_id: UUID):
     try:
         return await production_service.get_prompt_context(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/composition")
+async def get_production_composition(project_id: UUID):
+    try:
+        return await production_service.get_composition(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(f"{API_PREFIX}/productions/{{project_id}}/composition")
+async def update_production_composition(project_id: UUID, payload: CompositionUpdate):
+    try:
+        return await production_service.update_composition(project_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 

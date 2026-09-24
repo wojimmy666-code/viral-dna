@@ -3,7 +3,7 @@ export function groupModelOptions(models = []) {
 }
 
 export function groupDefinition(group) {
-  return { id: group.id, shot_plan_ids: group.shot_plan_ids, video_prompt: group.video_prompt || "", transition: group.transition || "cut" };
+  return { id: group.id, shot_plan_ids: group.shot_plan_ids, video_prompt: group.video_prompt || "", ...(group.video_prompt_mentions ? { video_prompt_mentions: group.video_prompt_mentions } : {}), transition: group.transition || "cut" };
 }
 
 export function suggestedGroups(shots, model, excluded = new Set()) {

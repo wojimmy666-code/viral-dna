@@ -156,6 +156,9 @@ html:has(.vd-home) { scrollbar-color: #49464f #100f12; scrollbar-width: thin; }
 .vd-footer p { margin-right: auto; }
 .vd-footer small { flex-basis: 100%; color: var(--home-muted); font-size: var(--home-caption-size); }
 .vd-footer > a:not(.vd-brand):hover { text-decoration: underline; text-underline-offset: 5px; }
+.vd-footer-legal { flex-basis: 100%; order: 3; text-align: center; color: var(--home-muted); font-size: var(--home-caption-size); }
+.vd-footer-legal a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding-inline: 8px; }
+.vd-footer-legal a:hover { color: var(--home-text); text-decoration: underline; text-underline-offset: 5px; }
 .vd-home { --home-section-size: clamp(32px,3.125vw,48px); }
 .vd-home .vd-image-unavailable { display: grid; place-items: center; height: 100%; padding: 20px; background: var(--home-panel); color: var(--home-muted); font-size: var(--home-label-size); }
 @media (min-width: 1800px) {

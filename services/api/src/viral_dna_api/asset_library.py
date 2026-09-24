@@ -605,6 +605,7 @@ class AssetLibraryService:
         query: str | None,
         storage_state: StorageSyncState | None,
         include_archived: bool,
+        prompt_images_only: bool = False,
     ) -> AssetListResponse:
         await self._active_context(workspace_id)
         assets = [
@@ -612,6 +613,9 @@ class AssetLibraryService:
             for item in await self.repository.list_assets()
             if item.workspace_id == workspace_id and (include_archived or item.archived_at is None)
         ]
+        if prompt_images_only:
+            # Reference eligibility must be filtered before pagination.
+            assets = [item for item in assets if item.media_kind == "image" and item.type != "logo"]
         if folder_id == "unfiled":
             assets = [item for item in assets if item.folder_id is None]
         elif folder_id:

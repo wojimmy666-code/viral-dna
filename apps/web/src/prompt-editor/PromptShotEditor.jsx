@@ -12,7 +12,8 @@ import {
   promptShotSummary,
   promptShotToPlainText,
 } from "./prompt-document.js";
-import { PromptRichTextEditor } from "./PromptRichTextEditor.jsx";
+import { AssetReferenceEditor } from '../prompt-references/AssetReferenceEditor.jsx';
+import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 import { promptDraftContainsUnlabeledEnglish } from "./prompt-editor-ui.js";
 
 function shotDuration(shot) {
@@ -27,6 +28,7 @@ export function PromptShotEditor({
   onCopy,
   onRestore,
   shot,
+  onAddAssets,
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const regionId = useId();
@@ -115,12 +117,15 @@ export function PromptShotEditor({
             </div>
           )}
 
-          <PromptRichTextEditor
-            ariaLabel={`${title}完整提示词`}
+          <AssetReferenceEditor
+            label={`${title}完整提示词`}
             disabled={disabled || !draft}
             value={documentText}
-            onChange={(nextText) => {
-              if (draft) onChange(promptDocumentTextToDraft(nextText, draft));
+            maxLength={32000}
+            references={draft?.asset_mentions || []} options={draft?.asset_mentions || []}
+            onAddAssets={onAddAssets && ((insert, options) => onAddAssets(assets => insert(assets.map(asset => promptAssetReference(asset))), options))}
+            onChange={(nextText, references) => {
+              if (draft) onChange({ ...promptDocumentTextToDraft(nextText, draft), asset_mentions: promptMentionData(references, 'image') });
             }}
           />
         </div>

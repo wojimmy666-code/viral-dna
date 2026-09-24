@@ -112,6 +112,7 @@ def create_asset_router(service: AssetLibraryService) -> APIRouter:
         query: Annotated[str | None, Query(max_length=120)] = None,
         storage_state: Annotated[StorageSyncState | None, Query()] = None,
         include_archived: Annotated[bool, Query()] = False,
+        prompt_images_only: Annotated[bool, Query()] = False,
     ) -> AssetListResponse:
         try:
             return await service.list_assets(
@@ -123,6 +124,7 @@ def create_asset_router(service: AssetLibraryService) -> APIRouter:
                 query=query,
                 storage_state=storage_state,
                 include_archived=include_archived,
+                prompt_images_only=prompt_images_only,
             )
         except (AssetLibraryError, StorageObjectError) as exc:
             _raise_http(exc)

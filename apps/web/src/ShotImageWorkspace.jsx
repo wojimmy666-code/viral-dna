@@ -1,12 +1,13 @@
 import { IconButton, Button } from "./ui/system/Button.jsx";
 import { imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId } from "./image-generation-controls/image-input.js";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
+import { CompositionControl } from "./composition/CompositionControl.jsx";
 import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
 import { stylePrompt } from "./visual-styles/visual-style.js";
-import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
 import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import { ImageAssetPromptEditor } from "./prompt-references/ImageAssetPromptEditor.jsx";
+import { imageModelOptions } from "./image-generation-controls/image-generation-ui.js";
 import {
   ArrowCounterClockwise,
   ArrowDown,
@@ -237,13 +238,15 @@ function KeyframePicker({
   );
 }
 
-function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo }) {
+function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo, assets, onAddAssets, resolveUrl }) {
   const [mode, setMode] = useState("duplicate");
   const start = Number(currentPlan?.end_seconds || 0);
   const [startSeconds, setStartSeconds] = useState(start.toFixed(2));
   const [endSeconds, setEndSeconds] = useState((start + 3).toFixed(2));
   const [keyframeSeconds, setKeyframeSeconds] = useState((start + 1.5).toFixed(2));
   const [imagePrompt, setImagePrompt] = useState("");
+  const [imagePromptMentions, setImagePromptMentions] = useState([]);
+  const [referenceBindings, setReferenceBindings] = useState([]);
 
   function submit(event) {
     event.preventDefault();
@@ -251,6 +254,7 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
       mode,
       insert_after_shot_plan_id: currentPlan?.id || null,
       image_prompt: imagePrompt.trim(),
+      image_prompt_mentions: mode === 'duplicate' ? [] : imagePromptMentions,
     };
     if (mode === "duplicate") {
       payload.source_shot_plan_id = currentPlan.id;
@@ -300,10 +304,14 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
           </div>
         )}
         {mode !== "duplicate" && (
-          <label className="production-field shot-create-prompt">
+          <div className="production-field shot-create-prompt">
             <span>初始图片提示词（可稍后填写）</span>
-            <textarea className="prompt-editor-textarea" onChange={(event) => setImagePrompt(event.target.value)} rows={3} value={imagePrompt} />
-          </label>
+            <ImageAssetPromptEditor assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} disabled={busy}
+              draft={{ imagePrompt, imagePromptMentions, referenceBindings }} setDraft={update => {
+                const next = update({ imagePrompt, imagePromptMentions, referenceBindings });
+                setImagePrompt(next.imagePrompt); setImagePromptMentions(next.imagePromptMentions); setReferenceBindings(next.referenceBindings);
+              }} />
+          </div>
         )}
         <footer>
           <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
@@ -315,7 +323,6 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
 }
 
 export function ShotImageWorkspace({
-  upstreamInputsChanged = false,
   globalPromptRef,
   initialCandidateId = "",
   onPreviewCandidate,
@@ -327,6 +334,7 @@ export function ShotImageWorkspace({
   setDraft,
   assets,
   gate,
+  advanceFeedback = "",
   generationCandidateCount,
   generationEngine,
   generationInputMode,
@@ -375,6 +383,7 @@ export function ShotImageWorkspace({
   request,
   saveState = "saved",
 }) {
+  const advanceFeedbackId = useId();
   const [keyframePickerOpen, setKeyframePickerOpen] = useState(false);
   const [shotCreateOpen, setShotCreateOpen] = useState(false);
   const [showDiscarded, setShowDiscarded] = useState(false);
@@ -386,6 +395,7 @@ export function ShotImageWorkspace({
   const [pendingOutputModes, setPendingOutputModes] = useState({});
   const promptRef = useRef(null);
   const [globalPrompts, setGlobalPrompts] = useState({});
+  const [compositionGuide, setCompositionGuide] = useState(null);
   const navigationHandlers = useRef({});
   const [batchItems, setBatchItems] = useState([]);
   const isSkillMode = project?.origin_type === "skill_run";
@@ -466,8 +476,10 @@ export function ShotImageWorkspace({
     [assets],
   );
   const pictureBindings = useMemo(() => {
-    return imageBindingsForDraft(shotPlan, activeVisualBeat, draft);
-  }, [shotPlan, activeVisualBeat, draft.referenceBindings, draft.imagePromptMentions]);
+    const local = imageBindingsForDraft(shotPlan, activeVisualBeat, draft);
+    const inherited = (globalPrompts.common_image_mentions || []).filter(item => !local.some(binding => binding.reference_asset_id === item.reference_asset_id));
+    return [...local, ...inherited.map(item => ({ reference_asset_id: item.reference_asset_id, role: DEFAULT_ROLE_BY_TYPE[assetsById.get(item.reference_asset_id)?.type] || 'layout', weight: 1 }))];
+  }, [shotPlan, activeVisualBeat, draft.referenceBindings, draft.imagePromptMentions, globalPrompts.common_image_mentions, assetsById]);
   const identityPolicy = useMemo(
     () => imageIdentityPolicy(pictureBindings, assets),
     [assets, pictureBindings],
@@ -598,6 +610,11 @@ export function ShotImageWorkspace({
     execution_mode: executionMode || generationSettings?.execution_mode,
     remote_model_alias: generationModelAlias || generationSettings?.remote_model_alias,
   };
+  const referenceCapabilities = imageModelOptions(generationSettings || {}).find((model) => model.alias === (executionMode === 'local_tool' ? 'local_tool' : effectiveGenerationSettings.remote_model_alias))?.capabilities;
+  const promptReferenceLimit = referenceCapabilities && Math.max(0, Math.min(
+    (referenceCapabilities.max_reference_images ?? Infinity) - (compositionGuide ? 1 : 0),
+    (referenceCapabilities.max_input_images ?? Infinity) - (effectiveInputMode === 'keyframe_edit' ? 1 : 0) - (compositionGuide ? 1 : 0),
+  ));
   const estimatedCostMicros = estimateImageGenerationCostMicros(
     effectiveGenerationSettings,
     candidateCount,
@@ -661,13 +678,19 @@ export function ShotImageWorkspace({
         : remoteConfigured
     ),
   );
-  const identityGenerationBlocker = !identityPolicy.valid
+  const compositionBlocker = compositionGuide && referenceCapabilities && (
+    !referenceCapabilities.image_to_image ? '当前模型不支持构图参考图，请更换模型或关闭构图引导'
+      : pictureBindings.length > promptReferenceLimit ? '构图引导额外占用 1 张参考图，已超过当前模型输入上限'
+        : Math.abs(compositionGuide.aspect_ratio / (project.output_width / project.output_height) - 1) > 0.02 ? '画幅已改变，请打开构图并重新确认'
+          : ''
+  );
+  const identityGenerationBlocker = compositionBlocker || (!identityPolicy.valid
     ? identityPolicy.blocker
     : baseCandidateId && !generationSettings?.supports_candidate_base_image
       ? "当前图片服务尚不支持生成图片作为底图，请重启后端并刷新页面"
       : effectiveInputMode === "keyframe_edit" && !selectedBase?.url
         ? "请选择有效的编辑底图，或切换为参考图创作／纯文生图"
-        : "";
+        : "");
   useEffect(() => {
     const preferred = (
       candidates.find((item) => item.id === initialCandidateId)
@@ -965,13 +988,15 @@ export function ShotImageWorkspace({
           <span>已采用 {gate?.approved_image_count || 0} 张</span>
           <Button
             className="primary-button compact"
-            disabled={busy || !gate?.allowed}
+            disabled={busy || !gate}
+            aria-describedby={advanceFeedback ? advanceFeedbackId : undefined}
             onClick={onAdvance}
             type="button"
           >
             进入分镜视频
             <ArrowRight size={15} />
           </Button>
+          {advanceFeedback && <p className="shot-gate-feedback" id={advanceFeedbackId} role="alert">{advanceFeedback}</p>}
         </div>
       </header>
 
@@ -979,11 +1004,6 @@ export function ShotImageWorkspace({
         <div className="production-inline-error" role="alert">
           <WarningCircle size={17} />
           {error}
-        </div>
-      )}
-      {gate?.blocker_messages?.length > 0 && (
-        <div className="shot-gate-message">
-          {gate.blocker_messages.join("；")}
         </div>
       )}
 
@@ -1260,12 +1280,6 @@ export function ShotImageWorkspace({
                   </div>
                 </section>
               )}
-              {(upstreamInputsChanged || activeVisualBeat?.image_inputs_changed || plan.image_inputs_changed || plan.image_status === "stale" || globalPromptWasEdited(shotDetail, globalPrompts, "image")) && (
-                <div className="shot-video-input-version-notice" role="status">
-                  <WarningCircle size={17} weight="fill" />
-                  上游内容已更新，已有图片仍可继续使用；如需匹配最新内容，可重新生成。
-                </div>
-              )}
               <div
                 className={`shot-compare-grid shot-compare-${previewLayout.orientation}${hasComparison ? "" : " shot-compare-single"}`}
                 style={previewCanvasStyle}
@@ -1511,7 +1525,13 @@ export function ShotImageWorkspace({
           <div className="shot-inspector-form">
             <div className="production-field local-prompt-editor">
               <PromptSectionHeader title="局部图片提示词" titleId={`image-prompt-label-${activeVisualBeat?.id || plan.id}`} state={saveState} onRetry={() => Promise.resolve(onRetryDraftSave?.()).catch(() => undefined)} />
+              <CompositionControl projectId={project.id} beatId={activeVisualBeat?.id} request={request} disabled={busy}
+                assets={assets} previewUrl={displayedCandidate ? resolveUrl(displayedCandidate.content_url) : null}
+                beforeOpen={async () => { if (await globalPromptRef.current?.flush() === false) return false; await onFlushDraft?.(); return true; }}
+                onSaved={() => globalPromptRef.current?.refresh()} onEffectiveChange={setCompositionGuide} />
               <ImageAssetPromptEditor
+                referenceLimit={promptReferenceLimit}
+                inheritedMentions={globalPrompts.common_image_mentions || []}
                 key={activeVisualBeat?.id || plan.id}
                 labelledBy={`image-prompt-label-${activeVisualBeat?.id || plan.id}`}
                 ref={promptRef} assets={assets} draft={draft} setDraft={setDraft}
@@ -1522,7 +1542,7 @@ export function ShotImageWorkspace({
               />
             </div>
             <PromptPreview common={globalPrompts.common_image_prompt} local={draft.imagePrompt} style={stylePrompt(globalPrompts, plan.id, "image")} label="图片提示词" />
-            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} />
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
             <fieldset className="shot-reference-field">
               <legend>参考资产绑定</legend>
               {assets.length === 0 ? (
@@ -1574,6 +1594,7 @@ export function ShotImageWorkspace({
       )}
       {shotCreateOpen && plan && (
         <ShotCreateDialog
+          assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl}
           busy={busy}
           hasSourceVideo={hasSourceVideo}
           currentPlan={plan}
