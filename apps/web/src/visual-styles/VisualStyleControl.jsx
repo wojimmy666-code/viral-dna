@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Dialog } from '../ui/system/Dialog.jsx';
 import { CheckCircle, Heart, ImageSquare, MagnifyingGlass, Palette, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "../ui/system/Button.jsx";
 import { mediaUrl } from "../accounts/account-client.js";
@@ -19,7 +19,7 @@ export function StyleCover({ src, name = "", className = "" }) {
 }
 
 function StylePicker({ catalog, loading, error: loadError, onReload, initial, allowInherit, inheritedSnapshot, part, onApply, onClose, request, onCatalogChange }) {
-  const ref = useRef(null), submitting = useRef(false), mounted = useRef(false);
+  const submitting = useRef(false), mounted = useRef(false);
   const titleId = useId();
   const [query, setQuery] = useState(""), [tab, setTab] = useState("all"), [category, setCategory] = useState("");
   const [selected, setSelected] = useState(initial);
@@ -32,10 +32,7 @@ function StylePicker({ catalog, loading, error: loadError, onReload, initial, al
   const validSelection = !selected?.catalog_id || Boolean(selectedItem);
   useEffect(() => {
     mounted.current = true;
-    const opener = document.activeElement, dialog = ref.current;
-    const overflow = document.body.style.overflow;
-    dialog.showModal(); document.body.style.overflow = "hidden";
-    return () => { mounted.current = false; dialog.close(); document.body.style.overflow = overflow; opener?.focus?.(); };
+    return () => { mounted.current = false; };
   }, []);
   async function apply() {
     if (submitting.current || !validSelection) return;
@@ -61,10 +58,9 @@ function StylePicker({ catalog, loading, error: loadError, onReload, initial, al
     finally { if (mounted.current) setFavoriteBusy(""); }
   }
   const close = () => { if (!submitting.current) onClose(); };
-  return createPortal(<dialog ref={ref} className="style-picker-dialog" aria-labelledby={titleId}
-    onCancel={event => { event.preventDefault(); close(); }} onClick={event => { if (event.target === ref.current) close(); }}>
+  return <Dialog className="style-picker-dialog" size="wide" aria-labelledby={titleId} busy={saving} onClose={close}>
     <div className="style-picker-layout">
-      <header className="style-picker-header"><h2 id={titleId}>选择风格</h2><IconButton label="关闭风格选择" onClick={close} disabled={saving}><X /></IconButton></header>
+      <header className="style-picker-header ui-dialog-header"><h2 id={titleId}>选择风格</h2><IconButton label="关闭风格选择" onClick={close} disabled={saving}><X /></IconButton></header>
       <div className="style-picker-tools">
         <div className="style-picker-tabs" role="group" aria-label="风格范围">{[["all", "全部风格"], ["favorites", "我的收藏"], ["recent", "最近使用"]].map(([key, name]) => <button data-ui="tab" type="button" key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{name}</button>)}</div>
         <label className="style-picker-search"><MagnifyingGlass size={18} /><input autoFocus type="search" aria-label="搜索风格名称或标签" placeholder="搜索风格名称、标签" value={query} onChange={event => setQuery(event.target.value)} /></label>
@@ -86,7 +82,7 @@ function StylePicker({ catalog, loading, error: loadError, onReload, initial, al
           })}</div>
         </>}
       </div>
-      <footer className="style-picker-footer">
+        <footer className="style-picker-footer ui-dialog-footer ui-dialog-footer-stack">
         <p className="visual-style-status">封面为风格示意，不作为生成参考图。</p>
         {error && <p className="visual-style-error" role="alert">{error}</p>}
         <div className="style-picker-selection">
@@ -99,7 +95,7 @@ function StylePicker({ catalog, loading, error: loadError, onReload, initial, al
         {selectedItem && <details className="style-picker-description"><summary>{selectedItem.name} · 查看风格说明</summary><p>{selectedItem.description}</p>{selectedItem.sample_urls?.length > 0 && <div className="style-samples">{selectedItem.sample_urls.map(src => <StyleCover key={src} src={src} name="风格效果示例" />)}</div>}<p className="visual-style-rules">{part === "video" ? selectedItem.video_prompt : selectedItem.image_prompt}</p></details>}
       </footer>
     </div>
-  </dialog>, document.body);
+  </Dialog>;
 }
 
 export function VisualStyleControl({ value = ORIGINAL_STYLE, snapshot, inheritedSnapshot, request, onChange, onPending, onAvailable, disabled = false, label = "风格", allowInherit = false, part, renderLayout }) {

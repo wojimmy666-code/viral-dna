@@ -29,13 +29,10 @@
 .asset-reference-token:focus-visible, .asset-reference-rail button:focus-visible, .asset-reference-popover button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reference-menu-chevron { margin-left: auto; }
 .asset-reference-popover .reference-menu-heading { margin: var(--space-3) var(--space-2) var(--space-1); }
-.prompt-asset-picker { box-sizing: border-box; width: min(1200px, calc(100vw - 48px)); height: min(780px, calc(100dvh - 48px)); max-height: calc(100dvh - 48px); padding: 0; overflow: hidden; border: 1px solid var(--border-default); border-radius: var(--radius-overlay); color: var(--text-primary); background: var(--surface-panel); }
+.ui-dialog.ui-dialog.prompt-asset-picker { height: min(780px, calc(100dvh - 32px)); overflow: hidden; }
 .prompt-asset-picker[open] { display: flex; flex-direction: column; }
-.prompt-asset-picker::backdrop { background: rgb(0 0 0 / 35%); }
 .prompt-asset-picker > header, .prompt-asset-picker > footer { flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-6); }
-.prompt-asset-picker > header { border-bottom: 1px solid var(--border-default); }
 .prompt-asset-picker h2 { margin: 0; font-size: var(--type-page-size); }
-.prompt-asset-picker > footer { border-top: 1px solid var(--border-default); }
 .prompt-asset-picker footer small { display: block; margin-top: var(--space-1); color: var(--text-secondary); font-size: var(--type-caption-size); }
 .prompt-asset-picker-body { flex: 1; display: grid; grid-template-columns: 192px minmax(0, 1fr); min-height: 0; }
 .prompt-asset-picker-sidebar { padding: var(--space-4) var(--space-2); border-right: 1px solid var(--border-default); }
@@ -68,7 +65,6 @@
 @media (max-width: 768px) {
   .asset-reference-input, .asset-reference-token, .asset-reference-popover input, .prompt-asset-picker input { font-size: var(--type-heading-size); }
   .asset-reference-close, .asset-reference-actions button, .asset-reference-add, .prompt-asset-picker button { min-height: 44px; min-width: 44px; }
-  .prompt-asset-picker { width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; }
   .prompt-asset-picker-body { grid-template-columns: minmax(0, 1fr); }
   .prompt-asset-picker-sidebar { display: none; }
   .prompt-asset-picker > header, .prompt-asset-picker > footer, .prompt-asset-picker-main { padding: var(--space-4); }
@@ -76,7 +72,6 @@
   .prompt-asset-picker-toolbar, .prompt-asset-picker-filters { width: 100%; }
   .prompt-asset-search { flex: 1; min-width: 0; }
   .prompt-asset-search input { width: 100%; }
-  .prompt-asset-picker > footer { flex-wrap: wrap; }
   .prompt-asset-picker-actions { margin-left: auto; }
 }
 .reference-purpose-field { display: grid; gap: 6px; margin-block: 12px; }
@@ -89,13 +84,8 @@
 .reference-purpose-selection label { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 640px; margin-block: 8px; }
 .reference-purpose-selection label span { min-width: 0; overflow-wrap: anywhere; }
 .reference-purpose-selection select { min-height: 44px; flex: 0 0 150px; }
-.spatial-reference-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--border-default); border-radius: var(--radius-overlay); color: var(--text-primary); background: var(--surface-panel); }
-.spatial-reference-dialog::backdrop { background: rgb(20 20 30 / 36%); }
-.spatial-reference-dialog header, .spatial-reference-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; }
-.spatial-reference-dialog header { border-bottom: 1px solid var(--border-default); }
 .spatial-reference-dialog h2 { margin: 0; font-size: var(--type-heading-size); }
-.spatial-reference-dialog footer { border-top: 1px solid var(--border-default); justify-content: flex-end; flex-wrap: wrap; }
-.spatial-reference-dialog-body { padding: 16px 20px; overflow-y: auto; max-height: calc(100dvh - 208px); overflow-wrap: anywhere; }
+.spatial-reference-dialog-body { padding: var(--space-6); overflow-y: auto; max-height: calc(100dvh - 208px); overflow-wrap: anywhere; }
 .spatial-reference-targets { border: 0; padding: 0; margin: 16px 0; display: grid; gap: 4px; }
 .spatial-reference-targets label, .spatial-reference-confirm { display: flex; align-items: center; gap: 10px; min-height: 44px; }
 .spatial-reference-dialog input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; }

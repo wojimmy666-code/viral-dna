@@ -1,9 +1,5 @@
 .composition-control { display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-2); margin-bottom:var(--space-2); }
 .composition-control>span,.composition-error { color:var(--status-danger-text); font-size:var(--type-caption-size); }
-.composition-dialog { width:min(1180px,calc(100vw - 32px)); max-width:none; max-height:calc(100dvh - 32px); padding:0; border:1px solid var(--border-default); border-radius:var(--radius-overlay); background:var(--surface-panel); color:var(--text-primary); overflow:auto; }
-.composition-dialog::backdrop { background:rgb(0 0 0 / 40%); }
-.composition-dialog header,.composition-dialog footer { display:flex; justify-content:space-between; gap:var(--space-4); align-items:center; padding:var(--space-4) var(--space-6); }
-.composition-dialog header { border-bottom:1px solid var(--border-default); }
 .composition-dialog h2 { margin:0; font-size:var(--type-heading-size); font-weight:var(--type-weight-semibold); }
 .composition-dialog p { color:var(--text-secondary); font-size:var(--type-caption-size); line-height:var(--type-leading-copy); margin:var(--space-2) 0; }
 .composition-body { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:var(--space-6); padding:var(--space-6); }
@@ -43,4 +39,4 @@
 .composition-presets [aria-pressed=true] { border-color:var(--accent); }
 .composition-result { margin:var(--space-2) 0; color:var(--text-secondary); font-size:var(--type-caption-size); line-height:var(--type-leading-copy); }
 @media(max-width:960px) { .reframe-body { grid-template-columns:1fr; } }
-@media(max-width:760px) { .composition-dialog { width:100%; max-height:100dvh; height:100dvh; border-radius:0; margin:0; }.composition-body { grid-template-columns:1fr; padding:var(--space-4); gap:var(--space-4); }.composition-dialog header,.composition-dialog footer { padding:var(--space-4); }.composition-controls input[type=number],.composition-controls select { min-height:44px; font-size:var(--type-heading-size); }.composition-dialog footer { position:static; }.composition-dialog footer>div { width:100%; }.composition-dialog footer>div:last-child>* { flex:1; } }
+@media(max-width:760px) { .composition-body { grid-template-columns:1fr; padding:var(--space-4); gap:var(--space-4); }.composition-controls input[type=number],.composition-controls select { min-height:44px; font-size:var(--type-heading-size); }.composition-dialog footer { position:static; }.composition-dialog footer>div { width:100%; }.composition-dialog footer>div:last-child>* { flex:1; } }

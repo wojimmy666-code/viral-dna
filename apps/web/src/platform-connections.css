@@ -316,34 +316,8 @@
   margin: 0 0 16px;
 }
 
-.platform-editor-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-modal-backdrop);
-  display: flex;
-  justify-content: flex-end;
-  background: rgba(29, 29, 39, 0.28);
-  backdrop-filter: blur(2px);
-}
 
-.platform-editor {
-  width: min(540px, 100vw);
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: white;
-  box-shadow: -18px 0 45px rgba(26, 25, 48, 0.14);
-  overflow: hidden;
-}
 
-.platform-editor > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 24px 26px 20px;
-  border-bottom: 1px solid var(--border-default);
-}
 
 .platform-editor header span {
   color: var(--accent);
@@ -493,12 +467,6 @@
   border-color: var(--accent-border);
 }
 
-.platform-editor footer {
-  justify-content: flex-end;
-  padding: 16px 26px;
-  border-top: 1px solid var(--border-default);
-  background: #fbfbfd;
-}
 
 @media (max-width: 900px) {
   .platform-card-grid {

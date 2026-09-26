@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
+import { Dialog } from './ui/system/Dialog.jsx';
 import {
   ArrowLeft,
   ArrowRight,
@@ -34,10 +34,7 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
 
   useEffect(() => {
     if (!activeItem) return undefined;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     const onKeyDown = (event) => {
-      if (event.key === "Escape") onClose?.();
       if (event.key === "ArrowLeft" && activeIndex > 0) {
         onActiveChange?.(items[activeIndex - 1].id);
       }
@@ -47,7 +44,6 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
-      document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [activeIndex, activeItem, items, onActiveChange, onClose]);
@@ -57,15 +53,9 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
   const canGoPrevious = activeIndex > 0;
   const canGoNext = activeIndex < items.length - 1;
 
-  return createPortal(
-    <div
+  return (
+    <Dialog skin="media" onClose={onClose} closeOnBackdrop
       aria-label="图片放大查看"
-      aria-modal="true"
-      className="media-lightbox-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose?.();
-      }}
-      role="dialog"
     >
       <section className="media-lightbox-panel">
         <header>
@@ -148,7 +138,6 @@ export function MediaLightbox({ activeId, items = [], onActiveChange, onClose })
           </div>
         </footer>
       </section>
-    </div>,
-    document.body,
+    </Dialog>
   );
 }

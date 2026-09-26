@@ -1,12 +1,11 @@
 import { Button } from "../ui/system/Button.jsx";
 import { useEffect, useId, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Dialog } from '../ui/system/Dialog.jsx';
 import { ImageSquare, Plus, SpinnerGap, X } from "@phosphor-icons/react";
 import { ASSET_TYPE_OPTIONS } from "../asset-library-ui.js";
 import { folderPreferenceKey, jsonRequest, promotionPayload, recalledFolder, rememberFolder } from "./asset-promotion-ui.js";
 
 export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
-  const dialogRef = useRef(null);
   const nameRef = useRef(null);
   const submitting = useRef(false);
   const alive = useRef(false);
@@ -27,10 +26,7 @@ export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
 
   useEffect(() => {
     alive.current = true;
-    const dialog = dialogRef.current;
-    dialog.showModal();
-    nameRef.current?.focus();
-    return () => { alive.current = false; dialog.close(); };
+    return () => { alive.current = false; };
   }, []);
 
   useEffect(() => {
@@ -110,16 +106,10 @@ export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
   }
 
   const busy = saving || folderSaving;
-  return createPortal(<dialog ref={dialogRef} className="generated-asset-dialog" aria-labelledby={headingId}
-    onCancel={event => { event.preventDefault(); close(); }}
-    onClick={event => {
-      event.stopPropagation();
-      if (event.target !== event.currentTarget) return;
-      const rect = event.currentTarget.getBoundingClientRect();
-      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close();
-    }}>
+  return <Dialog className="generated-asset-dialog" aria-labelledby={headingId} size="generation" initialFocusRef={nameRef} busy={busy} onClose={close}>
     <form onSubmit={submit}>
       <header><h2 id={headingId}>加入资产库</h2><Button className="text-button" aria-label="关闭入库窗口" disabled={busy} onClick={close} type="button"><X size={20} /></Button></header>
+      <div className="ui-dialog-body generated-asset-dialog-body">
       <div className="generated-asset-dialog-preview">
         {target.previewUrl && !previewFailed
           ? <img alt="本次加入资产库的素材" src={target.previewUrl} onError={() => setPreviewFailed(true)} />
@@ -148,7 +138,8 @@ export function AddToAssetsDialog({ target, onClose, onAdded, onUncertain }) {
         <label><span>标签</span><input disabled={busy} value={draft.tags} onChange={event => change("tags", event.target.value)} placeholder="用逗号分隔，最多 20 个" /></label>
       </details>
       {error && <p className="generated-asset-dialog-error" role="alert">{error}</p>}
+      </div>
       <footer><Button className="secondary-button compact" disabled={busy} type="button" onClick={close}>取消</Button><Button className="primary-button compact" disabled={busy || !catalog || !draft.name.trim() || newFolder !== null} type="submit">{saving ? <><SpinnerGap className="spin" size={16} />正在加入…</> : "确认加入"}</Button></footer>
     </form>
-  </dialog>, document.body);
+  </Dialog>;
 }

@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { X } from '@phosphor-icons/react';
 import { Button, IconButton } from '../ui/system/Button.jsx';
+import { Dialog } from '../ui/system/Dialog.jsx';
 
 export function SpatialReferenceApply({ projectId, beatId, reference, request, beforeLoad, onSaved, onClose, disabled }) {
-  const dialog = useRef(null), mounted = useRef(false), pending = useRef(false);
+  const mounted = useRef(false), pending = useRef(false);
   const titleId = useId();
   const [state, setState] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const [scope, setScope] = useState('current'), [selected, setSelected] = useState([beatId]), [replace, setReplace] = useState(false);
@@ -22,9 +23,8 @@ export function SpatialReferenceApply({ projectId, beatId, reference, request, b
     finally { pending.current = false; if (mounted.current) setBusy(false); }
   }
   useEffect(() => {
-    mounted.current = true; const previous = document.activeElement;
-    dialog.current.showModal(); void load();
-    return () => { mounted.current = false; if (previous?.isConnected) previous.focus({ preventScroll: true }); };
+    mounted.current = true; void load();
+    return () => { mounted.current = false; };
   }, []);
   async function apply() {
     if (pending.current || disabled || !state || !targets.length || guided.length || (conflicts.length && !replace)) return;
@@ -40,7 +40,7 @@ export function SpatialReferenceApply({ projectId, beatId, reference, request, b
     } catch (failure) { if (mounted.current) setError(`${failure.message} 请重新读取状态后核对，不会自动重试。`); }
     finally { pending.current = false; if (mounted.current) setBusy(false); }
   }
-  return <dialog ref={dialog} className="spatial-reference-dialog" aria-labelledby={titleId} onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
+  return <Dialog className="spatial-reference-dialog" aria-labelledby={titleId} busy={busy} onClose={onClose}>
     <header><h2 id={titleId}>应用空间参考</h2><IconButton label="关闭空间参考应用" disabled={busy} onClick={onClose}><X size={20} /></IconButton></header>
     <div className="spatial-reference-dialog-body">
       <p>{reference.label}</p><p>只更新参考配置，不生成图片，不覆盖素材，也不改变采用状态。</p>
@@ -55,5 +55,5 @@ export function SpatialReferenceApply({ projectId, beatId, reference, request, b
       </>}
     </div>
     <footer><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" loading={busy} loadingLabel="处理中…" disabled={disabled || !state || !targets.length || Boolean(guided.length) || (Boolean(conflicts.length) && !replace)} onClick={apply}>应用到 {targets.length} 个画面</Button></footer>
-  </dialog>;
+  </Dialog>;
 }

@@ -42,8 +42,6 @@
 .account-session-notice { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-3) var(--space-6); background: var(--status-warning-bg); color: var(--status-warning-text); font-size: var(--type-body-size); line-height: var(--type-leading-copy); }
 .account-session-notice > span { flex: 1 1 240px; }
 .account-session-notice button { min-height: 44px; }
-.account-reauth-dialog { box-sizing: border-box; width: min(440px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: var(--space-6); border: 1px solid var(--border-default); border-radius: var(--radius-overlay); background: var(--surface-panel); color: var(--text-primary); overflow-y: auto; }
-.account-reauth-dialog::backdrop { background: rgb(0 0 0 / 35%); }
 .account-reauth-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .account-reauth-heading h2 { margin: 0; font-size: var(--type-heading-size); font-weight: var(--type-weight-semibold); line-height: var(--type-leading-tight); }
 .account-reauth-heading button { flex: 0 0 44px; height: 44px; }

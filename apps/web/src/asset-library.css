@@ -1252,39 +1252,9 @@
   background: #f5fbf7;
 }
 
-.asset-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: grid;
-  place-items: center;
-  padding: 22px;
-  background: rgba(27, 26, 38, 0.42);
-  backdrop-filter: blur(5px);
-}
 
-.asset-modal {
-  width: min(760px, 100%);
-  max-height: min(820px, calc(100vh - 44px));
-  overflow-y: auto;
-  border: 1px solid #e2e2e9;
-  border-radius: 16px;
-  background: #fff;
-  box-shadow: 0 24px 70px rgba(29, 27, 48, 0.2);
-}
 
-.asset-modal.compact {
-  width: min(460px, calc(100vw - 32px));
-}
 
-.asset-modal-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 19px 21px 16px;
-  border-bottom: 1px solid #ededf2;
-}
 
 .asset-modal-header > div {
   display: grid;
@@ -1377,15 +1347,6 @@
   gap: 10px;
 }
 
-.asset-modal-footer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 8px;
-  padding: 13px 21px;
-  border-top: 1px solid #ededf2;
-  background: #fbfbfd;
-}
 
 .asset-modal-footer > span:first-child {
   display: inline-flex;
@@ -1660,15 +1621,7 @@
     border-radius: 13px;
   }
 
-  .asset-modal-backdrop {
-    align-items: end;
-    padding: 8px;
-  }
 
-  .asset-modal {
-    max-height: calc(100vh - 16px);
-    border-radius: 14px;
-  }
 
   .asset-upload-body,
   .asset-modal-header,
@@ -1676,9 +1629,6 @@
     padding-inline: 15px;
   }
 
-  .asset-modal-footer {
-    grid-template-columns: 1fr 1fr;
-  }
 
   .asset-modal-footer > span:first-child {
     grid-column: 1 / -1;

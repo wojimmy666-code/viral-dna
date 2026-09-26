@@ -1,4 +1,6 @@
 import { IconButton, Button } from "./ui/system/Button.jsx";
+import { Dialog } from './ui/system/Dialog.jsx';
+import { useActionDialog } from './ui/system/useActionDialog.jsx';
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { registerAccountFlusher } from "./accounts/account-client.js";
 import { readOnce } from "./creation-workspace/read-request.js";
@@ -559,41 +561,7 @@ function upsertGenerationRun(current, run) {
 }
 
 function ProductionDialog({ title, description, children, busy, onClose, size = "medium" }) {
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape" && !busy) onClose();
-    };
-    document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [busy, onClose]);
-
-  return (
-    <div className="production-modal-backdrop" role="presentation" onMouseDown={() => !busy && onClose()}>
-      <section
-        aria-modal="true"
-        aria-label={title}
-        className={`production-modal production-modal-${size}`}
-        role="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="production-modal-header">
-          <div>
-            <h3>{title}</h3>
-            {description && <p>{description}</p>}
-          </div>
-          <IconButton aria-label="关闭" className="production-icon-button" disabled={busy} onClick={onClose} type="button">
-            <X size={18} />
-          </IconButton>
-        </header>
-        {children}
-      </section>
-    </div>
-  );
+  return <Dialog className="production-modal" title={title} description={description} size={size === 'large' ? 'large' : 'generation'} busy={busy} onClose={onClose}>{children}</Dialog>;
 }
 
 function ReferenceThumbnail({ asset, resolveUrl }) {
@@ -1819,6 +1787,10 @@ export function ProductionHub({
     request,
   });
   const referencePreviewUrl = useObjectUrl(referenceFile);
+  const actionDialog = useActionDialog({
+    scopeKey: JSON.stringify([recordId, selectedProjectId, selectedShotId, selectedVisualBeatId, activeSection]),
+    inputKey: JSON.stringify([detail?.project?.current_revision_id, shotDraft, videoDraft, imageChoices, generationSettings, videoGenerationSettings]),
+  });
 
   useEffect(() => {
     const nextSettings = imageGenerationSettings || DEFAULT_PRODUCTION_IMAGE_SETTINGS;
@@ -2284,8 +2256,9 @@ export function ProductionHub({
   }
 
   async function createShot(payload) {
-    if (!detail?.project) return;
-    await executeAction(async () => {
+    if (!detail?.project) return false;
+    let accepted = false;
+    try { await executeAction(async () => {
       const created = await request(
         `/productions/${detail.project.id}/shots`,
         {
@@ -2297,12 +2270,14 @@ export function ProductionHub({
           }),
         },
       );
+      accepted = true;
       await Promise.all([
         refreshProject(detail.project.id, created.plan.id),
         onProjectsChanged(),
       ]);
       onNotice(`已新增分镜 ${created.plan.index}`);
-    });
+    }, true); } catch (failure) { if (!accepted) throw failure; }
+    return accepted;
   }
 
   async function discardShot(shotPlanId) {
@@ -2370,6 +2345,7 @@ export function ProductionHub({
   }
 
   async function generateShotCandidates(options = {}) {
+    const decision = options?.dialogDecision;
     const reframe = options?.compositionReframe;
     const reframeGeneration = reframe ? options.reframeGeneration : null;
     const { activeBeat, beatChanges, shotChanges } = shotDraftPatch(
@@ -2397,11 +2373,12 @@ export function ProductionHub({
       acceptsUnknownCost
       && !reframe
       && !generationSettings.allow_unknown_local_image_cost
-      && !window.confirm(
-        `本机工具无法提供可验证的成本信息。是否仍要为画面 ${activeBeat.index} 生成 ${candidateCount} 张候选？`,
-      )
+      && !decision
     ) {
-      return;
+      return actionDialog.open({ kind: 'generation', title: '确认生成图片', description: `分镜 ${shotDetail.plan.index} · 画面 ${activeBeat.index}`,
+        details: [['执行方式', '本机 ImageGen'], ['数量', `${candidateCount} 张候选`], ['尺寸', generationResolution?.replace('x', ' × ') || '沿用项目尺寸']],
+        warning: '本机工具无法提供可验证的费用信息。本次生成不代表免费。', confirmLabel: `生成 ${candidateCount} 张`,
+        onConfirm: context => generateShotCandidates({ ...options, dialogDecision: context }) });
     }
     await executeAction(async () => {
       const draftChanged = Object.keys(beatChanges).length > 0
@@ -2428,7 +2405,7 @@ export function ProductionHub({
       if (baseCandidateId && !generationSettings.supports_candidate_base_image) {
         throw new Error("当前图片服务尚不支持生成图片作为底图，请重启后端并刷新页面");
       }
-      const run = await request(
+      const submitRun = () => request(
         `/production-shots/${shotDetail.plan.id}/image-runs`,
         {
           method: "POST",
@@ -2448,12 +2425,13 @@ export function ProductionHub({
           }),
         },
       );
+      const run = await (decision ? decision.mutate(submitRun) : submitRun());
       setShotDetail((current) => upsertGenerationRun(current, run));
       await onProjectsChanged();
       onNotice(
         `${draftChanged ? "当前提示词与参考资产已自动保存；" : ""}分镜 ${shotDetail.plan.index} 画面 ${activeBeat.index} 的图片任务已加入队列`,
       );
-    }, Boolean(reframe));
+    }, Boolean(reframe || decision));
   }
 
   async function cancelShotGeneration(runId) {
@@ -2469,14 +2447,15 @@ export function ProductionHub({
 
   async function selectSourceKeyframe(timestampSeconds) {
     const activeBeat = visualBeatFromDetail(shotDetail, selectedVisualBeatId);
-    if (!shotDetail?.plan || !activeBeat) return;
+    if (!shotDetail?.plan || !activeBeat) return false;
+    let accepted = false;
     const hasReviewedOutput = (
       Boolean(activeBeat.approved_image_candidate_id)
       || ["approved", "review_required", "stale"].includes(
         activeBeat.image_status,
       )
     );
-    await executeAction(async () => {
+    try { await executeAction(async () => {
       await request(
         "/production-shots/" + shotDetail.plan.id + "/source-keyframe",
         {
@@ -2490,12 +2469,14 @@ export function ProductionHub({
           }),
         },
       );
+      accepted = true;
       await Promise.all([
         refreshProject(detail.project.id, shotDetail.plan.id, activeBeat.id),
         onProjectsChanged(),
       ]);
       onNotice("分镜 " + shotDetail.plan.index + " 的关键帧已更新");
-    });
+    }, true); } catch (failure) { if (!accepted) throw failure; }
+    return accepted;
   }
 
   async function approveSourceKeyframe() {
@@ -2888,7 +2869,7 @@ export function ProductionHub({
     });
   }
 
-  async function deleteVisualBeat(visualBeatId) {
+  async function deleteVisualBeat(visualBeatId, decision = null) {
     if (!shotDetail?.plan || (shotDetail.plan.visual_beats || []).length <= 1) return;
     const beats = shotDetail.plan.visual_beats || [];
     const index = beats.findIndex((item) => item.id === visualBeatId);
@@ -2897,11 +2878,10 @@ export function ProductionHub({
       shotDetail.plan.video_status,
     );
     if (
-      hasDownstream
-      && !window.confirm("删除此画面？已有视频和剪辑仍会保留。")
-    ) return;
+      hasDownstream && !decision
+    ) return actionDialog.open({ title: '删除画面', warning: '仅删除此画面配置。已有视频和剪辑仍会保留。', variant: 'warning', confirmLabel: '删除画面', onConfirm: context => deleteVisualBeat(visualBeatId, context) });
     await executeAction(async () => {
-      await request(
+      const submit = () => request(
         `/production-shots/${shotDetail.plan.id}/visual-beats/${visualBeatId}`,
         {
           method: "DELETE",
@@ -2912,12 +2892,13 @@ export function ProductionHub({
           }),
         },
       );
+      await (decision ? decision.mutate(submit) : submit());
       await Promise.all([
         refreshProject(detail.project.id, shotDetail.plan.id, nextSelected?.id),
         onProjectsChanged(),
       ]);
       onNotice("画面已删除并重新编号");
-    });
+    }, Boolean(decision));
   }
 
   async function updateVisualBeat(visualBeatId, changes) {
@@ -2974,7 +2955,8 @@ export function ProductionHub({
     });
   }
 
-  async function generateVideoCandidates() {
+  async function generateVideoCandidates(context = null) {
+    const decision = context?.mutate ? context : null;
     if (!shotDetail?.plan) return;
     const candidateCount = Math.min(
       4,
@@ -2993,10 +2975,14 @@ export function ProductionHub({
     const promptChanged = Object.keys(promptChanges).length > 0;
     const confirmStale = promptChanged && shotDetail.plan.video_status === "approved";
     if (
-      costUnknown
-      && !window.confirm("该模型需要按 Provider 实际用量结算，提交前无法给出可靠金额。是否继续？")
+      costUnknown && !decision
     ) {
-      return;
+      return actionDialog.open({ kind: 'generation', title: '确认生成视频', description: `分镜 ${shotDetail.plan.index}`,
+        details: [['模型', selectedModel?.label || videoDraft.modelAlias], ['数量', `${candidateCount} 个候选`], ['时长', `${Number.isFinite(durationSeconds) ? durationSeconds : shotDetail.plan.duration_seconds} 秒`], ['分辨率', videoDraft.resolution]],
+        warning: selectedModel?.pricing?.kind === 'provider_usage_tokens'
+          ? '该模型按供应商实际用量结算，提交前无法给出可靠金额。本次生成不代表免费。'
+          : '当前模型暂无可靠的费用信息。本次生成不代表免费，请以供应商实际账单为准。',
+        confirmLabel: `生成 ${candidateCount} 个视频`, onConfirm: value => generateVideoCandidates(value) });
     }
     await executeAction(async () => {
       await flushGlobalPrompts();
@@ -3035,7 +3021,7 @@ export function ProductionHub({
         )));
         setShotDetail(persistedShotDetail);
       }
-      const run = await request(
+      const submitRun = () => request(
         `/production-shots/${shotDetail.plan.id}/video-runs`,
         {
           method: "POST",
@@ -3061,6 +3047,7 @@ export function ProductionHub({
           }),
         },
       );
+      const run = await (decision ? decision.mutate(submitRun) : submitRun());
       setShotDetail((current) => upsertGenerationRun(
         persistedShotDetail || current,
         run,
@@ -3070,7 +3057,7 @@ export function ProductionHub({
       onNotice(promptChanged
         ? `提示词已自动保存，分镜 ${shotDetail.plan.index} 的 ${selectedModel?.label || "视频"} 任务已加入队列`
         : `分镜 ${shotDetail.plan.index} 的 ${selectedModel?.label || "视频"} 任务已加入队列`);
-    });
+    }, Boolean(decision));
   }
 
   async function updateManagedAssetBinding(binding) {
@@ -3151,23 +3138,18 @@ export function ProductionHub({
     return succeeded;
   }
 
-  async function deleteDepthControl(assetId) {
+  async function deleteDepthControl(assetId, decision = null) {
     if (!shotDetail?.plan || !detail?.project || !assetId) return false;
-    if (
-      typeof window !== "undefined"
-      && !window.confirm("永久删除该深度控制视频及其本地文件？此操作无法恢复。")
-    ) {
-      return false;
-    }
+    if (!decision) return actionDialog.open({ title: '永久删除深度控制视频', warning: '将删除该深度控制视频及其本地文件，此操作无法恢复。', variant: 'danger', confirmLabel: '永久删除', onConfirm: context => deleteDepthControl(assetId, context) });
     let succeeded = false;
     await executeAction(async () => {
       const query = new URLSearchParams({
         expected_revision_id: detail.project.current_revision_id,
       });
-      const response = await request(
+      const response = await decision.mutate(() => request(
         `/depth-controls/shots/${shotDetail.plan.id}/${assetId}?${query}`,
         { method: "DELETE" },
-      );
+      ));
       await Promise.all([
         refreshProject(detail.project.id, shotDetail.plan.id, selectedVisualBeatId),
         onProjectsChanged(),
@@ -3186,7 +3168,7 @@ export function ProductionHub({
             },
       );
       succeeded = true;
-    });
+    }, true);
     return succeeded;
   }
   async function cancelVideoGeneration(runId) {
@@ -3363,9 +3345,9 @@ export function ProductionHub({
     });
   }
 
-  async function rejectVideoCandidate(candidateId, reason) {
+  async function rejectVideoCandidate(candidateId, reason, decision = null) {
     await executeAction(async () => {
-      await request(`/generation-candidates/${candidateId}/approvals`, {
+      const submit = () => request(`/generation-candidates/${candidateId}/approvals`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3374,27 +3356,28 @@ export function ProductionHub({
           reason,
         }),
       });
+      await (decision ? decision.mutate(submit) : submit());
       await Promise.all([
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
       onNotice("视频候选已退回并保留在历史中，可随时重新采用");
-    });
+    }, Boolean(decision));
   }
 
-  async function revokeVideoApproval() {
+  async function revokeVideoApproval(context = null) {
+    const decision = context?.mutate ? context : null;
     if (!shotDetail?.plan || shotDetail.plan.video_status !== "approved") return;
     const hasDownstreamImpact = ["editing", "export"].includes(
       detail.project.active_step,
     );
     if (
-      hasDownstreamImpact
-      && !window.confirm("取消采用此视频？已有剪辑和导出仍会保留。")
+      hasDownstreamImpact && !decision
     ) {
-      return;
+      return actionDialog.open({ title: '取消采用视频', warning: '仅取消当前分镜的视频采用。已有剪辑和导出仍会保留。', variant: 'warning', confirmLabel: '取消采用', onConfirm: value => revokeVideoApproval(value) });
     }
     await executeAction(async () => {
-      await request(
+      const submit = () => request(
         `/production-shots/${shotDetail.plan.id}/video-approval/revoke`,
         {
           method: "POST",
@@ -3406,13 +3389,14 @@ export function ProductionHub({
           }),
         },
       );
+      await (decision ? decision.mutate(submit) : submit());
       await Promise.all([
         refreshProject(detail.project.id, selectedShotId),
         onProjectsChanged(),
       ]);
       setActiveSection("shot_videos");
       onNotice(`已取消采用分镜 ${shotDetail.plan.index} 的视频`);
-    });
+    }, Boolean(decision));
   }
 
   async function advanceToEditing() {
@@ -3951,6 +3935,7 @@ export function ProductionHub({
   }
 
   return renderWorkspace(<>
+      {actionDialog.element}
       {contentLoading && <div className="production-content-loading"><CircleNotch className="spin" size={24} /><span>正在打开创作方案</span></div>}
       {!contentLoading && contentError && <div className="production-inline-error production-content-error" role="alert"><WarningCircle size={18} />{contentError}</div>}
       {!contentLoading && !contentError && detail && (

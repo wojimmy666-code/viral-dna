@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Check, FolderSimple, ImageSquare, MagnifyingGlass, X } from '@phosphor-icons/react';
 import { Button, IconButton } from '../ui/system/Button.jsx';
+import { Dialog } from '../ui/system/Dialog.jsx';
 import { ASSET_TYPE_OPTIONS, buildAssetListQuery } from '../asset-library-ui.js';
 import './asset-reference-editor.css';
 import { purposeOptions } from './reference-purposes.js';
@@ -10,7 +11,6 @@ import { promptAssetReference } from './prompt-assets.js';
 // prompt, not just associated with its project. Re-insertion is allowed.
 export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClose, onSelect,
   initialQuery = '', referenceLimit, reservedReferenceCount = 0, maxSelection, referencePart = 'image' }) {
-  const dialog = useRef(null);
   const mounted = useRef(true);
   const titleId = useId();
   const [workspaceId, setWorkspaceId] = useState(null);
@@ -36,10 +36,7 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
 
   useEffect(() => {
     mounted.current = true;
-    const previous = document.activeElement;
-    if (!dialog.current.open) dialog.current.showModal();
-    dialog.current.querySelector('input')?.focus({ preventScroll: true });
-    return () => { mounted.current = false; if (previous?.isConnected) previous.focus({ preventScroll: true }); };
+    return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
     let active = true;
@@ -85,8 +82,7 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
     catch (failure) { if (mounted.current) setError(failure.message || '引用失败，选择已保留，请重试。'); }
     finally { if (mounted.current) setBusy(false); }
   }
-  return <dialog ref={dialog} className="prompt-asset-picker" aria-labelledby={titleId}
-    onCancel={(event) => { event.preventDefault(); if (!busy) onClose(); }}>
+  return <Dialog className="prompt-asset-picker" size="wide" aria-labelledby={titleId} busy={busy} onClose={onClose}>
     <header><h2 id={titleId}>引用资产</h2><IconButton label="关闭资产库" disabled={busy} onClick={onClose}><X size={20} /></IconButton></header>
     <div className="prompt-asset-picker-body">
       <nav className="prompt-asset-picker-sidebar" aria-label="资产库目录">
@@ -127,5 +123,5 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
       </section>
     </div>
     <footer><div role="status"><span>已选择 {selection.length} 项</span><small>{Number.isFinite(referenceLimit) ? `当前已用 ${usedCount} / 上限 ${referenceLimit} 项` : '仅列出可用作图片参考的资产'}{overLimit && ' · 超出当前模型上限'}</small></div><div className="prompt-asset-picker-actions"><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" loading={busy} loadingLabel="正在引用…" disabled={!selection.length || overLimit || spatialOverLimit} onClick={confirm}>确认引用</Button></div></footer>
-  </dialog>;
+  </Dialog>;
 }

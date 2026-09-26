@@ -1,4 +1,6 @@
 import { Button, IconButton } from "./ui/system/Button.jsx";
+import { Dialog } from './ui/system/Dialog.jsx';
+import { useActionDialog } from './ui/system/useActionDialog.jsx';
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowClockwise,
@@ -80,6 +82,7 @@ export function PlatformConnections({
   const [busy, setBusy] = useState("");
   const fileInputRef = useRef(null);
   const initialPlatformRef = useRef(initialPlatform);
+  const actionDialog = useActionDialog({ scopeKey: editorPlatform || '', inputKey: JSON.stringify(data) });
 
   const editorConnection = findPlatformConnection(data, editorPlatform);
   const selectedBrowser = browsers.find((item) => item.browser === browser);
@@ -252,26 +255,20 @@ export function PlatformConnections({
   }
 
   async function disconnect(platform) {
-    if (!window.confirm(`断开${platformLabel(platform)}连接并删除本机保存的登录信息？`)) return;
-    setBusy(`disconnect-${platform}`);
-    setActionError("");
-    try {
-      await request(`/settings/platform-connections/${platform}`, { method: "DELETE" });
-      await onRefresh();
-      onNotice({ type: "success", message: `${platformLabel(platform)}连接已断开` });
-      if (editorPlatform === platform) {
-        setEditorPlatform(null);
-        setCookieFile(null);
-      }
-    } catch (requestError) {
-      setActionError(requestError.message);
-    } finally {
-      setBusy("");
-    }
+    return actionDialog.open({ title: `断开${platformLabel(platform)}连接`, warning: '将删除本机保存的登录信息。已有项目和素材保留，下次采集可能需要重新登录。', variant: 'warning', confirmLabel: '断开连接',
+      onError: failure => setActionError(failure.message), onConfirm: async ({ mutate }) => {
+        setBusy(`disconnect-${platform}`); setActionError('');
+        try {
+          await mutate(() => request(`/settings/platform-connections/${platform}`, { method: 'DELETE' }));
+          await onRefresh(); onNotice({ type: 'success', message: `${platformLabel(platform)}连接已断开` });
+          if (editorPlatform === platform) { setEditorPlatform(null); setCookieFile(null); }
+        } finally { setBusy(''); }
+      } });
   }
 
   return (
     <main className="platform-connections-page">
+      {actionDialog.element}
       <header className="platform-connections-header">
         <div>
           <span className="platform-page-kicker"><LinkSimple size={15} /> 本机平台会话</span>
@@ -424,13 +421,9 @@ export function PlatformConnections({
       </section>
 
       {editorPlatform && (
-        <div className="platform-editor-backdrop" role="presentation" onMouseDown={closeEditor}>
-          <aside
+          <Dialog placement="drawer" onClose={closeEditor} busy={Boolean(busy)}
             aria-labelledby="platform-editor-title"
-            aria-modal="true"
             className="platform-editor"
-            onMouseDown={(event) => event.stopPropagation()}
-            role="dialog"
           >
             <header>
               <div>
@@ -587,8 +580,7 @@ export function PlatformConnections({
                 {method === "browser" ? "读取并保存" : "校验并导入"}
               </Button>
             </footer>
-          </aside>
-        </div>
+          </Dialog>
       )}
     </main>
   );

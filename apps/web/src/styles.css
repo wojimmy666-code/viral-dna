@@ -73,6 +73,7 @@
   --radius-control: 0.5rem;
   --radius-panel: 0.625rem;
   --radius-overlay: 0.75rem;
+  --overlay-backdrop: rgb(0 0 0 / 40%);
   --radius-pill: 999px;
   --control-height: 2.5rem;
   --control-height-compact: 2.25rem;
@@ -2388,30 +2389,7 @@ button:disabled {
   text-decoration: none;
 }
 
-.settings-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: flex;
-  justify-content: flex-end;
-  padding: 18px;
-  background: rgba(30, 30, 42, 0.34);
-  backdrop-filter: blur(3px);
-}
 
-.settings-dialog {
-  width: min(560px, 100%);
-  height: 100%;
-  max-height: calc(100vh - 36px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid rgba(225, 225, 235, 0.94);
-  border-radius: 16px;
-  background: #fff;
-  box-shadow: 0 24px 70px rgba(31, 29, 52, 0.2);
-  animation: settings-enter 180ms ease-out both;
-}
 
 .settings-header {
   display: flex;
@@ -5169,20 +5147,7 @@ button:disabled {
     row-gap: 15px;
   }
 
-  .settings-overlay {
-    align-items: flex-end;
-    padding: 0;
-  }
 
-  .settings-dialog {
-    width: 100%;
-    height: auto;
-    max-height: 94vh;
-    border-right: 0;
-    border-bottom: 0;
-    border-left: 0;
-    border-radius: 18px 18px 0 0;
-  }
 
   .profile-option {
     min-height: 112px;

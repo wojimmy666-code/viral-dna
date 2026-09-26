@@ -1,4 +1,6 @@
 import { IconButton, Button } from "./ui/system/Button.jsx";
+import { Dialog } from "./ui/system/Dialog.jsx";
+import { useActionDialog } from "./ui/system/useActionDialog.jsx";
 import {
   forwardRef,
   useCallback,
@@ -710,6 +712,7 @@ export function App() {
   const [historyPage, setHistoryPage] = useState(initialHistoryState.page);
   const [historyPageSize, setHistoryPageSize] = useState(initialHistoryState.pageSize);
   const [historyActionBusy, setHistoryActionBusy] = useState(false);
+  const actionDialog = useActionDialog({ scopeKey: `${location.key}:${workspaceInfo.root_path || ''}`, inputKey: JSON.stringify([folders, records.map(record => [record.id, record.name, record.lifecycle])]) });
   const [platformConnections, setPlatformConnections] = useState(
     DEFAULT_PLATFORM_CONNECTIONS,
   );
@@ -1456,35 +1459,20 @@ export function App() {
   }
 
   async function createHistoryFolder() {
-    const name = window.prompt("输入新目录名称");
-    if (!name?.trim()) return;
-    try {
-      await apiRequest("/folders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
-      });
-      await refreshHistory({ quiet: true });
-      showNotice("目录已创建");
-    } catch (requestError) {
-      setHistoryError(requestError.message);
-    }
+    return actionDialog.open({ kind: 'input', title: '新建目录', label: '目录名称', confirmLabel: '创建目录', maxLength: 120,
+      onError: failure => setHistoryError(failure.message), onConfirm: async ({ value: name, mutate }) => {
+        await mutate(() => apiRequest('/folders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }));
+        await refreshHistory({ quiet: true }); showNotice('目录已创建');
+      } });
   }
 
   async function renameHistoryFolder(folder) {
-    const name = window.prompt("修改目录名称", folder.name);
-    if (!name?.trim() || name.trim() === folder.name) return;
-    try {
-      await apiRequest(`/folders/${folder.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
-      });
-      await refreshHistory({ quiet: true });
-      showNotice("目录名称已更新");
-    } catch (requestError) {
-      setHistoryError(requestError.message);
-    }
+    return actionDialog.open({ kind: 'input', title: '修改目录名称', label: '目录名称', initialValue: folder.name, confirmLabel: '保存名称', maxLength: 120,
+      onError: failure => setHistoryError(failure.message), onConfirm: async ({ value: name, mutate }) => {
+        if (name === folder.name) return true;
+        await mutate(() => apiRequest(`/folders/${folder.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }));
+        await refreshHistory({ quiet: true }); showNotice('目录名称已更新');
+      } });
   }
 
   async function updateHistoryRecord(recordId, update, successMessage) {
@@ -1502,9 +1490,12 @@ export function App() {
   }
 
   async function renameHistoryRecord(record) {
-    const name = window.prompt("修改项目名称", record.name);
-    if (!name?.trim() || name.trim() === record.name) return;
-    await updateHistoryRecord(record.id, { name: name.trim() }, "项目名称已更新");
+    return actionDialog.open({ kind: 'input', title: '修改项目名称', label: '项目名称', initialValue: record.name, confirmLabel: '保存名称', maxLength: 200,
+      onError: failure => setHistoryError(failure.message), onConfirm: async ({ value: name, mutate }) => {
+        if (name === record.name) return true;
+        await mutate(() => apiRequest(`/projects/${record.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) }));
+        await refreshHistory({ quiet: true }); showNotice('项目名称已更新');
+      } });
   }
 
   async function openHistoryRecord(recordId, { mode = "", target = null } = {}) {
@@ -1534,14 +1525,14 @@ export function App() {
     return openHistoryRecord(recordId, { mode: "production" });
   }
 
-  async function mutateHistoryRecords(recordIds, action) {
+  async function mutateHistoryRecords(recordIds, action, decision = null) {
     const ids = [...new Set(recordIds)].filter(Boolean);
     if (!ids.length || historyActionBusy) return false;
     if (
       action === "purge"
-      && !window.confirm(`将永久删除选中的 ${ids.length} 个项目。共享资产会保留，但项目无法恢复。是否继续？`)
+      && !decision
     ) {
-      return false;
+      return actionDialog.open({ title: '永久删除项目', description: `已选择 ${ids.length} 个项目`, warning: '项目将被永久删除，无法恢复。资产库中的共享资产会保留。', variant: 'danger', confirmLabel: `永久删除 ${ids.length} 个项目`, onConfirm: context => mutateHistoryRecords(ids, action, context) });
     }
     setHistoryActionBusy(true);
     setHistoryError("");
@@ -1551,7 +1542,7 @@ export function App() {
         const selected = records.filter((item) => ids.includes(item.id));
         const analysisIds = selected.filter((item) => item.kind !== "skill").map((item) => item.id);
         const skillIds = selected.filter((item) => item.kind === "skill").map((item) => item.id);
-        const results = await Promise.all([
+        const results = await decision.mutate(() => Promise.all([
           analysisIds.length ? apiRequest("/records/batch", {
             method: "DELETE",
             headers: { "Content-Type": "application/json" },
@@ -1562,7 +1553,7 @@ export function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ project_ids: skillIds }),
           }) : null,
-        ]);
+        ]));
         result = { affected_count: results.reduce((sum, item) => sum + Number(item?.affected_count || 0), 0) };
       } else {
         result = await apiRequest("/projects/batch/lifecycle", {
@@ -1580,6 +1571,7 @@ export function App() {
     } catch (requestError) {
       setHistoryError(requestError.message);
       showNotice({ type: "error", title: "项目操作失败", message: requestError.message });
+      if (decision) throw requestError;
       return false;
     } finally {
       setHistoryActionBusy(false);
@@ -2484,6 +2476,7 @@ export function App() {
 
   return (
     <div className={`app-shell ${sidebarLayout.collapsed ? "sidebar-is-collapsed" : ""}`}>
+      {actionDialog.element}
       <Topbar
         sidebarCollapsed={sidebarLayout.collapsed}
         onToggleSidebar={sidebarLayout.toggle}
@@ -3492,18 +3485,10 @@ function ModelSettingsDialog({
   }
 
   return (
-    <div
-      className="settings-overlay"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closeIfIdle();
-      }}
-    >
-      <section
+      <Dialog placement="drawer" onClose={closeIfIdle} busy={saving || workspaceSaving || codexApplying || codexDiscovering || codexNetworkTesting || codexSandboxTesting}
         aria-describedby="model-settings-description"
         aria-labelledby="model-settings-title"
-        aria-modal="true"
         className="settings-dialog"
-        role="dialog"
       >
         <header className="settings-header">
           <div>
@@ -4715,8 +4700,7 @@ function ModelSettingsDialog({
             )}
           </Button>
         </footer>
-      </section>
-    </div>
+      </Dialog>
   );
 }
 

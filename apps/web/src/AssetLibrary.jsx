@@ -1,4 +1,6 @@
 import { IconButton, Button } from "./ui/system/Button.jsx";
+import { Dialog } from "./ui/system/Dialog.jsx";
+import { useActionDialog } from "./ui/system/useActionDialog.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { StorageUsageStrip } from "./accounts/StorageManagement.jsx";
 import {
@@ -121,24 +123,8 @@ function FolderCover({ cover, resolveUrl }) {
   return <img alt="" decoding="async" loading="lazy" onError={() => setFailed(true)} src={source} />;
 }
 
-function Modal({ children, label, onClose, size = "default" }) {
-  return (
-    <div
-      className="asset-modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        aria-label={label}
-        aria-modal="true"
-        className={`asset-modal ${size === "compact" ? "compact" : ""}`}
-        role="dialog"
-      >
-        {children}
-      </section>
-    </div>
-  );
+function Modal({ children, label, onClose, busy = false, size = "default" }) {
+  return <Dialog aria-label={label} className="asset-modal" size={size === 'compact' ? 'input' : 'large'} busy={busy} onClose={onClose}>{children}</Dialog>;
 }
 
 export function AssetLibrary({ request, resolveUrl, onNotice }) {
@@ -174,6 +160,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
   const uploadPreview = useObjectUrl(uploadFile);
   const workspaceId = context?.active_workspace?.id || "";
   const workspaceName = context?.active_workspace?.name || "主工作区";
+  const actionDialog = useActionDialog({ scopeKey: workspaceId, inputKey: JSON.stringify([selectedAsset?.id, selectedAsset?.version, folders.map(folder => [folder.id, folder.name, folder.asset_count])]) });
   const localLocation = context?.storage_locations?.find(
     (item) => item.provider_type === "local_filesystem",
   );
@@ -557,27 +544,17 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
 
   async function deleteFolder(folder) {
     const hasAssets = folder.asset_count > 0;
-    const accepted = window.confirm(
-      hasAssets
-        ? `“${folder.name}”中有 ${folder.asset_count} 个资产。删除目录并将资产移到未分类吗？`
-        : `确定删除目录“${folder.name}”吗？`,
-    );
-    if (!accepted) return;
-    setError("");
-    try {
-      await request(
-        `/asset-folders/${folder.id}?move_assets_to_unfiled=${hasAssets ? "true" : "false"}`,
-        { method: "DELETE" },
-      );
-      if (selectedFolder === folder.id) changeFolder("unfiled");
-      if (selectedAsset?.folder_id === folder.id) {
-        setSelectedAsset((current) => ({ ...current, folder_id: null, folder_name: null }));
-      }
-      await Promise.all([refreshFolders(), refreshAssets()]);
-      onNotice?.(hasAssets ? "目录已删除，资产已移到未分类" : "目录已删除");
-    } catch (requestError) {
-      setError(requestError.message);
-    }
+    return actionDialog.open({ title: '删除资产目录', description: `目录：${folder.name}`,
+      warning: hasAssets ? `目录中有 ${folder.asset_count} 个资产。删除目录后，资产会移到未分类，原文件不会删除。` : '仅删除空目录，不删除任何资产文件。',
+      variant: 'warning', confirmLabel: '删除目录', onError: failure => setError(failure.message),
+      onConfirm: async ({ mutate }) => {
+        setError('');
+        await mutate(() => request(`/asset-folders/${folder.id}?move_assets_to_unfiled=${hasAssets ? 'true' : 'false'}`, { method: 'DELETE' }));
+        if (selectedFolder === folder.id) changeFolder('unfiled');
+        if (selectedAsset?.folder_id === folder.id) setSelectedAsset(current => ({ ...current, folder_id: null, folder_name: null }));
+        await Promise.all([refreshFolders(), refreshAssets()]);
+        onNotice?.(hasAssets ? '目录已删除，资产已移到未分类' : '目录已删除');
+      } });
   }
 
   async function saveAssetDetail(event) {
@@ -610,22 +587,21 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
     }
   }
 
-  async function toggleArchive() {
+  async function toggleArchive(decision = null) {
     if (!selectedAsset) return;
     const restoring = Boolean(selectedAsset.archived_at);
-    if (!restoring && !window.confirm(`确定归档资产“${selectedAsset.name}”吗？`)) return;
+    if (!restoring && !decision?.mutate) return actionDialog.open({ title: '归档资产', description: selectedAsset.name, warning: '归档后从当前列表隐藏，原文件保留，可从已归档资产中恢复。', variant: 'warning', confirmLabel: '归档资产', onConfirm: context => toggleArchive(context) });
     setDetailSaving(true);
     setError("");
     try {
-      const updated = await request(
-        restoring ? `/assets/${selectedAsset.id}/restore` : `/assets/${selectedAsset.id}`,
-        { method: restoring ? "POST" : "DELETE" },
-      );
+      const submit = () => request(restoring ? `/assets/${selectedAsset.id}/restore` : `/assets/${selectedAsset.id}`, { method: restoring ? 'POST' : 'DELETE' });
+      const updated = await (decision?.mutate ? decision.mutate(submit) : submit());
       await Promise.all([refreshFolders(), refreshAssets()]);
       setSelectedAsset(restoring || includeArchived ? updated : null);
       onNotice?.(restoring ? "资产已恢复" : "资产已归档");
     } catch (requestError) {
       setError(requestError.message);
+      if (decision?.mutate) throw requestError;
     } finally {
       setDetailSaving(false);
     }
@@ -848,6 +824,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
 
   return (
     <main className={`asset-library-page ${selectedAsset ? "has-detail" : ""}`}>
+      {actionDialog.element}
       <section className="asset-page-heading">
         <div>
           <div className="breadcrumb">
@@ -1197,7 +1174,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
       </section>
 
       {uploadOpen && (
-        <Modal label="上传资产" onClose={() => !uploading && setUploadOpen(false)}>
+        <Modal label="上传资产" busy={uploading} onClose={() => !uploading && setUploadOpen(false)}>
           <form onSubmit={submitUpload}>
             <header className="asset-modal-header">
               <div><span>工作区资产</span><h2>上传新资产</h2><p>当前版本保存在本机工作区，单张图片不超过 15 MB。</p></div>
@@ -1220,6 +1197,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
                 <label className="asset-rights-check prominent"><input checked={uploadDraft.rightsConfirmed} onChange={(event) => setUploadDraft((current) => ({ ...current, rightsConfirmed: event.target.checked }))} type="checkbox" /><ShieldCheck size={17} /><span>我确认拥有该图片的使用权</span></label>
               </div>
             </div>
+            {error && <p className="ui-dialog-body ui-dialog-validation" role="alert">{error}</p>}
             <footer className="asset-modal-footer">
               <span><HardDrive size={15} weight="fill" />存储策略：仅本地</span>
               <Button className="secondary-button compact" disabled={uploading} onClick={() => setUploadOpen(false)} type="button">取消</Button>
@@ -1233,13 +1211,14 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
       )}
 
       {folderDialog && (
-        <Modal label={folderDialog.folder ? "重命名资产目录" : "新建资产目录"} onClose={() => !folderSaving && setFolderDialog(null)} size="compact">
+        <Modal label={folderDialog.folder ? "重命名资产目录" : "新建资产目录"} busy={folderSaving} onClose={() => !folderSaving && setFolderDialog(null)} size="compact">
           <form className="asset-folder-dialog" onSubmit={saveFolder}>
             <header className="asset-modal-header">
               <div><span>一级目录</span><h2>{folderDialog.folder ? "重命名目录" : "新建目录"}</h2><p>资产目录暂时只支持一级分类。</p></div>
               <IconButton aria-label="关闭目录设置" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button"><X size={18} /></IconButton>
             </header>
             <label><span>目录名称</span><input autoFocus maxLength={120} onChange={(event) => setFolderDialog((current) => ({ ...current, name: event.target.value }))} placeholder="例如：主播人物" required value={folderDialog.name} /></label>
+            {error && <p className="ui-dialog-body ui-dialog-validation" role="alert">{error}</p>}
             <footer className="asset-modal-footer">
               <span />
               <Button className="secondary-button compact" disabled={folderSaving} onClick={() => setFolderDialog(null)} type="button">取消</Button>
@@ -1252,6 +1231,7 @@ export function AssetLibrary({ request, resolveUrl, onNotice }) {
       {coverDialog && (
         <Modal
           label={`设置${coverDialog.folder.name}目录封面`}
+          busy={coverSaving}
           onClose={() => !coverSaving && setCoverDialog(null)}
         >
           <form className="asset-cover-dialog" onSubmit={saveFolderCover}>

@@ -110,35 +110,8 @@
   font-weight: var(--type-weight-semibold);
 }
 
-.managed-asset-picker-backdrop {
-  position: fixed;
-  z-index: 150;
-  inset: 0;
-  display: flex;
-  justify-content: flex-end;
-  background: rgb(27 26 38 / 38%);
-  backdrop-filter: blur(2px);
-}
 
-.managed-asset-picker {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-  width: min(860px, calc(100vw - 48px));
-  height: 100dvh;
-  overflow: hidden;
-  border-left: 1px solid #e4e2ec;
-  background: #fff;
-  box-shadow: -18px 0 48px rgb(40 34 81 / 16%);
-}
 
-.managed-asset-picker-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 22px 24px 18px;
-  border-bottom: 1px solid #eceaf2;
-}
 
 .managed-asset-picker-header > div {
   display: grid;
@@ -345,14 +318,6 @@
   color: var(--status-danger-text);
 }
 
-.managed-asset-picker-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border-top: 1px solid #eceaf2;
-  color: var(--text-secondary);
-}
 
 .managed-asset-picker-pagination > div {
   display: flex;
@@ -360,7 +325,6 @@
 }
 
 @media (max-width: 720px) {
-  .managed-asset-picker { width: 100vw; }
   .managed-asset-picker-body { grid-template-columns: 1fr; }
   .managed-asset-group-list {
     flex-direction: row;

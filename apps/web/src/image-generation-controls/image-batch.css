@@ -35,11 +35,7 @@
 .image-batch-choice select { width: 100%; min-height: var(--control-height); padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-control); background: var(--surface-panel); color: var(--text-primary); font: inherit; }
 .image-batch-choice span { color: var(--text-secondary); font-size: var(--type-caption-size); }
 .image-batch-cost-consent { display: flex; align-items: center; gap: var(--space-2); flex-basis: 100%; }
-.image-batch-dialog { box-sizing: border-box; width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: var(--space-4); border: 1px solid var(--border-default); border-radius: var(--radius-overlay); background: var(--surface-panel); color: var(--text-primary); overflow-y: auto; }
-.image-batch-dialog::backdrop { background: rgb(0 0 0 / 35%); }
-.image-batch-dialog h2 { margin: 0 0 var(--space-4); font-size: var(--type-heading-size); font-weight: var(--type-weight-semibold); }
 .image-batch-dialog .image-batch-choice { flex: 1 1 220px; min-width: 0; }
 .image-batch-dialog p { font-size: var(--type-body-size); overflow-wrap: anywhere; }
 .image-batch-hint { color: var(--text-secondary); }
-.image-batch-dialog footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 @media (max-width: 640px) { .image-batch-choice { flex: 1 1 180px; } }

@@ -432,34 +432,8 @@
   cursor: not-allowed;
 }
 
-.generation-reference-preview-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 140;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(25, 22, 31, .58);
-}
 
-.generation-reference-preview-dialog {
-  width: min(760px, 100%);
-  max-height: min(760px, calc(100dvh - 48px));
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: hidden;
-  border-radius: 14px;
-  background: #fff;
-}
 
-.generation-reference-preview-dialog > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border-default);
-}
 
 .generation-reference-preview-dialog > header > div {
   min-width: 0;

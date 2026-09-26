@@ -172,6 +172,8 @@ export function AnchoredPopover({
     >
       {children}
     </div>,
-    document.body,
+    // A native modal makes body-level siblings inert. Keep contextual menus
+    // inside their owning modal without turning the menu into a second modal.
+    anchorRef?.current?.closest('dialog[open]') || document.body,
   );
 }

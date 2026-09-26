@@ -1,4 +1,5 @@
 import { IconButton, Button } from "./ui/system/Button.jsx";
+import { Dialog } from './ui/system/Dialog.jsx';
 import { imageBindingsForDraft, resolveImageInputMode, imageBaseCandidateId } from "./image-generation-controls/image-input.js";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
@@ -145,6 +146,22 @@ function KeyframePicker({
     Math.max(start, Number(plan.source_keyframe_timestamp_seconds ?? (start + end) / 2)),
   );
   const [timestamp, setTimestamp] = useState(initial);
+  const pending = useRef(false);
+  const [localBusy, setLocalBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [uncertain, setUncertain] = useState(false);
+  const working = busy || localBusy;
+
+  async function confirmFrame() {
+    if (pending.current || busy || uncertain) return;
+    pending.current = true; setLocalBusy(true); setError('');
+    try { if (await onConfirm(timestamp) !== false) onClose(); }
+    catch (failure) {
+      const unknown = !(failure.status >= 400 && failure.status < 500);
+      setUncertain(unknown);
+      setError(unknown ? '提交结果未确认，请关闭并核对关键帧，勿重复提交。' : failure.message);
+    } finally { pending.current = false; setLocalBusy(false); }
+  }
 
   useEffect(() => {
     setTimestamp(initial);
@@ -171,20 +188,16 @@ function KeyframePicker({
   }
 
   return (
-    <div className="keyframe-picker-backdrop" role="presentation" onMouseDown={() => !busy && onClose()}>
-      <section
+      <Dialog onClose={onClose} busy={working} size="large"
         aria-label="从源视频选择关键帧"
-        aria-modal="true"
         className="keyframe-picker"
-        role="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
           <div>
             <h4>从源视频选择关键帧</h4>
             <p>仅可选择当前分镜 {seconds(start)}s 到 {seconds(end)}s 的画面。</p>
           </div>
-          <IconButton aria-label="关闭" disabled={busy} onClick={onClose} type="button"><X size={17} /></IconButton>
+          <IconButton aria-label="关闭" disabled={working} onClick={onClose} type="button"><X size={17} /></IconButton>
         </header>
         <div className="keyframe-picker-video">
           <video
@@ -219,23 +232,21 @@ function KeyframePicker({
             <span>秒</span>
           </label>
         </div>
+        {error && <p className="ui-dialog-body ui-dialog-validation" role="alert">{error}</p>}
         <footer>
-          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
+          <Button className="secondary-button compact" disabled={working} onClick={onClose} type="button">取消</Button>
           <Button
             className="primary-button compact"
-            disabled={busy}
-            onClick={() => {
-              onConfirm(timestamp);
-              onClose();
-            }}
+            disabled={working || uncertain}
+            loading={localBusy}
+            onClick={confirmFrame}
             type="button"
           >
             <ImageSquare size={16} />
             使用这一帧
           </Button>
         </footer>
-      </section>
-    </div>
+      </Dialog>
   );
 }
 
@@ -248,9 +259,15 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
   const [imagePrompt, setImagePrompt] = useState("");
   const [imagePromptMentions, setImagePromptMentions] = useState([]);
   const [referenceBindings, setReferenceBindings] = useState([]);
+  const pending = useRef(false);
+  const [localBusy, setLocalBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [uncertain, setUncertain] = useState(false);
+  const working = busy || localBusy;
 
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
+    if (pending.current || busy || uncertain) return;
     const payload = {
       mode,
       insert_after_shot_plan_id: currentPlan?.id || null,
@@ -265,24 +282,23 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
       payload.end_seconds = Number(endSeconds);
       payload.source_keyframe_timestamp_seconds = Number(keyframeSeconds);
     }
-    onCreate(payload);
-    onClose();
+    pending.current = true; setLocalBusy(true); setError('');
+    try { if (await onCreate(payload) !== false) onClose(); }
+    catch (failure) {
+      const unknown = !(failure.status >= 400 && failure.status < 500);
+      setUncertain(unknown);
+      setError(unknown ? '提交结果未确认，请关闭并核对分镜列表，勿重复创建。' : failure.message);
+    } finally { pending.current = false; setLocalBusy(false); }
   }
 
   return (
-    <div className="keyframe-picker-backdrop" role="presentation" onMouseDown={() => !busy && onClose()}>
-      <form
-        aria-label="新增分镜"
-        aria-modal="true"
-        className="keyframe-picker shot-create-dialog"
-        onSubmit={submit}
-        role="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <Dialog aria-label="新增分镜" className="keyframe-picker shot-create-dialog" busy={working} onClose={onClose}>
+      <form onSubmit={submit}>
         <header>
           <div><h4>新增分镜</h4><p>新分镜将插入到当前分镜之后。</p></div>
-          <IconButton aria-label="关闭" disabled={busy} onClick={onClose} type="button"><X size={17} /></IconButton>
+          <IconButton aria-label="关闭" disabled={working} onClick={onClose} type="button"><X size={17} /></IconButton>
         </header>
+        <fieldset className="shot-create-fields ui-dialog-body" disabled={working}>
         <div className="shot-create-options">
           <label className={mode === "duplicate" ? "active" : ""}>
             <input checked={mode === "duplicate"} onChange={() => setMode("duplicate")} type="radio" />
@@ -314,12 +330,14 @@ function ShotCreateDialog({ currentPlan, busy, onClose, onCreate, hasSourceVideo
               }} />
           </div>
         )}
+        {error && <p className="ui-dialog-validation" role="alert">{error}</p>}
+        </fieldset>
         <footer>
-          <Button className="secondary-button compact" disabled={busy} onClick={onClose} type="button">取消</Button>
-          <Button className="primary-button compact" disabled={busy} type="submit"><Plus size={16} />新增分镜</Button>
+          <Button className="secondary-button compact" disabled={working} onClick={onClose} type="button">取消</Button>
+          <Button className="primary-button compact" disabled={working || uncertain} loading={localBusy} type="submit"><Plus size={16} />新增分镜</Button>
         </footer>
       </form>
-    </div>
+    </Dialog>
   );
 }
 

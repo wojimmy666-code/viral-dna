@@ -1,6 +1,7 @@
 import {useEffect, useId, useRef, useState} from 'react';
 import {CornersOut, X} from '@phosphor-icons/react';
 import {Button, IconButton} from '../ui/system/Button.jsx';
+import {Dialog} from '../ui/system/Dialog.jsx';
 import {clampBox, compositionDifference, defaultComposition, effectiveComposition, moveBox} from './composition.js';
 import './composition.css';
 import {ReframePanel} from './ReframePanel.jsx';
@@ -35,7 +36,7 @@ function Box({box, onChange, actual=false, interactive=true, silhouette=false, r
 }
 
 export function CompositionDialog({state, projectId, beatId, previewUrl, assets=[], disabled, onClose, onSave, onReload, reframeSource, onGenerate}) {
-  const dialog = useRef(null), titleId=useId();
+  const titleId=useId();
   const initial=effectiveComposition(state,projectId,beatId);
   const [draft,setDraft]=useState(()=>initial || defaultComposition(state.width/state.height));
   const [selected,setSelected]=useState([beatId]);
@@ -45,7 +46,6 @@ export function CompositionDialog({state, projectId, beatId, previewUrl, assets=
   const disabledRef=useRef(disabled); disabledRef.current=disabled;
   const ratio=state.width/state.height;
   const aspectChanged=Math.abs(draft.aspect_ratio/ratio-1)>0.02;
-  useEffect(()=>{const previous=document.activeElement; dialog.current.showModal(); return ()=>previous?.isConnected && previous.focus();},[]);
   const delta=actual?compositionDifference(draft,actual):null;
   const targets=state.targets || [];
   const targetIds=scope==='all'?targets.map(item=>item.id):scope==='selected'?selected:[beatId];
@@ -58,7 +58,7 @@ export function CompositionDialog({state, projectId, beatId, previewUrl, assets=
   }
   function field(key,value){setDraft(current=>clampBox({...current,[key]:value}));}
   function close(){if(!busy)onClose();}
-  return <dialog ref={dialog} className="composition-dialog" aria-labelledby={titleId} onCancel={event=>{event.preventDefault();close();}}>
+  return <Dialog className="composition-dialog" size="wide" aria-labelledby={titleId} busy={busy} onClose={close}>
     <header><div><h2 id={titleId}>{mode==='reframe'?'缩放扩图':'构图引导'}</h2><p>{mode==='reframe'?'先标记原图人物，再按目标高度等比例缩放并补全环境。':'拖动人物框确定位置与大小；生成结果仍需人工核对。'}</p></div><IconButton label="关闭构图" disabled={busy} onClick={close}><X size={20}/></IconButton></header>
     {onGenerate&&<div className="composition-mode" aria-label="构图方式"><Button size="compact" variant={mode==='guide'?'secondary':'quiet'} aria-pressed={mode==='guide'} disabled={busy} onClick={()=>setMode('guide')}>参考引导</Button><Button size="compact" variant={mode==='reframe'?'secondary':'quiet'} aria-pressed={mode==='reframe'} disabled={busy||!reframeSource} title={!reframeSource?'请先生成并选择一张图片':undefined} onClick={()=>setMode('reframe')}>缩放扩图</Button>{!reframeSource&&<p>有生成图片后可按原图精确缩放。</p>}</div>}
     {mode==='reframe'&&reframeSource?<ReframePanel source={reframeSource} target={draft} onTargetChange={setDraft} disabled={disabled} onBusy={setBusy} onClose={onClose} onGenerate={onGenerate} Box={Box}/>:<>
@@ -93,7 +93,7 @@ export function CompositionDialog({state, projectId, beatId, previewUrl, assets=
       {disabled&&<p role="alert">当前只读，构图草稿暂时保留，不能应用。</p>}
     </div></div>
     <footer><div className="composition-secondary">{scope!=='default'&&<Button variant="quiet" size="compact" disabled={busy||disabled||!targetIds.length} onClick={()=>save('inherit')}>所选画面恢复默认</Button>}<Button variant="quiet" size="compact" disabled={busy||disabled||!targetIds.length} onClick={()=>save(scope==='default'?'clear_default':'disable')}>{scope==='default'?'清除方案默认':'所选画面不使用构图'}</Button></div><div><Button disabled={busy} onClick={close}>取消</Button><Button variant="primary" loading={busy} loadingLabel="正在应用…" disabled={disabled||aspectChanged||(scope!=='default'&&!targetIds.length)} onClick={()=>save()}>应用构图</Button></div></footer></>}
-  </dialog>;
+  </Dialog>;
 }
 
 export function CompositionControl({projectId,beatId,request,disabled,assets,previewUrl,beforeOpen,onSaved,onEffectiveChange,reframeSource,onGenerate}) {

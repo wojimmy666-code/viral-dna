@@ -1,4 +1,5 @@
 import { IconButton, Button } from "../ui/system/Button.jsx";
+import { Dialog } from "../ui/system/Dialog.jsx";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
@@ -62,14 +63,6 @@ export function ManagedAssetPicker({
   const [error, setError] = useState(null);
 
   useEffect(() => {
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-
-  useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -109,10 +102,7 @@ export function ManagedAssetPicker({
   }
 
   return (
-    <div className="managed-asset-picker-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
-      <aside aria-labelledby="managed-asset-picker-title" aria-modal="true" className="managed-asset-picker" role="dialog">
+      <Dialog aria-labelledby="managed-asset-picker-title" className="managed-asset-picker" size="large" placement="drawer" onClose={onClose}>
         <header className="managed-asset-picker-header">
           <div>
             <span>火山方舟资产目录</span>
@@ -214,7 +204,6 @@ export function ManagedAssetPicker({
             </div>
           </footer>
         )}
-      </aside>
-    </div>
+      </Dialog>
   );
 }

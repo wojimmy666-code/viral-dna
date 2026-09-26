@@ -1,4 +1,5 @@
 import { Button } from "./ui/system/Button.jsx";
+import { useActionDialog } from './ui/system/useActionDialog.jsx';
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
@@ -340,6 +341,7 @@ export function ShotVideoWorkspace({
   const [promptSettingsOpen, setPromptSettingsOpen] = useState(true);
   const [globalPrompts, setGlobalPrompts] = useState({});
   const plan = shotDetail?.plan;
+  const actionDialog = useActionDialog({ scopeKey: `${project?.id}:${plan?.id}:${displayedCandidateId}`, inputKey: project?.current_revision_id || '' });
   const generationGroup = project?.video_generation_groups?.find(group => group.shot_plan_ids.includes(plan?.id));
   const sourceVideoMode = plan?.output_mode === "source_video";
   const isSkill = project?.origin_type === "skill_run";
@@ -787,9 +789,8 @@ export function ShotVideoWorkspace({
 
   async function rejectDisplayedCandidate() {
     if (!displayedCandidate) return;
-    const reason = window.prompt("请输入退回原因", "动作或画面稳定性需要调整");
-    if (!reason?.trim()) return;
-    await onReject(displayedCandidate.id, reason.trim());
+    return actionDialog.open({ kind: 'input', title: '退回视频候选', description: '候选保留在历史中，可随时重新采用。', label: '退回原因', initialValue: '动作或画面稳定性需要调整', multiline: true, maxLength: 2000, confirmLabel: '退回候选',
+      onConfirm: context => onReject(displayedCandidate.id, context.value, context) });
   }
 
   function selectVideoModel(modelAlias) {
@@ -962,6 +963,7 @@ export function ShotVideoWorkspace({
 
   return (
     <section className={`shot-video-workspace${sourceVideoMode ? " source-video-passthrough" : ""}`}>
+      {actionDialog.element}
       <header className="shot-video-stage-header">
         <div>
           <h3>分镜视频</h3>
