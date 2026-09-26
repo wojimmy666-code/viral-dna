@@ -3,8 +3,9 @@ import {CornersOut, X} from '@phosphor-icons/react';
 import {Button, IconButton} from '../ui/system/Button.jsx';
 import {clampBox, compositionDifference, defaultComposition, effectiveComposition, moveBox} from './composition.js';
 import './composition.css';
+import {ReframePanel} from './ReframePanel.jsx';
 
-function Box({box, onChange, actual=false, interactive=true, silhouette=false}) {
+function Box({box, onChange, actual=false, interactive=true, silhouette=false, resizable=true}) {
   const drag = useRef(null);
   function start(event, resize) {
     if (!interactive || event.button !== 0) return;
@@ -29,17 +30,18 @@ function Box({box, onChange, actual=false, interactive=true, silhouette=false}) 
     {silhouette && <svg className="composition-figure" viewBox="0 0 100 200" preserveAspectRatio="none" aria-hidden="true"><circle cx="50" cy="17" r="13"/><path d="M50 34 V112 M17 99 L50 48 L83 99 M28 193 L50 112 L72 193" fill="none" stroke="currentColor" strokeWidth="9" strokeLinecap="round"/></svg>}
     <span className="composition-box-label">{actual?'实际位置（人工标记）':'目标位置'}</span>
     {interactive && <><button type="button" data-ui="composition-position" className="composition-drag" aria-label={actual?'移动实际人物框':'移动目标人物框'} onPointerDown={event=>start(event,false)} onKeyDown={event=>keyboard(event,false)} {...events}/>
-      <button type="button" data-ui="composition-resize" className="composition-resize" aria-label={actual?'调整实际人物大小':'调整目标人物大小'} onPointerDown={event=>start(event,true)} onKeyDown={event=>keyboard(event,true)} {...events}><CornersOut size={18}/></button></>}
+      {resizable&&<button type="button" data-ui="composition-resize" className="composition-resize" aria-label={actual?'调整实际人物大小':'调整目标人物大小'} onPointerDown={event=>start(event,true)} onKeyDown={event=>keyboard(event,true)} {...events}><CornersOut size={18}/></button>}</>}
   </div>;
 }
 
-export function CompositionDialog({state, projectId, beatId, previewUrl, assets=[], disabled, onClose, onSave, onReload}) {
+export function CompositionDialog({state, projectId, beatId, previewUrl, assets=[], disabled, onClose, onSave, onReload, reframeSource, onGenerate}) {
   const dialog = useRef(null), titleId=useId();
   const initial=effectiveComposition(state,projectId,beatId);
   const [draft,setDraft]=useState(()=>initial || defaultComposition(state.width/state.height));
   const [selected,setSelected]=useState([beatId]);
   const [scope,setScope]=useState('current'), [busy,setBusy]=useState(false), [error,setError]=useState('');
   const [review,setReview]=useState(false), [actual,setActual]=useState(null), [failedPreview,setFailedPreview]=useState(false);
+  const [mode,setMode]=useState('guide');
   const disabledRef=useRef(disabled); disabledRef.current=disabled;
   const ratio=state.width/state.height;
   const aspectChanged=Math.abs(draft.aspect_ratio/ratio-1)>0.02;
@@ -57,7 +59,9 @@ export function CompositionDialog({state, projectId, beatId, previewUrl, assets=
   function field(key,value){setDraft(current=>clampBox({...current,[key]:value}));}
   function close(){if(!busy)onClose();}
   return <dialog ref={dialog} className="composition-dialog" aria-labelledby={titleId} onCancel={event=>{event.preventDefault();close();}}>
-    <header><div><h2 id={titleId}>构图引导</h2><p>拖动人物框确定位置与大小；生成结果仍需人工核对。</p></div><IconButton label="关闭构图" disabled={busy} onClick={close}><X size={20}/></IconButton></header>
+    <header><div><h2 id={titleId}>{mode==='reframe'?'缩放扩图':'构图引导'}</h2><p>{mode==='reframe'?'先标记原图人物，再按目标高度等比例缩放并补全环境。':'拖动人物框确定位置与大小；生成结果仍需人工核对。'}</p></div><IconButton label="关闭构图" disabled={busy} onClick={close}><X size={20}/></IconButton></header>
+    {onGenerate&&<div className="composition-mode" aria-label="构图方式"><Button size="compact" variant={mode==='guide'?'secondary':'quiet'} aria-pressed={mode==='guide'} disabled={busy} onClick={()=>setMode('guide')}>参考引导</Button><Button size="compact" variant={mode==='reframe'?'secondary':'quiet'} aria-pressed={mode==='reframe'} disabled={busy||!reframeSource} title={!reframeSource?'请先生成并选择一张图片':undefined} onClick={()=>setMode('reframe')}>缩放扩图</Button>{!reframeSource&&<p>有生成图片后可按原图精确缩放。</p>}</div>}
+    {mode==='reframe'&&reframeSource?<ReframePanel source={reframeSource} target={draft} onTargetChange={setDraft} disabled={disabled} onBusy={setBusy} onClose={onClose} onGenerate={onGenerate} Box={Box}/>:<>
     <div className="composition-body"><div className="composition-stage">
       <div className="composition-canvas" style={{aspectRatio:ratio, maxWidth:`min(100%, ${52*ratio}vh)`}}>
         {previewUrl&&!failedPreview && <img src={previewUrl} alt="当前分镜画面，仅供构图定位和人工核对" onError={()=>setFailedPreview(true)}/>}
@@ -88,12 +92,13 @@ export function CompositionDialog({state, projectId, beatId, previewUrl, assets=
       {error&&<div className="composition-error" role="alert">{error}<Button variant="text" size="compact" disabled={busy} onClick={async()=>{try{await onReload();setError('已读取最新版本，当前构图仍保留，请核对后再次应用。');}catch(failure){setError(failure.message);}}}>重新读取版本</Button></div>}
       {disabled&&<p role="alert">当前只读，构图草稿暂时保留，不能应用。</p>}
     </div></div>
-    <footer><div className="composition-secondary">{scope!=='default'&&<Button variant="quiet" size="compact" disabled={busy||disabled||!targetIds.length} onClick={()=>save('inherit')}>所选画面恢复默认</Button>}<Button variant="quiet" size="compact" disabled={busy||disabled||!targetIds.length} onClick={()=>save(scope==='default'?'clear_default':'disable')}>{scope==='default'?'清除方案默认':'所选画面不使用构图'}</Button></div><div><Button disabled={busy} onClick={close}>取消</Button><Button variant="primary" loading={busy} loadingLabel="正在应用…" disabled={disabled||aspectChanged||(scope!=='default'&&!targetIds.length)} onClick={()=>save()}>应用构图</Button></div></footer>
+    <footer><div className="composition-secondary">{scope!=='default'&&<Button variant="quiet" size="compact" disabled={busy||disabled||!targetIds.length} onClick={()=>save('inherit')}>所选画面恢复默认</Button>}<Button variant="quiet" size="compact" disabled={busy||disabled||!targetIds.length} onClick={()=>save(scope==='default'?'clear_default':'disable')}>{scope==='default'?'清除方案默认':'所选画面不使用构图'}</Button></div><div><Button disabled={busy} onClick={close}>取消</Button><Button variant="primary" loading={busy} loadingLabel="正在应用…" disabled={disabled||aspectChanged||(scope!=='default'&&!targetIds.length)} onClick={()=>save()}>应用构图</Button></div></footer></>}
   </dialog>;
 }
 
-export function CompositionControl({projectId,beatId,request,disabled,assets,previewUrl,beforeOpen,onSaved,onEffectiveChange}) {
+export function CompositionControl({projectId,beatId,request,disabled,assets,previewUrl,beforeOpen,onSaved,onEffectiveChange,reframeSource,onGenerate}) {
   const [state,setState]=useState(null),[open,setOpen]=useState(false),[pending,setPending]=useState(false),[error,setError]=useState('');
+  const [frozenSource,setFrozenSource]=useState(null);
   const live=useRef({projectId,beatId,disabled});live.current={projectId,beatId,disabled};
   useEffect(()=>{live.current={projectId,beatId,disabled};return()=>{live.current.projectId=null;};},[projectId,beatId]);
   const callbacks=useRef({beforeOpen,onSaved,onEffectiveChange});callbacks.current={beforeOpen,onSaved,onEffectiveChange};
@@ -104,7 +109,7 @@ export function CompositionControl({projectId,beatId,request,disabled,assets,pre
   const effective=effectiveComposition(state,projectId,beatId);
   useEffect(()=>{callbacks.current.onEffectiveChange?.(effective);},[effective]);
   async function load(){const result=await request(path);if(live.current.projectId!==projectId||live.current.beatId!==beatId)throw new Error('画面已切换，请重新打开构图');setState(result);return result;}
-  async function show(){if(disabled||pending)return;setPending(true);setError('');try{if(await callbacks.current.beforeOpen?.()===false)throw new Error('请先处理未保存的提示词');await load();if(!live.current.disabled)setOpen(true);}catch(failure){setError(failure.message);}finally{setPending(false);}}
+  async function show(){if(disabled||pending)return;setPending(true);setError('');try{if(await callbacks.current.beforeOpen?.()===false)throw new Error('请先处理未保存的提示词');await load();if(!live.current.disabled){setFrozenSource(reframeSource);setOpen(true);}}catch(failure){setError(failure.message);}finally{setPending(false);}}
   async function save(payload){if(live.current.disabled||live.current.projectId!==projectId||live.current.beatId!==beatId)throw new Error('编辑权限或当前画面已改变');
     const saved=await request(path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,expected_context_id:state.context_id,expected_revision_id:state.revision_id})});
     if(live.current.projectId!==projectId||live.current.beatId!==beatId)return;
@@ -113,5 +118,6 @@ export function CompositionControl({projectId,beatId,request,disabled,assets,pre
     catch { throw new Error('构图已保存，但提示词版本同步失败。请重新读取版本或刷新页面后继续。'); }
     if(live.current.projectId===projectId&&live.current.beatId===beatId)setOpen(false);
   }
-  return <div className="composition-control"><Button variant="quiet" size="compact" icon={<CornersOut size={18}/>} disabled={disabled||!request} loading={pending} loadingLabel="读取构图…" onClick={show}>{effective?'构图引导 · 已设置':'构图'}</Button>{error&&<span role="alert">{error}</span>}{open&&state&&<CompositionDialog state={state} projectId={projectId} beatId={beatId} assets={assets} previewUrl={previewUrl} disabled={disabled} onClose={()=>setOpen(false)} onSave={save} onReload={load}/>}</div>;
+  async function generate(options){if(live.current.disabled||live.current.projectId!==projectId||live.current.beatId!==beatId)throw new Error('编辑权限或当前画面已改变');return onGenerate(options);}
+  return <div className="composition-control"><Button variant="quiet" size="compact" icon={<CornersOut size={18}/>} disabled={disabled||!request} loading={pending} loadingLabel="读取构图…" onClick={show}>{effective?'构图引导 · 已设置':'构图'}</Button>{error&&<span role="alert">{error}</span>}{open&&state&&<CompositionDialog state={state} projectId={projectId} beatId={beatId} assets={assets} previewUrl={previewUrl} disabled={disabled} onClose={()=>setOpen(false)} onSave={save} onReload={load} reframeSource={frozenSource} onGenerate={onGenerate?generate:undefined}/>}</div>;
 }

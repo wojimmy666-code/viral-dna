@@ -3,6 +3,33 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { activeReferences, referenceSegments, atomicDeletion, replacementRange, replaceReference } from '../src/prompt-references/reference-document.js';
 import { reconcileVideoDraftReferences, synchronizeAutomaticVideoPrompt } from '../src/video-inputs/video-prompt-references.js';
+import { purposeOptions, referenceRailOrder, spatialConflict } from '../src/prompt-references/reference-purposes.js';
+import { promptAssetReference, promptMentionData } from '../src/prompt-references/prompt-assets.js';
+import { imageGenerationInputManifest } from '../src/production-ui.js';
+
+test('purpose is per-use, spatial rail is first without renumbering, and only one space is allowed', () => {
+  const spatial = promptAssetReference({ id:'scene', name:'街头', type:'scene', reference_role:'spatial' }, 'image');
+  assert.equal(spatial.role, 'spatial');
+  assert.equal(promptMentionData([spatial], 'image')[0].role, 'spatial');
+  assert.equal(promptMentionData([promptAssetReference({id:'scene',name:'街头',type:'scene'},'image')], 'image')[0].role, 'scene');
+  assert.ok(purposeOptions('image','person').some(item=>item.value==='identity'));
+  assert.ok(!purposeOptions('image','scene').some(item=>item.value==='identity'));
+  const refs=[{reference_asset_id:'p',role:'identity',number:1},{...spatial,number:2}];
+  assert.deepEqual(referenceRailOrder(refs).map(item=>item.number),[2,1]);
+  assert.equal(spatialConflict([spatial,{...spatial}]),false);
+  assert.equal(spatialConflict([spatial,{...spatial,reference_asset_id:'other'}]),true);
+});
+
+test('style cover is not an input, dedicated style reference is counted once after user references', () => {
+  const refs=[{reference_asset_id:'scene',role:'spatial'},{reference_asset_id:'person',role:'identity'}];
+  const options={inputMode:'reference_to_image',referenceBindings:refs,styleSnapshot:{label:'旅行 Vlog',cover_url:'/cover',applies_to:['image'],reference_image:{id:'vlog-d',sha256:'hash'}}};
+  const inputs=imageGenerationInputManifest(options);
+  assert.deepEqual(inputs.map(item=>item.role),['identity','spatial','style']);
+  assert.deepEqual(inputs.map(item=>item.input_index),[1,2,3]);
+  assert.equal(inputs[2].sha256,'hash');
+  assert.ok(!inputs.some(item=>item.thumbnail_url==='/cover'));
+  assert.equal(imageGenerationInputManifest({...options,styleSnapshot:{cover_url:'/cover'}}).length,2);
+});
 
 const face = { reference_asset_id: 'face', label: '产品/正面' };
 const detail = { reference_asset_id: 'detail', label: '产品/正面细节' };
@@ -61,7 +88,8 @@ test('one atomic editor owns IME, undo, clipboard and accessible thumbnail UI', 
   assert.doesNotMatch(source, /\.scrollIntoView\(/);
   assert.match(source, /popup.kind === 'menu'\) positionPopup\(\)/);
   assert.match(source, /history.current\[index\]/);
-  assert.match(image, /item.binding \? \{ \.\.\.item.binding \}/);
+  assert.match(image, /item.binding \? \{ \.\.\.item.binding, role: item.role \|\| item.binding.role \}/);
+  assert.match(image, /promptMentionData\(nextReferences, 'image'\)/);
 });
 
 test('rich prompt editors are never wrapped in a native label that activates the first thumbnail', () => {

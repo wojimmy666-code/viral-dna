@@ -76,6 +76,14 @@ def execution_plan(group, members, generation_duration=None, *, context=None):
     # Declare each distinct style once, then bind it to its temporal segment.
     # Repeating a whole preset per short shot can exceed provider prompt limits.
     style_rules = {p.id: style_prompt(effective_style(context, str(p.id)), "video") for p in members} if context else {}
+    if context:
+        reference_keys = {
+            json.dumps((effective_style(context, str(p.id)) or {}).get("reference_image"), sort_keys=True)
+            if "video" in (effective_style(context, str(p.id)) or {}).get("applies_to", []) else "null"
+            for p in members
+        }
+        if len(reference_keys) > 1:
+            fail("组内风格生成参考图不一致，请统一风格或拆组生成；不会忽略某个分段的风格参考图")
     definitions = list(dict.fromkeys(text for text in style_rules.values() if text))
     for p in members:
         adopted = [b for b in sorted(p.visual_beats, key=lambda b: b.index) if b.approved_image_candidate_id]

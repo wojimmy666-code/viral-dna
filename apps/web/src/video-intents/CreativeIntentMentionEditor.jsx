@@ -22,6 +22,7 @@ export function CreativeIntentMentionEditor({ assets, depthAssets, disabled = fa
 
   return <div className="creative-intent-reference-field">
     <AssetReferenceEditor label="创作意图" rows={3} maxLength={4000} value={value} disabled={disabled}
+      referencePart="video"
       references={references} options={options} resolveUrl={resolveUrl}
       placeholder="描述创作要求；输入 @ 引用人物、服装或场景资产"
       onAddAssets={onAddAssets && ((insert, pickerOptions) => onAddAssets(selected => insert(buildVideoReferenceOptions({ assets: selected })), pickerOptions))}

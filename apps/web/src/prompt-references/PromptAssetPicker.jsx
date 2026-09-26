@@ -3,11 +3,13 @@ import { Check, FolderSimple, ImageSquare, MagnifyingGlass, X } from '@phosphor-
 import { Button, IconButton } from '../ui/system/Button.jsx';
 import { ASSET_TYPE_OPTIONS, buildAssetListQuery } from '../asset-library-ui.js';
 import './asset-reference-editor.css';
+import { purposeOptions } from './reference-purposes.js';
+import { promptAssetReference } from './prompt-assets.js';
 
 // Selection stays local until Confirm. selectedIds means referenced by this
 // prompt, not just associated with its project. Re-insertion is allowed.
 export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClose, onSelect,
-  initialQuery = '', referenceLimit, reservedReferenceCount = 0, maxSelection }) {
+  initialQuery = '', referenceLimit, reservedReferenceCount = 0, maxSelection, referencePart = 'image' }) {
   const dialog = useRef(null);
   const mounted = useRef(true);
   const titleId = useId();
@@ -28,6 +30,7 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
   const newCount = selection.filter((item) => !existing.has(item.id)).length;
   const usedCount = existing.size + reservedReferenceCount;
   const overLimit = Number.isFinite(referenceLimit) && usedCount + newCount > referenceLimit;
+  const spatialOverLimit = selection.filter(item => item.reference_role === 'spatial').length > 1;
   const folder = folders.find((item) => item.id === folderId);
   const home = !folderId && !query.trim() && !type;
 
@@ -76,7 +79,7 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
       ? current.filter((item) => item.id !== asset.id) : [...current, asset]);
   }
   async function confirm() {
-    if (busy || !selection.length || overLimit) return;
+    if (busy || !selection.length || overLimit || spatialOverLimit) return;
     setBusy(true); setError('');
     try { await onSelect(selection); }
     catch (failure) { if (mounted.current) setError(failure.message || '引用失败，选择已保留，请重试。'); }
@@ -117,8 +120,12 @@ export function PromptAssetPicker({ request, resolveUrl, selectedIds = [], onClo
           {!loading && !items.length && !(home && folders.length) && <p className="prompt-asset-empty">没有可引用的图片资产。可更换目录或搜索词；Logo 请使用专用入口。</p>}
         </div>
         {pages > 1 && <div className="prompt-asset-pagination"><Button size="compact" disabled={loading || busy || page === 1} onClick={() => setPage(page - 1)}>上一页</Button><span>{page} / {pages}</span><Button size="compact" disabled={loading || busy || page >= pages} onClick={() => setPage(page + 1)}>下一页</Button></div>}
+        {selection.length > 0 && <section className="reference-purpose-selection" aria-label="所选资产用途"><h3>引用用途</h3><p>用途只影响本次引用，不改变资产分类。空间参考最多一张。</p>
+          {selection.map(asset => <label key={asset.id}><span>{asset.name}</span><select aria-label={`${asset.name}的引用用途`} disabled={busy} value={asset.reference_role || promptAssetReference(asset, referencePart).role} onChange={event => setSelection(current => current.map(item => item.id === asset.id ? { ...item, reference_role: event.target.value } : item))}>{purposeOptions(referencePart, asset.type).map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>)}
+          {spatialOverLimit && <p role="alert">只能选择一张空间参考，请调整用途或取消多余选择。</p>}
+        </section>}
       </section>
     </div>
-    <footer><div role="status"><span>已选择 {selection.length} 项</span><small>{Number.isFinite(referenceLimit) ? `当前已用 ${usedCount} / 上限 ${referenceLimit} 项` : '仅列出可用作图片参考的资产'}{overLimit && ' · 超出当前模型上限'}</small></div><div className="prompt-asset-picker-actions"><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" loading={busy} loadingLabel="正在引用…" disabled={!selection.length || overLimit} onClick={confirm}>确认引用</Button></div></footer>
+    <footer><div role="status"><span>已选择 {selection.length} 项</span><small>{Number.isFinite(referenceLimit) ? `当前已用 ${usedCount} / 上限 ${referenceLimit} 项` : '仅列出可用作图片参考的资产'}{overLimit && ' · 超出当前模型上限'}</small></div><div className="prompt-asset-picker-actions"><Button disabled={busy} onClick={onClose}>取消</Button><Button variant="primary" loading={busy} loadingLabel="正在引用…" disabled={!selection.length || overLimit || spatialOverLimit} onClick={confirm}>确认引用</Button></div></footer>
   </dialog>;
 }

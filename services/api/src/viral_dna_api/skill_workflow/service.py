@@ -5352,6 +5352,7 @@ class SkillWorkflowService:
                 ),
                 exact_overlays=shot.exact_overlays,
                 video_reference_usage_ids=shot.video_reference_usage_ids,
+                image_prompt_mentions=[item.model_dump(mode="json") for item in shot.image_prompt_mentions],
                 video_prompt_mentions=[
                     item.model_dump(mode="json") for item in shot.video_prompt_mentions
                 ],

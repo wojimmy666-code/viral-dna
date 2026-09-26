@@ -194,6 +194,7 @@ def _positive_prompt(
             "depth": "动作与空间深度",
             "transition": "转场",
             "style": "视觉风格",
+            "spatial": "空间关系",
         }
         lines.append("提示词中的 @引用 与本次上传素材一一对应，必须按各自用途使用：")
         for mention in sorted(shot.video_prompt_mentions, key=lambda item: item.order):
@@ -250,11 +251,20 @@ def _positive_prompt(
     if reference_frames:
         lines.extend(
             [
-                "使用下列有序安全参考画面生成一段视频；图号顺序就是画面出现顺序，切换方式按分段要求。",
+                ("使用下列参考生成一段视频；时序画面按分段要求出现，独立的空间与风格辅助参考不进入视频时序。"
+                 if any(frame.role in {"spatial", "style"} for frame in reference_frames)
+                 else "使用下列有序安全参考画面生成一段视频；图号顺序就是画面出现顺序，切换方式按分段要求。"),
                 "保持用户要求的人物身份、服装和产品一致；动作、位置、空间与光影按各画面要求，不强制连续。",
             ]
         )
     for frame in reference_frames:
+        if frame.role in {"spatial", "style"}:
+            from ..reference_purposes import SPATIAL_REFERENCE_INSTRUCTION, STYLE_REFERENCE_INSTRUCTION
+            instruction = SPATIAL_REFERENCE_INSTRUCTION if frame.role == "spatial" else STYLE_REFERENCE_INSTRUCTION
+            lines.append(f"图{frame.ordinal}（{frame.title}）为辅助参考，不是视频首帧或时序关键帧。{instruction}")
+            if frame.role == "spatial" and any(item.source_kind == "approved_frame" for item in reference_frames):
+                lines.append("已采用分镜图的空间关系优先；辅助空间参考不能重新安排已确认的人物位置与尺寸。")
+            continue
         frame_title = (
             f"分镜图/图{frame.ordinal}"
             if frame.source_kind == "approved_frame"
@@ -264,7 +274,8 @@ def _positive_prompt(
             f"图{frame.ordinal}（{frame_title}）位于视频进度 "
             f"{frame.start_ratio:.0%}～{frame.end_ratio:.0%}。"
         )
-        if frame.ordinal < len(reference_frames):
+        next_frame = next((item for item in reference_frames if item.ordinal > frame.ordinal and item.role not in {"spatial", "style"}), None)
+        if next_frame:
             transition = (
                 ""
                 if frame.source_kind == "approved_frame"
@@ -272,13 +283,13 @@ def _positive_prompt(
             )
             if frame.transition_to_next_type == "model_generated":
                 lines.append(
-                    f"图{frame.ordinal}到图{frame.ordinal + 1}由视频模型结合前后画面"
+                    f"图{frame.ordinal}到图{next_frame.ordinal}由视频模型结合前后画面"
                     "和用户转场意图生成连续转场，不得默认改成硬切"
                     f"{f'；{transition}' if transition else '。'}"
                 )
             else:
                 lines.append(
-                    f"图{frame.ordinal}到图{frame.ordinal + 1}采用 "
+                    f"图{frame.ordinal}到图{next_frame.ordinal}采用 "
                     f"{frame.transition_to_next_type} 转场，约 "
                     f"{frame.transition_to_next_duration_seconds:g} 秒"
                     f"{f'；{transition}' if transition else '。'}"
@@ -600,6 +611,7 @@ class VideoGenerationGateway:
         run_id: UUID | None = None,
         cancel_event: Event | None = None,
         input_plan: VideoGenerationInputPlan | None = None,
+        visual_style_snapshot: dict | None = None,
     ) -> tuple[GenerationRun, list[GenerationCandidate]]:
         input_plan = input_plan or VideoGenerationInputPlan(
             sources=[VideoGenerationInputSource.APPROVED_IMAGES]
@@ -646,6 +658,24 @@ class VideoGenerationGateway:
                 "video_reference_order_invalid",
                 "参考图序号必须连续",
             )
+        from ..style_reference import image_style_reference
+        from fastapi import HTTPException
+        try:
+            style_reference = image_style_reference(self.workspace, visual_style_snapshot, "video")
+        except HTTPException as exc:
+            raise VideoGenerationGatewayError(exc.status_code, "style_reference_invalid", str(exc.detail)) from exc
+        spatial = [item for item in source_ordered_frames if item.role == "spatial"]
+        if len(spatial) > 1:
+            raise VideoGenerationGatewayError(422, "spatial_reference_duplicate", "视频只能使用一张辅助空间参考，请核对全局与局部引用")
+        if (spatial or style_reference) and not (capability.multi_image_reference and capability.ordered_reference_images):
+            raise VideoGenerationGatewayError(422, "video_auxiliary_reference_unsupported", "当前视频模型不支持独立的风格或空间参考图，请更换支持有序多图参考的模型，或明确移除该参考；不会把它作为首帧")
+        if style_reference:
+            source_ordered_frames = (*source_ordered_frames, OrderedReferenceFrame(
+                visual_beat_id=style_reference.asset_id, candidate_id=style_reference.asset_id,
+                ordinal=len(source_ordered_frames) + 1, title=style_reference.name, path=style_reference.path,
+                relative_path=style_reference.relative_path, sha256=style_reference.sha256,
+                start_ratio=0, end_ratio=1, transition_to_next_type="cut", transition_to_next_duration_seconds=0,
+                role="style", source_kind="style_reference"))
         all_managed_references = tuple(
             ProviderManagedAssetReference(
                 binding_id=binding.id,
@@ -739,6 +769,9 @@ class VideoGenerationGateway:
         except VideoReferencePolicyError as exc:
             raise VideoGenerationGatewayError(422, exc.code, str(exc)) from exc
         ordered_frames = reference_plan.reference_frames
+        selected_ids = {item.candidate_id for item in ordered_frames}
+        if any(item.role in {"spatial", "style"} and item.candidate_id not in selected_ids for item in source_ordered_frames):
+            raise VideoGenerationGatewayError(422, "video_auxiliary_reference_rejected", "当前视频模型的素材安全规则不允许所选风格或空间参考，请更换模型或明确移除参考；不会静默丢弃")
         depth_control_videos = reference_plan.depth_control_videos
         if depth_control_videos:
             try:

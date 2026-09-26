@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
@@ -12,7 +13,8 @@ test('composition guidance — isolated real component and mock API, no model ca
   const bundle=await build({absWorkingDir:root,bundle:true,write:false,outfile:'fixture.js',format:'esm',platform:'browser',jsx:'automatic',define:{'process.env.NODE_ENV':'"production"'},stdin:{resolveDir:root,loader:'jsx',contents:`
     import React,{useState} from 'react';import {createRoot} from 'react-dom/client';
     import './src/styles.css';import {CompositionControl} from './src/composition/CompositionControl.jsx';
-    window.calls=[];window.fail=false;window.slow=false;let version=1;let entries={};
+    window.calls=[];window.fail=false;window.slow=false;window.generations=[];window.generateFail=false;let version=1;let entries={};
+    const source={id:'candidate-1',url:'/cover.png',width:${cover.readUInt32BE(16)},height:${cover.readUInt32BE(20)},sha256:'${createHash('sha256').update(cover).digest('hex')}',outputWidth:1920,outputHeight:1080,modelLabel:'测试图片模型',costLabel:'隔离测试，不产生费用',generation:{width:1920,height:1080,execution_mode:'remote_api',model_alias:'test'},blocker:''};
     const targets=[{id:'beat-1',shot_id:'shot-1',label:'分镜 1 · 画面 1'},{id:'beat-2',shot_id:'shot-2',label:'分镜 2 · 画面 1'}];
     const snapshot=()=>({context_id:'c'+version,revision_id:'r1',width:1920,height:1080,entries:structuredClone(entries),targets});
     async function request(path,options={}) {
@@ -28,7 +30,7 @@ test('composition guidance — isolated real component and mock API, no model ca
       }return snapshot();
     }
     function App(){const [disabled,setDisabled]=useState(false),[beat,setBeat]=useState('beat-1');window.setReadonly=setDisabled;window.setBeat=setBeat;
-      return <main style={{padding:24,maxWidth:1240,margin:'auto'}}><h1>旅行分镜 · 构图定位测试</h1><p>隔离测试数据，不连接真实项目。</p><CompositionControl projectId="p" beatId={beat} request={request} disabled={disabled} previewUrl="/cover.png" assets={[{id:'person-1',type:'person',name:'测试人物',rights_confirmed:true}]} beforeOpen={async()=>true} onSaved={async()=>{window.refreshed=true;}}/></main>;
+      return <main style={{padding:24,maxWidth:1240,margin:'auto'}}><h1>旅行分镜 · 构图定位测试</h1><p>隔离测试数据，不连接真实项目。</p><CompositionControl projectId="p" beatId={beat} request={request} disabled={disabled} previewUrl="/cover.png" assets={[{id:'person-1',type:'person',name:'测试人物',rights_confirmed:true}]} beforeOpen={async()=>true} onSaved={async()=>{window.refreshed=true;}} reframeSource={source} onGenerate={async options=>{window.generations.push(options);if(window.generateFail)throw new Error('网络中断，请重试同一请求');}}/></main>;
     }createRoot(document.getElementById('root')).render(<App/>);
   `}});
   const js=bundle.outputFiles.find(file=>file.path.endsWith('.js')).text,css=bundle.outputFiles.find(file=>file.path.endsWith('.css')).text;
@@ -110,6 +112,52 @@ test('composition guidance — isolated real component and mock API, no model ca
         if(process.env.COMPOSITION_SCREENSHOTS==='1')await browser.screenshot(fileURLToPath(new URL('../../../.impeccable/review/composition/'+name+'.png',import.meta.url)));
       }
       await click('取消');
+    });
+    await t.test('shrink-outpaint requires manual measurement and explicit paid confirmation',async()=>{
+      await browser.viewport(1440,960);await open();await click('缩放扩图');
+      await browser.ready(`document.querySelector('.reframe-canvas img').complete`);
+      assert.match(await browser.evaluate(`document.querySelector('.reframe-confirmation').textContent`),/1080p/);
+      assert.doesNotMatch(await browser.evaluate(`document.querySelector('.reframe-confirmation').textContent`),/1920[×x]1080/);
+      assert.equal(await browser.evaluate(`window.generations.length`),0);
+      assert.equal(await browser.evaluate(`document.querySelector('.composition-dialog footer .primary-button').disabled`),true);
+      await setValue('[aria-label="原图人物宽度百分比"]','15.1');await setValue('[aria-label="原图人物高度百分比"]','50.7');
+      await setValue('[aria-label="原图左边距百分比"]','44.3');await setValue('[aria-label="原图头顶百分比"]','43.1');
+      assert.equal(await browser.evaluate(`document.querySelector('[aria-label="原图头顶百分比"]').value`),'43.1');
+      await browser.evaluate(`document.querySelector('.composition-controls fieldset .reframe-check input').click()`);
+      if(process.env.COMPOSITION_SCREENSHOTS==='1')await browser.screenshot(fileURLToPath(new URL('../../../.impeccable/review/reframe/source-desktop.png',import.meta.url)));
+      await click('下一步：预览缩放');await click('居中 · 高度 50%');
+      await setValue('[aria-label="目标人物高度百分比"]','35');await setValue('[aria-label="目标头顶位置百分比"]','35');
+      const box=await browser.evaluate(`(()=>{const canvas=document.querySelector('.reframe-canvas').getBoundingClientRect(),img=document.querySelector('.reframe-canvas img').getBoundingClientRect();return {w:img.width/canvas.width,h:img.height/canvas.height};})()`);
+      assert.ok(Math.abs(box.w-.69)<.01 && Math.abs(box.h-.69)<.01);
+      assert.match(await browser.evaluate(`document.querySelector('.reframe-body output').textContent`),/高度 35.0%/);
+      assert.equal(await browser.evaluate(`document.querySelector('.composition-dialog footer .primary-button').disabled`),true);
+      await browser.evaluate(`document.querySelector('.reframe-confirmation input').click()`);
+      assert.equal(await browser.evaluate(`document.querySelector('.composition-dialog footer .primary-button').disabled`),false);
+      for(const [name,width,height] of [['desktop',1440,960],['laptop',1280,900],['tablet',1024,900],['narrow',768,1024],['mobile',390,844]]){
+        await browser.viewport(width,height);
+        assert.equal(await browser.evaluate(`document.querySelector('dialog').scrollWidth>document.querySelector('dialog').clientWidth+1`),false);
+        if(process.env.COMPOSITION_SCREENSHOTS==='1')await browser.screenshot(fileURLToPath(new URL('../../../.impeccable/review/reframe/'+name+'.png',import.meta.url)));
+        if(name==='mobile'&&process.env.COMPOSITION_SCREENSHOTS==='1'){
+          await browser.evaluate(`document.querySelector('dialog').scrollTop=document.querySelector('dialog').scrollHeight`);
+          await browser.screenshot(fileURLToPath(new URL('../../../.impeccable/review/reframe/mobile-confirm.png',import.meta.url)));
+          await browser.evaluate(`document.querySelector('dialog').scrollTop=0`);
+        }
+      }
+      await browser.viewport(1440,960);await browser.evaluate(`window.generateFail=true`);await click('生成缩放扩图');
+      await browser.ready(`document.querySelector('.composition-error')`);
+      assert.match(await browser.evaluate(`document.querySelector('.composition-error').textContent`),/网络中断/);
+      await browser.evaluate(`window.generateFail=false`);await click('重试同一请求');await browser.ready(`!document.querySelector('dialog[open]')`);
+      const calls=await browser.evaluate('window.generations');assert.equal(calls.length,2);
+      assert.deepEqual(calls[0],calls[1]);assert.equal(calls[0].baseCandidateId,'candidate-1');assert.equal(calls[0].compositionReframe.source_box.height,.507);assert.equal(calls[0].compositionReframe.source_box.y,.431);
+    });
+    await t.test('invalid geometry and lost editing permission cannot generate',async()=>{
+      await open();await click('缩放扩图');await browser.ready(`document.querySelector('.reframe-canvas img').complete`);
+      await browser.evaluate(`document.querySelector('.composition-controls fieldset .reframe-check input').click()`);await click('下一步：预览缩放');
+      await setValue('[aria-label="目标人物高度百分比"]','99');
+      assert.match(await browser.evaluate(`document.querySelector('.composition-error').textContent`),/减小|裁掉/);
+      assert.equal(await browser.evaluate(`document.querySelector('.composition-dialog footer .primary-button').disabled`),true);
+      await browser.evaluate(`window.setReadonly(true)`);await browser.ready(`document.querySelector('.composition-controls fieldset').disabled`);
+      assert.equal(await browser.evaluate(`window.generations.length`),2);await click('取消');await browser.evaluate(`window.setReadonly(false)`);
     });
   }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
 });

@@ -120,6 +120,7 @@ function shotDraftFromDetail(detail, visualBeatId = null) {
     ).map((item) => ({
       reference_asset_id: item.reference_asset_id,
       label: item.label,
+      ...(item.role ? { role: item.role } : {}),
     })),
     negativeConstraints: (
       beat?.image_negative_constraints || detail.plan.image_negative_constraints || []
@@ -2216,7 +2217,7 @@ export function ProductionHub({
     }
   }
 
-  async function executeAction(action) {
+  async function executeAction(action, throwOnError = false) {
     shotCache.current.clear();
     setBusy(true);
     setActionError("");
@@ -2229,6 +2230,7 @@ export function ProductionHub({
         title: "操作失败",
         message: requestError.message,
       });
+      if (throwOnError) throw requestError;
     } finally {
       setBusy(false);
     }
@@ -2367,19 +2369,22 @@ export function ProductionHub({
     });
   }
 
-  async function generateShotCandidates() {
+  async function generateShotCandidates(options = {}) {
+    const reframe = options?.compositionReframe;
+    const reframeGeneration = reframe ? options.reframeGeneration : null;
     const { activeBeat, beatChanges, shotChanges } = shotDraftPatch(
       shotDetail,
       selectedVisualBeatId,
       shotDraft,
     );
-    if (!shotDetail?.plan || !activeBeat) return;
-    if (workflow && !generationResolution) { setActionError("请为本次图片生成选择分辨率"); return; }
-    const candidateCount = Math.min(
+    if (!shotDetail?.plan || !activeBeat) { if(reframe)throw new Error('当前画面已不可用'); return; }
+    if (reframe && !generationSettings.supports_composition_reframe) throw new Error('当前服务不支持缩放扩图，请更新后端并刷新页面');
+    if (workflow && !generationResolution && !reframe) { setActionError("请为本次图片生成选择分辨率"); return; }
+    const candidateCount = reframe ? 1 : Math.min(
       4,
       Math.max(1, Math.trunc(Number(generationCandidateCount) || 1)),
     );
-    const executionMode = resolveImageExecutionMode(
+    const executionMode = reframeGeneration?.execution_mode || resolveImageExecutionMode(
       generationSettings,
       generationEngine,
     );
@@ -2390,6 +2395,7 @@ export function ProductionHub({
     );
     if (
       acceptsUnknownCost
+      && !reframe
       && !generationSettings.allow_unknown_local_image_cost
       && !window.confirm(
         `本机工具无法提供可验证的成本信息。是否仍要为画面 ${activeBeat.index} 生成 ${candidateCount} 张候选？`,
@@ -2409,16 +2415,16 @@ export function ProductionHub({
       const persistedPlan = persistedShotDetail?.plan || shotDetail.plan;
       const persistedBeat = visualBeatFromDetail(persistedShotDetail || shotDetail, activeBeat.id);
       const bindings = imageBindingsForDraft(persistedPlan, persistedBeat, shotDraft);
-      const effectiveInputMode = resolveImageInputMode({
+      const effectiveInputMode = reframe ? 'keyframe_edit' : resolveImageInputMode({
         inputMode: generationInputMode,
         sourceUrl: workflow ? "" : persistedBeat?.source_frame_url || "",
         baseImageId: generationBaseImageId,
         referenceCount: bindings.length,
       });
-      if (effectiveInputMode === "keyframe_edit" && generationBaseImageId === "select") {
+      if (!reframe && effectiveInputMode === "keyframe_edit" && generationBaseImageId === "select") {
         throw new Error("请先选择编辑底图");
       }
-      const baseCandidateId = imageBaseCandidateId(effectiveInputMode, generationBaseImageId);
+      const baseCandidateId = reframe ? options.baseCandidateId : imageBaseCandidateId(effectiveInputMode, generationBaseImageId);
       if (baseCandidateId && !generationSettings.supports_candidate_base_image) {
         throw new Error("当前图片服务尚不支持生成图片作为底图，请重启后端并刷新页面");
       }
@@ -2434,10 +2440,11 @@ export function ProductionHub({
             input_mode: effectiveInputMode,
             base_image_candidate_id: baseCandidateId,
             execution_mode: executionMode,
-            model_alias: executionMode === "remote_api" ? generationModelAlias : "local_tool",
+            model_alias: reframeGeneration?.model_alias || (executionMode === "remote_api" ? generationModelAlias : "local_tool"),
             allow_unknown_cost: acceptsUnknownCost,
             ...(generationResolution ? { width: Number(generationResolution.split("x")[0]), height: Number(generationResolution.split("x")[1]) } : {}),
-            generation_intent: imageGenerationIntentForShot(shotDetail),
+            ...(reframe ? {width:reframeGeneration.width,height:reframeGeneration.height,composition_reframe:reframe,preserve_approval:true} : {}),
+            generation_intent: reframe ? 'standard' : imageGenerationIntentForShot(shotDetail),
           }),
         },
       );
@@ -2446,7 +2453,7 @@ export function ProductionHub({
       onNotice(
         `${draftChanged ? "当前提示词与参考资产已自动保存；" : ""}分镜 ${shotDetail.plan.index} 画面 ${activeBeat.index} 的图片任务已加入队列`,
       );
-    });
+    }, Boolean(reframe));
   }
 
   async function cancelShotGeneration(runId) {

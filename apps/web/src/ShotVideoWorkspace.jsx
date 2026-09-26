@@ -2,7 +2,7 @@ import { Button } from "./ui/system/Button.jsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
-import { stylePrompt } from "./visual-styles/visual-style.js";
+import { stylePrompt, styleReferenceCount } from "./visual-styles/visual-style.js";
 import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
 import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import {
@@ -1190,7 +1190,7 @@ export function ShotVideoWorkspace({
               <PromptSectionHeader as="summary" title="局部视频提示词" hint={`${videoDraft.videoPrompt.length} 字`} state={draftSaveState} onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)} />
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
-                  referenceLimit={selectedModel?.capabilities?.maximum_reference_images}
+                  referenceLimit={selectedModel?.capabilities?.maximum_reference_images == null ? undefined : Math.max(0, selectedModel.capabilities.maximum_reference_images - styleReferenceCount(globalPrompts, plan.id, 'video'))}
                   inheritedMentions={globalPrompts.common_video_mentions || []}
                   styleControl={<ShotStyleControl context={globalPrompts} shotKey={plan.id} editorRef={globalPromptRef} request={request} disabled={busy} part="video" />}
                   assets={assets}

@@ -76,6 +76,41 @@ async def owner_project(repository, item_id: str, *, collection="projects", dept
     raise AccountError(404, "project_missing", "项目不存在或不属于当前账户")
 
 
+async def reference_owner_project(repository, asset_id: str, project_id: str | None) -> str:
+    """Authorize the selected project link, not a shared asset's legacy owner."""
+    identifier = UUID(asset_id)
+    try:
+        selected_project = UUID(project_id) if project_id is not None else None
+    except ValueError:
+        raise AccountError(422, "invalid_project_id", "项目 ID 格式无效") from None
+
+    # WorkspaceStore scopes both lookups to the authenticated account. A library
+    # asset may be used by several productions, so never infer the first link.
+    asset = await repository.get_asset(identifier)
+    if asset is not None:
+        if selected_project is None:
+            raise AccountError(
+                422, "reference_project_required", "请从具体项目中编辑或移出参考资产"
+            )
+        links = await repository.list_project_asset_links(selected_project)
+        if not any(
+            link.asset_id == identifier and link.workspace_id == asset.workspace_id
+            for link in links
+        ):
+            raise AccountError(404, "reference_asset_not_found", "当前项目中不存在该参考资产")
+        # Include removed links so a retried unlink still reaches the idempotent
+        # business handler, with the same project lease and revision checks.
+    else:
+        legacy = await repository.get_reference_asset(identifier)
+        if legacy is None or (
+            selected_project is not None and legacy.project_id != selected_project
+        ):
+            raise AccountError(404, "reference_asset_not_found", "当前项目中不存在该参考资产")
+        selected_project = legacy.project_id
+
+    return await owner_project(repository, str(selected_project), collection="productions")
+
+
 def create_project_authorizer(repository):
     async def check(request: Request, temporary: list):
         if not password_auth_enabled() or not request.url.path.startswith("/api/v1/"):
@@ -165,7 +200,14 @@ def create_project_authorizer(repository):
                 except ValueError:
                     pass
                 else:
-                    ids.add(await owner_project(repository, parts[1], collection=collection))
+                    if collection == "references":
+                        ids.add(
+                            await reference_owner_project(
+                                repository, parts[1], request.query_params.get("project_id")
+                            )
+                        )
+                    else:
+                        ids.add(await owner_project(repository, parts[1], collection=collection))
         # Body-only batch endpoints must not evade the same project boundary.
         if write and request.headers.get("content-type", "").startswith("application/json"):
             try:

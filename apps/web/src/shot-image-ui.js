@@ -130,6 +130,7 @@ export function normalizePromptMentionDraft(
     nextMentions.push({
       reference_asset_id: asset.id,
       label: assetMentionLabel(asset),
+      ...(binding.role ? { role: binding.role } : {}),
     });
     changed = true;
   });

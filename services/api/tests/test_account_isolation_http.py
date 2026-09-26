@@ -469,6 +469,24 @@ def test_only_one_editor_fenced_writes_and_readonly_does_not_write(sandbox):
     asyncio.run(scenario())
 
 
+def test_spatial_reference_route_requires_own_account_and_active_edit_lease(sandbox):
+    @sandbox.app.put('/api/v1/productions/{project_id}/spatial-references')
+    async def spatial_route(project_id: UUID):
+        assert request_edit_fence.get() is not None
+        return {'authorized': True}
+
+    async def scenario():
+        async with client_for(sandbox) as owner, client_for(sandbox) as member, client_for(sandbox) as other:
+            await asyncio.gather(login(owner), login(member, '13800000002'), login(other, '13900000001'))
+            path = f'/api/v1/productions/{sandbox.production.id}/spatial-references'
+            assert (await owner.put(path, json={})).status_code == 423
+            await acquire(owner, sandbox.project.id)
+            assert (await owner.put(path, json={})).status_code == 200
+            assert (await member.put(path, json={})).status_code == 423
+            assert (await other.put(path, json={})).status_code == 404
+    asyncio.run(scenario())
+
+
 def test_background_job_keeps_tenant_after_release(sandbox):
     async def scenario():
         async with client_for(sandbox) as owner, client_for(sandbox) as person:

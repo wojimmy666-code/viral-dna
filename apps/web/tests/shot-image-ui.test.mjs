@@ -217,7 +217,7 @@ test("restores missing @ tokens from saved asset bindings without duplicates", (
     "@托管角色/小喵酱\n双马尾女性站在画面中央。",
   );
   assert.deepEqual(normalized.imagePromptMentions, [
-    { reference_asset_id: asset.id, label: "托管角色/小喵酱" },
+    { reference_asset_id: asset.id, label: "托管角色/小喵酱", role: 'identity' },
   ]);
   assert.equal(
     ensurePromptMentionTokens(

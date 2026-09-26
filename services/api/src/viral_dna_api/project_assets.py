@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from .asset_library import Asset, AssetFolder, AssetType, normalize_tags
+from .asset_library import Asset, AssetFolder, AssetMediaKind, AssetType, normalize_tags
 from .chinese import to_simplified
 from .models import (
     ProductionProject,
@@ -45,6 +45,10 @@ ASSET_TO_REFERENCE_TYPE = {
     AssetType.PRODUCT: ReferenceAssetType.PRODUCT,
     AssetType.SCENE: ReferenceAssetType.SCENE,
     AssetType.LOGO: ReferenceAssetType.PROP,
+    # Image classifications need a legacy project projection, not a library reclassification.
+    # Spatial/layout/etc. are per-use prompt roles and are saved independently.
+    AssetType.MOTION_REFERENCE: ReferenceAssetType.PROP,
+    AssetType.SPATIAL_DEPTH: ReferenceAssetType.PROP,
     AssetType.OTHER: ReferenceAssetType.PROP,
 }
 
@@ -292,7 +296,19 @@ class ProjectAssetService:
                 "reference_rights_required",
                 "资产尚未完成使用权确认",
             )
-        resolved_type = reference_type or ASSET_TO_REFERENCE_TYPE[asset.type]
+        if asset.media_kind != AssetMediaKind.IMAGE:
+            raise ProductionServiceError(
+                422,
+                "reference_image_required",
+                "此处仅支持引用图片资产；视频或深度视频请通过对应的视频输入入口添加",
+            )
+        resolved_type = reference_type or ASSET_TO_REFERENCE_TYPE.get(asset.type)
+        if resolved_type is None:
+            raise ProductionServiceError(
+                422,
+                "reference_asset_type_unsupported",
+                "当前资产分类尚不支持作为项目图片参考，请更新服务后重试",
+            )
         async with self._lock:
             await self._ensure_link(project, asset, resolved_type)
         return await self._projection(project.id, asset, resolved_type)

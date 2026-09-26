@@ -26,6 +26,7 @@ export function VideoPromptReferenceEditor({
     number: numbers.get(videoReferenceKey(item)), available: byKey.has(videoReferenceKey(item)),
   }));
   return <AssetReferenceEditor label="视频提示词" rows={7} value={value}
+    referencePart="video"
     styleControl={styleControl}
     referenceLimit={referenceLimit}
     reservedReferenceIds={[...selectedReferences.filter((item) => item.reference_kind !== 'reference_video' && !videoPromptMentions.some((mention) => videoReferenceKey(mention) === videoReferenceKey(item))).map(item => item.reference_id), ...inheritedMentions.map(item => item.reference_id)]}
@@ -48,6 +49,7 @@ export function VideoPromptReferenceEditor({
           selected = [...selected, { ...item.generationReference }];
         } else selected = ensureVideoGenerationReference(selected, item);
       });
+      selected = selected.map(item => ({ ...item, role: nextMentions.find(mention => videoReferenceKey(mention) === videoReferenceKey(item))?.role || item.role }));
       const previous = new Set(videoPromptMentions.map(videoReferenceKey));
       const addedReferences = nextReferences.filter((item) => !previous.has(videoReferenceKey(item)))
         .map((item) => item.generationReference || item);

@@ -50,6 +50,7 @@ from .image_generation.identity_policy import (
 from .image_generation.selection import (
     permits_unknown_local_image_cost,
 )
+from .image_reframe import plan_reframe, read_source
 from .managed_assets.service import ManagedAssetCatalogService, ManagedAssetServiceError
 from .media import MediaProcessingError, MediaProcessor
 from .models import (
@@ -1366,6 +1367,8 @@ class ProductionService:
 
     @staticmethod
     def _image_bindings_for_beat(plan, beat, bindings):
+        from .reference_purposes import scoped_bindings
+        bindings = scoped_bindings(bindings, beat.image_prompt_mentions)
         if plan.source_kind != ShotSourceKind.SKILL_GENERATED and len(plan.visual_beats) == 1:
             return bindings
         ids = {item.reference_asset_id for item in beat.image_prompt_mentions}
@@ -4822,7 +4825,7 @@ class ProductionService:
                     ]
                 )
 
-                if "reference_bindings" in requested_fields:
+                if "reference_bindings" in requested_fields and "image_prompt_mentions" not in requested_fields:
                     assets = {
                         item.id: item for item in await self._list_reference_assets(project.id)
                     }
@@ -4843,6 +4846,7 @@ class ProductionService:
                             PromptAssetMention(
                                 reference_asset_id=asset.id,
                                 label=_reference_asset_mention_label(asset),
+                                role=binding.role,
                             )
                         )
                     fields["image_prompt_mentions"] = await self._validate_prompt_mentions(
@@ -4856,6 +4860,13 @@ class ProductionService:
                         fields.get("image_prompt_mentions", beat.image_prompt_mentions),
                     )
 
+                other_ids = {mention.reference_asset_id for item in plan.visual_beats if item.id != beat.id for mention in item.image_prompt_mentions}
+                next_ids = {item.reference_asset_id for item in fields.get("image_prompt_mentions", beat.image_prompt_mentions)}
+                removed_ids = {item.reference_asset_id for item in beat.image_prompt_mentions} - next_ids - other_ids
+                binding_inputs = [item for item in binding_inputs if item.reference_asset_id not in removed_ids]
+                supplied_ids = {item.reference_asset_id for item in binding_inputs}
+                binding_inputs.extend(ReferenceBindingInput(**item.model_dump(include={"reference_asset_id", "role", "weight", "crop_hint", "notes"}))
+                                      for item in current_bindings if item.reference_asset_id in other_ids - supplied_ids)
                 next_bindings = await self._build_bindings(project, plan, binding_inputs)
                 removed_binding_ids = [item.id for item in current_bindings]
                 all_bindings = [
@@ -6502,6 +6513,25 @@ class ProductionService:
         plan = await self._require_shot(shot_plan_id)
         self._ensure_shot_active(plan)
         project = await self._require_project(plan.project_id)
+        if payload.composition_reframe and retry_of_run_id is None:
+            # Network retries reuse a frozen client operation ID, including after
+            # completion. A changed request must not silently reuse a paid job.
+            for previous in await self.repository.list_generation_runs(project.id, plan.id):
+                old = previous.request_payload
+                operation_id = (old.get("composition_reframe") or {}).get("request_id")
+                if operation_id == str(payload.composition_reframe.request_id):
+                    new = payload.model_dump(mode="json")
+                    keys = (
+                        "composition_reframe", "base_image_candidate_id", "visual_beat_id",
+                        "model_alias", "execution_mode", "width", "height", "candidate_count",
+                        "allow_unknown_cost",
+                    )
+                    if any(old.get(key) != new.get(key) for key in keys):
+                        raise _fail(
+                            409, "reframe_request_conflict",
+                            "同一缩放扩图请求的内容已变化，请核对任务后重新发起",
+                        )
+                    return previous
         self._require_generation_revision(project, plan, payload)
         payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
         payload = await self._validate_skill_image_contract(project, payload)
@@ -6510,7 +6540,7 @@ class ProductionService:
             payload = payload.model_copy(update={"visual_beat_id": beat.id})
         if payload.generation_intent == "new_variation" and payload.seed is None:
             payload = payload.model_copy(update={"seed": secrets.randbelow(2_147_483_648)})
-        if not beat.image_prompt.strip():
+        if not beat.image_prompt.strip() and not payload.composition_reframe:
             raise _fail(409, "image_prompt_required", "请先填写图片提示词")
         if beat.approved_image_candidate_id is not None:
             payload = payload.model_copy(update={"preserve_approval": True})
@@ -6520,18 +6550,46 @@ class ProductionService:
             from .project_prompts import image_prompt_snapshot
             context = await self.get_prompt_context(project.id)
             frozen_prompt = image_prompt_snapshot(beat.image_prompt, context, project_id=project.id, shot_key=str(plan.id), beat_id=beat.id)
-        bindings = await self._with_global_image_bindings(project, plan, bindings, frozen_prompt)
+        bindings = (
+            [] if payload.composition_reframe
+            else await self._with_global_image_bindings(project, plan, bindings, frozen_prompt)
+        )
         composition = frozen_prompt.get("composition_guide")
+        from .reference_purposes import spatial_references
+        if len(spatial_references(bindings)) > 1:
+            raise _fail(422, "spatial_reference_duplicate", "一个画面只能使用一张空间参考，请核对全局与局部引用")
+        if composition and spatial_references(bindings):
+            raise _fail(422, "spatial_composition_conflict", "空间参考与构图引导不能叠加，请先停用当前画面的构图引导")
+        if payload.composition_reframe:
+            original_bindings = self._image_bindings_for_beat(plan, beat, await self.repository.list_reference_bindings(plan.id))
+            original_bindings = await self._with_global_image_bindings(project, plan, original_bindings, frozen_prompt)
+            if spatial_references(original_bindings):
+                raise _fail(422, "spatial_reframe_conflict", "空间参考与缩放扩图不能叠加，请先移除当前空间参考")
+        style_snapshot = frozen_prompt.get("visual_style_snapshot") or {}
+        has_style_reference = bool(style_snapshot.get("reference_image") and "image" in style_snapshot.get("applies_to", [])) and not payload.composition_reframe
+        if payload.composition_reframe:
+            composition = None
         if composition and composition.get("subject_reference_id") not in {None, *(str(item.reference_asset_id) for item in bindings)}:
             raise _fail(422, "composition_subject_unbound", "请先在当前画面提示词中引用构图指定的人物资产")
-        if (frozen_prompt.get("global_mentions") or composition) and payload.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
+        if (frozen_prompt.get("global_mentions") or composition or has_style_reference) and payload.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
             payload = payload.model_copy(update={"input_mode": ImageGenerationInputMode.REFERENCE_TO_IMAGE})
         assets = await self._list_reference_assets(project.id)
         gateway_plan = _shot_for_visual_beat(plan, beat)
         base_path = None
         if payload.base_image_candidate_id is not None:
             base_path = await self._resolve_image_base(project, plan, gateway_plan, payload)
-        if payload.input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not bindings and not composition:
+        if payload.composition_reframe:
+            try:
+                source = await asyncio.to_thread(
+                    read_source, base_path, payload.composition_reframe
+                )
+                plan_reframe(
+                    source.size, payload.width or project.output_width,
+                    payload.height or project.output_height, payload.composition_reframe,
+                )
+            except (ValueError, OSError) as exc:
+                raise _fail(422, "reframe_geometry_invalid", str(exc)) from exc
+        if payload.input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not bindings and not composition and not has_style_reference:
             raise _fail(409, "reference_images_required", "请添加参考资产，或切换为纯文生图")
         if (
             payload.input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE
@@ -7115,7 +7173,7 @@ class ProductionService:
                         "image_composition": frozen.get("composition_guide"),
                     }
                 )
-            if not beat.image_prompt.strip():
+            if not beat.image_prompt.strip() and not payload.composition_reframe:
                 raise _fail(409, "image_prompt_required", "请先填写图片提示词")
             if beat.approved_image_candidate_id is not None:
                 payload = payload.model_copy(update={"preserve_approval": True})
@@ -7123,7 +7181,10 @@ class ProductionService:
             uses_images = payload.input_mode == ImageGenerationInputMode.KEYFRAME_EDIT
             bindings = await self.repository.list_reference_bindings(plan.id)
             bindings = self._image_bindings_for_beat(plan, beat, bindings)
-            bindings = await self._with_global_image_bindings(project, plan, bindings, frozen or {})
+            bindings = (
+                [] if payload.composition_reframe
+                else await self._with_global_image_bindings(project, plan, bindings, frozen or {})
+            )
             if frozen and frozen.get("global_mentions"):
                 mentions = [PromptAssetMention.model_validate(item) for item in frozen["global_mentions"]]
                 gateway_plan = gateway_plan.model_copy(update={"image_prompt_mentions": [*gateway_plan.image_prompt_mentions, *mentions]})
@@ -7178,6 +7239,8 @@ class ProductionService:
 
         if isinstance(self.image_gateway, ImageGenerationGateway):
             gateway_options["base_image_candidate_id"] = payload.base_image_candidate_id
+            gateway_options["visual_style_snapshot"] = (frozen or {}).get("visual_style_snapshot")
+            gateway_options["composition_reframe"] = payload.composition_reframe
             gateway_options["reserve_cost"] = lambda cost: self._reserve_image_cost(
                 project.id, run_id, cost
             )
@@ -7485,10 +7548,10 @@ class ProductionService:
                     if item.reference_kind == VideoPromptReferenceKind.PROJECT_ASSET
                 ]
                 mention_sources = [
-                    (target_beats[0], mention.reference_id, mention.label)
+                    (target_beats[0], mention.reference_id, mention.label, mention.role.value)
                     for mention in sorted(video_asset_mentions, key=lambda item: item.order)
                 ]
-                for beat, reference_asset_id, mention_label in mention_sources:
+                for beat, reference_asset_id, mention_label, mention_role in mention_sources:
                     if reference_asset_id in seen_asset_ids:
                         continue
                     reference = await self.project_assets.get_reference(
@@ -7526,7 +7589,7 @@ class ProductionService:
                             end_ratio=beat.end_ratio,
                             transition_to_next_type="cut",
                             transition_to_next_duration_seconds=0,
-                            role=asset_roles[reference.type],
+                            role=mention_role or asset_roles[reference.type],
                             source_kind="project_asset",
                         )
                     )
@@ -7562,6 +7625,7 @@ class ProductionService:
                     input_plan=payload.input_plan,
                     run_id=run_id,
                     cancel_event=cancellation,
+                    **({"visual_style_snapshot": (frozen or {}).get("visual_style_snapshot")} if isinstance(self.video_gateway, VideoGenerationGateway) else {}),
                 )
             except VideoGenerationGatewayError as exc:
                 raise _video_gateway_failure(exc) from exc
@@ -10036,6 +10100,8 @@ class ProductionService:
                 PromptAssetMention(
                     reference_asset_id=reference.id,
                     label=_reference_asset_mention_label(reference),
+                    role=next((mention.get("role") for mention in (item.image_prompt_mentions or [])
+                               if str(mention.get("reference_asset_id")) == str(reference.id)), None),
                 )
                 for reference in source_references
             ]
@@ -10142,7 +10208,7 @@ class ProductionService:
                     ReferenceBinding(
                         shot_plan_id=plan.id,
                         reference_asset_id=reference.id,
-                        role=_DEFAULT_ROLE_BY_REFERENCE_TYPE[reference.type],
+                        role=next((mention.role for mention in plan.image_prompt_mentions if mention.reference_asset_id == reference.id and mention.role), _DEFAULT_ROLE_BY_REFERENCE_TYPE[reference.type]),
                         notes="由 Skill 素材用途账本冻结绑定",
                     )
                 )
@@ -10393,6 +10459,7 @@ class ProductionService:
             frozen = run.request_payload.get("prompt_snapshot")
             if frozen is not None:
                 style_changed = style_prompt(frozen.get("visual_style_snapshot"), part) != style_prompt(effective_style(context, str(plan.id)), part)
+                style_changed = style_changed or (frozen.get("visual_style_snapshot") or {}).get("reference_image") != (effective_style(context, str(plan.id)) or {}).get("reference_image")
                 return style_changed or frozen.get("global_prompt", "") != getattr(context, f"common_{part}_prompt")
             return context.created_at > run.created_at
 
@@ -11241,6 +11308,8 @@ class ProductionService:
     ) -> list[PromptAssetMention]:
         assets = {item.id: item for item in await self._list_reference_assets(project.id)}
         normalized: list[PromptAssetMention] = []
+        if len({item.reference_asset_id for item in mentions if item.role == ReferenceRole.SPATIAL}) > 1:
+            raise _fail(422, "spatial_reference_duplicate", "只能选择一张空间参考，请更换已有引用")
         for mention in mentions:
             asset = assets.get(mention.reference_asset_id)
             if asset is None or asset.archived_at is not None:
@@ -11258,6 +11327,7 @@ class ProductionService:
             normalized.append(
                 PromptAssetMention(
                     reference_asset_id=asset.id,
+                    role=mention.role,
                     label=_simplified_text(
                         mention.label,
                         field_name="提示词资产名称",
@@ -11392,7 +11462,7 @@ class ProductionService:
             merged.append(
                 ReferenceBindingInput(
                     reference_asset_id=asset.id,
-                    role=_DEFAULT_ROLE_BY_REFERENCE_TYPE[asset.type],
+                    role=mention.role or _DEFAULT_ROLE_BY_REFERENCE_TYPE[asset.type],
                     weight=1,
                     notes=f"由提示词 @{mention.label} 自动关联",
                 )
@@ -12505,8 +12575,9 @@ class ProductionService:
         shot_plans: list[ShotPlan] | None = None,
         reference_bindings: list[ReferenceBinding] | None = None,
         video_clip_preparations: list[VideoClipPreparation] | None = None,
+        prompt_baseline_retained: bool = False,
     ) -> tuple[ProductionProject, ProductionRevision]:
-        if project.current_revision_id is not None:
+        if project.current_revision_id is not None and not prompt_baseline_retained:
             await ProjectPromptService(self.repository).retain_baseline(project)
         revisions = await self.repository.list_production_revisions(project.id)
         revision_number = max((item.revision_number for item in revisions), default=0) + 1

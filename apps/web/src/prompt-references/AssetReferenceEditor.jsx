@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { ArrowLeft, CaretRight, FolderSimple, ImageSquare, Plus, UserCircle, VideoCamera, X } from "@phosphor-icons/react";
 import { activeReferences, atomicDeletion, readReferenceDOM, referenceKey, referenceSegments, referenceToken, replaceReference, replacementRange } from "./reference-document.js";
 import "./asset-reference-editor.css";
+import { purposeOptions, referenceRailOrder, spatialConflict } from './reference-purposes.js';
 
 function offsets(root) {
   const selection = window.getSelection();
@@ -48,6 +49,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   disabled = false, label = "提示词", placeholder = "描述画面；输入 @ 引用项目已选资产", rows = 8,
   maxLength = 8000, indexOffset = 0, labelledBy, styleControl,
   referenceLimit, reservedReferenceCount = 0, reservedReferenceIds = [],
+  referencePart = 'image', onApplySpatial,
 }, forwardedRef) {
   const editorRef = useRef(null);
   const readOnlyRef = useRef(disabled);
@@ -68,6 +70,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   const [menuSection, setMenuSection] = useState(null);
   const [selected, setSelected] = useState(null);
   const [renderTick, setRenderTick] = useState(0);
+  const [purposeError, setPurposeError] = useState('');
   const popupId = useId();
   const optionMap = useMemo(() => new Map(options.map((item) => [referenceKey(item), item])), [options]);
   const visible = activeReferences(value, references).map((item, index) => ({
@@ -151,7 +154,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     document.addEventListener("pointerdown", outside);
     const reposition = (event) => {
       if (popup.kind === 'menu') positionPopup();
-      else if (!popupRef.current?.contains(event.target)) setPopup(null);
+      else if (!(event.target instanceof Node) || !popupRef.current?.contains(event.target)) setPopup(null);
     };
     window.addEventListener('resize', reposition);
     document.addEventListener('scroll', reposition, true);
@@ -204,6 +207,8 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   function commit(nextValue, nextReferences = local.current.references, position, typing = false) {
     if (disabled || nextValue.length > maxLength) { setRenderTick((tick) => tick + 1); return; }
     const next = { value: nextValue, references: activeReferences(nextValue, nextReferences) };
+    if (spatialConflict(next.references)) { setPurposeError('一个画面只能选择一张空间参考，请先移除或更换已有的空间参考。'); return; }
+    setPurposeError('');
     const now = Date.now();
     const merging = typing && now - lastTyping.current < 600 && historyIndex.current > 0
       && JSON.stringify(next.references) === JSON.stringify(local.current.references);
@@ -292,6 +297,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       const next = replacing ? replaceReference(current.value, current.references, replacing, additions[0])
         : { value: current.value.slice(0, start) + token + current.value.slice(end), references: [...current.references, ...additions] };
       if (next.value.length > maxLength) throw new Error(`加入引用后超过 ${maxLength} 字，请减少选择或缩短提示词。`);
+      if (spatialConflict(next.references)) throw new Error('只能使用一张空间参考，请先移除或更换已有的空间参考。');
       editorRef.current.focus({ preventScroll: true });
       commit(next.value, next.references, replacing ? undefined : { start: start + token.length, end: start + token.length });
       setTimeout(() => {
@@ -301,7 +307,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       }, 0);
     }, {
       query: popup?.kind === 'menu' ? query : '', selectedIds: [...new Set([...reservedReferenceIds, ...visible.filter(item => item.reference_kind !== 'reference_video' && referenceKey(item) !== referenceKey(replacing || {})).map((item) => item.reference_asset_id || item.reference_id)])],
-      referenceLimit, reservedReferenceCount, maxSelection: replacing ? 1 : undefined, onCancel: restore,
+      referenceLimit, reservedReferenceCount, referencePart, maxSelection: replacing ? 1 : undefined, onCancel: restore,
     });
   }
 
@@ -378,12 +384,13 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     if (cut && !disabled) commit(value.slice(0, range.start) + value.slice(range.end), references, { start: range.start, end: range.start });
   }
 
-  const referenceThumbnails = visible.map((reference) => <button type="button" key={referenceKey(reference)}
+  const referenceThumbnails = referenceRailOrder(visible).map((reference) => <button type="button" key={referenceKey(reference)}
     className={`asset-reference-thumbnail${selected === referenceKey(reference) ? ' active' : ''}`}
     aria-label={`图片 ${reference.number}，${reference.label}`} onClick={(event) => open(reference, event.currentTarget)}
     onFocus={(event) => open(reference, event.currentTarget, true)} onBlur={dismissPreview}
     onMouseLeave={dismissPreview} onMouseEnter={(event) => open(reference, event.currentTarget, true)}>
     <Thumbnail reference={reference} resolveUrl={resolveUrl} /><span>{reference.number}</span>
+    {reference.role === 'spatial' && <small className="asset-reference-purpose-badge">空间</small>}
   </button>);
   // Keep one mounted style control; only compose its display slots around the asset rail.
   // Style covers remain prompt metadata, never numbered generation references.
@@ -405,6 +412,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       }
     }}>
     {styleControl ? cloneElement(styleControl, { renderLayout: renderReferenceLayout }) : renderReferenceLayout({})}
+    {purposeError && popup?.kind !== 'reference' && <p className="reference-purpose-error" role="alert">{purposeError}</p>}
     <div ref={editorRef} className="asset-reference-input" role="textbox" aria-label={label} aria-labelledby={labelledBy} aria-multiline="true"
       aria-disabled={disabled} contentEditable={!disabled} suppressContentEditableWarning tabIndex={0}
       aria-controls={popup?.kind === 'menu' ? popupId : undefined} aria-autocomplete="list"
@@ -433,6 +441,20 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         <strong>{popup.reference.label}</strong>
         {popup.reference.description && <p>{popup.reference.description}</p>}
         {popup.reference.available === false && <p role="status">此引用暂不可用，请重新选择</p>}
+        {(popup.reference.reference_asset_id || popup.reference.reference_kind === 'project_asset') && <label className="reference-purpose-field">引用用途
+          <select aria-label="引用用途" aria-invalid={Boolean(purposeError)} aria-describedby={purposeError ? `${popupId}-purpose-error` : undefined} disabled={disabled || popup.reference.available === false} value={popup.reference.role || (referencePart === 'video' ? 'composition' : 'layout')}
+            onChange={event => {
+              const reference = { ...popup.reference, role: event.target.value };
+              const next = local.current.references.map(item => referenceKey(item) === referenceKey(reference) ? { ...item, role: reference.role } : item);
+              if (spatialConflict(next)) { setPurposeError('一个画面只能使用一张空间参考，请先更换已有的空间参考。'); return; }
+              commit(local.current.value, next); setPopup(current => ({ ...current, reference, hover: false }));
+            }}>
+            {purposeOptions(referencePart, popup.reference.asset_type || (['identity', 'actor_identity'].includes(popup.reference.role) ? 'person' : undefined)).map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
+          </label>}
+        {purposeError && <p id={`${popupId}-purpose-error`} className="reference-purpose-error" role="alert">{purposeError}</p>}
+        {popup.reference.role === 'spatial' && <p>只参考机位、人物占比与位置，不复制人物、服装或背景内容；不保证像素级对齐。</p>}
+        {popup.reference.role === 'spatial' && onApplySpatial && <Button variant="quiet" disabled={disabled || popup.reference.available === false} onClick={() => { const reference = popup.reference; setPopup(null); onApplySpatial(reference); }}>应用到其他画面…</Button>}
         <div className="asset-reference-actions">
           <Button className="secondary-button compact" type="button" onClick={() => {
             const start = value.indexOf(referenceToken(popup.reference)); setPopup(null); editorRef.current.focus();

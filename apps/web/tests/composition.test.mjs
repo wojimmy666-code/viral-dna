@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {clampBox, compositionDifference, defaultComposition, effectiveComposition, moveBox} from '../src/composition/composition.js';
+import {clampBox, compositionDifference, defaultComposition, effectiveComposition, moveBox, reframeGeometry} from '../src/composition/composition.js';
 import {createGlobalPromptSession} from '../src/prompt-context/global-prompt-session.js';
 
 test('normalized position, scale and presets stay on canvas',()=>{
@@ -31,4 +31,17 @@ test('refresh after composition save cannot erase unsaved global text',()=>{
   session.edit('image','手写草稿');
   assert.equal(session.acceptRevision({...initial,id:'other'}),false);
   assert.equal(session.snapshot().values.common_image_prompt,'手写草稿');
+});
+test('outpaint preview uses the verified integer transform and preserves width proportions',()=>{
+  const geometry=reframeGeometry({x:.39354,y:.24017,width:.1896,height:.66846},
+    {x:.458324341,y:.251285674,width:.124360684,height:.499327903},1672,941,1920,1080);
+  assert.equal(geometry.error,'');
+  assert.deepEqual([geometry.scaledWidth,geometry.scaledHeight,geometry.left,geometry.top],[1433,807,300,78]);
+  assert.ok(Math.abs(geometry.actual.height-.499327903)<1/1080);
+  assert.ok(geometry.actual.width>.14);
+});
+test('outpaint rejects invalid dimensions and layouts that crop the original',()=>{
+  const source={x:.3,y:.1,width:.4,height:.8};
+  assert.ok(reframeGeometry(source,{x:0,y:0,width:.2,height:.8},1920,1080,1920,1080).error);
+  assert.ok(reframeGeometry(source,defaultComposition(),0,0,1920,1080).error);
 });

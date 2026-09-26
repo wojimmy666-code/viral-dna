@@ -18,6 +18,7 @@
     "test:styles-browser": "node --experimental-websocket --test tests/visual-style-browser.test.mjs",
     "test:prompt-browser": "node --experimental-websocket --test tests/asset-reference-browser.test.mjs",
     "test:prompt-assets-browser": "node --experimental-websocket --test tests/prompt-asset-library-browser.test.mjs",
+    "test:spatial-browser": "node --experimental-websocket --test tests/spatial-reference-browser.test.mjs",
     "test:composition": "node --test tests/composition.test.mjs",
     "test:composition-browser": "node --experimental-websocket --test tests/composition-browser.test.mjs",
     "test:image-input-browser": "node --experimental-websocket --test tests/image-input-browser.test.mjs",

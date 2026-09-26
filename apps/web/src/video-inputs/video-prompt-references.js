@@ -31,6 +31,7 @@ export const VIDEO_REFERENCE_ROLE_LABELS = Object.freeze({
   depth: "动作与空间",
   transition: "转场",
   style: "视觉风格",
+  spatial: "空间参考",
 });
 
 export function videoReferenceRoleLabel(item = {}) {
@@ -194,7 +195,7 @@ export function normalizeVideoGenerationReferences(references = [], options = []
       reference_kind: option?.reference_kind || reference.reference_kind,
       reference_id: option?.reference_id || reference.reference_id,
       label: option?.label || reference.label,
-      role: option?.role || reference.role,
+      role: reference.reference_kind === 'project_asset' ? reference.role || option?.role : option?.role || reference.role,
       order: normalized.length + 1,
     };
     const visualBeatId = option?.visual_beat_id || reference.visual_beat_id;
@@ -416,7 +417,8 @@ export function buildVideoReferenceOptions({
         reference_kind: "project_asset",
         reference_id: asset.id,
         label: `资产/${assetMentionLabel(asset)}`,
-        role: ROLE_BY_ASSET_TYPE[asset.type] || "composition",
+        role: asset.reference_role || ROLE_BY_ASSET_TYPE[asset.type] || "composition",
+        asset_type: asset.type,
         category: "项目图片资产",
         description: `${assetDirectoryLabel(asset)} · ${asset.type || "图片"}`,
         preview_url: asset.thumbnail_url || asset.content_url || "",

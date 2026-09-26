@@ -41,6 +41,11 @@ export function stylePrompt(context, shotKey, part) {
   return effectiveStyleSnapshot(context, shotKey)[`${part}_prompt`] || "";
 }
 
+export function styleReferenceCount(context, shotKey, part) {
+  const style = effectiveStyleSnapshot(context, shotKey);
+  return style.reference_image && style.applies_to?.includes(part) ? 1 : 0;
+}
+
 export function styleValidation(value) {
   if (value?.preset === "custom" && !value.description?.trim()) return "请填写自定义风格描述";
   return "";

@@ -2395,7 +2395,7 @@ def test_visual_beat_saves_prompt_mentions_and_bindings_atomically(
         beat = next(item for item in body["plan"]["visual_beats"] if item["id"] == visual_beat_id)
         assert beat["image_prompt"] == (f"@{expected_label}\n双马尾女性站在画面中央。")
         assert beat["image_prompt_mentions"] == [
-            {"reference_asset_id": asset["id"], "label": expected_label}
+            {"reference_asset_id": asset["id"], "label": expected_label, "role": "identity"}
         ]
         assert len(body["reference_bindings"]) == 1
         assert body["reference_bindings"][0]["reference_asset_id"] == asset["id"]

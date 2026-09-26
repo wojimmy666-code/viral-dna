@@ -107,9 +107,12 @@ class ProductionSeedShot(BaseModel):
             result.pop("editing_guidance", None)
         if self.video_prompt_mentions is None:
             result.pop("video_prompt_mentions", None)
+        if self.image_prompt_mentions is None:
+            result.pop("image_prompt_mentions", None)
         return result
 
     video_prompt_mentions: list[dict[str, Any]] | None = None
+    image_prompt_mentions: list[dict[str, Any]] | None = None
 
     stable_shot_key: str = Field(pattern=r"^shot_[a-z0-9]{8,64}$")
     order: int = Field(ge=1)

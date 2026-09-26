@@ -4,7 +4,8 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import { CompositionControl } from "./composition/CompositionControl.jsx";
 import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
-import { stylePrompt } from "./visual-styles/visual-style.js";
+import { effectiveStyleSnapshot, stylePrompt, styleReferenceCount } from "./visual-styles/visual-style.js";
+import { SpatialReferenceApply } from './prompt-references/SpatialReferenceApply.jsx';
 import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import { ImageAssetPromptEditor } from "./prompt-references/ImageAssetPromptEditor.jsx";
 import { imageModelOptions } from "./image-generation-controls/image-generation-ui.js";
@@ -396,6 +397,7 @@ export function ShotImageWorkspace({
   const promptRef = useRef(null);
   const [globalPrompts, setGlobalPrompts] = useState({});
   const [compositionGuide, setCompositionGuide] = useState(null);
+  const [spatialApply, setSpatialApply] = useState(null);
   const navigationHandlers = useRef({});
   const [batchItems, setBatchItems] = useState([]);
   const isSkillMode = project?.origin_type === "skill_run";
@@ -478,7 +480,7 @@ export function ShotImageWorkspace({
   const pictureBindings = useMemo(() => {
     const local = imageBindingsForDraft(shotPlan, activeVisualBeat, draft);
     const inherited = (globalPrompts.common_image_mentions || []).filter(item => !local.some(binding => binding.reference_asset_id === item.reference_asset_id));
-    return [...local, ...inherited.map(item => ({ reference_asset_id: item.reference_asset_id, role: DEFAULT_ROLE_BY_TYPE[assetsById.get(item.reference_asset_id)?.type] || 'layout', weight: 1 }))];
+    return [...local, ...inherited.map(item => ({ reference_asset_id: item.reference_asset_id, role: item.role || DEFAULT_ROLE_BY_TYPE[assetsById.get(item.reference_asset_id)?.type] || 'layout', weight: 1 }))];
   }, [shotPlan, activeVisualBeat, draft.referenceBindings, draft.imagePromptMentions, globalPrompts.common_image_mentions, assetsById]);
   const identityPolicy = useMemo(
     () => imageIdentityPolicy(pictureBindings, assets),
@@ -560,9 +562,10 @@ export function ShotImageWorkspace({
     (entry) => entry.candidate.id === plan?.approved_image_candidate_id,
   ) || null;
   const sourceUrl = isSkillMode ? "" : plan?.source_keyframe_url || "";
+  const styleInputCount = styleReferenceCount(globalPrompts, plan?.id, 'image');
   const effectiveInputMode = resolveImageInputMode({
     inputMode: generationInputMode, sourceUrl, baseImageId: generationBaseImageId,
-    referenceCount: pictureBindings.length,
+    referenceCount: pictureBindings.length + styleInputCount,
   });
   const baseCandidateId = imageBaseCandidateId(effectiveInputMode, generationBaseImageId);
   const baseImageOptions = [
@@ -579,6 +582,7 @@ export function ShotImageWorkspace({
   const generationInputManifest = imageGenerationInputManifest({
     inputMode: effectiveInputMode, sourceUrl: selectedBase?.url || "",
     baseImageCandidateId: baseCandidateId, referenceBindings: pictureBindings, assets,
+    styleSnapshot: effectiveStyleSnapshot(globalPrompts, plan?.id),
   });
   const hasSourceVideo = Boolean(sourceVideoUrl);
   const hasSourcePreview = hasSourceVideo && Boolean(plan?.source_keyframe_url);
@@ -612,8 +616,8 @@ export function ShotImageWorkspace({
   };
   const referenceCapabilities = imageModelOptions(generationSettings || {}).find((model) => model.alias === (executionMode === 'local_tool' ? 'local_tool' : effectiveGenerationSettings.remote_model_alias))?.capabilities;
   const promptReferenceLimit = referenceCapabilities && Math.max(0, Math.min(
-    (referenceCapabilities.max_reference_images ?? Infinity) - (compositionGuide ? 1 : 0),
-    (referenceCapabilities.max_input_images ?? Infinity) - (effectiveInputMode === 'keyframe_edit' ? 1 : 0) - (compositionGuide ? 1 : 0),
+    (referenceCapabilities.max_reference_images ?? Infinity) - (compositionGuide ? 1 : 0) - styleInputCount,
+    (referenceCapabilities.max_input_images ?? Infinity) - (effectiveInputMode === 'keyframe_edit' ? 1 : 0) - (compositionGuide ? 1 : 0) - styleInputCount,
   ));
   const estimatedCostMicros = estimateImageGenerationCostMicros(
     effectiveGenerationSettings,
@@ -648,6 +652,20 @@ export function ShotImageWorkspace({
     || displayedCandidateRun?.model
     || "未记录模型"
   );
+  const reframeCost = estimateImageGenerationCostMicros(effectiveGenerationSettings, 1);
+  const reframeDimensions = isSkillMode && generationResolution
+    ? generationResolution.split('x').map(Number) : [project?.output_width, project?.output_height];
+  const reframeModel = imageModelOptions(generationSettings || {}).find(model => model.alias === (
+    executionMode === 'local_tool' ? 'local_tool' : effectiveGenerationSettings.remote_model_alias
+  ));
+  const reframeSource = displayedCandidate && {
+    ...displayedCandidate, url:resolveUrl(displayedCandidate.content_url),
+    outputWidth:reframeDimensions[0], outputHeight:reframeDimensions[1],
+    modelLabel:reframeModel?.label || reframeModel?.name || (executionMode==='local_tool'?'image-2（本机 ImageGen）':effectiveGenerationSettings.remote_model_alias),
+    costLabel:reframeCost != null ? `本次预计 ${formatCostMicros(reframeCost)}` : '本次费用未知，以工具实际账单为准',
+    generation:{width:reframeDimensions[0],height:reframeDimensions[1],execution_mode:executionMode,model_alias:executionMode==='local_tool'?'local_tool':effectiveGenerationSettings.remote_model_alias},
+    blocker:!generationSettings?.supports_composition_reframe?'当前服务不支持缩放扩图，请更新后端并刷新页面':!generationSettings.enabled?'请先配置并启用图片生成引擎':referenceCapabilities?.image_to_image===false?'当前模型不支持图片编辑，请先更换模型':!reframeDimensions.every(value=>Number.isFinite(value)&&value>0)?'请先选择本次图片分辨率':'',
+  };
   const candidateReadyForApproval = displayedCandidate && (
     plan?.image_status === "approved"
       ? !displayedCandidateIsApproved
@@ -684,7 +702,12 @@ export function ShotImageWorkspace({
         : Math.abs(compositionGuide.aspect_ratio / (project.output_width / project.output_height) - 1) > 0.02 ? '画幅已改变，请打开构图并重新确认'
           : ''
   );
-  const identityGenerationBlocker = compositionBlocker || (!identityPolicy.valid
+  const spatialInputs = pictureBindings.filter(item => item.role === 'spatial');
+  const referenceBlocker = spatialInputs.length > 1 ? '同一画面只能使用一张空间参考，请核对全局与局部引用'
+    : spatialInputs.length && compositionGuide ? '空间参考与构图引导不能叠加，请先停用当前构图引导'
+      : styleInputCount && referenceCapabilities && !referenceCapabilities.image_to_image ? '当前模型不支持风格参考图，请更换模型或风格'
+        : referenceCapabilities && pictureBindings.length > promptReferenceLimit ? '参考图已超过当前模型输入上限（含风格与构图参考）' : '';
+  const identityGenerationBlocker = referenceBlocker || compositionBlocker || (!identityPolicy.valid
     ? identityPolicy.blocker
     : baseCandidateId && !generationSettings?.supports_candidate_base_image
       ? "当前图片服务尚不支持生成图片作为底图，请重启后端并刷新页面"
@@ -730,7 +753,7 @@ export function ShotImageWorkspace({
         state.imagePrompt,
         state.imagePromptMentions,
         assets,
-        state.referenceBindings,
+        imageBindingsForDraft(shotPlan, activeVisualBeat, state),
       );
       return normalized.changed
         ? {
@@ -1410,6 +1433,10 @@ export function ShotImageWorkspace({
                       />
                     </div>
                   )}
+                  {displayedCandidate?.quality_report?.composition_reframe && <p className="composition-result" role="status">
+                    缩放扩图 · 人物高度 {(displayedCandidate.quality_report.composition_reframe.actual_box.height*100).toFixed(1)}%
+                    {' · '}原图保护区校验通过；尺寸依据人工标记，环境与接缝仍需人工检查。
+                  </p>}
                 </section>
               )}
 
@@ -1448,7 +1475,7 @@ export function ShotImageWorkspace({
                 estimatedCostLabel={commandCostLabel}
                 generationAvailable={generationAvailable}
                 identityBlocker={identityGenerationBlocker}
-                referenceCount={pictureBindings.length}
+                referenceCount={pictureBindings.length + styleInputCount}
                 baseImageId={selectedBaseId}
                 baseImageOptions={baseImageOptions}
                 onBaseImageChange={setGenerationBaseImageId}
@@ -1525,11 +1552,15 @@ export function ShotImageWorkspace({
           <div className="shot-inspector-form">
             <div className="production-field local-prompt-editor">
               <PromptSectionHeader title="局部图片提示词" titleId={`image-prompt-label-${activeVisualBeat?.id || plan.id}`} state={saveState} onRetry={() => Promise.resolve(onRetryDraftSave?.()).catch(() => undefined)} />
-              <CompositionControl projectId={project.id} beatId={activeVisualBeat?.id} request={request} disabled={busy}
+              <CompositionControl projectId={project.id} beatId={activeVisualBeat?.id} request={request} disabled={busy||latestRunBusy}
                 assets={assets} previewUrl={displayedCandidate ? resolveUrl(displayedCandidate.content_url) : null}
+                reframeSource={reframeSource} onGenerate={onGenerate}
                 beforeOpen={async () => { if (await globalPromptRef.current?.flush() === false) return false; await onFlushDraft?.(); return true; }}
                 onSaved={() => globalPromptRef.current?.refresh()} onEffectiveChange={setCompositionGuide} />
               <ImageAssetPromptEditor
+                onApplySpatial={setSpatialApply}
+                activeBindings={imageBindingsForDraft(shotPlan, activeVisualBeat, draft)}
+                retainedReferenceIds={(shotPlan?.visual_beats || []).filter(item => item.id !== activeVisualBeat?.id).flatMap(item => item.image_prompt_mentions.map(mention => mention.reference_asset_id))}
                 referenceLimit={promptReferenceLimit}
                 inheritedMentions={globalPrompts.common_image_mentions || []}
                 key={activeVisualBeat?.id || plan.id}
@@ -1540,6 +1571,9 @@ export function ShotImageWorkspace({
                 sourceFrame={effectiveInputMode === "keyframe_edit"}
                 styleControl={<ShotStyleControl context={globalPrompts} shotKey={plan.id} editorRef={globalPromptRef} request={request} disabled={busy} part="image" />}
               />
+              {spatialApply && <SpatialReferenceApply key={`${project.id}:${activeVisualBeat?.id}`} projectId={project.id} beatId={activeVisualBeat?.id} reference={spatialApply} request={request} disabled={busy}
+                beforeLoad={async () => { if (await globalPromptRef.current?.flush() === false) return false; return onFlushDraft?.(); }}
+                onSaved={async ids => { await onBatchResults?.(ids); onNotice?.('空间参考已应用，已有图片与采用状态保留。'); }} onClose={() => setSpatialApply(null)} />}
             </div>
             <PromptPreview common={globalPrompts.common_image_prompt} local={draft.imagePrompt} style={stylePrompt(globalPrompts, plan.id, "image")} label="图片提示词" />
             <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="image" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />

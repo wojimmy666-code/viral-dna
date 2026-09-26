@@ -13,7 +13,7 @@
 .asset-reference-thumbnail img { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: contain; }
 .asset-reference-thumbnail > span { position: absolute; top: var(--space-1); left: var(--space-1); display: grid; place-items: center; min-width: 20px; height: 20px; padding-inline: var(--space-1); border-radius: 50%; background: var(--text-primary); color: var(--text-on-dark); font-size: var(--type-caption-size); line-height: 1; }
 .asset-reference-add { display: inline-flex; align-items: center; gap: var(--space-1); margin: 0 var(--space-3) var(--space-2); padding: var(--space-1); border: 0; color: var(--accent); background: transparent; font-size: var(--type-caption-size); font-weight: var(--type-weight-semibold); cursor: pointer; }
-.asset-reference-popover { position: fixed; box-sizing: border-box; width: min(336px, calc(100vw - 16px)); max-height: min(440px, calc(100dvh - 16px)); overflow-x: hidden; overflow-y: auto; z-index: var(--z-tooltip); border: 1px solid var(--border-default); border-radius: var(--radius-overlay); padding: var(--space-3); background: var(--surface-panel); color: var(--text-primary); font-size: var(--type-body-size); }
+.asset-reference-popover { position: fixed; box-sizing: border-box; width: min(336px, calc(100vw - 16px)); max-height: min(600px, calc(100dvh - 16px)); overflow-x: hidden; overflow-y: auto; z-index: var(--z-tooltip); border: 1px solid var(--border-default); border-radius: var(--radius-overlay); padding: var(--space-3); background: var(--surface-panel); color: var(--text-primary); font-size: var(--type-body-size); }
 .asset-reference-popover strong { display: block; font-weight: var(--type-weight-semibold); overflow-wrap: anywhere; }
 .asset-reference-popover p, .asset-reference-popover small { color: var(--text-secondary); font-size: var(--type-caption-size); margin: var(--space-2) 0; }
 .asset-reference-preview { height: min(168px, 35dvh); min-width: 0; min-height: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; overflow: hidden; background: var(--surface-subtle); margin-bottom: var(--space-2); }
@@ -79,3 +79,23 @@
   .prompt-asset-picker > footer { flex-wrap: wrap; }
   .prompt-asset-picker-actions { margin-left: auto; }
 }
+.reference-purpose-field { display: grid; gap: 6px; margin-block: 12px; }
+.reference-purpose-field select { width: 100%; min-width: 0; min-height: 44px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-control); color: var(--text-primary); background: var(--surface-panel); font: inherit; }
+.reference-purpose-error, .asset-reference-popover .reference-purpose-error { color: var(--status-danger-text); margin-block: 8px; }
+.asset-reference-thumbnail .asset-reference-purpose-badge { position: absolute; inset: auto 0 0; padding: 3px; color: var(--text-on-dark); background: rgb(20 20 30 / 82%); font-size: var(--type-caption-size); line-height: 1.4; }
+.reference-purpose-selection { border-top: 1px solid var(--border-default); padding-block: 16px; }
+.reference-purpose-selection h3 { margin: 0 0 6px; font-size: var(--type-body-size); }
+.reference-purpose-selection p { margin: 0 0 12px; }
+.reference-purpose-selection label { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 640px; margin-block: 8px; }
+.reference-purpose-selection label span { min-width: 0; overflow-wrap: anywhere; }
+.reference-purpose-selection select { min-height: 44px; flex: 0 0 150px; }
+.spatial-reference-dialog { width: min(560px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--border-default); border-radius: var(--radius-overlay); color: var(--text-primary); background: var(--surface-panel); }
+.spatial-reference-dialog::backdrop { background: rgb(20 20 30 / 36%); }
+.spatial-reference-dialog header, .spatial-reference-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; }
+.spatial-reference-dialog header { border-bottom: 1px solid var(--border-default); }
+.spatial-reference-dialog h2 { margin: 0; font-size: var(--type-heading-size); }
+.spatial-reference-dialog footer { border-top: 1px solid var(--border-default); justify-content: flex-end; flex-wrap: wrap; }
+.spatial-reference-dialog-body { padding: 16px 20px; overflow-y: auto; max-height: calc(100dvh - 208px); overflow-wrap: anywhere; }
+.spatial-reference-targets { border: 0; padding: 0; margin: 16px 0; display: grid; gap: 4px; }
+.spatial-reference-targets label, .spatial-reference-confirm { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.spatial-reference-dialog input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; }

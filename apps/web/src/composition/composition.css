@@ -32,4 +32,15 @@
 .composition-review output { display:block; font-size:var(--type-caption-size); line-height:var(--type-leading-copy); font-variant-numeric:tabular-nums; }
 .composition-dialog footer { position:sticky; bottom:0; background:var(--surface-panel); border-top:1px solid var(--border-default); flex-wrap:wrap; }
 .composition-dialog footer>div { display:flex; gap:var(--space-2); flex-wrap:wrap; }
+.composition-mode { display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-2); padding:var(--space-3) var(--space-6) 0; }
+.reframe-body .composition-stage { justify-content:flex-start; gap:var(--space-2); }
+.reframe-canvas { flex-shrink:0; }
+.composition-dialog .reframe-check { display:flex; flex-direction:row; align-items:flex-start; gap:var(--space-2); min-height:44px; font-size:var(--type-body-size); line-height:var(--type-leading-copy); }
+.composition-dialog .reframe-check input { flex:none; width:20px; height:20px; margin:0; accent-color:var(--accent); }
+.reframe-confirmation { border-top:1px solid var(--border-default); padding-top:var(--space-4); }
+.reframe-confirmation strong { font-size:var(--type-body-size); font-weight:var(--type-weight-semibold); }
+.reframe-body output { font-size:var(--type-caption-size); font-variant-numeric:tabular-nums; line-height:var(--type-leading-copy); }
+.composition-presets [aria-pressed=true] { border-color:var(--accent); }
+.composition-result { margin:var(--space-2) 0; color:var(--text-secondary); font-size:var(--type-caption-size); line-height:var(--type-leading-copy); }
+@media(max-width:960px) { .reframe-body { grid-template-columns:1fr; } }
 @media(max-width:760px) { .composition-dialog { width:100%; max-height:100dvh; height:100dvh; border-radius:0; margin:0; }.composition-body { grid-template-columns:1fr; padding:var(--space-4); gap:var(--space-4); }.composition-dialog header,.composition-dialog footer { padding:var(--space-4); }.composition-controls input[type=number],.composition-controls select { min-height:44px; font-size:var(--type-heading-size); }.composition-dialog footer { position:static; }.composition-dialog footer>div { width:100%; }.composition-dialog footer>div:last-child>* { flex:1; } }

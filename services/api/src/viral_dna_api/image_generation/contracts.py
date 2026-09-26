@@ -21,7 +21,7 @@ from ..models import (
 
 IMAGE_REQUEST_SCHEMA_VERSION = "viral-dna-image-generation/v2"
 LOCAL_TOOL_PROTOCOL_VERSION = "viral-dna-image-tool/v1"
-IMAGE_PROMPT_VERSION = "shot-image-v4"
+IMAGE_PROMPT_VERSION = "shot-image-v5-reference-purposes"
 MAX_GENERATED_IMAGE_BYTES = 25 * 1024 * 1024
 
 
@@ -158,6 +158,7 @@ def build_reference_inputs(
         "scene": 3,
         "style": 4,
         "layout": 5,
+        "spatial": 6,
     }
     for binding in sorted(
         bindings,

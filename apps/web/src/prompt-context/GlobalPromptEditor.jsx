@@ -121,6 +121,7 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
           const options = assets.map(asset => promptAssetReference(asset, type));
           const references = (state?.values[`common_${type}_mentions`] || []).map(mention => ({ ...options.find(option => (option.reference_asset_id || option.reference_id) === (mention.reference_asset_id || mention.reference_id)), ...mention }));
           return <div key={type}>{parts.length === 2 && <span>{type === 'image' ? '图片' : '视频'}提示词</span>}<AssetReferenceEditor label={`全局${type === 'image' ? '图片' : '视频'}提示词`} rows={7} maxLength={8000} disabled={disabled || !state || Boolean(recovery)} value={state?.values[`common_${type}_prompt`] || ''} references={references} options={options} resolveUrl={resolveUrl}
+            referencePart={type}
             onAddAssets={onAddAssets && ((insert, pickerOptions) => onAddAssets(selected => insert(selected.map(asset => promptAssetReference(asset, type))), pickerOptions))}
             placeholder="可留空；输入 @ 引用整片共同资产" onBlur={() => void flush()} onChange={(value, refs) => edit(type, value, refs)} /></div>;
         })}

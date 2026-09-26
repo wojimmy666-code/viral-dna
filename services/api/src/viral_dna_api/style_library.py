@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -26,6 +27,7 @@ class StyleDefinition(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=12)
     description: str = Field(default="", max_length=400)
     cover_id: UUID | None = None
+    reference_image_id: UUID | None = None
     sample_ids: list[UUID] = Field(default_factory=list, max_length=4)
     applies_to: list[Literal["image", "video"]] = Field(default_factory=lambda: ["image", "video"], min_length=1, max_length=2)
     image_prompt: str = Field(default="", max_length=6000)
@@ -111,6 +113,35 @@ class StyleLibrary:
                 inserted = db.execute("INSERT OR IGNORE INTO styles VALUES (?, 1, ?, 1, 1)", (identifier, encoded)).rowcount
                 if inserted:
                     db.execute("INSERT INTO style_versions VALUES (?, 1, ?)", (identifier, encoded))
+            self._seed_vlog_reference(db)
+
+    @staticmethod
+    def _seed_vlog_reference(db):
+        """Only upgrade untouched built-ins; never rewrite a published version or admin draft."""
+        identifier = str(uuid5(NAMESPACE_URL, "viraldna:style:travel_vlog"))
+        row = db.execute("SELECT * FROM styles WHERE id=?", (identifier,)).fetchone()
+        if not row or not row["enabled"]:
+            return
+        published = db.execute("SELECT payload FROM style_versions WHERE style_id=? AND version=?", (identifier, row["published_version"])).fetchone()
+        style = StyleDefinition.model_validate_json(row["draft"])
+        if not published or style != StyleDefinition.model_validate_json(published["payload"]) or style.reference_image_id:
+            return
+        name, description, image_rules, video_rules = PRESETS["travel_vlog"]
+        if (style.name, style.description, style.image_prompt, style.video_prompt) != (name, description, image_rules, f"{image_rules}\n{video_rules}"):
+            return
+        path = Path(__file__).with_name("style_references") / "travel-vlog-d.png"
+        if not path.is_file():
+            return
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != "30582569ddec6a6ddb3ea1054da3c57543ad90c2e9e572f0300f7d0c2954f628":
+            raise RuntimeError("旅行 Vlog 参考图校验失败")
+        media_id = str(uuid5(NAMESPACE_URL, f"viraldna:style-reference:{digest}"))
+        db.execute("INSERT OR IGNORE INTO style_media VALUES (?, ?)", (media_id, content))
+        encoded = style.model_copy(update={"reference_image_id": UUID(media_id)}).model_dump_json()
+        version = row["published_version"] + 1
+        db.execute("INSERT INTO style_versions VALUES (?, ?, ?)", (identifier, version, encoded))
+        db.execute("UPDATE styles SET revision=revision+1, draft=?, published_version=? WHERE id=?", (encoded, version, identifier))
 
     @contextmanager
     def transaction(self):
@@ -133,6 +164,7 @@ class StyleLibrary:
         return {**data, "id": row["id"], "revision": row["revision"],
                 "version": row["published_version"], "enabled": bool(row["enabled"]),
                 "cover_url": f"{prefix}/{data['cover_id']}" if data.get("cover_id") else None,
+                "reference_image_url": f"{prefix}/{data['reference_image_id']}" if data.get("reference_image_id") else None,
                 "sample_urls": [f"{prefix}/{item}" for item in data.get("sample_ids", [])],
                 "selection": {"catalog_id": row["id"], "catalog_version": row["published_version"]}}
 
@@ -160,7 +192,7 @@ class StyleLibrary:
             if payload.expected_revision != revision:
                 raise HTTPException(409, "风格已在其他页面更新，请重新读取后核对")
             style = payload.style
-            for media_id in [style.cover_id, *style.sample_ids]:
+            for media_id in [style.cover_id, style.reference_image_id, *style.sample_ids]:
                 if media_id and not db.execute("SELECT 1 FROM style_media WHERE id=?", (str(media_id),)).fetchone():
                     raise HTTPException(422, "预览图片不存在，请重新上传")
             db.execute("""INSERT INTO styles (id, revision, draft) VALUES (?, ?, ?)
@@ -207,11 +239,25 @@ class StyleLibrary:
                 if part == "image":
                     text = static_image_text(text)
             rules[f"{part}_prompt"] = text
+        reference = None
+        if style.reference_image_id:
+            content = self.reference_content(str(style.reference_image_id))
+            with Image.open(io.BytesIO(content)) as image:
+                reference = {"id": str(style.reference_image_id), "sha256": hashlib.sha256(content).hexdigest(),
+                             "width": image.width, "height": image.height, "media_type": Image.MIME[image.format]}
         return {"version": "visual-style-library-v1", "selection": {"catalog_id": identifier, "catalog_version": version},
                 "label": style.name, "applies_to": style.applies_to,
+                **({"reference_image": reference} if reference else {}),
                 "cover_url": f"/api/v1/me/settings/visual-styles/media/{style.cover_id}" if style.cover_id else None, **rules}
 
-    def upload(self, content):
+    def reference_content(self, identifier):
+        with self.transaction() as db:
+            row = db.execute("SELECT content FROM style_media WHERE id=?", (identifier,)).fetchone()
+            if not row:
+                raise HTTPException(409, "风格参考图不可用，请重新选择风格")
+            return bytes(row["content"])
+
+    def upload(self, content, *, purpose="preview"):
         if not content or len(content) > 10 * 1024 * 1024:
             raise HTTPException(422, "请选择不超过 10 MB 的 JPG、PNG 或 WebP 图片")
         try:
@@ -227,20 +273,22 @@ class StyleLibrary:
             raise HTTPException(422, "无法读取图片，请上传有效的 JPG、PNG 或 WebP") from exc
         identifier = str(uuid4())
         with self.transaction() as db:
-            db.execute("INSERT INTO style_media VALUES (?, ?)", (identifier, output.getvalue()))
+            db.execute("INSERT INTO style_media VALUES (?, ?)", (identifier, content if purpose == "reference" else output.getvalue()))
         return {"id": identifier, "url": f"/api/v1/admin/visual-styles/media/{identifier}"}
 
     def media(self, identifier, *, admin=False):
         with self.transaction() as db:
             if not admin:
-                visible = any(identifier in [data.get("cover_id"), *data.get("sample_ids", [])]
+                visible = any(identifier in [data.get("cover_id"), data.get("reference_image_id"), *data.get("sample_ids", [])]
                               for row in db.execute("SELECT payload FROM style_versions") for data in [json.loads(row["payload"])])
                 if not visible:
                     raise HTTPException(404, "预览图片不存在")
             row = db.execute("SELECT content FROM style_media WHERE id=?", (identifier,)).fetchone()
             if not row:
                 raise HTTPException(404, "预览图片不存在")
-        return Response(row["content"], media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
+        with Image.open(io.BytesIO(row["content"])) as image:
+            media_type = Image.MIME[image.format]
+        return Response(row["content"], media_type=media_type, headers={"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
 
     def preference(self, principal, identifier, *, favorite=None, used=False):
         with self.transaction() as db:
@@ -287,11 +335,11 @@ def create_style_library_admin_router(require_admin):
         return get_style_library().action(str(style_id), payload.expected_revision, action)
 
     @router.post("/media")
-    async def upload(file: UploadFile):
+    async def upload(file: UploadFile, purpose: Literal["preview", "reference"] = "preview"):
         import asyncio
         try:
             content = await file.read(10 * 1024 * 1024 + 1)
-            return await asyncio.to_thread(get_style_library().upload, content)
+            return await asyncio.to_thread(get_style_library().upload, content, purpose=purpose)
         finally:
             await file.close()
 

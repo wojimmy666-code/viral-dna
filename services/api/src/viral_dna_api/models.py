@@ -14,11 +14,13 @@ from pydantic import (
     SecretStr,
     computed_field,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 from .control_assets.domain import DepthControlAsset
 from .editing_guidance import separate_shot_editing_guidance
+from .image_reframe import ImageReframe
 from .video_group_models import VideoGenerationGroup, VideoGroupClip
 from .prompt_engine.contracts import PromptShotDraft
 from .reference_routes.domain import VideoReferenceRouteCapability
@@ -249,6 +251,7 @@ class ReferenceRole(StrEnum):
     WARDROBE = "wardrobe"
     STYLE = "style"
     LAYOUT = "layout"
+    SPATIAL = "spatial"
 
 
 class ShotLock(StrEnum):
@@ -318,6 +321,7 @@ class VideoPromptReferenceRole(StrEnum):
     DEPTH = "depth"
     TRANSITION = "transition"
     STYLE = "style"
+    SPATIAL = "spatial"
 
 
 class VideoReferenceOrigin(StrEnum):
@@ -943,6 +947,7 @@ class ImageGenerationSettingsUpdate(BaseModel):
 class ImageGenerationSettingsResponse(BaseModel):
     enabled: bool = False
     supports_candidate_base_image: bool = True
+    supports_composition_reframe: bool = True
     execution_mode: ImageExecutionMode = ImageExecutionMode.REMOTE_API
     default_candidate_count: int = Field(default=1, ge=1, le=4)
     remote_provider: str = "dashscope"
@@ -2070,6 +2075,16 @@ class ReferenceBinding(BaseModel):
 class PromptAssetMention(BaseModel):
     reference_asset_id: UUID
     label: str = Field(min_length=1, max_length=260)
+    # Purpose belongs to this use, never to the shared asset's classification.
+    # None preserves the role of legacy bindings until explicitly edited.
+    role: ReferenceRole | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_legacy_role(self, handler):
+        result = handler(self)
+        if self.role is None:
+            result.pop("role", None)
+        return result
 
     @field_validator("label")
     @classmethod
@@ -3326,9 +3341,19 @@ class ImageGenerationCreate(ImageGenerationOverrides):
     seed: int | None = Field(default=None, ge=0, le=2_147_483_647)
     image_batch_id: UUID | None = None
     preserve_approval: bool = False
+    composition_reframe: ImageReframe | None = None
 
     @model_validator(mode="after")
     def require_edit_mode_for_base_image(self):
+        if self.composition_reframe and (
+            self.base_image_candidate_id is None
+            or self.input_mode != ImageGenerationInputMode.KEYFRAME_EDIT
+            or self.candidate_count != 1
+            or self.image_batch_id is not None
+        ):
+            raise ValueError(
+                "缩放扩图必须明确选择当前画面原图，单次生成 1 张，不支持批量共用人物标记"
+            )
         if (
             self.base_image_candidate_id is not None
             and self.input_mode != ImageGenerationInputMode.KEYFRAME_EDIT

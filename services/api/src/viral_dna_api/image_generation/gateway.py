@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +20,14 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from ..chinese import to_simplified
 from ..composition import CompositionGuide, build_guide_reference, guide_matches_aspect
 from ..generation import generate_simulated_images
+from ..image_reframe import (
+    ImageReframe,
+    outpaint_prompt,
+    plan_reframe,
+    prepare_reframe,
+    read_source,
+    restore_reframe,
+)
 from ..models import (
     GenerationCandidate,
     GenerationCostSource,
@@ -172,6 +181,7 @@ def _output_dimensions(
 
 
 def _compiled_prompt(request: ImageGenerationRequest) -> str:
+    from ..reference_purposes import SPATIAL_REFERENCE_INSTRUCTION
     # The gateway is also used directly by Look Test and local ImageGen.
     image_prompt = sanitize_still_image_prompt(request.shot.image_prompt)
     role_labels = {
@@ -181,6 +191,7 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
         "wardrobe": "服装款式与材质",
         "style": "整体视觉风格",
         "layout": "道具或布局",
+        "spatial": "空间关系",
     }
     mention_labels = {
         item.reference_asset_id: item.label for item in request.shot.image_prompt_mentions
@@ -246,6 +257,8 @@ def _compiled_prompt(request: ImageGenerationRequest) -> str:
             detail += "，仅参考色彩、光照、材质与表现语言，不继承参考图的人物身份、服装或场景；内容以本次提示词和相应用途的资产为准"
         if reference.crop_hint:
             detail += f"，裁切提示：{reference.crop_hint.strip()}"
+        if reference.role == "spatial":
+            detail += "。" + SPATIAL_REFERENCE_INSTRUCTION
         lines.append(detail + "。")
     lines.append("生成结果必须是完整画面，不要输出解释、边框、拼图或参考图标注。")
     return (to_simplified("\n".join(lines)) or "\n".join(lines)).strip()
@@ -383,14 +396,19 @@ def _save_candidate(
             "生成候选像素尺寸超过工作区安全限制",
         )
     candidate_output = BytesIO()
-    rendered.save(candidate_output, format="JPEG", quality=94, optimize=True)
+    reframe_audit = image.metadata.get("composition_reframe")
+    if reframe_audit:
+        rendered.save(candidate_output, format="PNG")
+    else:
+        rendered.save(candidate_output, format="JPEG", quality=94, optimize=True)
     candidate_payload = candidate_output.getvalue()
     thumbnail = rendered.copy()
     thumbnail.thumbnail((640, 640), Image.Resampling.LANCZOS)
     thumbnail_output = BytesIO()
     thumbnail.save(thumbnail_output, format="WEBP", quality=84, method=4)
 
-    candidate_path = run_root / f"candidate_{ordinal:03d}.jpg"
+    extension = "png" if reframe_audit else "jpg"
+    candidate_path = run_root / f"candidate_{ordinal:03d}.{extension}"
     thumbnail_path = run_root / f"candidate_{ordinal:03d}.webp"
     metadata_path = run_root / f"candidate_{ordinal:03d}.json"
     sha256 = hashlib.sha256(candidate_payload).hexdigest()
@@ -400,6 +418,8 @@ def _save_candidate(
         target_height=target_height,
         reference_roles=reference_roles,
     )
+    if reframe_audit:
+        quality_report["composition_reframe"] = reframe_audit
     metadata = {
         "schema_version": "viral-dna-generation-candidate/v1",
         "ordinal": ordinal,
@@ -519,6 +539,8 @@ class ImageGenerationGateway:
         cancel_event: Any | None = None,
         reserve_cost: Any | None = None,
         on_candidate: Any | None = None,
+        composition_reframe: ImageReframe | None = None,
+        visual_style_snapshot: dict | None = None,
     ) -> tuple[GenerationRun, list[GenerationCandidate]]:
         gateway_started = time.perf_counter()
         timing: dict[str, Any] = {
@@ -534,9 +556,34 @@ class ImageGenerationGateway:
                 "图片生成输入模式无效",
             ) from exc
         settings = self.settings_service.get()
-        guide = CompositionGuide.model_validate(shot.image_composition) if shot.image_composition else None
+        from ..reference_purposes import spatial_references
+        if composition_reframe and spatial_references(bindings):
+            raise ImageGenerationGatewayError(422, "spatial_reframe_conflict", "空间参考与缩放扩图不能叠加，请先移除当前空间参考")
+        if composition_reframe:
+            if (
+                not base_image_candidate_id
+                or selected_input_mode != ImageGenerationInputMode.KEYFRAME_EDIT
+                or candidate_count != 1
+            ):
+                raise ImageGenerationGatewayError(
+                    422, "reframe_input_invalid", "缩放扩图必须选择原图并单张生成"
+                )
+            # This operation only extends the explicitly selected photograph.
+            # It does not re-apply today's prompt, style, or reference bindings.
+            bindings, assets = [], []
+            shot = shot.model_copy(update={"image_prompt_mentions": []})
+        semantic_enabled = settings.semantic_quality_enabled and not composition_reframe
+        guide = (
+            CompositionGuide.model_validate(shot.image_composition)
+            if shot.image_composition and not composition_reframe
+            else None
+        )
         if guide and not guide_matches_aspect(guide, project.output_width, project.output_height):
             raise ImageGenerationGatewayError(422, "composition_aspect_changed", "画幅已改变，请重新确认构图引导")
+        if len(spatial_references(bindings)) > 1:
+            raise ImageGenerationGatewayError(422, "spatial_reference_duplicate", "一个画面只能使用一张空间参考，请核对全局与局部引用")
+        if guide and spatial_references(bindings):
+            raise ImageGenerationGatewayError(422, "spatial_composition_conflict", "空间参考与构图引导不能叠加，请先停用当前画面的构图引导")
         if guide and selected_input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
             selected_input_mode = ImageGenerationInputMode.REFERENCE_TO_IMAGE
         if not settings.enabled:
@@ -613,6 +660,17 @@ class ImageGenerationGateway:
                 "reference_asset_missing",
                 "部分参考资产已不可用，请重新选择，不能忽略资产继续生成",
             )
+        if not composition_reframe and visual_style_snapshot:
+            from ..style_reference import image_style_reference
+            from fastapi import HTTPException
+            try:
+                style_reference = image_style_reference(self.workspace, visual_style_snapshot, "image")
+            except HTTPException as exc:
+                raise ImageGenerationGatewayError(exc.status_code, "style_reference_invalid", str(exc.detail)) from exc
+            if style_reference:
+                references = (*references, style_reference)
+                if selected_input_mode == ImageGenerationInputMode.TEXT_TO_IMAGE:
+                    selected_input_mode = ImageGenerationInputMode.REFERENCE_TO_IMAGE
         if selected_input_mode == ImageGenerationInputMode.REFERENCE_TO_IMAGE and not references and guide is None:
             raise ImageGenerationGatewayError(
                 409, "reference_images_required", "请添加参考资产，或切换为纯文生图"
@@ -725,7 +783,7 @@ class ImageGenerationGateway:
             seed=seed,
             base_image_candidate_id=base_image_candidate_id,
         )
-        if project.origin_type == "skill_run":
+        if project.origin_type == "skill_run" or composition_reframe:
             width, height = project.output_width, project.output_height
             cap = identity.capability
             if (
@@ -744,8 +802,46 @@ class ImageGenerationGateway:
                 project.output_height,
                 identity.capability,
             )
-        prompt = _compiled_prompt(request)
-        negative_prompt = _negative_prompt(request)
+        run_id = run_id or uuid4()
+        run_root = (
+            self.workspace.production_shot_root(project.record_id, project.id, shot.id)
+            / "images"
+            / str(run_id)
+        )
+        reframe_plan, resized_original, reframe_origin = None, None, None
+        if composition_reframe:
+            try:
+                original = await asyncio.to_thread(
+                    read_source, _filesystem_path(source_path), composition_reframe
+                )
+                reframe_plan = plan_reframe(original.size, width, height, composition_reframe)
+                canvas, resized_original = await asyncio.to_thread(
+                    prepare_reframe, original, reframe_plan
+                )
+                # Normalize both sides for Windows extended-length file paths.
+                origin_relative = (
+                    _filesystem_path(source_path)
+                    .resolve()
+                    .relative_to(_filesystem_path(self.workspace.root).resolve())
+                    .as_posix()
+                )
+                reframe_origin = {"relative_path": origin_relative, "sha256": source_sha256}
+                source_path = run_root / "outpaint-input.png"
+                prepared = BytesIO()
+                canvas.save(prepared, format="PNG")
+                _write_atomic(source_path, prepared.getvalue())
+                source_path = _filesystem_path(source_path)
+                source_sha256 = _sha256_file(source_path)
+                request = replace(request, source_path=source_path, source_sha256=source_sha256)
+            except (ValueError, OSError) as exc:
+                raise ImageGenerationGatewayError(
+                    422, "reframe_geometry_invalid", str(exc)
+                ) from exc
+        prompt = outpaint_prompt(reframe_plan) if reframe_plan else _compiled_prompt(request)
+        negative_prompt = (
+            "重新取景，放大人物，裁切原图，新增前景人物，边框，灰色填充，画中画，水印"
+            if reframe_plan else _negative_prompt(request)
+        )
         input_payload = self._input_payload(
             request,
             identity,
@@ -757,13 +853,15 @@ class ImageGenerationGateway:
         )
         if guide:
             input_payload["composition_guide"] = guide.model_dump(mode="json")
+        if composition_reframe:
+            input_payload["composition_reframe"] = composition_reframe.model_dump(mode="json")
+            input_payload["reframe_origin"] = reframe_origin
+            input_payload["reframe_plan"] = reframe_plan.audit()
+            input_payload["source"]["relative_path"] = self.workspace.relative(
+                run_root / "outpaint-input.png"
+            )
+            input_payload["source"]["relative_url"] = None
         fingerprint = self._fingerprint(input_payload)
-        run_id = run_id or uuid4()
-        run_root = (
-            self.workspace.production_shot_root(project.record_id, project.id, shot.id)
-            / "images"
-            / str(run_id)
-        )
         input_path = run_root / "input.json"
         started = time.perf_counter()
         cached = (
@@ -780,7 +878,7 @@ class ImageGenerationGateway:
                 candidate_count=candidate_count,
                 started=started,
             )
-            if reuse_cache
+            if reuse_cache and not composition_reframe
             else None
         )
         if cached is not None:
@@ -844,6 +942,21 @@ class ImageGenerationGateway:
             if ordinal in streamed_candidates:
                 return
             publish_started = time.perf_counter()
+            if reframe_plan:
+                # Keep the model's output for audit even if restoration fails.
+                _write_atomic(run_root / f"outpaint-raw-{ordinal:03d}.bin", image.payload)
+                try:
+                    restored, audit = await asyncio.to_thread(
+                        restore_reframe, image.payload, resized_original, reframe_plan
+                    )
+                except (ValueError, OSError) as exc:
+                    raise ImageGenerationGatewayError(
+                        502, "reframe_restoration_failed", str(exc)
+                    ) from exc
+                image = GeneratedImage(
+                    payload=restored, media_type="image/png", width=width, height=height,
+                    metadata={**image.metadata, "composition_reframe": audit},
+                )
             candidate = await asyncio.to_thread(
                 _save_candidate,
                 self.workspace,
@@ -860,7 +973,7 @@ class ImageGenerationGateway:
             )
             streamed_candidates[ordinal] = candidate
             # Do not expose an unreviewed semantic-QA result as ready.
-            if on_candidate is not None and not settings.semantic_quality_enabled:
+            if on_candidate is not None and not semantic_enabled:
                 await on_candidate(candidate)
             timing.setdefault(
                 "first_candidate_ms", round((time.perf_counter() - gateway_started) * 1000)
@@ -887,10 +1000,11 @@ class ImageGenerationGateway:
             seed=request.seed,
             capability=identity.capability,
             cancel_event=cancel_event,
-            on_image=receive_image,
+            on_image=None if reframe_plan else receive_image,
         )
         slot_started = time.perf_counter()
         adapter_started = None
+        result = None
         save_timing("waiting_for_slot")
         try:
             if cancel_event is not None and cancel_event.is_set():
@@ -929,7 +1043,7 @@ class ImageGenerationGateway:
                     (time.perf_counter() - adapter_started) * 1000
                 )
             save_timing("failed")
-            if settings.semantic_quality_enabled:
+            if semantic_enabled:
                 for ordinal, candidate in streamed_candidates.items():
                     report = dict(candidate.quality_report)
                     report.update(
@@ -961,6 +1075,20 @@ class ImageGenerationGateway:
             if codex_timing := read_codex_timing():
                 failure_summary["codex_timing"] = codex_timing
             run = run.model_copy(update={"execution_summary": failure_summary})
+            if result is not None:
+                cost, cost_source = self._actual_cost(
+                    identity, result.actual_cost_micros, len(result.images)
+                )
+                run = run.model_copy(update={
+                    "actual_cost_micros": cost, "cost_source": cost_source,
+                    "usage": result.usage, "provider_request_id": result.provider_request_id,
+                })
+            if composition_reframe:
+                run = run.model_copy(update={
+                    "actual_cost_known": (
+                        result is not None and run.cost_source != GenerationCostSource.UNKNOWN
+                    ),
+                })
             return run, list(streamed_candidates.values())
 
         actual_cost, cost_source = self._actual_cost(
@@ -970,7 +1098,7 @@ class ImageGenerationGateway:
         )
         semantic_outcomes: list[SemanticQualityOutcome] = []
         quality_started = time.perf_counter()
-        if settings.semantic_quality_enabled:
+        if semantic_enabled:
             remaining_budget = (
                 None
                 if project.budget_limit_micros is None
@@ -1045,11 +1173,13 @@ class ImageGenerationGateway:
         execution_summary["identity_policy"] = input_payload["identity_policy"]
         execution_summary["input_manifest"] = input_payload["input_manifest"]
         execution_summary["semantic_quality"] = {
-            "enabled": settings.semantic_quality_enabled,
+            "enabled": bool(semantic_enabled),
             "candidate_count": len(semantic_outcomes),
             "estimated_cost_micros": semantic_estimated_cost,
             "actual_cost_micros": semantic_actual_cost,
         }
+        if reframe_plan:
+            execution_summary["composition_reframe"] = reframe_plan.audit()
         manifest_path = run_root / "manifest.json"
         manifest = {
             "schema_version": "viral-dna-image-generation-result/v1",
@@ -1107,6 +1237,10 @@ class ImageGenerationGateway:
             latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
             completed_at=completed_at,
         )
+        if composition_reframe:
+            run = run.model_copy(update={
+                "actual_cost_known": cost_source != GenerationCostSource.UNKNOWN,
+            })
         return run, candidates
 
     def recoverable_local_tool_artifacts(self, run: GenerationRun) -> tuple[Path, ...]:
@@ -1164,8 +1298,8 @@ class ImageGenerationGateway:
             if isinstance(input_payload.get("references"), list)
             else []
         )
-        target_width = max(1, int(output.get("width") or 1024))
-        target_height = max(1, int(output.get("height") or 1024))
+        target_width = max(1, int(output.get("compiled_width") or output.get("width") or 1024))
+        target_height = max(1, int(output.get("compiled_height") or output.get("height") or 1024))
         reference_roles = {
             str(item.get("role"))
             for item in references
@@ -1217,6 +1351,33 @@ class ImageGenerationGateway:
                     },
                 )
             )
+
+        if input_payload.get("composition_reframe"):
+            try:
+                spec = ImageReframe.model_validate(input_payload["composition_reframe"])
+                original_path = self.workspace.resolve(
+                    input_payload["reframe_origin"]["relative_path"]
+                )
+                original = await asyncio.to_thread(
+                    read_source, _filesystem_path(original_path), spec
+                )
+                plan = plan_reframe(original.size, target_width, target_height, spec)
+                _, resized = await asyncio.to_thread(prepare_reframe, original, plan)
+                restored_images = []
+                for image in recovered_images:
+                    restored, audit = await asyncio.to_thread(
+                        restore_reframe, image.payload, resized, plan
+                    )
+                    restored_images.append(GeneratedImage(
+                        payload=restored, media_type="image/png", width=target_width,
+                        height=target_height,
+                        metadata={**image.metadata, "composition_reframe": audit},
+                    ))
+                recovered_images = restored_images
+            except (ValueError, OSError, KeyError, WorkspaceError) as exc:
+                raise ImageGenerationGatewayError(
+                    409, "reframe_recovery_failed", "无法安全恢复缩放扩图：" + str(exc)
+                ) from exc
 
         candidates = [
             _save_candidate(
@@ -1310,6 +1471,8 @@ class ImageGenerationGateway:
             "locks": input_payload["locks"],
             "identity_policy": input_payload["identity_policy"],
         }
+        if input_payload.get("composition_reframe"):
+            stable_payload["composition_reframe"] = input_payload["composition_reframe"]
         return hashlib.sha256(_canonical_json(stable_payload)).hexdigest()
 
     async def _reuse_cached_generation(

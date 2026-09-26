@@ -113,7 +113,9 @@ def test_travel_vlog_is_selectable_for_images_and_video_with_approved_cover(libr
     assert item["name"] == "旅行 Vlog"
     assert item["category"] == "写实摄影"
     assert "Vlog" in item["tags"] and "日常随拍" in item["tags"]
-    assert item["version"] == 1 and item["enabled"]
+    assert item["version"] == 2 and item["enabled"]
+    assert item["reference_image_id"] != item["cover_id"]
+    assert "reference_image" not in library.frozen(identifier, 1)
     assert item["applies_to"] == ["image", "video"]
     assert item["cover_url"]
     with Image.open(io.BytesIO(library.media(item["cover_id"]).body)) as cover:
@@ -127,7 +129,7 @@ def test_travel_vlog_is_selectable_for_images_and_video_with_approved_cover(libr
     assert "旅行 Vlog 动态" not in snapshot["image_prompt"]
     assert "旅行 Vlog 动态" in snapshot["video_prompt"]
     assert item["cover_url"] not in snapshot["image_prompt"]
-    assert library.frozen(identifier, 1, selectable=True)["selection"] == item["selection"]
+    assert library.frozen(identifier, item["version"], selectable=True)["selection"] == item["selection"]
 
 
 def test_new_builtin_is_added_without_changing_existing_library(tmp_path, monkeypatch):

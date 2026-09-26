@@ -198,9 +198,23 @@ class ImageBatchService:
                 else:
                     message = ""
                     composition = effective_composition(prompt_context, project.id, beat.id)
-                    reference_count = len(picture_bindings) + bool(composition)
+                    from .production import ProductionServiceError
+                    from .reference_purposes import spatial_references
+                    try:
+                        picture_bindings = await p._with_global_image_bindings(project, plan, picture_bindings, item.prompt_snapshot)
+                    except ProductionServiceError as exc:
+                        item.status, item.error_message, item.retryable = "failed", str(exc), True
+                        items.append(item)
+                        continue
+                    style = item.prompt_snapshot.get("visual_style_snapshot") or {}
+                    style_count = bool(style.get("reference_image") and "image" in style.get("applies_to", []))
+                    reference_count = len(picture_bindings) + bool(composition) + style_count
                     if not beat.image_prompt.strip():
                         message = "请先填写图片提示词"
+                    elif len(spatial_references(picture_bindings)) > 1:
+                        message = "一个画面只能使用一张空间参考，请核对全局与局部引用"
+                    elif composition and spatial_references(picture_bindings):
+                        message = "空间参考与构图引导不能叠加，请先停用构图引导"
                     elif composition and not guide_matches_aspect(composition, project.output_width, project.output_height):
                         message = "画幅已改变，请重新确认构图引导"
                     elif count > option.capabilities.max_candidates:
@@ -209,8 +223,8 @@ class ImageBatchService:
                         message = "当前模型不支持参考图片，请调整本画面的模型或参考素材"
                     elif reference_count > min(option.capabilities.max_reference_images, option.capabilities.max_input_images):
                         message = (
-                            f"本画面需要 {reference_count} 项参考（含构图引导），"
-                            f"模型最多支持 {option.capabilities.max_reference_images} 项"
+                            f"本画面需要 {reference_count} 项参考（含全局、风格参考图和构图引导），"
+                            f"模型最多支持 {min(option.capabilities.max_reference_images, option.capabilities.max_input_images)} 项"
                         )
                     elif any(
                         binding.reference_asset_id not in assets

@@ -10,6 +10,7 @@ import { stylePrompt } from "../visual-styles/visual-style.js";
 import { PromptSectionHeader } from "../prompt-context/PromptSectionHeader.jsx";
 import { AssetReferenceEditor } from "../prompt-references/AssetReferenceEditor.jsx";
 import { usePromptAssetLibrary } from "../prompt-references/usePromptAssetLibrary.jsx";
+import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 
 export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor({
   approved, busy, manifest, onComplete, onSaved, outline, projectId, request, targetDurationFrames, resolveUrl,
@@ -29,11 +30,7 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
   const assetLibrary = usePromptAssetLibrary({ request, resolveUrl, skillProjectId: projectId, beforeLink: flush,
     onLinked: (_assets, facts) => { setAssetFacts(facts); setAssetError(''); },
   });
-  const assetReference = (asset, part) => ({
-    ...(part === 'image' ? { reference_asset_id: asset.id || asset.asset_id } : { reference_kind: 'project_asset', reference_id: asset.id || asset.asset_id, role: { person: 'actor_identity', product: 'product', scene: 'scene', clothing: 'wardrobe' }[asset.type] || 'composition' }),
-    label: `${part === 'video' ? '资产/' : ''}${asset.folder_name || '未分类'}/${asset.name}`,
-    thumbnail_url: asset.thumbnail_url, available: true,
-  });
+  const assetReference = promptAssetReference;
   useEffect(() => {
     let active = true;
     request(`/projects/${projectId}/prompt-assets`).then((items) => {
@@ -184,23 +181,18 @@ export const StoryboardPromptEditor = forwardRef(function StoryboardPromptEditor
           {[["image", "局部图片提示词", "描述这一张静态画面的主体、场景与构图…"], ["video", "局部视频提示词", "描述基于分镜图的动作、运镜与声音…"]].map(([part, label, placeholder]) => <div className="storyboard-local-prompt" key={part}><div className="storyboard-prompt-field">
             <PromptSectionHeader titleId={`prompt-label-${shot.stable_shot_key}-${part}`} title={label} />
             <AssetReferenceEditor label={`分镜 ${index + 1} ${label}`} disabled={disabled} maxLength={8000} placeholder={placeholder} rows={10}
+              referencePart={part}
               labelledBy={`title-${shot.stable_shot_key} prompt-label-${shot.stable_shot_key}-${part}`}
               ref={part === "image" ? (node) => { if (node) fields.current.set(shot.stable_shot_key, node); else fields.current.delete(shot.stable_shot_key); } : undefined}
               onBlur={() => void flush()}
               resolveUrl={resolveUrl} onAddAssets={(insert, options) => assetLibrary.open((assets) => insert(assets.map((asset) => assetReference(asset, part))), options)}
               references={(shot[`${part}_prompt_mentions`] || []).map((mention) => {
                 const fact = assetFacts.find((item) => item.asset_id === (mention.reference_asset_id || mention.reference_id));
-                return { ...mention, thumbnail_url: fact?.thumbnail_url, available: part === 'video' && mention.reference_kind !== 'project_asset' ? true : Boolean(fact?.image_eligible) };
+                return { ...mention, role: mention.role || (fact ? promptAssetReference(fact, part).role : undefined), asset_type: fact?.type, thumbnail_url: fact?.thumbnail_url, available: part === 'video' && mention.reference_kind !== 'project_asset' ? true : Boolean(fact?.image_eligible) };
               })}
-              options={assetFacts.filter((item) => item.image_eligible).map((item) => ({
-                ...(part === 'image' ? { reference_asset_id: item.asset_id } : { reference_kind: 'project_asset', reference_id: item.asset_id, role: { person: 'actor_identity', product: 'product', scene: 'scene', clothing: 'wardrobe' }[item.type] || 'composition' }),
-                label: `${part === 'video' ? '资产/' : ''}${item.folder_name || '未分类'}/${item.name}`,
-                thumbnail_url: item.thumbnail_url, available: true,
-              }))}
+              options={assetFacts.filter((item) => item.image_eligible).map(item => promptAssetReference(item, part))}
               onChange={(value, references) => edit((shots) => shots.map((item) => item.stable_shot_key === shot.stable_shot_key ? {
-                ...item, [`${part}_prompt_body`]: value, [`${part}_prompt_mentions`]: references.map((reference, order) => part === 'image'
-                  ? { reference_asset_id: reference.reference_asset_id, label: reference.label }
-                  : { reference_kind: reference.reference_kind, reference_id: reference.reference_id, label: reference.label, role: reference.role, order: order + 1 }),
+                ...item, [`${part}_prompt_body`]: value, [`${part}_prompt_mentions`]: promptMentionData(references, part),
               } : item))}
               value={shot[`${part}_prompt_body`]} />
           </div><PromptPreview common={globalPrompts[`common_${part}_prompt`]} local={shot[`${part}_prompt_body`]} style={stylePrompt(globalPrompts, state.manifest.shots.find(item => item.stable_shot_key === shot.stable_shot_key)?.production_shot_id, part)} label={label.replace("局部", "")} /></div>)}

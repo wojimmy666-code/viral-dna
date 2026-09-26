@@ -12,6 +12,7 @@ function BodyEditor({ label, value, mentions = [], readOnly, onChange, assets = 
   const options = assets.map(asset => promptAssetReference(asset, part));
   const references = mentions.map(mention => ({ ...options.find(item => (item.reference_id || item.reference_asset_id) === (mention.reference_id || mention.reference_asset_id)), ...mention }));
   return <div className="scheme-prompt-field"><span>{label}</span><AssetReferenceEditor label={label} value={value} references={references} options={[...options, ...references]} disabled={readOnly}
+    referencePart={part}
     onAddAssets={!readOnly && onAddAssets ? (insert, pickerOptions) => onAddAssets(selected => insert(selected.map(asset => promptAssetReference(asset, part))), pickerOptions) : undefined}
     onChange={(text, refs) => onChange?.(text, promptMentionData(refs, part))} placeholder="描述画面；输入 @ 引用资产" /></div>;
 }

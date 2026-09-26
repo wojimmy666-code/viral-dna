@@ -1,6 +1,9 @@
 // Keep the displayed input mode and the submitted request in agreement.
 export function imageBindingsForDraft(plan, beat, draft) {
-  const bindings = draft.referenceBindings || [];
+  const bindings = (draft.referenceBindings || []).map(binding => {
+    const role = (draft.imagePromptMentions || beat?.image_prompt_mentions || []).find(item => item.reference_asset_id === binding.reference_asset_id)?.role;
+    return role ? { ...binding, role } : binding;
+  });
   if (plan?.source_kind !== "skill_generated" && (plan?.visual_beats || []).length <= 1) return bindings;
   const ids = new Set((draft.imagePromptMentions || beat?.image_prompt_mentions || []).map(item => item.reference_asset_id));
   return bindings.filter(item => ids.has(item.reference_asset_id));

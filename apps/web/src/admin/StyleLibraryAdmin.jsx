@@ -6,7 +6,7 @@ import { registerAccountFlusher } from "../accounts/account-client.js";
 import "./style-library-admin.css";
 
 const BASE = "/admin/visual-styles";
-const EMPTY = { name: "", category: "写实摄影", tags: [], description: "", cover_id: null, sample_ids: [], applies_to: ["image", "video"], image_prompt: "", video_prompt: "", image_negative: "", video_negative: "", sort_order: 0 };
+const EMPTY = { name: "", category: "写实摄影", tags: [], description: "", cover_id: null, reference_image_id: null, sample_ids: [], applies_to: ["image", "video"], image_prompt: "", video_prompt: "", image_negative: "", video_negative: "", sort_order: 0 };
 const definition = item => ({ ...Object.fromEntries(Object.keys(EMPTY).map(key => [key, item[key] ?? EMPTY[key]])), tags: (item.tags || []).map(tag => tag.trim()).filter(Boolean) });
 const json = (body, method = "POST") => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
@@ -63,15 +63,15 @@ export function StyleLibraryAdmin({ request, onUnsavedChange }) {
     } catch (failure) { if (alive.current) setError(failure.message); }
     finally { operation.current = false; if (alive.current) setBusy(""); }
   }
-  async function upload(event, sample = false) {
+  async function upload(event, sample = false, reference = false) {
     const file = event.target.files?.[0]; event.target.value = "";
     if (!file || operation.current) return;
     operation.current = true; setBusy("upload"); setError("");
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error("请选择不超过 10 MB 的图片");
       const body = new FormData(); body.append("file", file);
-      const media = await request(`${BASE}/media`, { method: "POST", body });
-      if (alive.current) setDraft(current => sample
+      const media = await request(`${BASE}/media${reference ? '?purpose=reference' : ''}`, { method: "POST", body });
+      if (alive.current) setDraft(current => reference ? { ...current, reference_image_id: media.id, reference_image_url: media.url } : sample
         ? { ...current, sample_ids: [...current.sample_ids, media.id], sample_urls: [...(current.sample_urls || []), media.url] }
         : { ...current, cover_id: media.id, cover_url: media.url });
     } catch (failure) { if (alive.current) setError(failure.message || "上传失败，请重试"); }
@@ -96,6 +96,7 @@ export function StyleLibraryAdmin({ request, onUnsavedChange }) {
           <label>简短说明<textarea rows={2} maxLength={400} value={draft.description} onChange={event => change("description", event.target.value)} /></label>
           <div className="style-admin-media"><StyleCover src={draft.cover_url} name="风格封面" /><div><label className="style-upload"><UploadSimple size={18} />{busy === "upload" ? "正在上传并处理…" : "上传封面"}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => void upload(event)} /></label><p>JPG / PNG / WebP，最大 10 MB。封面仅展示，不传给生成模型。</p></div></div>
           <details><summary>效果示例（最多 4 张）</summary><div className="style-samples">{draft.sample_ids.map((id, index) => <div key={id}><StyleCover src={draft.sample_urls?.[index] || `/api/v1/admin/visual-styles/media/${id}`} /><IconButton label={`移除示例 ${index + 1}`} onClick={() => setDraft(current => ({ ...current, sample_ids: current.sample_ids.filter(value => value !== id), sample_urls: (current.sample_urls || []).filter((_, number) => number !== index) }))}><X /></IconButton></div>)}</div>{draft.sample_ids.length < 4 && <label className="style-upload">上传示例<input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => void upload(event, true)} /></label>}</details>
+          <div className="style-admin-media"><StyleCover src={draft.reference_image_url} name="生成参考图" /><div><label className="style-upload"><UploadSimple size={18} />{draft.reference_image_id ? '更换生成参考图' : '上传生成参考图'}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => void upload(event, false, true)} /></label><p>可选，与封面分开。请仅上传有权用于生成的图片；保留原文件，实际传给所选适用类型的模型，占用 1 张参考图。不复制人物、服装、地点或构图。视频需支持有序多图参考。</p>{draft.reference_image_id && <Button variant="quiet" size="compact" onClick={() => setDraft(current => ({ ...current, reference_image_id: null, reference_image_url: null }))}>移除生成参考图</Button>}</div></div>
           <div className="style-admin-types"><span>适用于</span>{[["image", "图片"], ["video", "视频"]].map(([key, name]) => <label key={key}><input type="checkbox" checked={draft.applies_to.includes(key)} onChange={event => change("applies_to", event.target.checked ? [...draft.applies_to, key] : draft.applies_to.filter(part => part !== key))} />{name}</label>)}</div>
           <div className="style-admin-fields">{[["image", "图片"], ["video", "视频"]].filter(([key]) => draft.applies_to.includes(key)).map(([key, name]) => <div key={key} className="style-admin-prompt"><label>{name}风格提示词<textarea required rows={8} maxLength={6000} value={draft[`${key}_prompt`]} placeholder={key === "image" ? "用中文描述光照、色彩、材质与摄影表现" : "用中文描述视觉表现与运动质感，不改变镜头要求"} onChange={event => change(`${key}_prompt`, event.target.value)} /></label><label>{name}避免项<textarea rows={3} maxLength={2000} value={draft[`${key}_negative`]} onChange={event => change(`${key}_negative`, event.target.value)} /></label></div>)}</div>
         </fieldset>

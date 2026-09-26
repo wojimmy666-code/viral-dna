@@ -71,6 +71,7 @@ export const REFERENCE_ROLE_OPTIONS = Object.freeze([
   { id: "wardrobe", label: "服装" },
   { id: "style", label: "风格" },
   { id: "layout", label: "构图" },
+  { id: "spatial", label: "空间参考" },
 ]);
 
 const IMAGE_REFERENCE_ROLE_ORDER = Object.freeze({
@@ -80,6 +81,7 @@ const IMAGE_REFERENCE_ROLE_ORDER = Object.freeze({
   scene: 3,
   style: 4,
   layout: 5,
+  spatial: 6,
 });
 
 export function imageIdentityPolicy(referenceBindings = [], assets = []) {
@@ -116,8 +118,10 @@ export function imageGenerationInputManifest({
   assets = [],
   allowTextReferences = false,
   baseImageCandidateId = null,
+  styleSnapshot = null,
 } = {}) {
-  if (inputMode === "text_to_image" && !allowTextReferences) return [];
+  const styleReference = styleSnapshot?.applies_to?.includes('image') && styleSnapshot?.reference_image;
+  if (inputMode === "text_to_image" && !allowTextReferences && !styleReference) return [];
   const assetsById = new Map((assets || []).map((asset) => [asset.id, asset]));
   const references = [...(referenceBindings || [])]
     .sort((left, right) => (
@@ -150,6 +154,12 @@ export function imageGenerationInputManifest({
       identity_source: binding.role === "identity",
       thumbnail_url: asset?.thumbnail_url || asset?.content_url || "",
     });
+  });
+  if (styleReference) manifest.push({
+    input_index: manifest.length + 1, kind: 'style_reference', role: 'style',
+    asset_id: styleReference.id, label: `${styleSnapshot.label} · 风格参考`,
+    responsibility: 'style_reference', identity_source: false, sha256: styleReference.sha256,
+    thumbnail_url: `/api/v1/me/settings/visual-styles/media/${styleReference.id}`,
   });
   return manifest;
 }

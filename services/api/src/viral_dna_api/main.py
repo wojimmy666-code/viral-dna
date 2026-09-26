@@ -237,6 +237,7 @@ from .production import (
 from .project_assets import ProjectAssetService
 from .project_prompts import ProjectPromptRevision, ProjectPromptUpdate
 from .composition import CompositionUpdate
+from .spatial_references import SpatialReferenceUpdate, apply_spatial_reference, spatial_reference_state
 from .style_library import create_style_library_admin_router, create_style_library_user_router
 from .projects import ProjectService, create_project_router
 from .prompt_engine.routes import create_prompt_draft_router
@@ -1092,6 +1093,22 @@ async def get_production_prompt_context(project_id: UUID):
 async def get_production_composition(project_id: UUID):
     try:
         return await production_service.get_composition(project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get(f"{API_PREFIX}/productions/{{project_id}}/spatial-references")
+async def get_production_spatial_references(project_id: UUID):
+    try:
+        return await spatial_reference_state(production_service, project_id)
+    except ProductionServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.put(f"{API_PREFIX}/productions/{{project_id}}/spatial-references")
+async def update_production_spatial_references(project_id: UUID, payload: SpatialReferenceUpdate):
+    try:
+        return await apply_spatial_reference(production_service, project_id, payload)
     except ProductionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
