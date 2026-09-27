@@ -1,6 +1,8 @@
 import { Button } from "./ui/system/Button.jsx";
 import { useActionDialog } from './ui/system/useActionDialog.jsx';
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { VideoGroupsPanel } from './video-groups/VideoGroupsPanel.jsx';
+import { groupShotLabel } from './video-groups/group-references.js';
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
 import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
 import { stylePrompt, styleReferenceCount } from "./visual-styles/visual-style.js";
@@ -176,7 +178,7 @@ function VideoCandidatePlayer({
   );
 }
 
-export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl, busy, gate, onReorderShots, onEditingSelectionChange }) {
+export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl, busy, gate, onReorderShots, onEditingSelectionChange, groupWorkspace }) {
   const draggedId = useRef(null);
   const [dropId, setDropId] = useState(null);
   const activeShots = shots.filter(
@@ -195,15 +197,24 @@ export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl,
   return (
     <aside className="shot-video-list" aria-label="分镜视频列表">
       <header>
-        <strong>有效分镜</strong>
-        <span>{activeShots.length} 个</span>
+        <strong>{groupWorkspace?.groups.length ? '视频生成单元' : '有效分镜'}</strong>
+        <span>{groupWorkspace?.groups.length ? groupWorkspace.groups.length + activeShots.filter(item => !groupWorkspace.groups.some(group => group.shot_plan_ids.includes(item.plan.id))).length : activeShots.length} 个</span>
       </header>
       <div>
         {activeShots.map((item, index) => {
           const plan = item.plan;
+          const group = groupWorkspace?.groups.find(group => group.shot_plan_ids.includes(plan.id));
+          const groupIndex = groupWorkspace?.groups.indexOf(group);
           return (
+            <Fragment key={plan.id}>
+            {group?.shot_plan_ids[0] === plan.id && <button data-ui="navigation" type="button"
+              className={`shot-video-group-link${groupWorkspace.activeGroupId === group.id ? ' active' : ''}`}
+              disabled={busy} aria-current={groupWorkspace.activeGroupId === group.id ? 'true' : undefined}
+              onClick={() => groupWorkspace.onSelectGroup(group.id)}>
+              <FilmStrip size={20} /><span><strong>生成组 {groupIndex + 1}</strong><small>{groupShotLabel(group, shots)}</small><small>{group.images?.length || 0} 张图 → 1 段视频</small></span>
+            </button>}
             <div
-              className={`shot-video-row${selectedShotId === plan.id ? " active" : ""}${dropId === plan.id ? " drop-target" : ""}`}
+              className={`shot-video-row${group ? ' grouped' : ''}${!groupWorkspace?.activeGroupId && selectedShotId === plan.id ? " active" : ""}${dropId === plan.id ? " drop-target" : ""}`}
               key={plan.id}
               onDragOver={(event) => {
                 if (busy || !draggedId.current) return;
@@ -213,9 +224,9 @@ export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl,
                 event.preventDefault(); move(draggedId.current, plan.id); draggedId.current = null; setDropId(null);
               }}
             >
-              <button className="shot-video-drag" type="button" disabled={busy || !onReorderShots}
-                draggable={!busy && Boolean(onReorderShots)}
-                aria-label={`调整分镜${plan.index}顺序`} title="拖拽排序；也可聚焦后按上下方向键"
+              <button className="shot-video-drag" type="button" disabled={busy || !onReorderShots || Boolean(groupWorkspace?.groups.length)}
+                draggable={!busy && Boolean(onReorderShots) && !groupWorkspace?.groups.length}
+                aria-label={`调整分镜${plan.index}顺序`} title={groupWorkspace?.groups.length ? '请先拆分生成组后调整分镜顺序' : '拖拽排序；也可聚焦后按上下方向键'}
                 onDragStart={(event) => { draggedId.current = plan.id; event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", plan.id); }}
                 onDragEnd={() => { draggedId.current = null; setDropId(null); }}
                 onKeyDown={(event) => {
@@ -225,7 +236,7 @@ export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl,
                   if (target) move(plan.id, target.plan.id);
                 }}><DotsSixVertical size={16} /></button>
               <button className="shot-video-select" type="button" disabled={busy}
-                aria-current={selectedShotId === plan.id ? "true" : undefined}
+                aria-current={!groupWorkspace?.activeGroupId && selectedShotId === plan.id ? "true" : undefined}
                 onClick={() => onSelectShot(plan.id)}>
               <ShotNavigationThumbnail
                 index={plan.index}
@@ -260,6 +271,7 @@ export function ShotVideoList({ shots, selectedShotId, onSelectShot, resolveUrl,
                   onChange={(event) => onEditingSelectionChange?.(plan.id, event.target.checked)} />
               </label>
             </div>
+            </Fragment>
           );
         })}
       </div>
@@ -318,6 +330,7 @@ export function ShotVideoWorkspace({
   videoGenerationSettingsStatus = "ready",
   onReloadVideoGenerationSettings,
   textModelLabel = "Qwen3.7 Plus",
+  videoGroupsRef, onGroupsChanged, beforeGroupGenerate,
 }) {
   const [displayedCandidateId, setDisplayedCandidateId] = useState(null);
   const [enhancementPreview, setEnhancementPreview] = useState(null);
@@ -962,6 +975,12 @@ export function ShotVideoWorkspace({
   }
 
   return (
+    <VideoGroupsPanel key={project.id} project={project} shots={shots} settings={videoGenerationSettings}
+      request={request} resolveUrl={resolveUrl} assets={assets} onAddAssets={onAddAssets}
+      disabled={busy} flushRef={videoGroupsRef} globalPromptRef={globalPromptRef}
+      beforeGenerate={beforeGroupGenerate} onChanged={onGroupsChanged}
+      selectedShotId={selectedShotId} onSelectShot={onSelectShot}>
+    {groupWorkspace => (
     <section className={`shot-video-workspace${sourceVideoMode ? " source-video-passthrough" : ""}`}>
       {actionDialog.element}
       <header className="shot-video-stage-header">
@@ -997,7 +1016,7 @@ export function ShotVideoWorkspace({
         <div className="production-inline-error" role="alert"><WarningCircle size={18} />{error}</div>
       )}
 
-      {(upstreamInputsChanged || plan.video_inputs_changed || plan.video_status === "stale" || globalPromptWasEdited(shotDetail, globalPrompts, "video")) && (
+      {!groupWorkspace.editor && (upstreamInputsChanged || plan.video_inputs_changed || plan.video_status === "stale" || globalPromptWasEdited(shotDetail, globalPrompts, "video")) && (
         <div className="shot-video-input-version-notice" role="status">
           <WarningCircle size={18} />
           <div>
@@ -1007,19 +1026,23 @@ export function ShotVideoWorkspace({
         </div>
       )}
 
+      {groupWorkspace.toolbar}
       <div className="shot-video-layout">
         <ShotVideoList
-          onSelectShot={onSelectShot}
+          onSelectShot={groupWorkspace.onSelectShot}
+          groupWorkspace={groupWorkspace}
           resolveUrl={resolveUrl}
           selectedShotId={selectedShotId}
           shots={shots}
-          busy={busy}
+          busy={busy || groupWorkspace.pending}
           gate={gate}
           onReorderShots={onReorderShots}
           onEditingSelectionChange={onEditingSelectionChange}
         />
 
-        <div className="shot-video-editor">
+        <div className="shot-video-editor" inert={groupWorkspace.pending || undefined} aria-busy={groupWorkspace.pending}>
+          {groupWorkspace.editor || <>
+          {generationGroup && <div className="video-group-member-notice"><span>正在编辑组内分镜，修改将用于下次组合生成。</span><Button variant="text" size="compact" disabled={busy} onClick={() => groupWorkspace.onSelectGroup(generationGroup.id)}>返回生成组</Button></div>}
           <header className="shot-video-editor-title">
             <div>
               <span>分镜 {plan.index}</span>
@@ -1223,7 +1246,7 @@ export function ShotVideoWorkspace({
               </div>
             </details>
             <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
-            {generationGroup ? <p role="status">此分镜已加入上方的视频生成组。下方编辑分镜动作和资产引用，保存后请回到生成组预览费用、生成并核对切点。</p> : <ShotVideoGenerationControls
+            {generationGroup ? <p role="status">此分镜已加入生成组，保存后可点击“返回生成组”统一生成并核对切点。</p> : <ShotVideoGenerationControls
               activeRun={activeRun}
               allReferencesApproved={!generationBlockedReason}
               busy={busy}
@@ -1312,6 +1335,7 @@ export function ShotVideoWorkspace({
             />
           )}
 
+          </>}
         </div>
       </div>
 
@@ -1341,5 +1365,7 @@ export function ShotVideoWorkspace({
         />
       )}
     </section>
+    )}
+    </VideoGroupsPanel>
   );
 }

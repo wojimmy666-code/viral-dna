@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { groupDefinition, groupModelOptions, suggestedGroups, plannedCuts, cutsValid } from "../src/video-groups/group-planning.js";
 import { productionPromptsToText } from "../src/prompt-editor/prompt-sources.js";
+import { adjacentSelection, groupReferences } from '../src/video-groups/group-references.js';
 
 const model = { available: true, capabilities: { multi_image_reference: true, ordered_reference_images: true, minimum_duration_seconds: 4, maximum_duration_seconds: 10, maximum_reference_images: 5 } };
 const shots = Array.from({ length: 5 }, (_, i) => ({ id: `s${i}`, index: i + 1, duration_seconds: 1, visual_beats: [{ approved_image_candidate_id: `i${i}` }] }));
@@ -26,4 +27,30 @@ test("TXT exports a single group prompt, not multiple standalone video tasks", (
   assert.match(text, /2 个分镜 → 1 段视频/);
   assert.match(text, /巴黎硬切到京都/);
   assert.doesNotMatch(text, /不要重复独立任务/);
+});
+
+test('group rail shows every adopted image in exact server order, including multiple beats per shot', () => {
+  const input = Array.from({ length: 5 }, (_, i) => ({ reference_kind: 'approved_image', reference_id: `i${i}`, label: `图${i + 1}`, order: i + 1 }));
+  const group = { input_plan: { references: input }, images: input.map((item, i) => ({ id: item.reference_id, url: `/image/${i}`, index: i + 1 })) };
+  const refs = groupReferences(group, []);
+  assert.deepEqual(refs.pinned.map(item => item.reference_id), input.map(item => item.reference_id));
+  assert.deepEqual(refs.all.map(item => item.number), [1, 2, 3, 4, 5]);
+  assert.ok(refs.all.every(item => item.thumbnail_url && item.available));
+});
+
+test('removing a supplement token cannot remove storyboard or inherited references', () => {
+  const image = { reference_kind: 'approved_image', reference_id: 'i1', label: '图1' };
+  const inherited = { reference_kind: 'project_asset', reference_id: 'a1', label: '分镜1-人物' };
+  const own = { reference_kind: 'project_asset', reference_id: 'a2', label: '资产/场景' };
+  const group = { input_plan: { references: [image, inherited, own] }, video_prompt_mentions: [own], images: [{ id: 'i1', url: '/image' }] };
+  assert.deepEqual(groupReferences(group, []).all.map(item => item.reference_id), ['i1', 'a1']);
+  assert.deepEqual(groupReferences(group, [own]).all.map(item => item.number), [1, 2, 3]);
+  const duplicate = groupReferences(group, [inherited, own]);
+  assert.equal(duplicate.all.length, 3);
+  assert.equal(duplicate.mentions[0].number, 2);
+});
+
+test('group selection rejects gaps, unknown IDs, repeats, and single selections', () => {
+  assert.equal(adjacentSelection(shots, ['s2', 's0', 's1']), true);
+  for (const ids of [['s0'], ['s0', 's2'], ['s0', 'missing'], ['s0', 's0']]) assert.equal(adjacentSelection(shots, ids), false);
 });

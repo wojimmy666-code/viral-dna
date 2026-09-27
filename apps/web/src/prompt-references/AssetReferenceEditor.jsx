@@ -50,6 +50,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
   maxLength = 8000, indexOffset = 0, labelledBy, styleControl,
   referenceLimit, reservedReferenceCount = 0, reservedReferenceIds = [],
   referencePart = 'image', onApplySpatial,
+  pinnedReferences = [], preserveReferenceOrder = false, showPinnedTokens = false,
 }, forwardedRef) {
   const editorRef = useRef(null);
   const readOnlyRef = useRef(disabled);
@@ -384,7 +385,14 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
     if (cut && !disabled) commit(value.slice(0, range.start) + value.slice(range.end), references, { start: range.start, end: range.start });
   }
 
-  const referenceThumbnails = referenceRailOrder(visible).map((reference) => <button type="button" key={referenceKey(reference)}
+  // Group inputs inherited from storyboard/global prompts stay visible even when
+  // not mentioned in the editable group supplement. Their IDs/order are server-owned.
+  const railMap = new Map(visible.map(item => [referenceKey(item), item]));
+  pinnedReferences.forEach(item => railMap.set(referenceKey(item), { ...item, pinned: true }));
+  const railReferences = preserveReferenceOrder
+    ? [...railMap.values()].sort((a, b) => a.number - b.number)
+    : referenceRailOrder([...railMap.values()]);
+  const referenceThumbnails = railReferences.map((reference) => <button type="button" key={referenceKey(reference)}
     className={`asset-reference-thumbnail${selected === referenceKey(reference) ? ' active' : ''}`}
     aria-label={`图片 ${reference.number}，${reference.label}`} onClick={(event) => open(reference, event.currentTarget)}
     onFocus={(event) => open(reference, event.currentTarget, true)} onBlur={dismissPreview}
@@ -399,7 +407,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       {onAddAssets && <Button variant="quiet" size="compact" disabled={disabled} onClick={() => addAsset()} icon={<Plus size={16} />}>添加参考</Button>}
       {trigger}{status}
     </div>
-    {(thumbnail || visible.length > 0) && <div className="asset-reference-rail" aria-label={`${label}风格与引用图片`}>
+    {(thumbnail || railReferences.length > 0) && <div className="asset-reference-rail" aria-label={`${label}风格与引用图片`}>
       {thumbnail}{referenceThumbnails}
     </div>}
   </>;
@@ -412,6 +420,12 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
       }
     }}>
     {styleControl ? cloneElement(styleControl, { renderLayout: renderReferenceLayout }) : renderReferenceLayout({})}
+    {showPinnedTokens && pinnedReferences.length > 0 && <div className="asset-reference-pinned-tokens" aria-label="本组按顺序使用的分镜图">
+      {pinnedReferences.filter(item => item.reference_kind === 'approved_image').map(reference => <button type="button" data-ui="reference-token" className="asset-reference-token" key={referenceKey(reference)}
+        aria-label={`图片 ${reference.number}，${reference.label}，查看引用`} onClick={event => open({ ...reference, pinned: true }, event.currentTarget)}>
+        <Thumbnail reference={reference} resolveUrl={resolveUrl} /><span>图片{reference.number}</span>
+      </button>)}
+    </div>}
     {purposeError && popup?.kind !== 'reference' && <p className="reference-purpose-error" role="alert">{purposeError}</p>}
     <div ref={editorRef} className="asset-reference-input" role="textbox" aria-label={label} aria-labelledby={labelledBy} aria-multiline="true"
       aria-disabled={disabled} contentEditable={!disabled} suppressContentEditableWarning tabIndex={0}
@@ -441,7 +455,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         <strong>{popup.reference.label}</strong>
         {popup.reference.description && <p>{popup.reference.description}</p>}
         {popup.reference.available === false && <p role="status">此引用暂不可用，请重新选择</p>}
-        {(popup.reference.reference_asset_id || popup.reference.reference_kind === 'project_asset') && <label className="reference-purpose-field">引用用途
+        {!popup.reference.pinned && (popup.reference.reference_asset_id || popup.reference.reference_kind === 'project_asset') && <label className="reference-purpose-field">引用用途
           <select aria-label="引用用途" aria-invalid={Boolean(purposeError)} aria-describedby={purposeError ? `${popupId}-purpose-error` : undefined} disabled={disabled || popup.reference.available === false} value={popup.reference.role || (referencePart === 'video' ? 'composition' : 'layout')}
             onChange={event => {
               const reference = { ...popup.reference, role: event.target.value };
@@ -455,7 +469,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
         {purposeError && <p id={`${popupId}-purpose-error`} className="reference-purpose-error" role="alert">{purposeError}</p>}
         {popup.reference.role === 'spatial' && <p>只参考机位、人物占比与位置，不复制人物、服装或背景内容；不保证像素级对齐。</p>}
         {popup.reference.role === 'spatial' && onApplySpatial && <Button variant="quiet" disabled={disabled || popup.reference.available === false} onClick={() => { const reference = popup.reference; setPopup(null); onApplySpatial(reference); }}>应用到其他画面…</Button>}
-        <div className="asset-reference-actions">
+        {popup.reference.pinned ? <p>此参考来自组内分镜或全局设置，请在对应分镜编辑或通过“调整组合”修改。</p> : <div className="asset-reference-actions">
           <Button className="secondary-button compact" type="button" onClick={() => {
             const start = value.indexOf(referenceToken(popup.reference)); setPopup(null); editorRef.current.focus();
             setSelection(editorRef.current, start, start + referenceToken(popup.reference).length);
@@ -464,7 +478,7 @@ export const AssetReferenceEditor = forwardRef(function AssetReferenceEditor({
           <Button className="secondary-button compact" disabled={disabled} type="button" onClick={() => {
             const next = replaceReference(value, references, popup.reference, null); commit(next.value, next.references); setPopup(null);
           }}>移除</Button>
-        </div>
+        </div>}
       </> : <>
         <input aria-label="搜索项目已选资产" placeholder="搜索引用，或打开资产库" value={query} onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }} />
         {menuSection && <Button variant="quiet" size="compact" icon={<ArrowLeft size={16} />} onClick={() => { setMenuSection(null); setActiveIndex(0); }}>返回素材引用</Button>}

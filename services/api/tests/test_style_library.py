@@ -113,8 +113,9 @@ def test_travel_vlog_is_selectable_for_images_and_video_with_approved_cover(libr
     assert item["name"] == "旅行 Vlog"
     assert item["category"] == "写实摄影"
     assert "Vlog" in item["tags"] and "日常随拍" in item["tags"]
-    assert item["version"] == 2 and item["enabled"]
-    assert item["reference_image_id"] != item["cover_id"]
+    assert item["version"] == 3 and item["enabled"]
+    assert item["reference_image_id"] is None
+    assert library.frozen(identifier, 2)["reference_image"]["id"] != item["cover_id"]
     assert "reference_image" not in library.frozen(identifier, 1)
     assert item["applies_to"] == ["image", "video"]
     assert item["cover_url"]
@@ -122,6 +123,7 @@ def test_travel_vlog_is_selectable_for_images_and_video_with_approved_cover(libr
         assert cover.width > cover.height
         assert abs(cover.width / cover.height - 16 / 9) < 0.01
     snapshot = freeze_style(item["selection"])
+    assert "reference_image" not in snapshot
     assert snapshot["label"] == "旅行 Vlog"
     assert "共享现场光向" in snapshot["image_prompt"]
     assert "45%–55%" in snapshot["image_prompt"]

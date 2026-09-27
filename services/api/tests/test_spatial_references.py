@@ -16,7 +16,7 @@ from viral_dna_api.image_generation.contracts import AdapterIdentity
 from viral_dna_api.image_generation.gateway import ImageGenerationGateway, ImageGenerationGatewayError
 from viral_dna_api.models import (GenerationCostSource, ImageExecutionMode, PromptAssetMention, ReferenceAsset,
                                  ReferenceBinding, ShotVisualBeatUpdate, WorkflowItemStatus)
-from viral_dna_api.production import ProductionService, ProductionServiceError
+from viral_dna_api.production import ProductionServiceError
 from viral_dna_api.reference_purposes import scoped_bindings
 from viral_dna_api.spatial_references import SpatialReferenceUpdate, apply_spatial_reference, spatial_reference_state
 from viral_dna_api.style_library import StyleLibrary, StyleDefinition, StyleWrite
@@ -149,7 +149,14 @@ def library_with_reference(tmp_path, monkeypatch):
     library = StyleLibrary(tmp_path / 'styles.sqlite3')
     monkeypatch.setattr(style_library, 'get_style_library', lambda: library)
     monkeypatch.setattr(style_reference, 'get_style_library', lambda: library)
-    return library, next(item for item in library.catalog()['items'] if item['name'] == '旅行 Vlog')
+    style = next(item for item in library.catalog()['items'] if item['name'] == '旅行 Vlog')
+    # The latest built-in is text-only. Explicit admin references still retain
+    # the same bytes, capacity checks and model routing as historic vlog v2.
+    reference_id = library.frozen(style['id'], 2)['reference_image']['id']
+    saved = library.save(style['id'], StyleWrite(expected_revision=style['revision'],
+        style=StyleDefinition(**{**{key: style[key] for key in StyleDefinition.model_fields},
+                                 'reference_image_id': reference_id})))
+    return library, library.action(style['id'], saved['revision'], 'publish')
 
 
 @pytest.mark.asyncio
@@ -179,12 +186,14 @@ async def test_batch_preflight_counts_dedicated_style_input(tmp_path, monkeypatc
 
 
 def test_dedicated_style_reference_keeps_original_and_old_versions(tmp_path, monkeypatch):
-    library, style = library_with_reference(tmp_path, monkeypatch)
-    snapshot = library.frozen(style['id'], style['version'])
+    library = StyleLibrary(tmp_path / 'styles.sqlite3')
+    style = next(item for item in library.catalog()['items'] if item['name'] == '旅行 Vlog')
+    snapshot = library.frozen(style['id'], 2)
     assert snapshot['reference_image']['sha256'] == '30582569ddec6a6ddb3ea1054da3c57543ad90c2e9e572f0300f7d0c2954f628'
     assert 'reference_image' not in library.frozen(style['id'], 1)
+    assert 'reference_image' not in library.frozen(style['id'], style['version'])
     reopened = StyleLibrary(library.path)
-    assert reopened.frozen(style['id'], style['version']) == snapshot
+    assert reopened.frozen(style['id'], 2) == snapshot
     assert next(item for item in reopened.catalog()['items'] if item['id'] == style['id'])['version'] == style['version']
     raw = io.BytesIO(); Image.new('RGB', (23, 17), 'blue').save(raw, format='PNG')
     media = library.upload(raw.getvalue(), purpose='reference')
@@ -193,7 +202,7 @@ def test_dedicated_style_reference_keeps_original_and_old_versions(tmp_path, mon
         library.media(media['id'])
     published = library.action(style['id'], library.save(style['id'], StyleWrite(expected_revision=style['revision'],
         style=StyleDefinition(**{**{key: style[key] for key in StyleDefinition.model_fields}, 'reference_image_id': media['id']})))['revision'], 'publish')
-    assert published['version'] == 3
+    assert published['version'] == 4
     assert library.frozen(style['id'], 2) == snapshot
     assert library.media(media['id']).media_type == 'image/png'
 

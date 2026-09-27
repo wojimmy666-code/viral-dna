@@ -52,7 +52,6 @@ import {
 } from "./production-ui.js";
 import { ShotImageWorkspace } from "./ShotImageWorkspace.jsx";
 import { ShotVideoWorkspace } from "./ShotVideoWorkspace.jsx";
-import { VideoGroupsPanel } from "./video-groups/VideoGroupsPanel.jsx";
 import { VideoEditorWorkspace } from "./video-editor/index.js";
 import { ProductionExportWorkspace } from "./ProductionExportWorkspace.jsx";
 import {
@@ -2130,22 +2129,22 @@ export function ProductionHub({
     }
   }
 
-  async function selectShot(shotPlanId, { visualBeatId = null, candidateId = "" } = {}) {
+  async function selectShot(shotPlanId, { visualBeatId = null, candidateId = "", deferSelection = false } = {}) {
     if (activeSection === "shot_videos") {
       const target = workspaceShotId(shots, detail?.project, activeSection, shotPlanId);
       if (target !== shotPlanId) {
         updateLocation({ shotId: target || "", visualBeatId: "", candidateId: "" });
-        if (target) return selectShot(target);
-        return;
+        if (target) return selectShot(target, { deferSelection });
+        return false;
       }
     }
     const selectionRequest = ++shotRequestId.current;
     shotSelectionPending.current = true;
     try {
       await flushWorkspace();
-      if (selectionRequest !== shotRequestId.current) return;
-      // Show selection immediately; the canvas has a local loading state.
-      setSelectedShotId(shotPlanId);
+      if (selectionRequest !== shotRequestId.current) return false;
+      // Group navigation keeps the settled editor until the destination is ready.
+      if (!deferSelection) setSelectedShotId(shotPlanId);
       setActionError("");
       const cached = shotCache.current.get(shotPlanId);
       const summary = shots.find((item) => item.plan.id === shotPlanId)?.plan;
@@ -2155,7 +2154,7 @@ export function ProductionHub({
         activeSection === "shot_videos" ? request(`/production-shots/${shotPlanId}/video-generation-draft`) : Promise.resolve(null),
       ]);
       const firstVisualBeat = visualBeatFromDetail(nextShotDetail, visualBeatId);
-      if (selectionRequest !== shotRequestId.current) return;
+      if (selectionRequest !== shotRequestId.current) return false;
       setSelectedShotId(shotPlanId);
       setFocusedCandidateId(candidateId);
       setActionError("");
@@ -2179,11 +2178,13 @@ export function ProductionHub({
         persistedDraft: persistedVideoDraft,
       });
       updateLocation({ shotId: shotPlanId, visualBeatId: firstVisualBeat?.id || "", candidateId });
+      return true;
     } catch (requestError) {
       if (selectionRequest === shotRequestId.current) {
         setActionError(requestError.message);
         setSelectedShotId(shotDetail?.plan?.id || null);
       }
+      return false;
     } finally {
       if (selectionRequest === shotRequestId.current) shotSelectionPending.current = false;
     }
@@ -4037,8 +4038,10 @@ export function ProductionHub({
             )}
             {activeSection === "shot_videos" && (
               <>
-              <VideoGroupsPanel key={detail.project.id} assets={assets} onAddAssets={openAssetPicker} flushRef={videoGroupsRef} beforeGenerate={async () => { await flushGlobalPrompts(); await flushVideoDraft(); }} project={detail.project} shots={videoStageShots(shots, detail.project)} settings={videoGenerationSettings} request={request} resolveUrl={resolveUrl} disabled={busy} onChanged={() => refreshProject(detail.project.id, selectedShotId)} onAdvance={advanceToEditing} />
               <ShotVideoWorkspace
+                videoGroupsRef={videoGroupsRef}
+                beforeGroupGenerate={async () => { await flushGlobalPrompts(); await flushVideoDraft(); }}
+                onGroupsChanged={() => refreshProject(detail.project.id, selectedShotId)}
                 upstreamInputsChanged={workflow?.upstreamInputsChanged}
                 onAddAssets={openAssetPicker}
                 globalPromptRef={globalPromptRef}

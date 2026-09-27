@@ -120,6 +120,32 @@ test("video deep links cannot select an excluded shot", async () => {
   assert.ok(!loaded.some(path => path.startsWith("/production-shots/a")));
 });
 
+for (const fail of [false, true]) {
+  test(`group navigation keeps the settled editor until destination load ${fail ? "fails" : "succeeds"}`, async () => {
+    const scope = productionScope(), entered = deferred(), release = deferred();
+    scope.activeSection = "shot_videos";
+    scope.detail = {project:{video_stage_shot_ids:["a", "b"]}};
+    scope.shots = ["a", "b"].map(id => ({plan:{id}}));
+    const request = scope.request;
+    scope.request = path => {
+      if (path === "/production-shots/b") { entered.resolve(); return release.promise; }
+      return request(path);
+    };
+    const selecting = productionHandler("selectShot", scope)("b", {deferSelection:true});
+    await entered.promise;
+    assert.equal(scope.selectedShotId, "a");
+    assert.equal(scope.shotDetail.plan.id, "a");
+    assert.equal(scope.shotSelectionPending.current, true);
+    if (fail) release.reject(new Error("destination unavailable"));
+    else release.resolve({plan:{id:"b"}});
+    assert.equal(await selecting, !fail);
+    assert.equal(scope.selectedShotId, fail ? "a" : "b");
+    assert.equal(scope.shotDetail.plan.id, fail ? "a" : "b");
+    assert.equal(scope.shotSelectionPending.current, false);
+    if (fail) assert.equal(scope.actionError, "destination unavailable");
+  });
+}
+
 test("a late video refresh cannot restore its old route after navigation", async () => {
   const scope = productionScope(), entered = deferred(), release = deferred();
   const request = scope.request;

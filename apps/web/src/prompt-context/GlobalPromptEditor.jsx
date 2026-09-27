@@ -72,7 +72,14 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
     session.current.editStyle(value, compiled, key);
     if (!await session.current.flush()) throw new Error(session.current.snapshot().error || "风格保存失败，请重试");
   }
-  useImperativeHandle(ref, () => ({ flush, applyStyle, async refresh() {
+  async function applyStyles(value, compiled, keys) {
+    if (disabled || recoveryRef.current || !session.current) throw new Error("当前不可编辑，请先恢复编辑状态");
+    window.clearTimeout(timer.current);
+    // A group selection is one atomic context update, not N partially saved writes.
+    keys.forEach(key => session.current.editStyle(value, compiled, key));
+    if (!await session.current.flush()) throw new Error(session.current.snapshot().error || "风格保存失败，请重试");
+  }
+  useImperativeHandle(ref, () => ({ flush, applyStyle, applyStyles, async refresh() {
     const currentSession = session.current;
     if (!currentSession || !await flush()) return false;
     const next = await callbacks.current.request(path);

@@ -89,3 +89,5 @@
 .spatial-reference-targets { border: 0; padding: 0; margin: 16px 0; display: grid; gap: 4px; }
 .spatial-reference-targets label, .spatial-reference-confirm { display: flex; align-items: center; gap: 10px; min-height: 44px; }
 .spatial-reference-dialog input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 18px; }
+.asset-reference-pinned-tokens { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-3, 12px); }
+.asset-reference-pinned-tokens .asset-reference-token { cursor: pointer; font: inherit; }

@@ -16,8 +16,11 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .access_context import account_access
+from .travel_vlog import CANDID_TRAVEL_VLOG, LEGACY_TRAVEL_VLOG
 from .visual_styles import BOUNDARY, PRESETS
 from .workspace_catalog import default_account_catalog_path
+
+VLOG_REFERENCE_SHA256 = "30582569ddec6a6ddb3ea1054da3c57543ad90c2e9e572f0300f7d0c2954f628"
 
 
 class StyleDefinition(BaseModel):
@@ -84,6 +87,9 @@ class StyleLibrary:
             for index, (key, (name, description, image_rules, video)) in enumerate(PRESETS.items()):
                 if key in {"original", "custom"}:
                     continue
+                if key == "travel_vlog":
+                    # Keep fresh and upgraded catalogs' historic versions identical.
+                    name, description, image_rules, video = LEGACY_TRAVEL_VLOG
                 identifier = str(uuid5(NAMESPACE_URL, f"viraldna:style:{key}"))
                 existing = db.execute("SELECT * FROM styles WHERE id=?", (identifier,)).fetchone()
                 needs_seed_cover = existing and existing["revision"] == 1 and existing["published_version"] == 1 and not json.loads(existing["draft"]).get("cover_id")
@@ -114,34 +120,85 @@ class StyleLibrary:
                 if inserted:
                     db.execute("INSERT INTO style_versions VALUES (?, 1, ?)", (identifier, encoded))
             self._seed_vlog_reference(db)
+            self._seed_vlog_candid(db)
+
+    @staticmethod
+    def _untouched_legacy_vlog(db):
+        """Compare all fields, not just prose; an admin save also changes revision."""
+        identifier = str(uuid5(NAMESPACE_URL, "viraldna:style:travel_vlog"))
+        row = db.execute("SELECT * FROM styles WHERE id=?", (identifier,)).fetchone()
+        if not row or not row["enabled"] or row["revision"] != row["published_version"]:
+            return None
+        published = db.execute(
+            "SELECT payload FROM style_versions WHERE style_id=? AND version=?",
+            (identifier, row["published_version"]),
+        ).fetchone()
+        style = StyleDefinition.model_validate_json(row["draft"])
+        if not published or style != StyleDefinition.model_validate_json(published["payload"]):
+            return None
+        name, description, image_rules, video_rules = LEGACY_TRAVEL_VLOG
+        expected = StyleDefinition(
+            name=name, category="写实摄影", tags=["旅行", "Vlog", "日常随拍", "纪实"],
+            description=description, image_prompt=image_rules,
+            video_prompt=f"{image_rules}\n{video_rules}", sort_order=70,
+            cover_id=uuid5(NAMESPACE_URL, "viraldna:style-cover:travel_vlog:1"),
+        )
+        reference_id = uuid5(NAMESPACE_URL, f"viraldna:style-reference:{VLOG_REFERENCE_SHA256}")
+        if style.reference_image_id not in {None, reference_id}:
+            return None
+        if style.model_copy(update={"reference_image_id": None}) != expected:
+            return None
+        return row, style
+
+    @staticmethod
+    def _publish_seed(db, row, style):
+        encoded = style.model_dump_json()
+        version = row["published_version"] + 1
+        db.execute("INSERT INTO style_versions VALUES (?, ?, ?)", (row["id"], version, encoded))
+        db.execute(
+            "UPDATE styles SET revision=revision+1, draft=?, published_version=? WHERE id=?",
+            (encoded, version, row["id"]),
+        )
 
     @staticmethod
     def _seed_vlog_reference(db):
         """Only upgrade untouched built-ins; never rewrite a published version or admin draft."""
-        identifier = str(uuid5(NAMESPACE_URL, "viraldna:style:travel_vlog"))
-        row = db.execute("SELECT * FROM styles WHERE id=?", (identifier,)).fetchone()
-        if not row or not row["enabled"]:
+        legacy = StyleLibrary._untouched_legacy_vlog(db)
+        if legacy is None:
             return
-        published = db.execute("SELECT payload FROM style_versions WHERE style_id=? AND version=?", (identifier, row["published_version"])).fetchone()
-        style = StyleDefinition.model_validate_json(row["draft"])
-        if not published or style != StyleDefinition.model_validate_json(published["payload"]) or style.reference_image_id:
-            return
-        name, description, image_rules, video_rules = PRESETS["travel_vlog"]
-        if (style.name, style.description, style.image_prompt, style.video_prompt) != (name, description, image_rules, f"{image_rules}\n{video_rules}"):
+        row, style = legacy
+        if style.reference_image_id:
             return
         path = Path(__file__).with_name("style_references") / "travel-vlog-d.png"
         if not path.is_file():
             return
         content = path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
-        if digest != "30582569ddec6a6ddb3ea1054da3c57543ad90c2e9e572f0300f7d0c2954f628":
+        if digest != VLOG_REFERENCE_SHA256:
             raise RuntimeError("旅行 Vlog 参考图校验失败")
         media_id = str(uuid5(NAMESPACE_URL, f"viraldna:style-reference:{digest}"))
         db.execute("INSERT OR IGNORE INTO style_media VALUES (?, ?)", (media_id, content))
-        encoded = style.model_copy(update={"reference_image_id": UUID(media_id)}).model_dump_json()
-        version = row["published_version"] + 1
-        db.execute("INSERT INTO style_versions VALUES (?, ?, ?)", (identifier, version, encoded))
-        db.execute("UPDATE styles SET revision=revision+1, draft=?, published_version=? WHERE id=?", (encoded, version, identifier))
+        StyleLibrary._publish_seed(
+            db, row, style.model_copy(update={"reference_image_id": UUID(media_id)}),
+        )
+
+    @staticmethod
+    def _seed_vlog_candid(db):
+        """Publish E-derived rules without the previous D generation reference.
+
+        Only the original built-in is eligible. Existing selections stay pinned
+        to their version; no projects, candidate media or preferences are touched.
+        """
+        legacy = StyleLibrary._untouched_legacy_vlog(db)
+        if legacy is None:
+            return
+        row, style = legacy
+        name, description, image_rules, video_rules = CANDID_TRAVEL_VLOG
+        updated = style.model_copy(update={
+            "name": name, "description": description, "image_prompt": image_rules,
+            "video_prompt": f"{image_rules}\n{video_rules}", "reference_image_id": None,
+        })
+        StyleLibrary._publish_seed(db, row, updated)
 
     @contextmanager
     def transaction(self):
