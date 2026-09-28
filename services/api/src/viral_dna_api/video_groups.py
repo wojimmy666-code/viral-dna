@@ -19,6 +19,7 @@ from .models import (
 from .video_group_models import VideoGroupUpdate, VideoGroupAdopt, VideoGroupClip
 from .project_prompts import effective_style, prompt_snapshot
 from .visual_styles import style_prompt
+from .video_generation.input_policy import VIDEO_INPUT_POLICY, video_prompt_snapshot
 
 
 def fail(message, status=409):
@@ -46,7 +47,19 @@ def members_for(project, group, plans):
     return [lookup[identifier] for identifier in group.shot_plan_ids]
 
 
-def input_fingerprint(project, group, members, common_prompt, context=None):
+def input_fingerprint(project, group, members, common_prompt, context=None, *, legacy=False, video_references=None):
+    if not legacy:
+        plan, _ = execution_plan(group, members, context=context, video_references=video_references)
+        data = {"input_policy": VIDEO_INPUT_POLICY, "group": group.model_dump(mode="json"),
+                "size": [project.output_width, project.output_height], "common_prompt": common_prompt,
+                "prompt": plan.video_prompt, "negative": plan.video_negative_constraints,
+                "mentions": [m.model_dump(mode="json") for m in plan.video_prompt_mentions],
+                "global_mentions": [m.model_dump(mode="json") for m in context.common_video_mentions] if context else [],
+                "assets": [b.model_dump(mode="json") for b in plan.managed_asset_bindings],
+                "images": [{"id": str(b.id), "candidate": str(b.approved_image_candidate_id),
+                            "index": b.index, "start": b.start_ratio, "end": b.end_ratio} for b in plan.visual_beats],
+                "durations": [p.duration_seconds for p in members]}
+        return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     data = {
         "group": group.model_dump(mode="json"), "common_prompt": common_prompt,
         "size": [project.output_width, project.output_height],
@@ -68,15 +81,15 @@ def input_fingerprint(project, group, members, common_prompt, context=None):
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def execution_plan(group, members, generation_duration=None, *, context=None):
+def execution_plan(group, members, generation_duration=None, *, context=None, legacy=False, video_references=None):
     """Transient aggregate. Never persist this object over its anchor shot."""
     total = sum(p.duration_seconds for p in members)
     scale = float(generation_duration or total) / total
     cursor, beats, lines, owners, mentions = 0.0, [], [], {}, {}
     # Declare each distinct style once, then bind it to its temporal segment.
     # Repeating a whole preset per short shot can exceed provider prompt limits.
-    style_rules = {p.id: style_prompt(effective_style(context, str(p.id)), "video") for p in members} if context else {}
-    if context:
+    style_rules = {p.id: style_prompt(effective_style(context, str(p.id)), "video") for p in members} if context and legacy else {}
+    if context and legacy:
         reference_keys = {
             json.dumps((effective_style(context, str(p.id)) or {}).get("reference_image"), sort_keys=True)
             if "video" in (effective_style(context, str(p.id)) or {}).get("applies_to", []) else "null"
@@ -108,7 +121,25 @@ def execution_plan(group, members, generation_duration=None, *, context=None):
             rules = style_rules[p.id]
             prompt += (f"\n本分段应用风格配置 {definitions.index(rules) + 1}。" if rules
                        else "\n本分段沿用自身正文风格，不应用其他分段的风格配置。")
-        for mention in p.video_prompt_mentions:
+        member_mentions = list(p.video_prompt_mentions)
+        if not legacy:
+            for ref in (video_references or {}).get(p.id, []):
+                if ref.reference_kind != "approved_image" and not any(
+                    (m.reference_kind, m.reference_id) == (ref.reference_kind, ref.reference_id) for m in member_mentions
+                ):
+                    member_mentions.append(VideoPromptMention.model_validate(ref.model_dump()))
+        for mention in member_mentions:
+            selected = any((r.reference_kind, r.reference_id) == (mention.reference_kind, mention.reference_id)
+                           for r in (video_references or {}).get(p.id, []))
+            if not legacy and f"@{mention.label}" not in prompt:
+                if not selected or mention.reference_kind == "approved_image":
+                    continue
+                prompt += f"\n额外参考：@{mention.label}"
+            if not legacy and mention.reference_kind != "approved_image" and not any(
+                r.reference_kind == mention.reference_kind and r.reference_id == mention.reference_id
+                for r in (video_references or {}).get(p.id, [])
+            ):
+                fail(f"分镜 {p.index} 的 @{mention.label} 尚未确认用于视频；请编辑该分镜，确认额外引用或移除标签、改用分镜图")
             if mention.reference_kind.value in {"depth_control", "reference_video"}:
                 fail("含深度或参考视频控制的分镜请独立生成，不能作为多场景组隐式合并")
             if mention.reference_kind.value == "approved_image":
@@ -134,13 +165,21 @@ def execution_plan(group, members, generation_duration=None, *, context=None):
         if key not in mentions:
             mentions[key] = mention
         group_prompt = group_prompt.replace(f"@{mention.label}", f"@{mentions[key].label}")
-    prompt = "\n".join([group_prompt, transition,
-                        "人物位置、动作与景别以各分镜要求为准，不强制继承原片。", *lines]).strip()
+    appearance = ("人物位置、动作与景别以各分镜要求为准，不强制继承原片。" if legacy else
+                  "已采用分镜图是人物外观、服装、场景、光照与构图的视觉依据；文字描述动作、运镜和转场，不重新设计图片外观。")
+    prompt = "\n".join([group_prompt, transition, appearance, *lines]).strip()
     if definitions:
         prompt += "\n" + "\n".join(f"风格配置 {i}（仅用于上方指定分段）：\n{text}" for i, text in enumerate(definitions, 1))
     if len(prompt) > 8000:
         fail("合并后的分段提示词超过 8000 字，请精简提示词或拆组")
     bindings = {b.asset_id: b for p in members for b in p.managed_asset_bindings}
+    if not legacy:
+        managed_ids = {m.reference_id for m in mentions.values() if m.reference_kind == "provider_managed_asset"}
+        bindings = {key: b for key, b in bindings.items() if b.id in managed_ids}
+        selected_keys = set(mentions)
+        for mention in context.common_video_mentions if context else []:
+            if (mention.reference_kind, mention.reference_id) not in selected_keys:
+                fail(f"全局视频提示词中的 @{mention.label} 尚未加入本组；请在本组显式添加参考，或在全局提示词移除标签、改用分镜图")
     plan = members[0].model_copy(update={
         "visual_beats": beats, "duration_seconds": total, "video_prompt": prompt,
         "video_prompt_mentions": list(mentions.values()), "locks": [],
@@ -155,19 +194,23 @@ class VideoGroups:
         self.production = production
         self.repository = production.repository
 
-    async def projection(self, project, group_id):
+    async def projection(self, project, group_id, *, legacy=False, generation_duration=None):
         group = group_for(project, group_id)
         members = members_for(project, group, await self.repository.list_shot_plans(project.id))
-        current = []
+        current, video_references = [], {}
         for member in members:
             draft = await self.repository.get_video_generation_draft(member.id)
+            if draft and draft.input_plan.input_policy == VIDEO_INPUT_POLICY:
+                video_references[member.id] = draft.input_plan.references
             current.append(member.model_copy(update={"video_prompt": draft.video_prompt,
                 "video_prompt_mentions": draft.video_prompt_mentions,
                 "video_negative_constraints": draft.video_negative_constraints}) if draft else member)
         members = current
         context = await self.production.get_prompt_context(project.id)
-        fingerprint = input_fingerprint(project, group, members, context.common_video_prompt, context)
-        plan, owners = execution_plan(group, members, context=context)
+        fingerprint = input_fingerprint(project, group, members, context.common_video_prompt, context,
+                                        legacy=legacy, video_references=video_references)
+        plan, owners = execution_plan(group, members, generation_duration, context=context,
+                                     legacy=legacy, video_references=video_references)
         return group, members, plan, owners, fingerprint
 
     async def require_idle(self, project, identifiers):
@@ -176,6 +219,19 @@ class VideoGroups:
                and r.status in {ProductionRunStatus.QUEUED, ProductionRunStatus.RUNNING,
                                 ProductionRunStatus.CANCELLATION_REQUESTED} for r in runs):
             fail("相关分镜仍有生成任务，请等待结束或取消后再修改分组")
+
+    async def projection_for_run(self, project, group_id, run):
+        """Old adoptions/retries retain their original input contract."""
+        if (run.request_payload.get("input_plan") or {}).get("input_policy") == VIDEO_INPUT_POLICY:
+            return await self.projection(project, group_id)
+        from .production import ProductionServiceError
+        try:
+            current = await self.projection(project, group_id)
+            if current[-1] == run.request_payload.get("expected_group_fingerprint"):
+                return current
+        except ProductionServiceError:
+            pass
+        return await self.projection(project, group_id, legacy=True)
 
     async def update(self, project_id, payload):
         async with await self.production._project_lock(project_id):
@@ -205,8 +261,21 @@ class VideoGroups:
     async def state(self, project_id):
         project = await self.production._require_project(project_id)
         rows = []
+        plans = await self.repository.list_shot_plans(project.id)
         for group in project.video_generation_groups:
             row = group.model_dump(mode="json")
+            # Keep adopted images and repair controls visible even if compilation
+            # fails. A validation error must never turn five real images into zero.
+            members = [next((p for p in plans if p.id == identifier), None) for identifier in group.shot_plan_ids]
+            members = [p for p in members if p is not None]
+            beats = [b for p in members for b in sorted(p.visual_beats, key=lambda b: b.index) if b.approved_image_candidate_id]
+            row.update(target_duration_seconds=sum(p.duration_seconds for p in members),
+                       anchor_shot_id=str(group.shot_plan_ids[0]),
+                       shots=[{"id": str(p.id), "index": p.index, "duration_seconds": p.duration_seconds} for p in members],
+                       images=[{"id": str(b.approved_image_candidate_id), "index": i, "url": f"/api/v1/generation-candidates/{b.approved_image_candidate_id}/content"} for i, b in enumerate(beats, 1)],
+                       input_plan={"input_policy": VIDEO_INPUT_POLICY, "sources": ["approved_images"],
+                                   "references": [{"reference_kind": "approved_image", "reference_id": str(b.approved_image_candidate_id), "label": f"图{i}", "role": "composition", "order": i, "visual_beat_id": str(b.id)} for i, b in enumerate(beats, 1)]},
+                       compiled_prompt="\n\n".join(f"分镜 {p.index}：{p.video_prompt}" for p in members))
             runs = await self.repository.list_generation_runs(project.id, group.shot_plan_ids[0])
             matching = sorted([r for r in runs if str(r.request_payload.get("generation_group_id")) == str(group.id)], key=lambda r: r.created_at, reverse=True)
             row["runs"] = [await self.production._run_response(r) for r in matching[:8]]
@@ -220,21 +289,27 @@ class VideoGroups:
                     references.append({"reference_kind": mention.reference_kind, "reference_id": str(mention.reference_id),
                                        "label": mention.label, "role": mention.role, "order": len(references) + 1})
                 context = await self.production.get_prompt_context(project.id)
-                for mention in context.common_video_mentions:
-                    if not any(item["reference_kind"] == mention.reference_kind and item["reference_id"] == str(mention.reference_id) for item in references):
-                        references.append({"reference_kind": mention.reference_kind, "reference_id": str(mention.reference_id), "label": mention.label, "role": mention.role, "order": len(references) + 1})
                 sources = ["approved_images"]
                 if any(r["reference_kind"] == "project_asset" for r in references):
                     sources.append("project_assets")
                 if plan.managed_asset_bindings:
                     sources.append("provider_managed_assets")
                 row.update(input_fingerprint=fingerprint, target_duration_seconds=plan.duration_seconds,
-                           input_plan={"sources": sources, "references": references},
-                           compiled_prompt=prompt_snapshot(plan.video_prompt, await self.production.get_prompt_context(project.id), "video", include_style=False)["compiled_prompt"], anchor_shot_id=str(plan.id),
+                           input_plan={"input_policy": VIDEO_INPUT_POLICY, "sources": sources, "references": references},
+                           compiled_prompt=video_prompt_snapshot(plan.video_prompt, context)["compiled_prompt"], anchor_shot_id=str(plan.id),
                            shots=[{"id": str(p.id), "index": p.index, "duration_seconds": p.duration_seconds} for p in members],
                            images=[{"id": str(b.approved_image_candidate_id), "index": b.index,
                                     "url": f"/api/v1/generation-candidates/{b.approved_image_candidate_id}/content"} for b in plan.visual_beats])
                 row["stale_run_ids"] = [str(r.id) for r in matching if r.request_payload.get("expected_group_fingerprint") != fingerprint]
+                legacy_runs = [r for r in matching if (r.request_payload.get("input_plan") or {}).get("input_policy") != VIDEO_INPUT_POLICY]
+                if legacy_runs:
+                    from .production import ProductionServiceError
+                    try:
+                        legacy_fingerprint = (await self.projection(project, group.id, legacy=True))[-1]
+                        row["stale_run_ids"] = [identifier for identifier in row["stale_run_ids"] if not any(
+                            str(r.id) == identifier and r.request_payload.get("expected_group_fingerprint") == legacy_fingerprint for r in legacy_runs)]
+                    except ProductionServiceError:
+                        pass
                 row["error"] = None
             except Exception as exc:
                 from .production import ProductionServiceError
@@ -248,12 +323,12 @@ class VideoGroups:
         async with await self.production._project_lock(project_id):
             project = await self.production._require_project(project_id)
             self.production._require_expected_revision(project, payload.expected_revision_id)
-            _, members, _, _, fingerprint = await self.projection(project, group_id)
-            await self.require_idle(project, {p.id for p in members})
             candidate = await self.repository.get_generation_candidate(payload.candidate_id)
             run = await self.repository.get_generation_run(candidate.generation_run_id) if candidate else None
             if not candidate or not run or run.project_id != project.id or run.kind != GenerationKind.VIDEO or candidate.kind != GenerationKind.VIDEO:
                 fail("视频候选不属于本项目生成组", 404)
+            _, members, _, _, fingerprint = await self.projection_for_run(project, group_id, run)
+            await self.require_idle(project, {p.id for p in members})
             if (str(run.request_payload.get("generation_group_id")) != str(group_id)
                     or run.request_payload.get("expected_group_fingerprint") != fingerprint
                     or run.status not in {ProductionRunStatus.COMPLETED, ProductionRunStatus.CACHED}

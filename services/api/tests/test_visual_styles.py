@@ -123,7 +123,7 @@ async def test_batch_freezes_style_per_shot_and_changes_do_not_rewrite_media(tmp
 
 
 @pytest.mark.asyncio
-async def test_grouped_video_deduplicates_styles_but_keeps_each_segment_and_export(tmp_path, monkeypatch):
+async def test_grouped_video_uses_adopted_images_without_reapplying_image_styles(tmp_path, monkeypatch):
     from test_video_groups import setup_group
     env, groups, group, _ = await setup_group(tmp_path, monkeypatch)
     context = await env.service.get_prompt_context(env.project.id)
@@ -131,17 +131,21 @@ async def test_grouped_video_deduplicates_styles_but_keeps_each_segment_and_expo
     natural = await env.service.update_prompt_context(env.project.id, update(context, visual_style={"preset": "natural"}, shot_styles={key: {"preset": "anime"}}))
     project = await env.store.get_production_project(env.project.id)
     _, members, aggregate, _, fingerprint = await groups.projection(project, group.id)
-    assert aggregate.video_prompt.count("【画面风格：自然实拍】") == 1
-    assert aggregate.video_prompt.count("【画面风格：二维动漫】") == 1
-    assert "本分段应用风格配置 2" in aggregate.video_prompt
+    assert "【画面风格：" not in aggregate.video_prompt
+    assert "本分段应用风格配置" not in aggregate.video_prompt
+    # Old frozen runs still compile their original style contract.
+    legacy = (await groups.projection(project, group.id, legacy=True))[2]
+    assert legacy.video_prompt.count("【画面风格：自然实拍】") == 1
+    assert legacy.video_prompt.count("【画面风格：二维动漫】") == 1
     payload = VideoGenerationCreate(expected_revision_id=project.current_revision_id, generation_group_id=group.id, expected_group_fingerprint=fingerprint, duration_seconds=10)
     scaled, _ = await env.service._group_video_plan(project, members[0], payload)
-    assert "自然实拍" in scaled.video_prompt and "二维动漫" in scaled.video_prompt
+    assert "自然实拍" not in scaled.video_prompt and "二维动漫" not in scaled.video_prompt
     document = await ProductionPromptDocuments(env.service).get(project.id)
     assert document["shots"][1]["visual_style_snapshot"]["label"] == "二维动漫"
-    assert "二维动漫" in document["video_groups"][0]["compiled_prompt"]
+    assert document["video_input_policy"] == "adopted_images_v1"
+    assert "二维动漫" not in document["video_groups"][0]["compiled_prompt"]
     await env.service.update_prompt_context(project.id, update(natural, visual_style={"preset": "cinematic"}))
-    assert fingerprint != (await groups.projection(project, group.id))[-1]
+    assert fingerprint == (await groups.projection(project, group.id))[-1]
     assert "电影写实" not in aggregate.video_prompt
 
 

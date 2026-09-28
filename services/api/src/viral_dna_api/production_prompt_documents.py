@@ -106,6 +106,7 @@ class ProductionPromptDocuments:
         rows = []
         groups = []
         from .video_groups import members_for, execution_plan
+        from .video_generation.input_policy import VIDEO_INPUT_POLICY, video_prompt_snapshot
         for group in project.video_generation_groups:
             row = group.model_dump(mode="json")
             try:
@@ -114,8 +115,10 @@ class ProductionPromptDocuments:
                     "video_prompt_mentions": drafts[p.id].video_prompt_mentions,
                     "video_negative_constraints": drafts[p.id].video_negative_constraints})
                     if drafts.get(p.id) else self.production._local_prompt_view(p, context) for p in members]
-                compiled, _ = execution_plan(group, members, context=context)
-                row.update(compiled_prompt=prompt_snapshot(compiled.video_prompt, context, "video", include_style=False)["compiled_prompt"], negative_constraints=compiled.video_negative_constraints,
+                references = {p.id: drafts[p.id].input_plan.references for p in members
+                              if drafts.get(p.id) and drafts[p.id].input_plan.input_policy == VIDEO_INPUT_POLICY}
+                compiled, _ = execution_plan(group, members, context=context, video_references=references)
+                row.update(compiled_prompt=video_prompt_snapshot(compiled.video_prompt, context)["compiled_prompt"], negative_constraints=compiled.video_negative_constraints,
                     target_duration_seconds=compiled.duration_seconds, error=None)
             except ProductionServiceError as exc:
                 row.update(compiled_prompt=group.video_prompt, negative_constraints=[], error=str(exc))
@@ -176,6 +179,7 @@ class ProductionPromptDocuments:
             "revision_id": str(project.current_revision_id),
             "context_id": str(context.id),
             "visual_style_snapshot": context.visual_style_snapshot,
+            "video_input_policy": "adopted_images_v1",
             "common_image_prompt": context.common_image_prompt,
             "common_video_prompt": context.common_video_prompt,
             "common_image_mentions": [item.model_dump(mode="json") for item in context.common_image_mentions],

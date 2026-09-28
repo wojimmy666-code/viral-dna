@@ -8,7 +8,7 @@ import { styleRecoverySummary } from "../visual-styles/visual-style.js";
 import { AssetReferenceEditor } from '../prompt-references/AssetReferenceEditor.jsx';
 import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 
-export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path, part = "both", request, disabled = false, onChange, shotKey, hideShotStyle = false, assets = [], onAddAssets, resolveUrl }, ref) {
+export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path, part = "both", request, disabled = false, onChange, shotKey, hideShotStyle = false, hideVisualStyle = false, assets = [], onAddAssets, resolveUrl }, ref) {
   const callbacks = useRef({ request, onChange });
   callbacks.current = { request, onChange };
   const session = useRef(null);
@@ -120,7 +120,7 @@ export const GlobalPromptEditor = forwardRef(function GlobalPromptEditor({ path,
     <details onToggle={event => { if (!event.currentTarget.open) void flush(); }}>
       <PromptSectionHeader as="summary" quiet title={`全局${part === "both" ? "" : part === "image" ? "图片" : "视频"}提示词`} hint="适用于全部分镜" state={state?.status || "loading"} onRetry={() => void flush()} />
       {state && Object.hasOwn(state.values, "visual_style") && <div className="prompt-style-tools">
-        <VisualStyleControl label="整片风格" part={part} value={state.values.visual_style} snapshot={state.values.visual_style_snapshot} request={request} disabled={disabled || Boolean(recovery)} onChange={applyStyle} onPending={value => { stylePending.current.global = value; }} />
+        {!hideVisualStyle && <VisualStyleControl label="整片风格" part={part} value={state.values.visual_style} snapshot={state.values.visual_style_snapshot} request={request} disabled={disabled || Boolean(recovery)} onChange={applyStyle} onPending={value => { stylePending.current.global = value; }} />}
         {shotKey && !hideShotStyle && <VisualStyleControl key={shotKey} label="本镜风格" part={part} allowInherit value={state.values.shot_styles[shotKey] ?? null} snapshot={state.values.shot_style_snapshots[shotKey]} inheritedSnapshot={state.values.visual_style_snapshot} request={request} disabled={disabled || Boolean(recovery)} onChange={(value, compiled) => applyStyle(value, compiled, shotKey)} onPending={value => { stylePending.current.shot = value; }} />}
       </div>}
       <div className={`global-prompt-fields ${parts.length === 2 ? "is-paired" : ""}`}>

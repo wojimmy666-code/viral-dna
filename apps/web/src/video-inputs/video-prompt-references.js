@@ -386,6 +386,19 @@ export function requiredSourceForVideoMention(mention = {}) {
   return VIDEO_REFERENCE_SOURCE_BY_KIND[mention.reference_kind] || "";
 }
 
+export function unconfirmedVideoReferences(prompt, mentions = [], selected = [], common = '', globalMentions = []) {
+  const selectedKeys = new Set(selected.map(videoReferenceKey));
+  const pending = new Map();
+  for (const [text, items] of [[prompt, mentions], [common, globalMentions]]) {
+    for (const item of items) {
+      if (String(text || '').includes(videoMentionToken(item)) && !selectedKeys.has(videoReferenceKey(item))) {
+        pending.set(videoReferenceKey(item), item);
+      }
+    }
+  }
+  return [...pending.values()];
+}
+
 export function buildManagedAssetReferenceOption(managedAssetBinding = null) {
   if (!managedAssetBinding?.id) return null;
   return {
@@ -547,6 +560,7 @@ export function synchronizeAutomaticVideoPrompt({
   mentions = [],
   selectedReferences = [],
   preserveFormatting = false,
+  preserveUnselectedMentions = false,
 } = {}) {
   const references = normalizeVideoGenerationReferences(selectedReferences);
   const byKey = new Map(references.map((item) => [videoReferenceKey(item), item]));
@@ -583,7 +597,10 @@ export function synchronizeAutomaticVideoPrompt({
       if (segment.type !== "mention") return segment.text;
       const previous = previousByKey.get(segment.referenceKey);
       const current = byStableKey.get(videoReferenceStableKey(previous)) || byKey.get(segment.referenceKey);
-      return current ? videoMentionToken(current) : "";
+      const preserve = previous?.reference_kind !== 'approved_image' && (Array.isArray(preserveUnselectedMentions)
+        ? preserveUnselectedMentions.some(item => videoReferenceKey(item) === segment.referenceKey)
+        : preserveUnselectedMentions);
+      return current ? videoMentionToken(current) : preserve ? segment.text : "";
     }).join("");
   if (!preserveFormatting) body = body.replace(/[ \t]+\n/g, "\n").trim();
   const present = new Set(buildVideoPromptHighlightSegments(body, references)
@@ -595,7 +612,7 @@ export function synchronizeAutomaticVideoPrompt({
     videoPrompt,
     videoPromptMentions: normalizeVideoPromptMentions(
       videoPrompt,
-      references,
+      preserveUnselectedMentions ? [...mentions, ...references] : references,
       references,
     ),
   };
@@ -662,6 +679,7 @@ export function reconcileVideoDraftReferences(
     : synchronizeAutomaticVideoPrompt({
       prompt: draft.videoPrompt, mentions: draft.videoPromptMentions, selectedReferences,
       preserveFormatting: true,
+      preserveUnselectedMentions: (draft.videoPromptMentions || []).filter(item => !(draft.selectedReferences || []).some(selected => videoReferenceKey(selected) === videoReferenceKey(item))),
     });
   const inputSources = new Set(change.inputSources || draft.inputSources || []);
   for (const reference of removedReferences) {

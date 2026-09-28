@@ -6,8 +6,6 @@ import "./video-groups.css";
 import { AssetReferenceEditor } from '../prompt-references/AssetReferenceEditor.jsx';
 import { promptAssetReference, promptMentionData } from '../prompt-references/prompt-assets.js';
 import { GlobalPromptEditor } from '../prompt-context/GlobalPromptEditor.jsx';
-import { VisualStyleControl } from '../visual-styles/VisualStyleControl.jsx';
-import { effectiveStyleSnapshot, visualStyleKey, styleReferenceCount, ORIGINAL_STYLE } from '../visual-styles/visual-style.js';
 import { PromptSectionHeader } from '../prompt-context/PromptSectionHeader.jsx';
 import { adjacentSelection, groupReferences, groupShotLabel } from './group-references.js';
 
@@ -59,7 +57,6 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
   const ownGlobalRef = useRef(null);
   const contextRef = globalPromptRef || ownGlobalRef;
   const [context, setContext] = useState({});
-  const [stylePending, setStylePending] = useState(false);
   const [submissionUncertain, setSubmissionUncertain] = useState(false);
   const dirty = prompt !== (group.video_prompt || "") || transition !== group.transition || JSON.stringify(mentions) !== JSON.stringify(group.video_prompt_mentions || []);
   const definitionKey = JSON.stringify(groupDefinition(group));
@@ -77,14 +74,12 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
   useEffect(() => { if (!dirty) setBaseKey(definitionKey); }, [dirty, definitionKey]);
   useEffect(() => { onDirty(group.id, dirty); return () => onDirty(group.id, false); }, [onDirty, group.id, dirty]);
   const running = group.runs?.find(run => ACTIVE.has(run.status));
-  const references = groupReferences(group, mentions, assets, context.common_video_mentions);
-  const styleCount = Math.max(0, ...group.shot_plan_ids.map(id => styleReferenceCount(context, id, 'video')));
-  const referenceCount = references.all.length + styleCount;
-  const styles = group.shot_plan_ids.map(id => context.shot_styles?.[id] ?? context.visual_style ?? ORIGINAL_STYLE);
-  const mixedStyles = new Set(styles.map(visualStyleKey)).size > 1;
-  const confirmationKey = JSON.stringify([group.input_fingerprint, model?.alias, duration, resolution, context]);
-  const canGenerate = !disabled && !pending && !running && !dirty && !group.error && model && !stylePending && !submissionUncertain
-    && Object.hasOwn(context, 'visual_style')
+  const references = groupReferences(group, mentions, assets);
+  const referenceCount = references.all.length;
+  const confirmationKey = JSON.stringify([group.input_fingerprint, model?.alias, duration, resolution, context.common_video_prompt, context.common_video_mentions]);
+  const canGenerate = !disabled && !pending && !running && !dirty && !group.error && model && !submissionUncertain
+    && group.input_plan?.input_policy === 'adopted_images_v1'
+    && Object.hasOwn(context, 'common_video_prompt')
     && referenceCount <= model.capabilities.maximum_reference_images && duration >= group.target_duration_seconds;
   const busyRef = useRef(false);
   const pendingSave = useRef(null);
@@ -94,7 +89,7 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const save = useCallback(async () => {
     if (pendingSave.current) return pendingSave.current;
-    if (busyRef.current || stylePending) return false;
+    if (busyRef.current) return false;
     // Input and blur/navigation can run before React commits the new state.
     // Read the synchronous draft, not the previous render's save closure.
     const draft = latestDraft.current;
@@ -110,7 +105,7 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
     })();
     try { return await pendingSave.current; }
     finally { pendingSave.current = null; }
-  }, [baseKey, definitionKey, serverDraftKey, disabled, group, onSave, stylePending]);
+  }, [baseKey, definitionKey, serverDraftKey, disabled, group, onSave]);
   useEffect(() => registerSave(group.id, save), [group.id, registerSave, save]);
   useEffect(() => {
     if (!dirty || conflict || pending || error || running) return;
@@ -162,29 +157,24 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
     await onReload(); setSubmissionUncertain(false);
   });
   return <section className="video-group" aria-label={`生成组 ${ordinal} 编辑器`}>
-    <header className="shot-video-editor-title"><div><strong>生成组 {ordinal}</strong><span>{groupShotLabel(group)} · {group.images?.length || 0} 张图 → 1 段视频</span></div><Button variant="quiet" size="compact" disabled={pending || disabled || Boolean(running)} onClick={onAdjust}>调整组合</Button></header>
-    {group.error ? <p role="alert" className="video-group-error">{group.error}</p> : <>
+    <header className="shot-video-editor-title"><div><strong>生成组 {ordinal}</strong><span>{group.images?.length || 0} 张分镜图 · {Math.max(0, referenceCount - (group.images?.length || 0))} 项附加参考 → 1 段视频</span></div><Button variant="quiet" size="compact" disabled={pending || disabled || Boolean(running)} onClick={onAdjust}>调整组合</Button></header>
+    {group.error && <p role="alert" className="video-group-error">{group.error}</p>}
+    {group.input_plan?.input_policy !== 'adopted_images_v1' && <p role="alert" className="video-group-error">后端尚未启用独立视频输入，请更新并重启本地服务后刷新。</p>}
       {conflict && <p role="alert" className="video-group-error">组要求已在其他页面更新。<Button className="text-button" type="button" onClick={() => { setPrompt(group.video_prompt); setMentions(group.video_prompt_mentions || []); setTransition(group.transition); setBaseKey(definitionKey); setEstimate(null); setError(""); }}>放弃本地组要求，读取新内容</Button></p>}
       <div className="video-group-prompt-panel">
       <PromptSectionHeader title="组视频提示词" state={error ? 'error' : pending && dirty ? 'saving' : dirty ? 'dirty' : 'saved'} onRetry={() => void save()} />
       <AssetReferenceEditor label="本组补充要求" rows={3} maxLength={8000} value={prompt} references={references.mentions} options={references.options} resolveUrl={resolveUrl} disabled={pending || disabled || Boolean(running)}
         referencePart="video" pinnedReferences={references.pinned} preserveReferenceOrder showPinnedTokens
-        styleControl={<VisualStyleControl label={mixedStyles ? '统一本组风格' : '本组风格'} part="video" allowInherit
-          value={mixedStyles ? ORIGINAL_STYLE : context.shot_styles?.[group.shot_plan_ids[0]] ?? null}
-          snapshot={effectiveStyleSnapshot(context, group.shot_plan_ids[0])} inheritedSnapshot={context.visual_style_snapshot}
-          request={request} disabled={pending || disabled || Boolean(running) || !Object.hasOwn(context, 'visual_style')}
-          onPending={setStylePending} onChange={async (value, compiled) => { await contextRef.current.applyStyles(value, compiled, group.shot_plan_ids); setEstimate(null); await onReload(); }} />}
-        referenceLimit={model?.capabilities?.maximum_reference_images - styleCount}
+        referenceLimit={model?.capabilities?.maximum_reference_images}
         reservedReferenceIds={references.pinned.map(item => item.reference_id)}
         onAddAssets={onAddAssets && ((insert, options) => onAddAssets(selected => insert(selected.map(asset => promptAssetReference(asset, 'video'))), options))}
         onBlur={() => void save()}
         onChange={(value, refs) => { const nextMentions = promptMentionData(refs, 'video'); latestDraft.current = { ...latestDraft.current, prompt: value, mentions: nextMentions }; setError(''); setEstimate(null); setPrompt(value); setMentions(nextMentions); }} placeholder="补充本组共同动作、运镜或衔接要求；输入 @ 引用资产。原分镜动作在下方保留。" />
-      {mixedStyles && <p className="video-group-meta">各分镜风格不同，将按分段应用；选择“统一本组风格”会同步本组各镜风格。</p>}
-      <p className="video-group-meta">{group.images.length} 张分镜图{references.all.length > group.images.length ? ` · ${references.all.length - group.images.length} 项额外参考` : ''}{styleCount ? ' · 1 张独立风格参考' : ''}，按编号顺序提交。风格封面不计入参考图。</p>
+      <p className="video-group-meta">{groupShotLabel(group)}，按图片编号顺序提交。外观以已采用图片为准；生图时的资产和风格不重复传入。</p>
       <div className="video-group-actions"><label>场景切换<select value={transition} disabled={pending || disabled || Boolean(running)} onChange={event => { latestDraft.current = { ...latestDraft.current, transition: event.target.value }; setError(''); setEstimate(null); setTransition(event.target.value); }}><option value="cut">硬切</option><option value="continuous">连续运动</option><option value="dissolve">叠化</option></select></label><span className="video-group-meta">成片目标 {Number(group.target_duration_seconds.toFixed(2))} 秒</span></div>
       <details className="video-group-script-details" open><summary>各分镜动作与完整提示词{dirty ? ' · 待保存更新' : ''}</summary><p className="video-group-script">{group.compiled_prompt}</p><div className="video-group-members">{group.shots.map(shot => <Button key={shot.id} variant="text" size="compact" disabled={pending || disabled} onClick={() => onEditShot?.(shot.id)}>编辑分镜 {shot.index} 动作</Button>)}</div></details>
       </div>
-      <GlobalPromptEditor ref={contextRef} path={`/productions/${projectId}/prompt-context`} request={request} part="video" disabled={disabled || Boolean(running)} onChange={setContext} hideShotStyle assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
+      <GlobalPromptEditor ref={contextRef} path={`/productions/${projectId}/prompt-context`} request={request} part="video" disabled={disabled || Boolean(running)} onChange={setContext} hideShotStyle hideVisualStyle assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
       <div className="video-group-actions">
         <label>视频模型<select value={model?.alias || ""} disabled={disabled || pending || Boolean(running)} onChange={event => { const next = models.find(item => item.alias === event.target.value); setAlias(event.target.value); const values = videoDurationOptions(next); setDuration(values.find(value => value >= group.target_duration_seconds) || values.at(-1)); setResolution(preferredVideoResolution(next)); setEstimate(null); }}><option value="" disabled>选择有序多图模型</option>{models.map(item => <option key={item.alias} value={item.alias}>{item.label}</option>)}</select></label>
         <label>生成时长<select value={duration} disabled={disabled || pending || Boolean(running)} onChange={event => setDuration(Number(event.target.value))}>{durations.map(value => <option key={value} value={value}>{value} 秒</option>)}</select></label>
@@ -194,7 +184,6 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
       {!model && <p>未配置可用的有序多图模型。请配置模型，或拆组后独立生成再剪辑。</p>}
       {model && (referenceCount > model.capabilities.maximum_reference_images || duration < group.target_duration_seconds) && <p role="alert" className="video-group-error">本组共 {referenceCount} 项参考，模型上限 {model.capabilities.maximum_reference_images} 项；生成时长须至少 {group.target_duration_seconds} 秒。请调整模型、时长或组合，不会自动丢弃参考。</p>}
       {estimate?.key === confirmationKey && <div className="video-group-confirm"><strong>确认本次生成</strong><p>{group.images.length} 张分镜图 · {referenceCount - group.images.length} 项额外参考 → 1 段视频 · {duration} 秒 · {resolution} · {model.label} · 静音</p><p>{estimate.result.estimate_known ? `预计费用 ¥${(estimate.result.estimated_cost_micros / 1000000).toFixed(4)}` : "当前模型无法预估费用，不代表免费，将按供应商实际用量记录"}</p>{!estimate.result.estimate_known && <label className="video-group-check"><input type="checkbox" checked={acceptUnknown} onChange={event => setAcceptUnknown(event.target.checked)} />确认接受费用未知</label>}<div className="video-group-actions"><Button disabled={pending} onClick={() => setEstimate(null)}>取消</Button><Button type="button" className="primary-button" disabled={!canGenerate || (!estimate.result.estimate_known && !acceptUnknown)} onClick={generate}>确认费用并生成</Button></div></div>}
-    </>}
     {running && <p role="status">{running.status === "queued" ? "排队中" : "生成中"}，完成后需要核对场景与切点。<Button type="button" variant="warning" size="compact" disabled={pending || disabled || running.status === "cancellation_requested"} onClick={cancel}>{running.status === "cancellation_requested" ? "正在停止…" : "取消任务"}</Button></p>}
     {group.runs?.filter(run => !ACTIVE.has(run.status)).map((run, index) => <details key={run.id} open={index === 0}>
       <summary>{run.status === "failed" ? "生成失败" : run.status === "cancelled" ? "已取消" : "生成结果"} · {new Date(run.created_at).toLocaleString("zh-CN")}</summary>

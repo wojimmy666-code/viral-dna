@@ -20,7 +20,8 @@ export function VideoPromptReferenceEditor({
     ...item, key: videoReferenceKey(item), number: numbers.get(videoReferenceKey(item)),
     available: true,
   }));
-  const references = videoPromptMentions.map((item) => ({
+  const pendingMentions = videoPromptMentions.filter(item => !ordered.some(reference => videoReferenceKey(reference) === videoReferenceKey(item)));
+  const references = videoPromptMentions.filter(item => ordered.some(reference => videoReferenceKey(reference) === videoReferenceKey(item))).map((item) => ({
     ...byKey.get(videoReferenceKey(item)), ...item, key: videoReferenceKey(item),
     generationReference: ordered.find((reference) => videoReferenceKey(reference) === videoReferenceKey(item)),
     number: numbers.get(videoReferenceKey(item)), available: byKey.has(videoReferenceKey(item)),
@@ -29,6 +30,8 @@ export function VideoPromptReferenceEditor({
     referencePart="video"
     styleControl={styleControl}
     referenceLimit={referenceLimit}
+    pinnedReferences={ordered.filter(item => !videoPromptMentions.some(mention => videoReferenceKey(mention) === videoReferenceKey(item))).map(item => ({ ...byKey.get(videoReferenceKey(item)), ...item, number: numbers.get(videoReferenceKey(item)) }))}
+    preserveReferenceOrder
     reservedReferenceIds={[...selectedReferences.filter((item) => item.reference_kind !== 'reference_video' && !videoPromptMentions.some((mention) => videoReferenceKey(mention) === videoReferenceKey(item))).map(item => item.reference_id), ...inheritedMentions.map(item => item.reference_id)]}
     references={references} options={choices} resolveUrl={resolveUrl} onBlur={onBlur}
     onAddAssets={onAddAssets && ((insert, pickerOptions) => onAddAssets((assets) => insert(
@@ -36,10 +39,10 @@ export function VideoPromptReferenceEditor({
     ), pickerOptions)) } disabled={disabled}
     placeholder="描述视频；输入 @ 引用已采用分镜图或项目已选素材"
     onChange={(nextValue, nextReferences) => {
-      const nextMentions = normalizeVideoPromptMentions(nextValue, nextReferences.map((item, index) => ({
+      const nextMentions = normalizeVideoPromptMentions(nextValue, [...pendingMentions, ...nextReferences.map((item, index) => ({
         reference_kind: item.reference_kind, reference_id: item.reference_id, label: item.label,
         role: item.role, order: index + 1,
-      })), [...options, ...nextReferences]);
+      }))], [...options, ...nextReferences]);
       const retained = new Set(nextMentions.map(videoReferenceKey));
       const removedKeys = new Set(videoPromptMentions.filter((item) => !retained.has(videoReferenceKey(item))).map(videoReferenceKey));
       const removedReferences = selectedReferences.filter((item) => removedKeys.has(videoReferenceKey(item)));

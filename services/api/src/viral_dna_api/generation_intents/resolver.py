@@ -589,7 +589,7 @@ def resolve_intent_references(
     ]
     sources = list(dict.fromkeys(SOURCE_BY_KIND[item.reference_kind] for item in ordered))
     return ResolvedIntentReferences(
-        input_plan=VideoGenerationInputPlan(sources=sources, references=ordered),
+        input_plan=VideoGenerationInputPlan(input_policy="adopted_images_v1", sources=sources, references=ordered),
         unresolved=tuple(unresolved),
         warnings=tuple(warnings),
         transition_evidence=transition_evidence,

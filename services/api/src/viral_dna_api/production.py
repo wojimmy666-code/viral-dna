@@ -2198,6 +2198,7 @@ class ProductionService:
                     plans,
                     {item.id for item in plans},
                     revision_id,
+                    video_changed=True,
                 )
             updated, revision = await self._prepare_revision(
                 updated,
@@ -3864,7 +3865,8 @@ class ProductionService:
                 "common_image_prompt": context.common_image_prompt,
                 "common_video_prompt": context.common_video_prompt,
                 "image_style_prompt": style_prompt(effective_style(context, str(plan.id)), "image"),
-                "video_style_prompt": style_prompt(effective_style(context, str(plan.id)), "video"),
+                "video_style_prompt": "",
+                "video_input_policy": "adopted_images_v1",
             },
             reference_bindings=await self.repository.list_reference_bindings(plan.id),
             current_revision_id=project.current_revision_id,
@@ -4896,7 +4898,7 @@ class ProductionService:
                 validated,
                 validated.visual_beats,
                 revision_id=revision_id,
-                invalidate_video=image_inputs_changed or structural_changed,
+                invalidate_video=structural_changed,
             )
             await self._save_visual_beat_plan(
                 project,
@@ -6054,14 +6056,16 @@ class ProductionService:
         self._schedule_video_run(run.id)
         return await self._run_response(run)
 
-    async def _group_video_plan(self, project, plan, payload):
-        from .video_groups import VideoGroups, execution_plan
+    async def _group_video_plan(self, project, plan, payload, *, legacy=False):
+        from .video_groups import VideoGroups
         containing = next((g for g in project.video_generation_groups if plan.id in g.shot_plan_ids), None)
         if payload.generation_group_id is None:
             if containing:
                 raise _fail(409, "video_group_required", "该分镜已加入视频生成组，请从生成组操作或先拆组")
             return plan, {beat.id: plan for beat in plan.visual_beats}
-        group, members, aggregate, owners, fingerprint = await VideoGroups(self).projection(project, payload.generation_group_id)
+        group, members, aggregate, owners, fingerprint = await VideoGroups(self).projection(
+            project, payload.generation_group_id,
+            legacy=legacy, generation_duration=payload.duration_seconds)
         if aggregate.id != plan.id:
             raise _fail(422, "video_group_anchor_invalid", "请从本组第一个分镜发起生成")
         if not payload.expected_group_fingerprint or fingerprint != payload.expected_group_fingerprint:
@@ -6069,7 +6073,6 @@ class ProductionService:
         if payload.duration_seconds is not None:
             if payload.duration_seconds < aggregate.duration_seconds:
                 raise _fail(422, "video_group_duration_short", "生成时长不能短于本组成片目标，请增加时长或拆分生成组")
-            aggregate, owners = execution_plan(group, members, payload.duration_seconds, context=await self.get_prompt_context(project.id))
         return aggregate, owners
 
     async def _validate_video_input_plan(
@@ -6111,6 +6114,10 @@ class ProductionService:
             (reference.reference_kind, reference.reference_id)
             for reference in payload.input_plan.references
         }
+        if payload.input_plan.input_policy == "adopted_images_v1":
+            actual_sources = {source_by_reference_kind[r.reference_kind] for r in payload.input_plan.references}
+            if sources != actual_sources:
+                raise _fail(409, "video_input_sources_mismatch", "视频输入来源与已展示参考不一致，请重新选择参考；不会自动使用原资产或控制视频")
         for reference in payload.input_plan.references:
             required_source = source_by_reference_kind[reference.reference_kind]
             if required_source not in sources:
@@ -6192,7 +6199,7 @@ class ProductionService:
         if sources & image_sources and not capability.image_to_video:
             raise _fail(422, "video_image_input_unsupported", "当前模型不支持图片输入")
         if payload.generation_group_id is not None:
-            _, owners = await self._group_video_plan(project, plan, payload)
+            _, owners = await self._group_video_plan(project, plan, payload, legacy=payload.input_plan.input_policy is None)
             for beat in plan.visual_beats:
                 if not await self._has_valid_approved_image_beat(project, owners[beat.id], beat):
                     raise _fail(409, "approved_image_required", "组内图片已失效，请重新采用对应分镜图")
@@ -6256,23 +6263,41 @@ class ProductionService:
         self._require_generation_revision(project, plan, payload)
         payload = payload.model_copy(update={"expected_shot_revision_id": plan.revision_id})
         self._require_video_stage_member(project, plan)
-        plan, _ = await self._group_video_plan(project, plan, payload)
-        frozen_prompt = frozen_prompt or prompt_snapshot(
-            plan.video_prompt, await self.get_prompt_context(project.id), "video",
-            shot_key=str(plan.id), include_style=not payload.generation_group_id,
-        )
+        from .video_generation.input_policy import VIDEO_INPUT_POLICY, selected_video_plan, video_prompt_snapshot
+        if retry_of_run_id is None:
+            payload = payload.model_copy(update={"input_plan": payload.input_plan.model_copy(
+                update={"input_policy": VIDEO_INPUT_POLICY})})
+        plan, _ = await self._group_video_plan(project, plan, payload,
+            legacy=retry_of_run_id is not None and payload.input_plan.input_policy is None)
+        if retry_of_run_id is None and not payload.input_plan.references and payload.input_plan.includes(VideoGenerationInputSource.APPROVED_IMAGES):
+            from .video_generation.drafts import current_default_input_plan
+            payload = payload.model_copy(update={"input_plan": payload.input_plan.model_copy(update={
+                "references": current_default_input_plan(plan).references})})
+        context = await self.get_prompt_context(project.id)
+        if payload.input_plan.input_policy == VIDEO_INPUT_POLICY:
+            plan = selected_video_plan(plan, payload.input_plan)
+            frozen_prompt = frozen_prompt or video_prompt_snapshot(plan.video_prompt, context, shot_key=str(plan.id))
+        else:
+            frozen_prompt = frozen_prompt or prompt_snapshot(plan.video_prompt, context, "video",
+                shot_key=str(plan.id), include_style=not payload.generation_group_id)
         global_mentions = [VideoPromptMention.model_validate(item) for item in frozen_prompt.get("global_mentions", [])]
         if global_mentions:
             await self._validate_video_prompt_mentions(project, plan, global_mentions)
             selected = list(payload.input_plan.references)
             keys = {(item.reference_kind, item.reference_id) for item in selected}
+            if payload.input_plan.input_policy == VIDEO_INPUT_POLICY:
+                missing = [m for m in global_mentions if (m.reference_kind, m.reference_id) not in keys]
+                if missing:
+                    raise _fail(409, "video_reference_confirmation_required",
+                        f"全局视频提示词中的 @{missing[0].label} 尚未确认用于本次视频，请显式添加参考或移除标签、改用分镜图")
             for mention in global_mentions:
                 if (mention.reference_kind, mention.reference_id) not in keys:
                     selected.append(VideoGenerationReference(**(mention.model_dump() | {"order": len(selected) + 1})))
                     keys.add((mention.reference_kind, mention.reference_id))
             payload = payload.model_copy(update={"input_plan": payload.input_plan.model_copy(update={
                 "references": selected,
-                "sources": list(dict.fromkeys([*payload.input_plan.sources, VideoGenerationInputSource.PROJECT_ASSETS])),
+                "sources": (payload.input_plan.sources if payload.input_plan.input_policy == VIDEO_INPUT_POLICY else
+                            list(dict.fromkeys([*payload.input_plan.sources, VideoGenerationInputSource.PROJECT_ASSETS]))),
             })})
         if payload.generation_group_id is not None:
             from .video_groups import VideoGroups, group_for
@@ -7427,7 +7452,10 @@ class ProductionService:
             self._require_generation_revision(project, plan, payload)
             self._require_video_stage_member(project, plan)
             persisted_plan = plan
-            plan, reference_owners = await self._group_video_plan(project, plan, payload)
+            plan, reference_owners = await self._group_video_plan(project, plan, payload, legacy=payload.input_plan.input_policy is None)
+            if payload.input_plan.input_policy == "adopted_images_v1":
+                from .video_generation.input_policy import selected_video_plan
+                plan = selected_video_plan(plan, payload.input_plan)
             if project.active_step not in {
                 ProductionStep.SHOT_VIDEOS,
                 ProductionStep.EDITING,
@@ -8978,7 +9006,7 @@ class ProductionService:
             if clip.candidate_id != candidate.id or str(run.request_payload.get("generation_group_id")) != str(clip.group_id):
                 return False
             try:
-                _, members, _, _, fingerprint = await VideoGroups(self).projection(project, clip.group_id)
+                _, members, _, _, fingerprint = await VideoGroups(self).projection_for_run(project, clip.group_id, run)
             except ProductionServiceError:
                 return False
             if plan.id not in {p.id for p in members} or clip.input_fingerprint != fingerprint:
@@ -10458,6 +10486,9 @@ class ProductionService:
                 return False
             frozen = run.request_payload.get("prompt_snapshot")
             if frozen is not None:
+                if part == "video" and frozen.get("input_policy") == "adopted_images_v1":
+                    return (frozen.get("global_prompt", "") != context.common_video_prompt
+                            or frozen.get("global_mentions", []) != [m.model_dump(mode="json") for m in context.common_video_mentions])
                 style_changed = style_prompt(frozen.get("visual_style_snapshot"), part) != style_prompt(effective_style(context, str(plan.id)), part)
                 style_changed = style_changed or (frozen.get("visual_style_snapshot") or {}).get("reference_image") != (effective_style(context, str(plan.id)) or {}).get("reference_image")
                 return style_changed or frozen.get("global_prompt", "") != getattr(context, f"common_{part}_prompt")
@@ -11179,6 +11210,8 @@ class ProductionService:
         plans: list[ShotPlan],
         impacted_ids: set[UUID],
         revision_id: UUID,
+        *,
+        video_changed: bool = False,
     ) -> tuple[list[ShotPlan], list[ShotPlan]]:
         next_plans: list[ShotPlan] = []
         changed: list[ShotPlan] = []
@@ -11186,7 +11219,7 @@ class ProductionService:
             if plan.id not in impacted_ids:
                 next_plans.append(plan)
                 continue
-            updated = changed_plan(await self._input_compatible_plan(plan), image=True).model_copy(
+            updated = changed_plan(await self._input_compatible_plan(plan), image=True, video=video_changed).model_copy(
                 update={
                     "revision_id": revision_id,
                     "updated_at": utc_now(),
@@ -11272,7 +11305,7 @@ class ProductionService:
 
         updated_plan = ShotPlan.model_validate({**plan.model_dump(mode="python"), **updates})
         if image_changed or video_changed:
-            updated_plan = changed_plan(updated_plan, image=image_changed)
+            updated_plan = changed_plan(updated_plan, image=image_changed, video=video_changed)
         if image_changed and updated_plan.visual_beats:
             primary = updated_plan.visual_beats[0]
             beat_updates: dict[str, object] = {
@@ -11297,7 +11330,7 @@ class ProductionService:
                     for item in updated_plan.visual_beats
                 ],
                 revision_id=revision_id,
-                invalidate_video=True,
+                invalidate_video=video_changed,
             )
         return updated_plan
 

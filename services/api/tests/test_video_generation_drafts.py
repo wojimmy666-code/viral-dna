@@ -232,6 +232,7 @@ def test_video_generation_draft_starts_with_all_approved_visual_beats() -> None:
         draft = await service.get(shot.id)
 
         assert draft.input_plan.sources == [VideoGenerationInputSource.APPROVED_IMAGES]
+        assert draft.input_plan.input_policy == "adopted_images_v1"
         assert [item.reference_id for item in draft.input_plan.references] == [
             first_candidate_id,
             second_candidate_id,
@@ -318,7 +319,8 @@ def test_video_generation_draft_backfills_latest_video_run() -> None:
         assert draft.model_alias == "minimax_h3"
         assert draft.duration_seconds == 6
         assert draft.candidate_count == 3
-        assert draft.input_plan.sources == [VideoGenerationInputSource.APPROVED_IMAGES]
+        assert draft.input_plan.sources == []  # no adopted frame exists in this fixture
+        assert draft.input_plan.input_policy == "adopted_images_v1"
 
     asyncio.run(scenario())
 

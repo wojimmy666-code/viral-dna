@@ -27,6 +27,7 @@ from ..models import (
 from ..project_prompts import ProjectPromptService, local_prompt, prompt_lock
 from ..prompt_versions import VIDEO_INTENT_PROMPT_VERSION
 from .settings import VideoGenerationSettingsService
+from .input_policy import VIDEO_INPUT_POLICY
 
 
 class ShotVideoGenerationDraftRepository(Protocol):
@@ -255,7 +256,7 @@ class ShotVideoGenerationDraftService:
                 ),
                 candidate_count=_bounded_candidate_count(request.get("candidate_count")),
                 audio_strategy=request.get("audio_strategy", "reuse_source"),
-                input_plan=request.get("input_plan") or legacy_video_input_plan(),
+                input_plan=current_default_input_plan(plan),
                 video_prompt=plan.video_prompt,
                 video_prompt_mentions=plan.video_prompt_mentions,
                 video_negative_constraints=plan.video_negative_constraints,
@@ -350,24 +351,8 @@ def current_default_input_plan(plan: ShotPlan | None = None) -> VideoGenerationI
         for order, beat in enumerate(approved_targets, start=1)
     ]
     sources = [VideoGenerationInputSource.APPROVED_IMAGES] if approved_targets else []
-    source_for = {
-        "project_asset": VideoGenerationInputSource.PROJECT_ASSETS,
-        "approved_image": VideoGenerationInputSource.APPROVED_IMAGES,
-        "provider_managed_asset": VideoGenerationInputSource.PROVIDER_MANAGED_ASSETS,
-        "reference_video": VideoGenerationInputSource.REFERENCE_VIDEO,
-        "depth_control": VideoGenerationInputSource.DEPTH_CONTROL,
-    }
-    keys = {(item.reference_kind, item.reference_id) for item in references}
-    for mention in plan.video_prompt_mentions:
-        if (mention.reference_kind, mention.reference_id) not in keys:
-            references.append(
-                VideoGenerationReference(**{**mention.model_dump(), "order": len(references) + 1})
-            )
-            keys.add((mention.reference_kind, mention.reference_id))
-        source = source_for[mention.reference_kind]
-        if source not in sources:
-            sources.append(source)
     return VideoGenerationInputPlan(
+        input_policy=VIDEO_INPUT_POLICY,
         sources=sources,
         references=references,
     )

@@ -4,8 +4,6 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { VideoGroupsPanel } from './video-groups/VideoGroupsPanel.jsx';
 import { groupShotLabel } from './video-groups/group-references.js';
 import { GlobalPromptEditor, PromptPreview } from "./prompt-context/GlobalPromptEditor.jsx";
-import { ShotStyleControl } from "./visual-styles/ProductionStyleControl.jsx";
-import { stylePrompt, styleReferenceCount } from "./visual-styles/visual-style.js";
 import { globalPromptWasEdited } from "./prompt-context/input-freshness.js";
 import { PromptSectionHeader } from "./prompt-context/PromptSectionHeader.jsx";
 import {
@@ -49,6 +47,9 @@ import {
   requiredSourceForVideoMention,
   videoMentionToken,
   videoReferenceStableKey,
+  unconfirmedVideoReferences,
+  normalizeVideoGenerationReferences,
+  removeVideoMentionFromPrompt,
 } from "./video-inputs/video-prompt-references.js";
 import "./managed-assets/managed-assets.css";
 import "./video-controls/depth-control.css";
@@ -509,6 +510,8 @@ export function ShotVideoWorkspace({
   const usesDepthControl = selectedInputSources.has("depth_control");
   const selectedVideoReferences = videoDraft.selectedReferences || [];
   const explicitVideoMentions = videoDraft.videoPromptMentions || [];
+  const pendingVideoReferences = unconfirmedVideoReferences(videoDraft.videoPrompt, explicitVideoMentions,
+    selectedVideoReferences, globalPrompts.common_video_prompt, globalPrompts.common_video_mentions);
   const capacityReferenceKinds = new Set([
     "approved_image",
     "project_asset",
@@ -688,6 +691,7 @@ export function ShotVideoWorkspace({
     }
   }
   const mentionBlockedReason = (() => {
+    if (pendingVideoReferences.length) return '有旧资产标签尚未确认用于视频，请先核对额外引用';
     for (const mention of explicitVideoMentions) {
       const token = videoMentionToken(mention);
       const requiredSource = requiredSourceForVideoMention(mention);
@@ -723,6 +727,8 @@ export function ShotVideoWorkspace({
   })();
   const generationBlockedReason = modelCatalogLoading
     ? "正在读取视频模型目录，请稍候"
+    : shotDetail?.current_global_prompts?.video_input_policy !== 'adopted_images_v1'
+      ? "后端尚未启用独立视频输入，请更新并重启本地服务后刷新"
     : modelCatalogFailed
       ? "视频模型目录读取失败，请重新加载"
     : !isSkill && videoDraft.intent?.status === "stale"
@@ -1215,9 +1221,7 @@ export function ShotVideoWorkspace({
               <PromptSectionHeader as="summary" title="局部视频提示词" hint={`${videoDraft.videoPrompt.length} 字`} state={draftSaveState} onRetry={() => Promise.resolve(flushVideoDraft?.(plan.id)).catch(() => undefined)} />
               <div className="shot-video-config-disclosure-body">
                 <VideoPromptReferenceEditor
-                  referenceLimit={selectedModel?.capabilities?.maximum_reference_images == null ? undefined : Math.max(0, selectedModel.capabilities.maximum_reference_images - styleReferenceCount(globalPrompts, plan.id, 'video'))}
-                  inheritedMentions={globalPrompts.common_video_mentions || []}
-                  styleControl={<ShotStyleControl context={globalPrompts} shotKey={plan.id} editorRef={globalPromptRef} request={request} disabled={busy} part="video" />}
+                  referenceLimit={selectedModel?.capabilities?.maximum_reference_images}
                   assets={assets}
                   disabled={busy}
                   onAddAssets={onAddAssets}
@@ -1234,6 +1238,21 @@ export function ShotVideoWorkspace({
                   videoPromptMentions={videoDraft.videoPromptMentions || []}
                   videoReferenceBindings={plan?.video_reference_bindings || []}
                 />
+                {pendingVideoReferences.length > 0 && <section role="status" aria-label="核对视频额外参考">
+                  <p>旧资产标签尚未加入本次视频。已采用图片已包含原外观；如仍需额外约束，请逐项确认。</p>
+                  {pendingVideoReferences.map(reference => <div key={`${reference.reference_kind}:${reference.reference_id}`}>
+                    <span>@{reference.label}</span>
+                    <Button variant="text" size="compact" disabled={busy} onClick={() => setVideoDraft(current => reconcileVideoDraftReferences(current, {
+                      selectedReferences: normalizeVideoGenerationReferences([...current.selectedReferences, reference]),
+                      addedReferences: [reference],
+                    }, referenceFrames))}>用于本次视频</Button>
+                    {videoDraft.videoPrompt.includes(videoMentionToken(reference)) && <Button variant="text" size="compact" disabled={busy} onClick={() => setVideoDraft(current => reconcileVideoDraftReferences(current, {
+                      videoPrompt: removeVideoMentionFromPrompt(current.videoPrompt, reference),
+                      videoPromptMentions: current.videoPromptMentions.filter(item => item.reference_id !== reference.reference_id || item.reference_kind !== reference.reference_kind),
+                    }, referenceFrames))}>移除局部标签</Button>}
+                  </div>)}
+                  <p>也可编辑正文，将标签改为对应分镜图；全局标签在下方全局视频提示词中修改。</p>
+                </section>}
                 {(videoDraft.autoReferenceExclusions || []).length > 0 && <Button className="text-button" type="button" disabled={busy} onClick={() => setVideoDraft((current) => (
                   reconcileVideoDraftReferences(current, { restoreAutomaticReferences: true }, referenceFrames)
                 ))}>恢复默认分镜图引用</Button>}
@@ -1242,10 +1261,10 @@ export function ShotVideoWorkspace({
                   prompt={videoDraft.videoPrompt}
                   references={videoDraft.selectedReferences || []}
                 />
-                <PromptPreview common={globalPrompts.common_video_prompt} local={videoDraft.videoPrompt} style={stylePrompt(globalPrompts, plan.id, "video")} label="视频提示词" />
+                <PromptPreview common={globalPrompts.common_video_prompt} local={videoDraft.videoPrompt} label="视频提示词" />
               </div>
             </details>
-            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" shotKey={plan.id} hideShotStyle request={request} onChange={setGlobalPrompts} disabled={busy} assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
+            <GlobalPromptEditor ref={globalPromptRef} key={project.id} path={`/productions/${project.id}/prompt-context`} part="video" shotKey={plan.id} hideShotStyle hideVisualStyle request={request} onChange={setGlobalPrompts} disabled={busy} assets={assets} onAddAssets={onAddAssets} resolveUrl={resolveUrl} />
             {generationGroup ? <p role="status">此分镜已加入生成组，保存后可点击“返回生成组”统一生成并核对切点。</p> : <ShotVideoGenerationControls
               activeRun={activeRun}
               allReferencesApproved={!generationBlockedReason}

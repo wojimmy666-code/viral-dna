@@ -21,7 +21,7 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
     let state={expected_revision_id:'r1',groups:[]},runs=[];
     window.calls=[]; window.stale=false; window.groupError=false; window.failSave=false; window.unknownCost=false;
     const noop=()=>{};
-    function project(group){if(window.groupError)return {...group,runs,stale_run_ids:runs.map(r=>r.id),error:'分镜 2 尚未采用参考图片，请恢复图片后重试'};const members=shots.filter(s=>group.shot_plan_ids.includes(s.id));return {...group,input_fingerprint:JSON.stringify([group.video_prompt,group.shot_plan_ids]),anchor_shot_id:members[0].id,shots:members,images:members.map((s,i)=>({id:s.visual_beats[0].approved_image_candidate_id,index:i+1,url:image})),target_duration_seconds:members.length,input_plan:{sources:['approved_images'],references:members.map((s,i)=>({reference_kind:'approved_image',reference_id:s.visual_beats[0].approved_image_candidate_id,label:'图'+(i+1),order:i+1,role:'composition'}))},compiled_prompt:(group.video_prompt||'')+'\n'+members.map((s,i)=>'成片分镜 '+s.index+'：参考图'+(i+1)+'。'+['巴黎铁塔前向左行走。','纽约自由女神像前继续向左行走。','伦敦大本钟前向左行走。','悉尼歌剧院前继续行走。','埃及金字塔前向左行走。'][s.index-1]).join('\n'),runs,stale_run_ids:window.stale?runs.map(r=>r.id):[],error:null};}
+    function project(group){const members=shots.filter(s=>group.shot_plan_ids.includes(s.id));const adopted=window.groupError?members.filter(s=>s.id!=='s1'):members;return {...group,input_fingerprint:JSON.stringify([group.video_prompt,group.shot_plan_ids]),anchor_shot_id:members[0].id,shots:members,images:adopted.map((s,i)=>({id:s.visual_beats[0].approved_image_candidate_id,index:i+1,url:image})),target_duration_seconds:members.length,input_plan:{input_policy:'adopted_images_v1',sources:['approved_images'],references:adopted.map((s,i)=>({reference_kind:'approved_image',reference_id:s.visual_beats[0].approved_image_candidate_id,label:'图'+(i+1),order:i+1,role:'composition'}))},compiled_prompt:(group.video_prompt||'')+'\n'+members.map((s,i)=>'成片分镜 '+s.index+'：参考图'+(i+1)+'。'+['巴黎铁塔前向左行走。','纽约自由女神像前继续向左行走。','伦敦大本钟前向左行走。','悉尼歌剧院前继续行走。','埃及金字塔前向左行走。'][s.index-1]).join('\n'),runs,stale_run_ids:window.stale||window.groupError?runs.map(r=>r.id):[],error:window.groupError?'分镜 2 尚未采用参考图片，请恢复图片后重试':null};}
     const request=async(path,options={})=>{
       const body=options.body&&JSON.parse(options.body);window.calls.push({path,method:options.method||'GET',body});
       if(path.endsWith('/video-groups')){if(options.method==='PUT'){if(window.failSave)throw new Error('模拟保存失败');state={expected_revision_id:'r'+window.calls.length,groups:body.groups};}return {...state,groups:state.groups.map(project)};}
@@ -54,6 +54,8 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   let browser;
+  const artifactRoot = new URL(`../../../output/playwright/video-image-inputs-${Date.now()}/`, import.meta.url);
+  const capture = async name => { const path = fileURLToPath(new URL(name, artifactRoot)); await browser.screenshot(path, true); console.info('Screenshot:', path); };
   try {
     browser = await localBrowser();
     const errors = [];
@@ -71,10 +73,11 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
     assert.equal(await browser.evaluate("window.calls.filter(c=>c.method!=='GET').length"),0);
     await browser.evaluate("document.querySelector('details').open=true;[...document.querySelectorAll('.video-group-choices input')].forEach(i=>i.click())");
     await browser.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='合并选中分镜').click()");
-    await browser.ready("document.querySelectorAll('.video-group .asset-reference-thumbnail').length===5 && document.querySelector('.style-selected')");
+    await browser.ready("document.querySelectorAll('.video-group .asset-reference-thumbnail').length===5");
     assert.deepEqual(await browser.evaluate("[...document.querySelectorAll('.video-group .asset-reference-thumbnail > span')].map(el=>el.textContent)"),['1','2','3','4','5']);
     assert.equal(await browser.evaluate("document.querySelectorAll('.asset-reference-pinned-tokens .asset-reference-token').length"),5);
-    assert.equal(await browser.evaluate("document.querySelector('.video-group .asset-reference-rail').firstElementChild.className"),'style-selected');
+    assert.equal(await browser.evaluate("document.querySelectorAll('.video-group .style-selected').length"),0);
+    assert.equal(await browser.evaluate("document.body.textContent.includes('5 张分镜图 · 0 项附加参考 → 1 段视频')"),true);
     assert.equal(await browser.evaluate("document.querySelector('.video-group-script').textContent.includes('成片分镜 5')"),true);
     await browser.evaluate("window.failSave=true;const input=document.querySelector('[aria-label=\"本组补充要求\"]');input.focus();input.textContent='人物保持同一方向，背景按图切换';input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText'}))");
     await browser.ready("document.body.textContent.includes('模拟保存失败')");
@@ -106,10 +109,10 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
     await browser.evaluate("window.capacity(5)");
     await browser.ready("![...document.querySelectorAll('button')].find(b=>b.textContent==='生成 1 段视频').disabled");
     assert.equal(await browser.evaluate("window.calls.filter(c=>c.path.endsWith('/video-runs')).length"),0);
-    await browser.screenshot(fileURLToPath(new URL("../../../.impeccable/review/video-groups-unified/desktop.png", import.meta.url)), true);
+    await capture('desktop.png');
     await browser.viewport(390,844);
     assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),true);
-    await browser.screenshot(fileURLToPath(new URL("../../../.impeccable/review/video-groups-unified/mobile.png", import.meta.url)), true);
+    await capture('mobile.png');
     await browser.viewport(768);
     assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),true);
     await browser.evaluate("window.unknownCost=true;[...document.querySelectorAll('button')].find(b=>b.textContent==='生成 1 段视频').click()");
@@ -143,27 +146,30 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
     await browser.viewport(1440);
     await browser.evaluate("scrollTo(0,0)");
     await browser.ready("document.querySelector('video').readyState>=2");
-    await browser.screenshot(fileURLToPath(new URL("../../../.impeccable/review/video-groups-unified/review-desktop.png", import.meta.url)), true);
+    await capture('review-desktop.png');
     await browser.viewport(390,844);
     await browser.evaluate("scrollTo(0,0)");
     assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),true);
-    await browser.screenshot(fileURLToPath(new URL("../../../.impeccable/review/video-groups-unified/review-mobile.png", import.meta.url)), true);
+    await capture('review-mobile.png');
     await browser.evaluate("window.stale=true;[...document.querySelectorAll('button')].find(b=>b.textContent==='采用这些片段').click()");
     await browser.ready("document.body.textContent.includes('历史结果仅供查看')");
     assert.equal(await browser.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='采用这些片段').disabled"),true);
     await browser.evaluate("window.failInputs()");
     await browser.ready("document.body.textContent.includes('尚未采用参考图片') && document.body.textContent.includes('取消任务')");
+    assert.equal(await browser.evaluate("document.querySelectorAll('.video-group .asset-reference-thumbnail').length"),4);
+    assert.equal(await browser.evaluate("Boolean(document.querySelector('[aria-label=\"本组补充要求\"]'))"),true);
+    assert.equal(await browser.evaluate("document.body.textContent.includes('4 张分镜图 · 0 项附加参考 → 1 段视频')"),true);
     assert.equal(await browser.evaluate("document.querySelectorAll('video[aria-label=\"生成组历史视频（只读）\"]').length"),1);
     assert.equal(await browser.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent==='采用这些片段')"),false);
     assert.equal(await browser.evaluate("document.body.textContent.includes('已记录费用 ¥0.1250')"),true);
     await browser.viewport(1440);
     await browser.evaluate("scrollTo(0,0);document.querySelector('video').parentElement.parentElement.open=true");
     await browser.ready("document.querySelector('video').readyState>=2");
-    await browser.screenshot(fileURLToPath(new URL("../../../.impeccable/review/video-groups-unified/error-desktop.png", import.meta.url)), true);
+    await capture('error-desktop.png');
     await browser.viewport(390,844);
     await browser.evaluate("scrollTo(0,0)");
     assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),true);
-    await browser.screenshot(fileURLToPath(new URL("../../../.impeccable/review/video-groups-unified/error-mobile.png", import.meta.url)), true);
+    await capture('error-mobile.png');
     await browser.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='取消任务').click()");
     await browser.ready("!document.body.textContent.includes('取消任务')");
     assert.equal(await browser.evaluate("window.calls.filter(c=>c.path.endsWith('/cancel')).length"),1);

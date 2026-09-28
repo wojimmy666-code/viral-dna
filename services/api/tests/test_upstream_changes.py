@@ -107,7 +107,8 @@ async def test_edit_keeps_adoptions_and_gate_open_without_confirmation(
     assert updated.plan.video_status == "approved"
     assert updated.plan.approved_image_candidate_id == image.id
     assert updated.plan.approved_video_candidate_id == video.id
-    assert updated.plan.image_inputs_changed and updated.plan.video_inputs_changed
+    assert updated.plan.image_inputs_changed
+    assert not updated.plan.video_inputs_changed
     gate = await env.service.gate_status(env.project.id)
     assert gate.allowed and not gate.blocker_messages
     assert gate.stale_shot_count == 1

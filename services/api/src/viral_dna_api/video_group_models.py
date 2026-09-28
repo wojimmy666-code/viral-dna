@@ -10,7 +10,7 @@ class GroupAssetMention(BaseModel):
     reference_kind: Literal["project_asset"] = "project_asset"
     reference_id: UUID
     label: str = Field(min_length=1, max_length=260)
-    role: Literal["actor_identity", "composition", "scene", "product", "wardrobe", "style"] = "composition"
+    role: Literal["actor_identity", "composition", "scene", "product", "wardrobe", "style", "spatial"] = "composition"
     order: int = Field(default=1, ge=1, le=100)
 
 

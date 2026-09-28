@@ -33,12 +33,34 @@ import {
   synchronizeAutomaticVideoPrompt,
   videoMentionToken,
   videoReferenceConflictPriority,
+  unconfirmedVideoReferences,
 } from "../src/video-inputs/video-prompt-references.js";
 
 const workspaceSource = readFileSync(
   new URL("../src/ShotVideoWorkspace.jsx", import.meta.url),
   "utf8",
 );
+
+test('legacy video tags stay editable but never silently become generation inputs', () => {
+  const mention = { reference_kind: 'project_asset', reference_id: 'asset1', label: '资产/人物', role: 'actor_identity', order: 1 };
+  const detail = { plan: { duration_seconds: 3, video_prompt: '@资产/人物 向左行走', video_prompt_mentions: [mention],
+    visual_beats: [{ id: 'beat1', index: 1, start_ratio: 0, end_ratio: 1, approved_image_candidate_id: 'image1' }] },
+    generation_runs: [{ kind: 'image', visual_beat_id: 'beat1', candidates: [{ id: 'image1' }] }] };
+  const persisted = { schema_version: 'viral-dna-shot-video-draft/v2', video_prompt: detail.plan.video_prompt,
+    video_prompt_mentions: [mention], input_plan: { sources: ['approved_images', 'project_assets'], references: [mention] } };
+  const draft = videoDraftFromDetail(detail, {}, persisted);
+  assert.match(draft.videoPrompt, /@资产\/人物 向左行走/);
+  assert.deepEqual(draft.selectedReferences.map(ref => ref.reference_id), ['image1']);
+  assert.deepEqual(draft.inputSources, ['approved_images']);
+  assert.equal(unconfirmedVideoReferences(draft.videoPrompt, draft.videoPromptMentions, draft.selectedReferences).length, 1);
+  const saved = videoDraftParameters(draft);
+  const restored = videoDraftFromDetail(detail, {}, { ...persisted, ...saved });
+  assert.equal(unconfirmedVideoReferences(restored.videoPrompt, restored.videoPromptMentions, restored.selectedReferences).length, 1);
+  const confirmed = videoDraftFromDetail(detail, {}, { ...persisted, input_plan: { ...persisted.input_plan, input_policy: 'adopted_images_v1' } });
+  assert.equal(confirmed.selectedReferences.length, 2);
+  assert.equal(unconfirmedVideoReferences(confirmed.videoPrompt, confirmed.videoPromptMentions, confirmed.selectedReferences).length, 0);
+  assert.doesNotMatch(workspaceSource, /ShotStyleControl|styleReferenceCount/);
+});
 test("video workspace hides Skill intent, uses explicit selection and one asset editor", () => {
   assert.match(workspaceSource, /project\?\.origin_type === "skill_run"/);
   assert.match(workspaceSource, /!isSkill && <CreativeIntentPanel/);
@@ -386,6 +408,7 @@ test("persists each shot video model instead of reapplying the global default", 
     audio_strategy: "generate_native",
     input_plan: {
       schema_version: "viral-dna-video-input-plan/v1",
+      input_policy: "adopted_images_v1",
       sources: [],
       references: [],
     },

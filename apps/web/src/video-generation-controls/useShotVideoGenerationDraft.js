@@ -65,6 +65,7 @@ export function videoDraftParameters(draft) {
     audio_strategy: draft?.audioStrategy || "reuse_source",
     input_plan: {
       schema_version: "viral-dna-video-input-plan/v1",
+      input_policy: "adopted_images_v1",
       sources: Array.from(new Set(draft?.inputSources || [])),
       references: normalizeVideoGenerationReferences(draft?.selectedReferences || []),
     },
@@ -184,7 +185,8 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
     persistedDraft?.reference_order_override || []
   ).map(String);
   const selectedReferences = synchronizeAutomaticVideoReferences({
-    selectedReferences: baseReferences,
+    selectedReferences: persistedDraft?.input_plan?.input_policy === "adopted_images_v1"
+      ? baseReferences : baseReferences.filter(item => item.reference_kind === "approved_image"),
     referenceFrames,
     excludedVisualBeatIds: autoReferenceExclusions,
     orderOverride: referenceOrderOverride,
@@ -197,6 +199,7 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
     prompt: videoPrompt,
     mentions: legacyMentions,
     selectedReferences,
+    preserveUnselectedMentions: true,
   });
   const inferredSources = selectedReferences
     .map(requiredSourceForVideoMention)
@@ -224,10 +227,7 @@ export function videoDraftFromDetail(detail, settings, persistedDraft = null) {
       || settings?.default_resolution
       || "720P"
     ).toUpperCase(),
-    inputSources: Array.from(new Set([
-      ...(persistedDraft?.input_plan?.sources || []),
-      ...inferredSources,
-    ])),
+    inputSources: Array.from(new Set(inferredSources)),
     referenceSyncMode: persistedDraft?.reference_sync_mode || "auto",
     autoReferenceExclusions,
     referenceOrderOverride: effectiveReferenceOrderOverride,

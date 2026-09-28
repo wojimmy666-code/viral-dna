@@ -34,7 +34,7 @@ export function productionPromptsToText(document) {
     });
     if (!shot.video_group_id) {
       lines.push("视频提示词", shot.video_prompt);
-      const videoStyle = (shot.visual_style_snapshot ?? document.visual_style_snapshot)?.video_prompt;
+      const videoStyle = document.video_input_policy === 'adopted_images_v1' ? '' : (shot.visual_style_snapshot ?? document.visual_style_snapshot)?.video_prompt;
       if (videoStyle) lines.push(videoStyle);
       if (shot.video_negative_constraints.length) lines.push("视频负面约束：" + shot.video_negative_constraints.join("；"));
     } else lines.push("视频按生成组执行，见下方合并提示词");

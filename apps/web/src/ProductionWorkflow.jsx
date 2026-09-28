@@ -3033,6 +3033,7 @@ export function ProductionHub({
             input_mode: videoInputModeFromDraft(videoDraft),
             input_plan: {
               schema_version: "viral-dna-video-input-plan/v1",
+              input_policy: "adopted_images_v1",
               sources: Array.from(new Set(videoDraft.inputSources || [])),
               references: videoDraft.selectedReferences || [],
             },

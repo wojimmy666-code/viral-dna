@@ -385,6 +385,9 @@ class VideoGenerationReference(BaseModel):
 
 class VideoGenerationInputPlan(BaseModel):
     schema_version: Literal["viral-dna-video-input-plan/v1"] = "viral-dna-video-input-plan/v1"
+    # None identifies historical requests. New submissions never inherit the
+    # assets or visual style used to produce an already adopted image.
+    input_policy: Literal["adopted_images_v1"] | None = None
     sources: list[VideoGenerationInputSource] = Field(default_factory=list, max_length=5)
     references: list[VideoGenerationReference] = Field(default_factory=list, max_length=100)
 

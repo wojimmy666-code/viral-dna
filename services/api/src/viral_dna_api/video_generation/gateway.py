@@ -660,6 +660,11 @@ class VideoGenerationGateway:
             )
         from ..style_reference import image_style_reference
         from fastapi import HTTPException
+        if input_plan.input_policy == "adopted_images_v1":
+            if visual_style_snapshot:
+                raise VideoGenerationGatewayError(422, "video_inherited_style_forbidden", "视频不能隐式继承生图风格；请显式添加视频参考")
+            from .input_policy import selected_video_plan
+            shot = selected_video_plan(shot, input_plan)
         try:
             style_reference = image_style_reference(self.workspace, visual_style_snapshot, "video")
         except HTTPException as exc:
