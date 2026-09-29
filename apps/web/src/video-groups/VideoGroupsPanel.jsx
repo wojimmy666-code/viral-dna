@@ -8,6 +8,7 @@ import { promptAssetReference, promptMentionData } from '../prompt-references/pr
 import { GlobalPromptEditor } from '../prompt-context/GlobalPromptEditor.jsx';
 import { PromptSectionHeader } from '../prompt-context/PromptSectionHeader.jsx';
 import { adjacentSelection, groupReferences, groupShotLabel } from './group-references.js';
+import { VideoGenerationFailure } from '../video-generation-controls/VideoGenerationFailure.jsx';
 
 const ACTIVE = new Set(["queued", "running", "cancellation_requested"]);
 const json = body => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
@@ -187,8 +188,9 @@ function GroupEditor({ group, ordinal, models, revision, projectId, request, res
     {running && <p role="status">{running.status === "queued" ? "排队中" : "生成中"}，完成后需要核对场景与切点。<Button type="button" variant="warning" size="compact" disabled={pending || disabled || running.status === "cancellation_requested"} onClick={cancel}>{running.status === "cancellation_requested" ? "正在停止…" : "取消任务"}</Button></p>}
     {group.runs?.filter(run => !ACTIVE.has(run.status)).map((run, index) => <details key={run.id} open={index === 0}>
       <summary>{run.status === "failed" ? "生成失败" : run.status === "cancelled" ? "已取消" : "生成结果"} · {new Date(run.created_at).toLocaleString("zh-CN")}</summary>
-      <p>{run.actual_cost_known ? `已记录费用 ¥${(Number(run.actual_cost_micros || 0) / 1000000).toFixed(4)}` : "实际费用待回传"}</p>
-      {run.error_message && <p role="alert">{run.error_message}</p>}
+      {["failed", "blocked"].includes(run.status)
+        ? <VideoGenerationFailure run={run} />
+        : <p>{run.actual_cost_known ? `已记录费用 ¥${(Number(run.actual_cost_micros || 0) / 1000000).toFixed(4)}` : "实际费用待回传"}</p>}
       {(group.error || group.stale_run_ids?.includes(run.id)) && <p className="video-group-error">输入已变化，此历史结果仅供查看，不能按当前分组直接采用。</p>}
       {run.candidates?.filter(candidate => ["ready", "selected"].includes(candidate.status)).map(candidate => group.error
         ? <div className="video-group-review" key={candidate.id}><video controls preload="metadata" src={resolveUrl(candidate.content_url)} aria-label="生成组历史视频（只读）" /></div>

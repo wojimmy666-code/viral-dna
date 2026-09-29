@@ -35,6 +35,10 @@
 
 ## 回归入口
 
+2026-09-29 Seedance 输入与失败信息修复：发现旧 `seedance_managed_actor_depth_guidance` 路径在普通已采用图片输入时仍要求托管演员，提交前触发 `video_managed_identity_required`，且未知错误被错误解释为 Provider 生成失败。新增 `adopted_images_route`，仅对 `adopted_images_v1` 选择图片路径；保留旧冻结请求、人像授权与明确真人输入限制，禁止静默删除或重排采用图。参考 [火山方舟创建视频任务接口](https://docs.volcengine.com/docs/ark/create-video-generation-task-api?lang=zh&redirect=1)：支持多图参考不等于允许任意真人人脸输入，AI 生成人像亦可能被 Provider 拒绝。
+
+新增 `test_seedance_image_inputs.py` 通过真实 Gateway → Planner → Orchestrator → Seedance mapper/client 及隔离 HTTP transport 验证标准版、Fast 的五图请求，分别模拟提交拒绝和已受理后失败；另覆盖 Mini 单／多图、显式演员、容量、已标记真人限制及网络异常原始原因。`test_video_failure_details.py` 覆盖旧错误只读投影、系统／Provider／通信／结果处理归因及未知状态，不修改历史账本。单镜和组共用明确错误组件，提供原始错误详情，未提交任务不再显示“费用待回传”。本轮相关后端 112 项、前端完整测试、隔离浏览器验收及构建通过；浏览器覆盖 1440/390 宽的三种失败来源和五张参考保留。本轮没有真实模型调用、付费重试或生产部署。
+
 2026-09-28 视频输入解耦：默认仅已采用分镜图和视频动作／运镜／转场提示；附加引用需在视频阶段明确确认。后端 219 项相关回归通过，覆盖普通／Skill 项目五图组合、混合旧风格、旧标签确认、缺图可修复状态、图片上游编辑不误标视频输入、历史重试冻结内容、生产接口、队列、供应商模拟及时间线。`test:web`、`test:video-groups-browser`、`check:design`、`check:docs` 和 `build:web` 均通过；浏览器为隔离模拟数据，没有真实模型调用。构建仍有既有大包提示。
 
 后端：`test_video_groups.py`、`test_prompt_documents.py`、`test_creative_brief.py`、`test_creative_responses.py`、`test_creative_recovery.py`，并联查生产 API、时间线、视频输入及旧队列测试。

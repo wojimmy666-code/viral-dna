@@ -311,8 +311,8 @@ const VIDEO_FAILURE_PRESENTATIONS = Object.freeze({
   video_provider_task_timeout: {
     category: "timeout",
     title: "等待视频生成结果超时",
-    message: "上游任务可能仍在运行。稍后重试查询不会重新提交，也不会重复计费。",
-    action: "retry",
+    message: "尚未确认 Provider 的最终状态。请先查询已有任务或核对 Provider 控制台；不要直接重新生成，以免重复提交。",
+    action: "inspect_details",
     retryable: true,
   },
   video_provider_content_rejected: {
@@ -326,6 +326,9 @@ const VIDEO_FAILURE_PRESENTATIONS = Object.freeze({
 
 function legacyVideoFailureCode(run, task) {
   const code = String(run?.error_code || task?.error_code || "");
+  // Structured server diagnostics are authoritative; do not reinterpret local
+  // errors as provider failures by searching words in their explanations.
+  if (run?.error_origin) return code;
   const message = String(
     run?.error_technical_message
     || task?.error_technical_message
@@ -361,7 +364,7 @@ export function videoGenerationFailureDetails(run) {
   const fallback = VIDEO_FAILURE_PRESENTATIONS[code] || {
     category: "unknown",
     title: "视频生成未完成",
-    message: "Provider 没有完成本次生成。请查看技术详情，调整设置后再试。",
+    message: "未获得具体失败原因，请查看技术详情及任务编号；目前不能确认故障来源。",
     action: "inspect_details",
     retryable: false,
   };
@@ -370,6 +373,10 @@ export function videoGenerationFailureDetails(run) {
   const title = category === "inference_limit"
     ? `${modelLabel} 已暂停生成`
     : run.error_title || task?.error_title || fallback.title;
+  const providerRequestId = run.provider_request_id || task?.provider_task_id || "";
+  const origin = run.error_origin || (providerRequestId ? "provider" : "unknown");
+  const stage = run.error_stage || (providerRequestId ? "generation" : "unknown");
+  const submissionState = run.provider_submission_state || (providerRequestId ? "submitted" : "unknown");
   return {
     code,
     category,
@@ -387,7 +394,12 @@ export function videoGenerationFailureDetails(run) {
       || task?.provider_error_code
       || (String(task?.error_code || "").startsWith("video_") ? "" : task?.error_code)
       || "",
-    providerRequestId: run.provider_request_id || task?.provider_task_id || "",
+    providerRequestId,
+    origin,
+    stage,
+    submissionState,
+    originLabel: ({ system: "系统", provider: "Provider", transport: "网络通信", unknown: "尚未确认" })[origin] || "尚未确认",
+    stageLabel: ({ input_validation: "提交前校验", submission: "提交请求", generation: "Provider 生成", result_query: "查询结果", result_handling: "结果下载或处理", unknown: "尚未确认" })[stage] || "尚未确认",
     provider: run.provider || task?.provider || "",
     modelLabel,
     technicalMessage: run.error_technical_message || task?.error_technical_message || "",
@@ -399,6 +411,9 @@ export function videoGenerationDiagnosticText(details) {
   if (!details) return "";
   return [
     `错误：${details.title}`,
+    `来源：${details.originLabel}`,
+    `发生阶段：${details.stageLabel}`,
+    `提交状态：${details.submissionState}`,
     `错误码：${details.code}`,
     details.providerCode ? `Provider 错误码：${details.providerCode}` : "",
     details.provider ? `Provider：${details.provider}` : "",

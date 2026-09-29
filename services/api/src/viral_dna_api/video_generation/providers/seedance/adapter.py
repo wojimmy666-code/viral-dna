@@ -72,7 +72,8 @@ class SeedanceVideoProvider:
                 response = await client.create_task(payload)
         except httpx.HTTPError as exc:
             raise VideoProviderError(
-                503, "video_provider_unavailable", "无法连接火山方舟视频服务", retryable=True
+                503, "video_provider_unavailable",
+                f"提交火山方舟视频请求时通信失败（{type(exc).__name__}）：{exc}", retryable=True,
             ) from exc
         body = _json(response)
         task_id = str(body.get("id") or body.get("task_id") or "").strip()
@@ -93,7 +94,8 @@ class SeedanceVideoProvider:
                 response = await client.get_task(task_id)
         except httpx.HTTPError as exc:
             raise VideoProviderError(
-                503, "video_provider_unavailable", "无法查询火山方舟视频任务", retryable=True
+                503, "video_provider_unavailable",
+                f"查询火山方舟视频任务时通信失败（{type(exc).__name__}）：{exc}", retryable=True,
             ) from exc
         body = _json(response)
         if response.is_error:

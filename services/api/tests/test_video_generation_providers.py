@@ -1271,6 +1271,7 @@ def test_seedance_real_person_rejection_points_to_managed_identity_strategy() ->
 
     assert failure.code == "video_provider_content_rejected"
     assert failure.category == "person_reference_policy"
-    assert failure.title == "检测到未托管真人参考"
+    assert failure.title == "Provider 人像审核未通过"
     assert failure.suggested_action == "review_person_references"
-    assert "全场景深度" in failure.message
+    assert "AI 生成的人像也可能触发" in failure.message
+    assert "继续提交被拒绝的原图不能解决" in failure.message

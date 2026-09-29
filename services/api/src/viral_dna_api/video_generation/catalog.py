@@ -108,6 +108,7 @@ def _capability(
     managed_assets: bool = False,
     person_policy: PersonReferencePolicy = PersonReferencePolicy.RAW_SUPPORTED,
     reference_route: VideoReferenceRouteCapability | None = None,
+    adopted_images_route: VideoReferenceRouteCapability | None = None,
     text_to_video: bool = False,
     reference_video: bool = False,
     native_audio: bool = False,
@@ -192,6 +193,7 @@ def _capability(
             ],
         ),
         reference_route=resolved_route,
+        adopted_images_route=adopted_images_route,
     )
 
 
@@ -214,6 +216,21 @@ SEEDANCE_MANAGED_ROUTE = VideoReferenceRouteCapability(
     requires_depth_control_video=True,
     show_depth_control_controls=True,
     requires_public_media_url=True,
+)
+
+# Ordinary image references use the multimodal API, not the legacy actor-only
+# recipe. This does NOT grant permission to upload real human faces: the
+# provider's portrait provenance/authorization checks still apply.
+SEEDANCE_IMAGE_ROUTE = VideoReferenceRouteCapability(
+    label="分镜图片参考",
+    identity_transport=IdentityReferenceTransport.REFERENCE_IMAGE,
+    accepts_raw_person_images=False,
+    spatial_control_transport=SpatialControlTransport.REFERENCE_VIDEO,
+    spatial_control_semantics=SpatialControlSemantics.GUIDED_DEPTH_REFERENCE,
+    supports_depth_control_video=True,
+    show_depth_control_controls=True,
+    requires_public_media_url=True,
+    availability_note="Seedance 支持多图参考；含人脸的图片仍须满足 Provider 的素材来源和授权要求，AI 生图也可能被其人像审核拒绝。",
 )
 
 MINIMAX_H3_ROUTE = VideoReferenceRouteCapability(
@@ -362,6 +379,7 @@ _MODELS = (
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             reference_route=SEEDANCE_MANAGED_ROUTE,
+            adopted_images_route=SEEDANCE_IMAGE_ROUTE,
             text_to_video=True,
             native_audio=True,
         ),
@@ -388,6 +406,7 @@ _MODELS = (
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             reference_route=SEEDANCE_MANAGED_ROUTE,
+            adopted_images_route=SEEDANCE_IMAGE_ROUTE,
             text_to_video=True,
             native_audio=True,
         ),
@@ -414,6 +433,7 @@ _MODELS = (
             managed_assets=True,
             person_policy=PersonReferencePolicy.MANAGED_REQUIRED,
             reference_route=SEEDANCE_MANAGED_ROUTE,
+            adopted_images_route=SEEDANCE_IMAGE_ROUTE,
             text_to_video=True,
         ),
         pricing={

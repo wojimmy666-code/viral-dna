@@ -770,10 +770,18 @@ class VideoGenerationGateway:
                     else self.public_media_stager.ready
                 ),
                 depth_optional=True,
+                input_policy=input_plan.input_policy,
             )
         except VideoReferencePolicyError as exc:
             raise VideoGenerationGatewayError(422, exc.code, str(exc)) from exc
         ordered_frames = reference_plan.reference_frames
+        if input_plan.input_policy == "adopted_images_v1" and [
+            item.candidate_id for item in ordered_frames
+        ] != [item.candidate_id for item in source_ordered_frames]:
+            raise VideoGenerationGatewayError(
+                422, "video_reference_selection_changed",
+                "当前模型的参考路径无法完整保留所选图片及顺序，请更换模型或明确调整参考；系统不会静默丢弃图片。",
+            )
         selected_ids = {item.candidate_id for item in ordered_frames}
         if any(item.role in {"spatial", "style"} and item.candidate_id not in selected_ids for item in source_ordered_frames):
             raise VideoGenerationGatewayError(422, "video_auxiliary_reference_rejected", "当前视频模型的素材安全规则不允许所选风格或空间参考，请更换模型或明确移除参考；不会静默丢弃")

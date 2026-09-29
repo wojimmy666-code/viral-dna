@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import { VideoGenerationSettingsPopover } from "./video-generation-controls/VideoGenerationSettingsPopover.jsx";
 import { VideoModelPopover } from "./video-generation-controls/VideoModelPopover.jsx";
+import { VideoGenerationFailure } from './video-generation-controls/VideoGenerationFailure.jsx';
 import {
   videoOutputSummary,
   videoModelCatalogUiState,
@@ -248,6 +249,7 @@ export function ShotVideoGenerationControls({
         supportedResolutions={supportedResolutions}
       />
 
+      {!activeRun && <VideoGenerationFailure run={latestRun} />}
       {generationBlockedReason && (
         <div className="production-inline-error shot-video-command-error" role="status">
           <WarningCircle size={17} />

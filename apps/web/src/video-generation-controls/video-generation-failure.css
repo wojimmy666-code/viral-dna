@@ -1,0 +1,13 @@
+.video-generation-failure {
+  min-width: 0;
+  margin-block: var(--space-4);
+  color: var(--text-primary);
+  font-size: var(--type-body-size);
+  line-height: var(--type-leading-copy);
+  overflow-wrap: anywhere;
+}
+.video-generation-failure [role="alert"] { color: var(--status-danger-text); }
+.video-generation-failure p { margin-block: var(--space-2); }
+.video-generation-failure details { margin-top: var(--space-3); }
+.video-generation-failure summary { cursor: pointer; }
+.video-generation-failure pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-caption-size); }

@@ -14,7 +14,7 @@ from ..video_generation.contracts import (
     OrderedReferenceFrame,
     ProviderManagedAssetReference,
 )
-from .domain import PersonReferencePolicy
+from .domain import PersonContentClass, PersonReferencePolicy
 
 
 class VideoReferencePolicyError(RuntimeError):
@@ -133,6 +133,7 @@ def resolve_video_reference_plan(
     depth_control_videos: tuple[DepthControlVideo, ...] = (),
     public_media_transport_ready: bool = False,
     depth_optional: bool = False,
+    input_policy: str | None = None,
 ) -> ResolvedVideoReferencePlan:
     """Compile creative appearance assets and one depth-control video.
 
@@ -140,7 +141,11 @@ def resolve_video_reference_plan(
     identity and appearance are always sourced from explicit creative assets.
     """
 
-    route_capability = capability.reference_route
+    image_first = input_policy == "adopted_images_v1"
+    route_capability = (
+        capability.adopted_images_route or capability.reference_route
+        if image_first else capability.reference_route
+    )
     policy = capability.person_references.policy
     ordered = sorted(reference_frames, key=lambda item: item.ordinal)
     enabled_depth = tuple(depth_control_videos[:1])
@@ -187,11 +192,32 @@ def resolve_video_reference_plan(
         )
 
     warnings = list(route.warnings)
+    if image_first and not route_capability.accepts_raw_person_images:
+        # Check only selected media, never unrelated image-generation assets.
+        selected_ids = {frame.candidate_id for frame in ordered}
+        if any(
+            binding.enabled
+            and (binding.image_candidate_id or binding.reference_asset_id) in selected_ids
+            and binding.person_class == PersonContentClass.REAL_PERSON
+            for binding in shot.video_reference_bindings
+        ):
+            raise VideoReferencePolicyError(
+                "video_real_person_reference_unsupported",
+                "所选参考图已标记为真人素材，Seedance 不支持直接上传此类人脸图片。"
+                "请使用 Provider 已授权的人像素材路径，或更换明确支持该素材的模型。",
+            )
+        warnings.append(route_capability.availability_note or "人像参考须通过 Provider 审核")
     selected: list[OrderedReferenceFrame] = []
     excluded: list[ExcludedVideoReference] = []
     selected_managed: tuple[ProviderManagedAssetReference, ...] = ()
 
-    if route.identity_transport == IdentityReferenceTransport.PROVIDER_MANAGED_ASSET:
+    if image_first and route.identity_transport != IdentityReferenceTransport.PROVIDER_MANAGED_ASSET:
+        # Preserve the visible input list exactly, including explicit optional
+        # references. In particular, never drop/reorder the adopted shot images.
+        selected = ordered
+        selected_managed = managed_asset_references
+        strategy = "adopted_images_with_explicit_references"
+    elif route.identity_transport == IdentityReferenceTransport.PROVIDER_MANAGED_ASSET:
         if len(managed_asset_references) != 1:
             raise VideoReferencePolicyError(
                 "video_managed_identity_count_invalid",

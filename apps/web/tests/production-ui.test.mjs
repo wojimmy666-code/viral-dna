@@ -193,6 +193,33 @@ test("only recommends direct retry for retryable video failures", () => {
   assert.equal(details.action, "retry");
 });
 
+test("structured local failures stay local and expose a specific cause", () => {
+  const details = videoGenerationFailureDetails({
+    status: "failed", model_display_name: "Seedance 2.0",
+    error_code: "video_managed_identity_required", error_category: "validation",
+    error_title: "系统输入校验未通过", error_message: "旧托管演员规则拦截，未绑定演员。",
+    error_origin: "system", error_stage: "input_validation", provider_submission_state: "not_submitted",
+    error_technical_message: "原始校验信息（含 timeout 也不能被改成 Provider 错误）",
+  });
+  assert.equal(details.code, "video_managed_identity_required");
+  assert.equal(details.originLabel, "系统");
+  assert.equal(details.stageLabel, "提交前校验");
+  assert.equal(details.submissionState, "not_submitted");
+  assert.match(details.message, /未绑定演员/);
+  assert.match(videoGenerationDiagnosticText(details), /来源：系统/);
+});
+
+test("transport ambiguity never implies the request was not submitted", () => {
+  const details = videoGenerationFailureDetails({
+    status: "failed", error_code: "video_provider_unavailable",
+    error_origin: "transport", error_stage: "submission", provider_submission_state: "unknown",
+    provider_tasks: [{ status: "unknown", provider_task_id: null }],
+  });
+  assert.equal(details.submissionState, "unknown");
+  assert.equal(details.originLabel, "网络通信");
+  assert.equal(videoGenerationFailureDetails({ status: "completed" }), null);
+});
+
 test("maps supported ratios to their default output dimensions", () => {
   assert.deepEqual(dimensionsForRatio("9:16"), { width: 1080, height: 1920 });
   assert.deepEqual(dimensionsForRatio("16:9"), { width: 1920, height: 1080 });

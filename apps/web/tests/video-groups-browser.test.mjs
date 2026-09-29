@@ -36,6 +36,7 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
     const app=createRoot(document.getElementById('root'));
     function Fixture({revision}){const [shot,setShot]=useState('s0');return <main style={{maxWidth:'1180px',margin:'auto',padding:'16px'}}><h1>分镜视频</h1><p>交互验收 · 模拟分镜与模型，不会产生费用</p><VideoGroupsPanel project={{id:'project',current_revision_id:revision}} shots={shots} settings={{models:[model]}} request={request} resolveUrl={url=>url} onChanged={noop} selectedShotId={shot} onSelectShot={setShot}>{workspace=><section className="shot-video-workspace">{workspace.toolbar}<div className="shot-video-layout"><ShotVideoList shots={shots.map(plan=>({plan}))} selectedShotId={shot} onSelectShot={workspace.onSelectShot} groupWorkspace={workspace} resolveUrl={url=>url} busy={workspace.pending}/><div className="shot-video-editor">{workspace.editor||<p>当前分镜动作编辑 · {shot}</p>}</div></div></section>}</VideoGroupsPanel></main>}
     const render=(revision='r1')=>app.render(<Fixture revision={revision}/>);
+    window.showFailure=origin=>{window.groupError=false;window.stale=false;runs=[{id:'failed-'+origin,status:'failed',created_at:new Date().toISOString(),model_display_name:'Seedance 2.0',provider:'volc_ark',actual_cost_known:false,candidates:[],error_origin:origin,error_stage:origin==='system'?'input_validation':'submission',provider_submission_state:origin==='system'?'not_submitted':origin==='provider'?'rejected':'unknown',error_code:origin==='system'?'video_managed_identity_required':origin==='provider'?'video_provider_content_rejected':'video_provider_unavailable',error_title:origin==='system'?'系统输入校验未通过':origin==='provider'?'Provider 人像审核未通过':'提交状态尚未确认',error_message:origin==='system'?'此任务被本地旧托管演员规则拦截：未绑定当前 Provider 的托管演员。请刷新后从当前图片重新生成。':'请核对 Provider 返回原因或控制台状态，不要直接重复生成。',provider_error_code:origin==='provider'?'InputImageSensitiveContentDetected.PrivacyInformation':null,error_technical_message:'Diagnostic details for the selected generation task.'}];render('failure-'+origin);};
     window.failInputs=()=>{window.groupError=true;runs=[{id:'active1',status:'running',created_at:new Date().toISOString(),candidates:[]},...runs];render('error1');};
     window.capacity=n=>{model.capabilities.maximum_reference_images=n;render('capacity'+n);};
     render();
@@ -173,6 +174,26 @@ test("grouping, unified five-image editor, explicit paid confirmation, reviewed 
     await browser.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='取消任务').click()");
     await browser.ready("!document.body.textContent.includes('取消任务')");
     assert.equal(await browser.evaluate("window.calls.filter(c=>c.path.endsWith('/cancel')).length"),1);
+    await browser.evaluate("window.showFailure('system')");
+    await browser.ready("document.querySelector('.video-generation-failure')?.textContent.includes('系统输入校验未通过')");
+    assert.equal(await browser.evaluate("document.querySelector('.video-generation-failure').textContent.includes('未提交给 Provider')"),true);
+    assert.equal(await browser.evaluate("document.querySelector('.video-generation-failure').textContent.includes('实际费用待回传')"),false);
+    assert.equal(await browser.evaluate("document.querySelectorAll('.video-group .asset-reference-thumbnail').length"),5);
+    await browser.evaluate("document.querySelector('.video-generation-failure details').open=true");
+    for (const width of [1440,390]) {
+      await browser.viewport(width,844);
+      await browser.evaluate("document.querySelector('.video-generation-failure').scrollIntoView({block:'center'})");
+      assert.equal(await browser.evaluate("document.documentElement.scrollWidth<=innerWidth"),true);
+      await capture('generation-failure-'+width+'.png');
+    }
+    await browser.evaluate("window.showFailure('provider')");
+    await browser.ready("document.querySelector('.video-generation-failure')?.textContent.includes('Provider 人像审核未通过')");
+    assert.equal(await browser.evaluate("document.querySelector('.video-generation-failure').textContent.includes('InputImageSensitiveContentDetected.PrivacyInformation')"),true);
+    await browser.evaluate("window.showFailure('transport')");
+    await browser.ready("document.querySelector('.video-generation-failure')?.textContent.includes('网络通信')");
+    assert.equal(await browser.evaluate("document.querySelector('.video-generation-failure').textContent.includes('避免重复生成')"),true);
+    assert.equal(await browser.evaluate("document.querySelector('.video-generation-failure').textContent.includes('未提交给 Provider')"),false);
+    assert.equal(await browser.evaluate("window.calls.filter(c=>c.path.endsWith('/video-runs')).length"),1);
     await browser.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='拆为独立生成').click()");
     await browser.ready("!document.querySelector('.video-group')");
     assert.equal(await browser.evaluate("document.querySelectorAll('.video-group-choices label').length"),5);

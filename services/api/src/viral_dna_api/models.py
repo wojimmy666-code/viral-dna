@@ -676,6 +676,8 @@ class VideoGenerationCapability(BaseModel):
     reference_route: VideoReferenceRouteCapability = Field(
         default_factory=VideoReferenceRouteCapability
     )
+    # New image-first video tasks must not inherit legacy actor/depth prerequisites.
+    adopted_images_route: VideoReferenceRouteCapability | None = None
 
     @model_validator(mode="after")
     def validate_reference_image_limits(self) -> VideoGenerationCapability:
@@ -3784,6 +3786,9 @@ class GenerationRunResponse(BaseModel):
     error_technical_message: str | None = None
     error_retryable: bool = False
     error_action: str | None = None
+    error_origin: Literal["system", "provider", "transport", "unknown"] | None = None
+    error_stage: Literal["input_validation", "submission", "generation", "result_query", "result_handling", "unknown"] | None = None
+    provider_submission_state: Literal["not_submitted", "rejected", "submitted", "unknown"] | None = None
     recovery_available: bool = False
     recovery_candidate_count: int = Field(default=0, ge=0)
     created_at: datetime

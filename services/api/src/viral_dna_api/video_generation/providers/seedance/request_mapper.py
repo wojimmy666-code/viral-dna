@@ -39,6 +39,9 @@ def build_seedance_request(request: ProviderVideoRequest) -> dict[str, object]:
             f"- {identity_label} 是唯一演员身份来源，决定人物身份、面部、年龄与稳定外观。"
         )
     for index, frame in enumerate(request.reference_frames, start=len(managed_images) + 1):
+        if frame.source_kind == "approved_frame" and not (managed_images or managed_videos):
+            material_rules.append(f"- 图片{index} 是已采用的分镜画面，提供该段人物外观、服装、场景、光照与构图；按图片编号顺序衔接动作。")
+            continue
         purpose = ROLE_LABELS.get(frame.role, "构图与画面信息")
         material_rules.append(f"- 图片{index} 只提供{purpose}。")
     if request.depth_control_videos:

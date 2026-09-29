@@ -491,11 +491,11 @@ export function ShotVideoWorkspace({
   ) || null;
   const selectedManagedAssetCapability = selectedModel?.capabilities?.managed_assets;
   const personReferenceCapability = selectedModel?.capabilities?.person_references || {};
-  const referenceRouteCapability = selectedModel?.capabilities?.reference_route || {};
+  const referenceRouteCapability = selectedModel?.capabilities?.adopted_images_route || selectedModel?.capabilities?.reference_route || {};
   const routeUsesManagedIdentity = (
     referenceRouteCapability.identity_transport === "provider_managed_asset"
   );
-  const managedIdentityRequired = personReferenceCapability.policy === "managed_required";
+  const managedIdentityRequired = routeUsesManagedIdentity && referenceRouteCapability.identity_required;
   const selectedDepthCount = (plan?.depth_control_assets || []).filter(
     (item) => item.enabled && item.status === "ready" && item.validation_status === "passed",
   ).length;
@@ -642,7 +642,7 @@ export function ShotVideoWorkspace({
       cancelled = true;
     };
   }, [plan?.id, request, usesDepthControl, depthSettingsOpen]);
-  const managedAssetCompatible = !routeUsesManagedIdentity || !managedAssetBinding || Boolean(
+  const managedAssetCompatible = !managedAssetBinding || Boolean(
     selectedManagedAssetCapability?.supported
     && selectedManagedAssetCapability.provider === managedAssetBinding.provider
     && (selectedManagedAssetCapability.asset_kinds || []).includes(managedAssetBinding.kind)

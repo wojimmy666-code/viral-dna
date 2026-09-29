@@ -194,7 +194,7 @@ from .video_generation import (
     VideoGenerationGateway,
     VideoGenerationGatewayError,
 )
-from .video_generation.errors import classify_video_provider_failure
+from .video_generation.errors import classify_video_provider_failure, video_failure_location
 from .workspace import WorkspaceError, WorkspaceManager
 
 MAX_REFERENCE_IMAGE_BYTES = 15 * 1024 * 1024
@@ -11660,15 +11660,22 @@ class ProductionService:
                 or (failed_task.provider_error_code if failed_task else None)
                 or (failure.provider_code if failure else None)
             ),
-            error_category=run.error_category or (failure.category if failure else None),
-            error_title=run.error_title or (failure.title if failure else None),
+            error_category=failure.category if failure else run.error_category,
+            error_title=failure.title if failure else run.error_title,
             error_technical_message=(
-                run.error_technical_message
+                (failure.technical_message if failure else None)
+                or run.error_technical_message
                 or (failed_task.error_technical_message if failed_task else None)
                 or (failure.technical_message if failure else None)
             ),
             error_retryable=run.error_retryable or bool(failure and failure.retryable),
-            error_action=run.error_action or (failure.suggested_action if failure else None),
+            error_action=failure.suggested_action if failure else run.error_action,
+            **(video_failure_location(
+                code=failure.code,
+                provider_code=failure.provider_code,
+                provider_task_id=run.provider_request_id,
+                provider_tasks=provider_tasks,
+            ) if failure else {}),
             recovery_available=bool(recovery_artifacts),
             recovery_candidate_count=len(recovery_artifacts),
             created_at=run.created_at,
